@@ -240,6 +240,8 @@ def test_coding_agent_tool_tier_is_registered():
         "inkbox_send_sms",
         "inkbox_send_imessage",
         "inkbox_place_call",
+        "inkbox_list_emails",
+        "inkbox_get_email",
         "inkbox_list_calls",
         "inkbox_get_call_transcript",
         "inkbox_list_text_conversations",

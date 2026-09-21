@@ -15,6 +15,7 @@ import json
 import logging
 import os
 import re
+import uuid
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
@@ -56,6 +57,7 @@ try:
         PendingInteraction,
         format_permission_request,
         format_poll,
+        summarize_tool_call,
         parse_permission_reply,
         parse_poll_reply,
     )
@@ -66,12 +68,59 @@ except ImportError:  # pragma: no cover - direct local import/test fallback
         PendingInteraction,
         format_permission_request,
         format_poll,
+        summarize_tool_call,
         parse_permission_reply,
         parse_poll_reply,
     )
     from prompts import build_channel_prompt, frame_inbound
 
 logger = logging.getLogger(__name__)
+
+# Inkbox tools that WRITE to shared cloud data. Kept out of the auto-approved
+# set so they route through _can_use_tool and text the human for approval.
+GATED_INKBOX_TOOLS = frozenset({
+    "mcp__inkbox__inkbox_create_contact",
+    "mcp__inkbox__inkbox_update_contact",
+    "mcp__inkbox__inkbox_delete_contact",
+})
+
+# Outbound sends. For a non-approver session these are auto-allowed ONLY when
+# the target is the party already in the conversation (a reply) or the
+# approver; anything else (a third party) escalates.
+SEND_TOOLS = frozenset({
+    "mcp__inkbox__inkbox_send_email",
+    "mcp__inkbox__inkbox_send_sms",
+    "mcp__inkbox__inkbox_send_imessage",
+    "mcp__inkbox__inkbox_place_call",
+})
+
+# Reads of OTHER people's data (address book, transcripts, conversations).
+# Escalate for non-approver sessions; a stranger must not be able to pull
+# the contact list or someone else's thread.
+PRIVATE_READ_TOOLS = frozenset({
+    "mcp__inkbox__inkbox_list_emails",
+    "mcp__inkbox__inkbox_get_email",
+    "mcp__inkbox__inkbox_list_calls",
+    "mcp__inkbox__inkbox_get_call_transcript",
+    "mcp__inkbox__inkbox_list_text_conversations",
+    "mcp__inkbox__inkbox_list_imessage_conversations",
+    "mcp__inkbox__inkbox_get_imessage_conversation",
+    "mcp__inkbox__inkbox_get_text_conversation",
+    "mcp__inkbox__inkbox_lookup_contact",
+    "mcp__inkbox__inkbox_list_contacts",
+    "mcp__inkbox__inkbox_get_contact",
+})
+
+# The only auto-allowed tools for a session whose remote party is NOT the
+# approver. Enough to schedule (look at the calendar, search the web, reply);
+# everything else, including any filesystem read, escalates.
+STRANGER_AUTO_ALLOWED = frozenset({
+    "WebSearch",
+    "TodoWrite",
+    "mcp__tamid-drive__list_calendars",
+    "mcp__tamid-drive__get_events",
+    "mcp__tamid-drive__query_freebusy",
+})
 
 # gateway.send_to_contact(chat_id, text, mode, meta) signature.
 SendFn = Callable[[str, str, str, Dict[str, Any]], Awaitable[Any]]
@@ -354,8 +403,10 @@ class ContactSession:
         health_fn: Optional[HealthFn] = None,
         on_send_rejected: Optional[SendRejectedFn] = None,
         system_prompt_extra: str = "",
+        manager: Optional["SessionManager"] = None,
     ):
         self.chat_id = chat_id
+        self.manager = manager
         self.cfg = cfg
         self.send_fn = send_fn
         self.typing_fn = typing_fn
@@ -375,6 +426,11 @@ class ContactSession:
         self.reply_meta: Dict[str, Any] = {}
         self.pending: Optional[PendingInteraction] = None
         self.always_allowed: set[str] = set()
+        # Per-turn gate state (reset at the start of every Claude turn).
+        self._turn_allowed: set[str] = set()   # "always" grants for non-approver sessions
+        self._denied_this_turn = False          # one deny ends all asking for the turn
+        self._handoff_this_turn = False         # gateway already told Aaron + will answer the sender
+        self._inbound_text = ""                 # raw text of the message that started the turn
 
         self._client: Optional[ClaudeSDKClient] = None
         self._queue: asyncio.Queue[_Turn] = asyncio.Queue()
@@ -408,6 +464,10 @@ class ContactSession:
         self.mode = mode
         self.reply_meta = dict(meta or {})
 
+        # The approver answering somebody else's outstanding escalation.
+        if await self._consume_approver_reply(text):
+            return
+
         # Bridge control commands (/clear, /new, /stop) steer the conversation
         # itself — handle them here instead of forwarding them to Claude.
         command = _control_command(text)
@@ -440,6 +500,7 @@ class ContactSession:
 
         # Tag the message with its channel + sender so Claude knows where it
         # is and who it's talking to (the static system prompt can't).
+        self._inbound_text = text
         await self._queue.put(_Turn(text=frame_inbound(mode, meta, text)))
 
         # Texting again while Claude is mid-turn behaves like hitting Esc and
@@ -792,6 +853,9 @@ class ContactSession:
                     # the whole turn, then always tear it down — even if the
                     # turn raises.
                     self._turn_active = True
+                    self._turn_allowed.clear()
+                    self._denied_this_turn = False
+                    self._handoff_this_turn = False
                     typing_task = asyncio.create_task(self._typing_loop())
                     await client.query(turn.text)
 
@@ -871,6 +935,12 @@ class ContactSession:
                     )
             return
         if self._interrupting:
+            return
+        if self._handoff_this_turn and self._approver_routing_active():
+            # Whatever Claude wrote this turn was shaped by the refusal and may
+            # be addressed to Aaron. Drop it; the sender gets the fixed note.
+            logger.info("[session %s] handoff turn: sending fixed note, dropping model text", self.chat_id)
+            await self._deliver_reply(turn, self.HANDOFF_NOTE)
             return
         if self._current_channel_tool_delivery:
             logger.info(
@@ -1035,9 +1105,12 @@ class ContactSession:
                 "append": prompt_append,
             },
             setting_sources=["user", "project"],
-            # Read-only tools and our own Inkbox tools run without a text;
-            # everything else lands in _can_use_tool and escalates.
-            allowed_tools=list(self.cfg.auto_allowed_tools) + list(self.mcp_tool_names),
+            permission_mode="default",
+            # Auto-allowed tools run without a text; everything else lands in
+            # _can_use_tool. The approver's own session gets the configured
+            # read set plus Inkbox tools; anyone else gets the stranger set,
+            # with sends decided per-target in the hook.
+            allowed_tools=self._allowed_tools(),
             mcp_servers={"inkbox": self.mcp_server},
             can_use_tool=self._can_use_tool,
             resume=self.resume_session_id or None,
@@ -1058,7 +1131,132 @@ class ContactSession:
     # Escalation (permission prompts + AskUserQuestion polls)
     # ------------------------------------------------------------------
 
+    HANDOFF_NOTE = (
+        "Thanks! I'll confirm that with Aaron and get back to you shortly.\n\n"
+        "Blatbot\nExecutive Assistant to Aaron Blatnoy"
+    )
+
+    async def _handoff_to_approver(self, tool_name: str, input_data: Dict[str, Any]) -> None:
+        """Deterministically tell Aaron what a stranger wants. Once per turn."""
+        if self._handoff_this_turn:
+            return
+        self._handoff_this_turn = True
+        meta = self.reply_meta or {}
+        contact = meta.get("contact") or {}
+        who = ""
+        if isinstance(contact, dict):
+            who = " ".join(str(contact.get(k) or "") for k in ("given_name", "family_name")).strip()
+        sender = str(meta.get("sender") or self.chat_id)
+        who = f"{who} ({sender})" if who else sender
+        wanted = summarize_tool_call(tool_name, input_data)
+        snippet = re.sub(r"\s+", " ", self._inbound_text or "").strip()
+        if len(snippet) > 400:
+            snippet = snippet[:400] + "..."
+        text = (
+            f"[Blatbot] {who} via {self.mode} needs you.\n"
+            f"Blatbot wanted to: {wanted}\n"
+            f"Their message: {snippet}\n"
+            "I told them I'll confirm with you. Tell me here what to do."
+        )
+        conv = self.cfg.approver_imessage_conversation_id
+        try:
+            if conv:
+                await self.send_fn(f"imessage:{conv}", text, "imessage", {"conversation_id": conv})
+            else:
+                await self.send_fn(self.cfg.approver_phone, text, "sms", {"to": self.cfg.approver_phone})
+        except Exception:
+            logger.exception("[session %s] failed to hand off to approver", self.chat_id)
+
+    def _allowed_tools(self) -> list[str]:
+        """Tools that run without asking, for this session's remote party."""
+        if self._approver_routing_active():
+            base = [t for t in self.cfg.auto_allowed_tools if t in STRANGER_AUTO_ALLOWED]
+            base += [t for t in STRANGER_AUTO_ALLOWED if t not in base and t.startswith("mcp__")]
+            return base
+        return list(self.cfg.auto_allowed_tools) + [
+            t for t in self.mcp_tool_names if t not in GATED_INKBOX_TOOLS
+        ]
+
+    def _send_target_is_in_conversation(self, tool_name: str, input_data: Dict[str, Any]) -> bool:
+        """True when a send tool targets the current remote party or the approver."""
+        meta = self.reply_meta or {}
+        conv = str(input_data.get("conversation_id") or "").strip()
+        if conv:
+            if conv == str(meta.get("conversation_id") or ""):
+                return True
+            if conv == self.cfg.approver_imessage_conversation_id:
+                return True
+            return False
+        to = input_data.get("to")
+        targets = to if isinstance(to, list) else [to]
+        targets = [str(t or "").strip().lower() for t in targets if t]
+        if not targets:
+            return False
+        own = {str(meta.get("sender") or "").strip().lower(), str(meta.get("to") or "").strip().lower()}
+        own.discard("")
+        approver = self._digits(self.cfg.approver_phone)
+        for t in targets:
+            if t in own:
+                continue
+            d = self._digits(t)
+            if approver and d and (d == approver or d.endswith(approver[-10:])):
+                continue
+            return False
+        return True
+
     async def _can_use_tool(self, tool_name: str, input_data: Dict[str, Any], context: Any):
+        stranger = self._approver_routing_active()
+
+        # The approver's own session never prompts. Aaron is the human in the
+        # loop; the project deny list (Bash, Write, Edit, Gmail send, sharing,
+        # Apps Script) is still enforced by Claude Code underneath this hook.
+        if not stranger and self.cfg.approver_phone and tool_name != "AskUserQuestion":
+            return PermissionResultAllow()
+
+        # After a handoff, Claude may not message the sender itself this turn;
+        # the gateway sends the fixed note so nothing meant for Aaron leaks.
+        if stranger and self._handoff_this_turn and tool_name in SEND_TOOLS:
+            return PermissionResultDeny(
+                message="The system is replying to the sender for you this turn. Send nothing; reply with an empty message."
+            )
+        # Replies to the person you are talking to (or to the approver) are free.
+        if stranger and tool_name in SEND_TOOLS:
+            if self._send_target_is_in_conversation(tool_name, input_data):
+                return PermissionResultAllow()
+
+        # A stranger's session never prompts anyone. Anything outside the free
+        # set is refused on the spot and Claude is told to hand off to Aaron
+        # over iMessage. Aaron then acts in his own session, where the stock
+        # single-session prompts apply. (Ticket routing across sessions is
+        # kept behind INKBOX_APPROVER_TICKETS for experiments; default off.)
+        if stranger and not self.cfg.approver_tickets_enabled:
+            await self._handoff_to_approver(tool_name, input_data)
+            return PermissionResultDeny(
+                message=(
+                    "Not permitted in this conversation; only Aaron can do that. The system "
+                    "has already notified Aaron and will send the sender a short note that "
+                    "you will confirm with Aaron. Do not retry, do not try other tools, do "
+                    "not send anything, and do not explain this. Reply with an empty message."
+                )
+            )
+
+        # One deny from the approver ends all asking for the rest of the turn.
+        if stranger and self._denied_this_turn and tool_name != "AskUserQuestion":
+            return PermissionResultDeny(
+                message=(
+                    "Aaron already declined a request in this turn. Do not retry or try "
+                    "a different tool; tell the sender you are not able to do that."
+                )
+            )
+
+        # Replies to the person you are talking to (or to the approver) are free.
+        if stranger and tool_name in SEND_TOOLS:
+            if self._send_target_is_in_conversation(tool_name, input_data):
+                return PermissionResultAllow()
+
+        if stranger and tool_name in self._turn_allowed:
+            return PermissionResultAllow()
+
         # AskUserQuestion → numbered poll on the human's channel.
         if tool_name == "AskUserQuestion":
             questions = list(input_data.get("questions") or [])
@@ -1089,16 +1287,99 @@ class ContactSession:
 
         decision = parse_permission_reply(reply)
         if decision == "always":
-            self.always_allowed.add(tool_name)
+            if stranger:
+                # For a stranger, "always" means the rest of this turn only.
+                self._turn_allowed.add(tool_name)
+            else:
+                self.always_allowed.add(tool_name)
             return PermissionResultAllow()
         if decision == "allow":
             return PermissionResultAllow()
+        if stranger:
+            self._denied_this_turn = True
+            return PermissionResultDeny(
+                message=(
+                    "Aaron declined this. Do not retry or try a different tool; "
+                    "tell the sender you are not able to do that and stop."
+                )
+            )
         return PermissionResultDeny(
             message=(
                 f'The human replied "{reply.strip()}" — treating that as not approved. '
                 "If their reply contains new instructions, follow those instead."
             )
         )
+
+    # ------------------------------------------------------------------
+    # Approver routing: escalations go to the configured human, not the sender
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _digits(value: Any) -> str:
+        return re.sub(r"\D", "", str(value or ""))
+
+    def _is_approver(self) -> bool:
+        """True when this session's remote party is the configured approver."""
+        want = self._digits(self.cfg.approver_phone)
+        if not want:
+            return False
+        meta = self.reply_meta or {}
+        conv = str(meta.get("conversation_id") or "")
+        if self.cfg.approver_imessage_conversation_id:
+            # Spoof-resistant mode: only the real iMessage thread counts as
+            # the approver. Email From: headers and SMS sender ids can be
+            # forged; an Inkbox iMessage conversation id cannot.
+            return self.mode == "imessage" and conv == self.cfg.approver_imessage_conversation_id
+        candidates: list = [meta.get("sender"), meta.get("to")]
+        contact = meta.get("contact") or {}
+        if isinstance(contact, dict):
+            for key in ("phone", "phone_number", "phones", "phone_numbers"):
+                val = contact.get(key)
+                if isinstance(val, list):
+                    candidates.extend(val)
+                else:
+                    candidates.append(val)
+        for c in candidates:
+            d = self._digits(c)
+            if d and (d == want or d.endswith(want[-10:])):
+                return True
+        return False
+
+    def _approver_routing_active(self) -> bool:
+        return bool(self.manager is not None and self.cfg.approver_phone and not self._is_approver())
+
+    async def _consume_approver_reply(self, text: str) -> bool:
+        """If this is the approver answering an outstanding request, resolve it.
+
+        Returns:
+            bool: True when the message was consumed as an approval reply.
+        """
+        if self.manager is None or not self._is_approver():
+            return False
+        pending = self.manager.pending_approvals
+        if not pending:
+            return False
+        # If the approver's OWN session is waiting on an inline prompt, a bare
+        # answer belongs to that prompt; only a ticket prefix can redirect it.
+        if self.pending is not None and not self.pending.future.done():
+            m0 = re.match(r"^\s*([0-9a-f]{4})\b", text.strip(), re.I)
+            if not (m0 and m0.group(1).lower() in pending):
+                return False
+        m = re.match(r"^\s*([0-9a-f]{4})\b[\s:,-]*(.*)$", text.strip(), re.S | re.I)
+        target: Optional["ContactSession"] = None
+        answer = text
+        if m and m.group(1).lower() in pending:
+            target = pending[m.group(1).lower()]
+            answer = m.group(2).strip() or text
+        elif len(pending) == 1 and parse_permission_reply(text) is not None:
+            # A bare 1/2/3 (or yes/no/always) answers the only open ticket.
+            # Anything else is a normal message to the approver's own session.
+            target = next(iter(pending.values()))
+        if target is None or target.pending is None or target.pending.future.done():
+            return False
+        logger.info("[session %s] approver reply routed to session %s", self.chat_id, target.chat_id)
+        target.pending.future.set_result(answer)
+        return True
 
     async def _escalate(
         self,
@@ -1126,7 +1407,33 @@ class ContactSession:
             questions=list(questions or []),
             tool_name=tool_name,
         )
-        await self._reply(prompt_text)
+        ticket = ""
+        if self._approver_routing_active():
+            ticket = uuid.uuid4().hex[:4]
+            self.manager.pending_approvals[ticket] = self
+            who = str((self.reply_meta or {}).get("sender") or self.chat_id)
+            approver_text = (
+                f"[blatbot approval {ticket}] {kind} request from {who} via {self.mode}:\n\n"
+                f"{prompt_text}\n\n"
+                f"Reply '{ticket} 1' allow, '{ticket} 2' always, '{ticket} 3' deny."
+            )
+            try:
+                conv = self.cfg.approver_imessage_conversation_id
+                if conv:
+                    await self.send_fn(
+                        f"imessage:{conv}", approver_text, "imessage", {"conversation_id": conv}
+                    )
+                else:
+                    await self.send_fn(
+                        self.cfg.approver_phone, approver_text, "sms", {"to": self.cfg.approver_phone}
+                    )
+            except Exception:
+                logger.exception("[session %s] failed to reach approver", self.chat_id)
+                self.manager.pending_approvals.pop(ticket, None)
+                self.pending = None
+                return None
+        else:
+            await self._reply(prompt_text)
         try:
             return await asyncio.wait_for(
                 self.pending.future, timeout=self.cfg.permission_timeout_s
@@ -1135,6 +1442,8 @@ class ContactSession:
             return None
         finally:
             self.pending = None
+            if ticket and self.manager is not None:
+                self.manager.pending_approvals.pop(ticket, None)
 
     async def _reply(self, text: str) -> None:
         await self.send_fn(self.chat_id, text, self.mode, self.reply_meta)
@@ -1171,6 +1480,8 @@ class SessionManager:
         self.mcp_tool_names = mcp_tool_names
         self.identity_info = identity_info
         self.sessions: Dict[str, ContactSession] = {}
+        # ticket -> session whose escalation is waiting on the approver
+        self.pending_approvals: Dict[str, ContactSession] = {}
         self._session_ids: Dict[str, str] = self._load_state()
 
     def _load_state(self) -> Dict[str, str]:
@@ -1214,6 +1525,7 @@ class SessionManager:
             session = ContactSession(
                 chat_id=chat_id,
                 cfg=self.cfg,
+                manager=self,
                 send_fn=self.send_fn,
                 mcp_server=self.mcp_server,
                 mcp_tool_names=self.mcp_tool_names,

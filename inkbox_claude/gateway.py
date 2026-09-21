@@ -839,16 +839,33 @@ class InkboxGateway:
 
         # Sessions get the Inkbox tools so Claude can message proactively.
         server, tool_names = build_inkbox_mcp_server(self._inkbox, self.cfg.identity, self.cfg)
-        self.sessions = SessionManager(
-            cfg=self.cfg,
-            send_fn=self.send_to_contact,
-            mcp_server=server,
-            mcp_tool_names=tool_names,
-            identity_info=identity_info,
-            typing_fn=self.send_typing,
-            on_send_rejected=self._note_send_rejection,
-            health_fn=self.health_report,
-        )
+        if self.cfg.mode == "gate":
+            try:
+                from .gate.manager import GateSessionManager
+            except ImportError:  # pragma: no cover
+                from gate.manager import GateSessionManager
+            self.sessions = GateSessionManager(
+                cfg=self.cfg,
+                send_fn=self.send_to_contact,
+                mcp_server=server,
+                identity_info=identity_info,
+                store_path=self.cfg.gate_db_path,
+                exec_cwd=self.cfg.gate_exec_dir,
+                standing_path=self.cfg.gate_standing_path,
+            )
+            logger.info("[bridge] mode=gate (router=%s, approver iMessage conv=%s)",
+                        self.cfg.deepseek_model, self.cfg.approver_imessage_conversation_id or "-")
+        else:
+            self.sessions = SessionManager(
+                cfg=self.cfg,
+                send_fn=self.send_to_contact,
+                mcp_server=server,
+                mcp_tool_names=tool_names,
+                identity_info=identity_info,
+                typing_fn=self.send_typing,
+                on_send_rejected=self._note_send_rejection,
+                health_fn=self.health_report,
+            )
         await self._catch_up_a2a_tasks()
         await self._recover_hosted_call_completions()
 
@@ -2451,12 +2468,18 @@ class InkboxGateway:
                 contact=contact,
             )
         thread_key = self._thread_key("sms", conversation_id)
-        chat_id = self._chat_key(
-            data,
-            sender,
-            thread_key,
-            contact=contact,
-            allow_webhook_contact=False,
+        # A group is one shared context for everyone in it, so the conversation -
+        # not the sender - is the chat. 1:1 keeps its per-contact chat.
+        chat_id = (
+            thread_key
+            if (is_group and thread_key)
+            else self._chat_key(
+                data,
+                sender,
+                thread_key,
+                contact=contact,
+                allow_webhook_contact=False,
+            )
         )
         meta = {
             "conversation_id": conversation_id or None,
@@ -3517,7 +3540,31 @@ class InkboxGateway:
             outbound_conversation_summary=(oc.get("conversation_summary") or None),
         )
         try:
-            return await open_inkbox_realtime_bridge(config=self.cfg.realtime, meta=meta)
+            rt_config = self.cfg.realtime
+            if self.cfg.mode == "gate" and self.sessions is not None:
+                import dataclasses
+                gate_chat = (contact or {}).get("id") or remote or f"call:{call_id}"
+                gate_session = self.sessions.get(gate_chat)
+                briefing = ""
+                if hasattr(gate_session, "voice_briefing"):
+                    briefing = gate_session.voice_briefing({"call_id": call_id, "sender": remote, "contact": contact})
+                vocab = getattr(self.sessions, "voice_vocabulary", "")
+                rt_config = dataclasses.replace(
+                    rt_config, gate_mode=True, vocabulary="",
+                    additional_instructions="\n\n".join(x for x in (rt_config.additional_instructions, briefing) if x),
+                )
+            # Voice API: GPT-Live (full duplex, delegates to this gateway) by default;
+            # INKBOX_VOICE_API=realtime keeps the older single-model Realtime bridge.
+            if (os.getenv("INKBOX_VOICE_API") or "live").strip().lower() != "realtime":
+                try:
+                    try:
+                        from .live import open_inkbox_live_bridge
+                    except ImportError:  # pragma: no cover
+                        from live import open_inkbox_live_bridge
+                    return await open_inkbox_live_bridge(config=rt_config, meta=meta)
+                except RealtimeBridgeConnectError as exc:
+                    logger.warning("[bridge] GPT-Live connect failed for call %s (%s); trying Realtime", call_id, exc)
+            return await open_inkbox_realtime_bridge(config=rt_config, meta=meta)
         except RealtimeBridgeConnectError as exc:
             logger.warning(
                 "[bridge] realtime connect failed for call %s (%s); "
@@ -3635,7 +3682,14 @@ class InkboxGateway:
                         "contact": contact,
                         "contact_memories": memories,
                     }, query)
-                    return await self.sessions.get(chat_id).run_consult(prompt)
+                    gate_session = self.sessions.get(chat_id)
+                    if hasattr(gate_session, "voice_consult"):
+                        # Gate mode: the live call is one more gated surface.
+                        return await gate_session.voice_consult(query, {
+                            "call_id": call_id, "sender": remote,
+                            "contact": contact, "direction": direction,
+                        })
+                    return await gate_session.run_consult(prompt)
 
                 async def _post_call(actions: List[Dict[str, str]], transcript: Any) -> None:
                     # Run the queued after-call work in the caller's session. The
@@ -3646,7 +3700,16 @@ class InkboxGateway:
                         "contact": contact,
                         "contact_memories": memories,
                     }, _post_call_prompt(actions, transcript))
-                    await self.sessions.get(chat_id).run_consult(prompt)
+                    gate_session = self.sessions.get(chat_id)
+                    if hasattr(gate_session, "voice_consult"):
+                        for item in actions or []:
+                            text = " ".join(str(item.get(k) or "") for k in ("action", "description", "details")).strip()
+                            if text:
+                                await gate_session.voice_consult(
+                                    f"(Promised on the phone call, do it now) {text}",
+                                    {"call_id": call_id, "sender": remote, "contact": contact})
+                        return
+                    await gate_session.run_consult(prompt)
 
                 async def _call_ended(transcript: Any) -> None:
                     # No queued actions: let Claude reflect and do any follow-up
@@ -3696,7 +3759,7 @@ class InkboxGateway:
                     continue
                 event = payload.get("event")
                 if event == "start":
-                    await self._speak(ws, "Hey, you've reached Claude. What do you need?", "greeting")
+                    await self._speak(ws, "Hi, this is Blatbot, Aaron Blatnoy's assistant. How can I help?", "greeting")
                 elif event == "transcript" and payload.get("is_final"):
                     text = str(payload.get("text") or "").strip()
                     if not text:

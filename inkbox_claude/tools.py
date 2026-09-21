@@ -663,6 +663,80 @@ def build_inkbox_mcp_server(
             return _error(msg)
 
     @tool(
+        "inkbox_list_emails",
+        "List recent emails in THIS agent's own Inkbox mailbox (blatbot@inkboxmail.com), "
+        "newest first: direction, from, to, subject, date, id, and a short snippet. "
+        "Use this to answer 'who emailed you' or 'what is in your inbox'. Pass "
+        "inbound_only=true to see only mail received. Use inkbox_get_email for a full body.",
+        {"limit": int, "inbound_only": bool, "contains": str},
+    )
+    async def inkbox_list_emails(args: Dict[str, Any]) -> Dict[str, Any]:
+        def _run():
+            import itertools
+            identity = _identity()
+            limit = max(1, min(int(args.get("limit") or 25), 100))
+            inbound_only = bool(args.get("inbound_only"))
+            needle = str(args.get("contains") or "").strip().lower()
+            out = []
+            for m in itertools.islice(identity.iter_emails(), 300):
+                direction = str(getattr(m, "direction", "") or "")
+                if inbound_only and direction != "inbound":
+                    continue
+                subject = str(getattr(m, "subject", "") or "")
+                frm = str(getattr(m, "from_address", "") or "")
+                to = getattr(m, "to", None) or getattr(m, "to_addresses", None) or []
+                snippet = str(getattr(m, "snippet", "") or getattr(m, "preview", "") or "")[:200]
+                hay = f"{subject} {frm} {to} {snippet}".lower()
+                if needle and needle not in hay:
+                    continue
+                out.append({
+                    "id": str(getattr(m, "id", "")),
+                    "date": str(getattr(m, "created_at", "") or getattr(m, "received_at", ""))[:19],
+                    "direction": direction,
+                    "from": frm,
+                    "to": [str(t) for t in to] if isinstance(to, list) else str(to),
+                    "subject": subject,
+                    "snippet": snippet,
+                })
+                if len(out) >= limit:
+                    break
+            return {"count": len(out), "emails": out}
+
+        try:
+            return _result(await asyncio.to_thread(_run))
+        except Exception as exc:
+            return _error(str(exc))
+
+    @tool(
+        "inkbox_get_email",
+        "Read one email from this agent's own Inkbox mailbox by id (from inkbox_list_emails).",
+        {"message_id": str},
+    )
+    async def inkbox_get_email(args: Dict[str, Any]) -> Dict[str, Any]:
+        def _run():
+            identity = _identity()
+            m = identity.get_message(str(args["message_id"]))
+            body = (
+                getattr(m, "body_text", None) or getattr(m, "text", None)
+                or getattr(m, "body", None) or ""
+            )
+            to = getattr(m, "to", None) or getattr(m, "to_addresses", None) or []
+            return {
+                "id": str(getattr(m, "id", "")),
+                "date": str(getattr(m, "created_at", ""))[:19],
+                "direction": str(getattr(m, "direction", "") or ""),
+                "from": str(getattr(m, "from_address", "") or ""),
+                "to": [str(t) for t in to] if isinstance(to, list) else str(to),
+                "subject": str(getattr(m, "subject", "") or ""),
+                "body": str(body)[:8000],
+            }
+
+        try:
+            return _result(await asyncio.to_thread(_run))
+        except Exception as exc:
+            return _error(str(exc))
+
+    @tool(
         "inkbox_list_calls",
         "List recent phone calls on this agent's Inkbox number, newest first.",
         {"limit": int, "offset": int},
@@ -733,9 +807,23 @@ def build_inkbox_mcp_server(
     )
     async def inkbox_get_imessage_conversation(args: Dict[str, Any]) -> Dict[str, Any]:
         def _run():
-            return _identity().get_imessage_conversation(
-                str(args["conversation_id"]), limit=int(args.get("limit") or 50)
-            )
+            identity = _identity()
+            conv_id = str(args["conversation_id"])
+            conv = identity.get_imessage_conversation(conv_id)
+            msgs = identity.list_imessages(conversation_id=conv_id, limit=int(args.get("limit") or 50))
+            return {
+                "conversation": conv,
+                "messages": [
+                    {
+                        "id": str(getattr(m, "id", "")),
+                        "created_at": str(getattr(m, "created_at", ""))[:19],
+                        "direction": str(getattr(m, "direction", "") or ""),
+                        "from": getattr(m, "sender_number", None) or getattr(m, "remote_number", None),
+                        "text": getattr(m, "content", None) or getattr(m, "text", None) or "",
+                    }
+                    for m in reversed(list(msgs))
+                ],
+            }
 
         try:
             return _result(await asyncio.to_thread(_run))
@@ -1164,6 +1252,8 @@ def build_inkbox_mcp_server(
         inkbox_send_sms,
         inkbox_send_imessage,
         inkbox_place_call,
+        inkbox_list_emails,
+        inkbox_get_email,
         inkbox_list_calls,
         inkbox_get_call_transcript,
         inkbox_list_text_conversations,
@@ -1192,6 +1282,8 @@ def build_inkbox_mcp_server(
         "mcp__inkbox__inkbox_send_sms",
         "mcp__inkbox__inkbox_send_imessage",
         "mcp__inkbox__inkbox_place_call",
+        "mcp__inkbox__inkbox_list_emails",
+        "mcp__inkbox__inkbox_get_email",
         "mcp__inkbox__inkbox_list_calls",
         "mcp__inkbox__inkbox_get_call_transcript",
         "mcp__inkbox__inkbox_list_text_conversations",

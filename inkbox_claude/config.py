@@ -48,6 +48,11 @@ DEFAULT_AUTO_ALLOWED_TOOLS = [
 ]
 
 
+def state_dir() -> Path:
+    """~/.inkbox-claude (or INKBOX_CLAUDE_HOME)."""
+    return Path(os.getenv("INKBOX_CLAUDE_HOME") or (Path.home() / ".inkbox-claude"))
+
+
 def call_contexts_dir() -> Path:
     """Directory where ``inkbox_place_call`` stashes per-call context."""
     root = Path(os.getenv("INKBOX_CLAUDE_HOME") or (Path.home() / ".inkbox-claude"))
@@ -92,6 +97,23 @@ class BridgeConfig:
     port: int = DEFAULT_PORT
     # Claude Code side
     project_dir: str = ""
+    # E.164 phone that receives every permission/poll escalation instead of
+    # the remote party. Empty = stock behaviour (ask the sender themselves).
+    approver_phone: str = ""
+    # Existing iMessage conversation id with the approver. When set, approval
+    # requests go over iMessage; otherwise they fall back to SMS.
+    approver_imessage_conversation_id: str = ""
+    # Cross-session approval tickets (stranger session texts the approver and
+    # waits). Off by default: strangers are refused and hand off instead.
+    approver_tickets_enabled: bool = False
+    # "sessions" = Claude Code per contact (stock). "gate" = DeepSeek router +
+    # approval gate + deterministic Claude executor (inkbox_claude.gate).
+    mode: str = "sessions"
+    deepseek_api_key: str = ""
+    deepseek_model: str = "deepseek-chat"
+    gate_db_path: str = ""
+    gate_exec_dir: str = ""
+    gate_standing_path: str = ""
     claude_model: str = ""
     permission_timeout_s: float = 600.0
     auto_allowed_tools: List[str] = field(default_factory=lambda: list(DEFAULT_AUTO_ALLOWED_TOOLS))
@@ -126,6 +148,22 @@ def inkbox_client_kwargs(api_key: str, base_url: str | None = None) -> Dict[str,
     }
 
 
+_BLATBOT_VOICE = (
+    "You are Blatbot, Aaron Blatnoy's executive assistant, answering his assistant line. You're a guy in "
+    "your late twenties: relaxed, quick, dry sense of humor, low-key confident. Talk like a real person on "
+    "the phone, not like a customer service agent."
+)
+# Delivery steering written to flatten Realtime's performance. GPT-Live drops it (see live.py):
+# it fought the chosen voice's natural character and made Cedar sound like a different voice.
+_BLATBOT_DELIVERY = (
+    " Your voice is grounded and plain: chest voice, low "
+    "in your range, steady pitch, relaxed pace. Think of a calm guy talking to a friend across a table, not a "
+    "host, a concierge or a narrator. Keep the energy a notch below the caller's. No brightness, no smile in "
+    "the voice, no breathiness, no drawn-out vowels, no melodic swoops, and sentences end flat or falling, never "
+    "rising. Dry humor stays dry: say the funny thing in the same flat tone as everything else."
+)
+
+
 def _read_realtime_config() -> RealtimeConfig:
     """Build the Realtime voice config from the env.
 
@@ -144,6 +182,7 @@ def _read_realtime_config() -> RealtimeConfig:
         model=str(os.getenv("INKBOX_REALTIME_MODEL") or REALTIME_DEFAULT_MODEL).strip(),
         voice=str(os.getenv("INKBOX_REALTIME_VOICE") or REALTIME_DEFAULT_VOICE).strip(),
         fallback_to_inkbox_stt_tts=env_flag("INKBOX_REALTIME_FALLBACK_TO_INKBOX_STT_TTS", True),
+        additional_instructions=str(os.getenv("INKBOX_REALTIME_INSTRUCTIONS") or (_BLATBOT_VOICE + _BLATBOT_DELIVERY)).strip(),
     )
 
 
@@ -194,6 +233,19 @@ def read_config(extra: Dict[str, Any] | None = None) -> BridgeConfig:
         host=str(os.getenv("INKBOX_BRIDGE_HOST") or DEFAULT_HOST).strip(),
         port=int(os.getenv("INKBOX_BRIDGE_PORT") or DEFAULT_PORT),
         project_dir=str(os.getenv("CLAUDE_PROJECT_DIR") or extra.get("project_dir") or os.getcwd()).strip(),
+        approver_phone=str(os.getenv("INKBOX_APPROVER_PHONE") or extra.get("approver_phone") or "").strip(),
+        approver_imessage_conversation_id=str(
+            os.getenv("INKBOX_APPROVER_IMESSAGE_CONVERSATION_ID")
+            or extra.get("approver_imessage_conversation_id")
+            or ""
+        ).strip(),
+        approver_tickets_enabled=str(os.getenv("INKBOX_APPROVER_TICKETS") or "").strip().lower() in ("1", "true", "yes"),
+        mode=str(os.getenv("INKBOX_MODE") or "sessions").strip().lower(),
+        deepseek_api_key=str(os.getenv("DEEPSEEK_API_KEY") or "").strip(),
+        deepseek_model=str(os.getenv("DEEPSEEK_MODEL") or "deepseek-chat").strip(),
+        gate_db_path=str(os.getenv("GATE_DB_PATH") or str(state_dir() / "gate.db")).strip(),
+        gate_exec_dir=str(os.getenv("GATE_EXEC_DIR") or str(state_dir() / "exec")).strip(),
+        gate_standing_path=str(os.getenv("GATE_STANDING_PATH") or str(state_dir() / "standing.md")).strip(),
         claude_model=str(os.getenv("CLAUDE_MODEL") or extra.get("claude_model") or "").strip(),
         permission_timeout_s=float(os.getenv("INKBOX_PERMISSION_TIMEOUT_S") or 600.0),
         auto_allowed_tools=_csv_env("INKBOX_AUTO_ALLOWED_TOOLS") or list(DEFAULT_AUTO_ALLOWED_TOOLS),
