@@ -22,6 +22,7 @@ from __future__ import annotations
 import asyncio
 import inspect
 import json
+import os
 import logging
 import time
 from contextlib import suppress
@@ -96,6 +97,10 @@ class RealtimeConfig:
     connect_timeout_s: float = DEFAULT_CONNECT_TIMEOUT_S
     fallback_to_inkbox_stt_tts: bool = True
     base_url: str = REALTIME_URL
+    # Gate mode: the voice model is only a mouth and ears. Every fact and every
+    # action goes through consult, and after-call queues are not offered.
+    gate_mode: bool = False
+    vocabulary: str = ""
 
     @property
     def has_credential(self) -> bool:
@@ -153,6 +158,22 @@ class _BridgeState:
     # OpenAI→Inkbox audio pump flowing; tracked here so call teardown can
     # cancel them.
     consult_tasks: Set["asyncio.Task[None]"] = field(default_factory=set)
+    # Monotonic time anyone last made sound (model audio out, or caller speech
+    # start). Used to fill dead air during a consult without talking over people.
+    last_sound_at: float = field(default_factory=time.monotonic)
+    # True between OpenAI's response.created and response.done. A tool result
+    # that lands mid-response must wait its turn instead of colliding with it.
+    response_active: bool = False
+    gate_mode: bool = False
+    barge_in_enabled: bool = False
+    # Street-noise tolerance: the bridge, not OpenAI, decides what counts as an
+    # interruption. Sound has to keep going for BARGE_IN_MS before the agent is cut off.
+    speech_started_at: Optional[float] = None
+    barge_task: Optional["asyncio.Task[None]"] = None
+    # Estimated monotonic time the phone finishes playing audio already sent.
+    # OpenAI generates speech faster than it plays, so "response done" is not
+    # "the agent has stopped talking".
+    playback_until: float = 0.0
 
 
 # ----------------------------------------------------------------------
@@ -160,7 +181,7 @@ class _BridgeState:
 # ----------------------------------------------------------------------
 
 
-def build_realtime_instructions(meta: RealtimeCallMeta, additional: str = "") -> str:
+def build_realtime_instructions(meta: RealtimeCallMeta, additional: str = "", gate_mode: bool = False) -> str:
     """Compose the system prompt sent to the Realtime model.
 
     Args:
@@ -171,6 +192,8 @@ def build_realtime_instructions(meta: RealtimeCallMeta, additional: str = "") ->
         str: The instruction string for the ``session.update``.
     """
     lines = [
+        "You are on a live phone call. Speak the way people talk on the phone.",
+    ] if gate_mode else [
         "You are the configured Claude Code Inkbox agent speaking on a live Inkbox phone call.",
         "Use natural, concise spoken replies. Keep most answers to one or two short sentences.",
         "You are a voice; do not read out code, file paths, diffs, or logs verbatim.",
@@ -251,35 +274,69 @@ def build_realtime_instructions(meta: RealtimeCallMeta, additional: str = "") ->
         lines.append(
             "For outbound calls, do not open with a generic offer to help. Start by explaining why you are calling, then ask the next specific question or give the requested update.",
         )
-    lines.extend([
-        "Do not perform a context lookup before greeting the caller. Do not say you are waiting on a lookup or checking context.",
-        f"To do real work NOW in the project ({meta.project_dir or 'the working directory'}) "
-        f"or Inkbox account - look up contacts, inspect texts/calls, use Inkbox tools, "
-        f"read or edit files, run commands or tests, check git, or search the codebase - "
-        f"call {CONSULT_TOOL_NAME} with a plain-English request. It runs the Claude Code "
-        "agent in the caller's ongoing conversation and returns a spoken-friendly answer; read that answer back in your own voice.",
-        f"If the caller wants work done AFTER the call (or accepts a deferral), call "
-        f"{POST_CALL_ACTION_TOOL_NAME} to queue it. Tell them it's queued for after the "
-        "call; do not claim it is already done.",
-        f"If the caller changes or cancels queued after-call work, call "
-        f"{EDIT_POST_CALL_ACTION_TOOL_NAME} or {DELETE_POST_CALL_ACTION_TOOL_NAME} with "
-        f"the action_index returned when it was queued. If {CONSULT_TOOL_NAME} already "
-        f"did the work a queued action describes, delete that action so it isn't repeated.",
-        f"When the caller says goodbye or the conversation is clearly done, call "
-        f"{HANG_UP_CALL_TOOL_NAME}: the first call arms hangup and asks you to say a short "
-        "goodbye; after the goodbye, call it once more to actually end the call.",
-        f"Do NOT call {CONSULT_TOOL_NAME} for greetings, small talk, or questions you "
-        "can answer directly from the loaded call context. Use it whenever the caller wants "
-        "something done in code, asks for contact/account context you do not already have, "
-        "or needs an Inkbox tool lookup.",
-        "While a tool runs you may say a brief 'one moment' so the caller isn't left in silence.",
-    ])
+    if gate_mode:
+        lines.extend([
+            "This is your call. Run it like a sharp, easygoing human assistant would: talk freely, react, joke "
+            "if it fits, ask what you need to ask, think out loud, change subject with the caller. Use what "
+            "you know from the notes below and from earlier in the call. There is no script.",
+            f"{CONSULT_TOOL_NAME} is how you get anything done or found out. Whenever something is more than "
+            "talk, whatever it is, use it: say what's needed in plain English with the details you were given. "
+            "Don't decide in advance whether it's possible; you'll be told. It takes a few seconds, like a "
+            "person typing, so keep chatting and bring the outcome in when it lands.",
+            "Everything else is just conversation, and that is yours. Don't use the tool for it.",
+            "You are Blatbot, Aaron's assistant, and that is all there is to it. You don't know or talk about "
+            "how you work. When you check or do something, it's simply you doing it: 'let me look', 'give me "
+            "a sec', 'done'. If someone asks whether you're an AI, say yes, you're Aaron's AI assistant, and "
+            "move on.",
+            "One honest-assistant rule: don't say something was booked, sent, changed or confirmed unless "
+            "you were told so, and don't make up facts about Aaron's schedule or messages. If the tool "
+            "says Aaron has to approve something first, tell the caller that.",
+            f"When the caller is wrapping up, say goodbye and call {HANG_UP_CALL_TOOL_NAME}.",
+        ])
+    else:
+      lines.extend([
+          "Do not perform a context lookup before greeting the caller. Do not say you are waiting on a lookup or checking context.",
+          f"To do real work NOW in the project ({meta.project_dir or 'the working directory'}) "
+          f"or Inkbox account - look up contacts, inspect texts/calls, use Inkbox tools, "
+          f"read or edit files, run commands or tests, check git, or search the codebase - "
+          f"call {CONSULT_TOOL_NAME} with a plain-English request. It runs the Claude Code "
+          "agent in the caller's ongoing conversation and returns a spoken-friendly answer; read that answer back in your own voice.",
+          f"If the caller wants work done AFTER the call (or accepts a deferral), call "
+          f"{POST_CALL_ACTION_TOOL_NAME} to queue it. Tell them it's queued for after the "
+          "call; do not claim it is already done.",
+          f"If the caller changes or cancels queued after-call work, call "
+          f"{EDIT_POST_CALL_ACTION_TOOL_NAME} or {DELETE_POST_CALL_ACTION_TOOL_NAME} with "
+          f"the action_index returned when it was queued. If {CONSULT_TOOL_NAME} already "
+          f"did the work a queued action describes, delete that action so it isn't repeated.",
+          f"When the caller says goodbye or the conversation is clearly done, call "
+          f"{HANG_UP_CALL_TOOL_NAME}: the first call arms hangup and asks you to say a short "
+          "goodbye; after the goodbye, call it once more to actually end the call.",
+          f"Do NOT call {CONSULT_TOOL_NAME} for greetings, small talk, or questions you "
+          "can answer directly from the loaded call context. Use it whenever the caller wants "
+          "something done in code, asks for contact/account context you do not already have, "
+          "or needs an Inkbox tool lookup.",
+          "While a tool runs you may say a brief 'one moment' so the caller isn't left in silence.",
+      ])
+    if gate_mode:
+        # The voice agent is a surface: it gets who it is and who it's talking to,
+        # nothing about the platform underneath.
+        drop = ("identity handle", "contact id", "shared Inkbox iMessage", "never state or promise a number")
+        kept = []
+        for ln in lines:
+            if any(d in ln for d in drop):
+                continue
+            ln = (ln.replace("Your Inkbox agent email address", "Your email address")
+                    .replace("Known Inkbox contact info is already loaded", "You already know this caller")
+                    .replace("No matching Inkbox contact record is loaded", "You don't know who this caller is yet")
+                    .replace("Inkbox ", ""))
+            kept.append(ln)
+        lines = kept
     if additional.strip():
         lines += ["", additional.strip()]
     return "\n".join(lines)
 
 
-def build_realtime_greeting(meta: RealtimeCallMeta) -> str:
+def build_realtime_greeting(meta: RealtimeCallMeta, gate_mode: bool = False) -> str:
     """Instructions for the proactive opening line spoken at pickup."""
     first_name = (
         _escape_contact_memory_tags(meta.contact_name.split()[0])
@@ -297,6 +354,14 @@ def build_realtime_greeting(meta: RealtimeCallMeta) -> str:
             f"{_escape_contact_memory_tags(meta.outbound_purpose)}. "
             "Do not ask a generic how-can-I-help question."
         )
+    if gate_mode:
+        who = f"The person calling is {first_name}. " if first_name != "there" else ""
+        return (
+            f"{who}You speak first. The moment the call connects, introduce yourself: say hello, that this is "
+            "Blatbot, and that you're Aaron Blatnoy's assistant (if it's Aaron calling, just that it's "
+            "Blatbot), then ask what they need. Your own words, relaxed, one or two short sentences, like a "
+            "person answering a phone. Then stop and let them talk."
+        )
     return (
         f"Greet the caller now as the very first thing you say. Say something like "
         f"'Hi {first_name}, this is your Claude Code Inkbox agent - how can I help?' "
@@ -309,7 +374,31 @@ def build_realtime_greeting(meta: RealtimeCallMeta) -> str:
 # ----------------------------------------------------------------------
 
 
-def _consult_tool_schema() -> Dict[str, Any]:
+def _consult_tool_schema(gate_mode: bool = False) -> Dict[str, Any]:
+    if gate_mode:
+        return {
+            "type": "function",
+            "name": CONSULT_TOOL_NAME,
+            "description": (
+                "How you get anything done or found out. Anything beyond conversation goes here: whenever "
+                "the caller wants something done, looked up, checked, changed or followed up, or you need "
+                "something you don't already know. Don't judge whether it's possible; ask, and you'll get back "
+                "the outcome, including when it can't be done or needs Aaron's approval first. Takes a few "
+                "seconds."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "query": {
+                        "type": "string",
+                        "description": (
+                            "What's needed, in plain English, with who is asking and whatever details they gave."
+                        ),
+                    },
+                },
+                "required": ["query"],
+            },
+        }
     return {
         "type": "function",
         "name": CONSULT_TOOL_NAME,
@@ -574,7 +663,7 @@ async def open_inkbox_realtime_bridge(
         return OpenedRealtimeBridge(
             session=session,
             openai_ws=openai_ws,
-            state=_BridgeState(),
+            state=_BridgeState(gate_mode=config.gate_mode),
             config=config,
             meta=meta,
         )
@@ -628,23 +717,32 @@ async def _send_session_update(
         "session": {
             "type": "realtime",
             "model": config.model,
-            "instructions": build_realtime_instructions(meta, config.additional_instructions),
+            "instructions": build_realtime_instructions(meta, config.additional_instructions, config.gate_mode),
             "output_modalities": ["audio"],
             "audio": {
                 "input": {
                     "format": AUDIO_FORMAT_TELEPHONY,
-                    "noise_reduction": None,
-                    "transcription": {"model": INPUT_TRANSCRIPTION_MODEL},
+                    # Phone handset audio: filter line noise and the agent's own echo
+                    # before VAD sees it, so they don't register as the caller speaking.
+                    "noise_reduction": {"type": os.getenv("INKBOX_REALTIME_NOISE_REDUCTION") or "near_field"},
+                    "transcription": ({"model": INPUT_TRANSCRIPTION_MODEL, "prompt": config.vocabulary}
+                                      if config.vocabulary else {"model": INPUT_TRANSCRIPTION_MODEL}),
                     # Server-side VAD: the model auto-detects speech start/stop,
                     # auto-responds, and supports barge-in. The bridge never
                     # triggers response.create per turn itself.
                     "turn_detection": {
                         "type": "server_vad",
-                        "threshold": 0.5,
+                        # Higher threshold: breaths, clicks and echo no longer count as
+                        # speech, so they stop cutting the agent off mid-sentence. A real
+                        # interruption (someone actually talking) still gets through.
+                        "threshold": float(os.getenv("INKBOX_REALTIME_VAD_THRESHOLD") or 0.85),
                         "prefix_padding_ms": 300,
-                        "silence_duration_ms": 500,
+                        "silence_duration_ms": int(os.getenv("INKBOX_REALTIME_VAD_SILENCE_MS") or 700),
                         "create_response": True,
-                        "interrupt_response": True,
+                        # Gate mode: OpenAI never cuts the agent off by itself. A siren, a
+                        # passer-by or a cough would do it constantly on a city street. The
+                        # bridge interrupts only when sound is sustained (see BARGE_IN_MS).
+                        "interrupt_response": not config.gate_mode,
                     },
                 },
                 "output": {
@@ -652,13 +750,16 @@ async def _send_session_update(
                     "voice": config.voice,
                 },
             },
-            "tools": [
+            "tools": ([_consult_tool_schema(gate_mode=True), _hang_up_call_tool_schema()] if config.gate_mode else [
                 _consult_tool_schema(),
                 _post_call_action_tool_schema(),
                 _edit_post_call_action_tool_schema(),
                 _delete_post_call_action_tool_schema(),
                 _hang_up_call_tool_schema(),
-            ],
+            ]),
+            # Gate mode: the model handles pure conversation itself and must send
+            # anything factual or actionable through consult (enforced by prompt;
+            # the relay of a consult answer is a speech-only response).
             "tool_choice": "auto",
         },
     }
@@ -675,7 +776,7 @@ async def _maybe_send_greeting(
     try:
         await openai_ws.send_str(json.dumps({
             "type": "response.create",
-            "response": {"instructions": build_realtime_greeting(meta)},
+            "response": {"instructions": build_realtime_greeting(meta, state.gate_mode), "tool_choice": "none"},
         }))
     except Exception as exc:
         logger.debug("[realtime] greeting send failed: %s", exc)
@@ -808,6 +909,11 @@ async def _openai_to_inkbox_pump(
         # GA: response.output_audio.delta; beta: response.audio.delta.
         if ftype in ("response.output_audio.delta", "response.audio.delta"):
             delta_b64 = frame.get("delta") or ""
+            state.last_sound_at = time.monotonic()
+            if delta_b64:
+                # 8 kHz, 1 byte per sample (G.711): bytes / 8000 = seconds of speech.
+                secs = (len(delta_b64) * 3 / 4) / 8000.0
+                state.playback_until = max(state.playback_until, time.monotonic()) + secs
             if delta_b64:
                 out: Dict[str, Any] = {
                     "event": "media",
@@ -830,9 +936,43 @@ async def _openai_to_inkbox_pump(
                 await inkbox_ws.send_str(json.dumps(done))
 
         # Caller started speaking (barge-in) — drop queued outbound audio.
+        elif ftype == "response.created":
+            state.response_active = True
+        elif ftype in ("response.done", "response.cancelled"):
+            state.response_active = False
+            if config.gate_mode and not state.barge_in_enabled:
+                state.barge_in_enabled = True  # the introduction is out; interruptions allowed from here
         elif ftype == "input_audio_buffer.speech_started":
-            with suppress(Exception):
-                await inkbox_ws.send_str(json.dumps({"event": "clear"}))
+            state.last_sound_at = time.monotonic()
+            if not config.gate_mode:
+                state.playback_until = 0.0
+                with suppress(Exception):
+                    await inkbox_ws.send_str(json.dumps({"event": "clear"}))
+                continue
+            state.speech_started_at = time.monotonic()
+            if not state.barge_in_enabled:
+                continue  # still introducing itself; let it finish
+            agent_talking = state.response_active or time.monotonic() < state.playback_until
+            if not agent_talking:
+                continue  # nothing to interrupt
+            hold_ms = int(os.getenv("INKBOX_REALTIME_BARGE_IN_MS") or 550)
+
+            async def _barge(started: float = state.speech_started_at, hold: float = hold_ms / 1000.0) -> None:
+                await asyncio.sleep(hold)
+                if state.speech_started_at != started:
+                    return  # the sound stopped (a blip): the agent keeps talking
+                state.playback_until = 0.0
+                with suppress(Exception):
+                    await openai_ws.send_str(json.dumps({"type": "response.cancel"}))
+                with suppress(Exception):
+                    await inkbox_ws.send_str(json.dumps({"event": "clear"}))
+
+            if state.barge_task is not None and not state.barge_task.done():
+                state.barge_task.cancel()
+            state.barge_task = asyncio.create_task(_barge())
+        elif ftype == "input_audio_buffer.speech_stopped":
+            state.last_sound_at = time.monotonic()
+            state.speech_started_at = None
 
         # Transcripts (for logging / consult context).
         elif ftype in (
@@ -890,7 +1030,11 @@ async def _openai_to_inkbox_pump(
                     "args": item.get("arguments") or "{}",
                 })
         elif ftype == "error":
-            logger.warning("[realtime] OpenAI error frame: %s", frame.get("error"))
+            err = frame.get("error") or {}
+            if err.get("code") in ("conversation_already_has_active_response", "response_cancel_not_active"):
+                logger.debug("[realtime] benign turn-taking frame: %s", err.get("code"))
+            else:
+                logger.warning("[realtime] OpenAI error frame: %s", err)
 
 
 # ----------------------------------------------------------------------
@@ -943,24 +1087,70 @@ async def _dispatch_tool_call(
         return
 
     # Best-effort interim cue so the caller hears something while Claude works.
+    # Gate mode: the model leads and says its own lead-in, so nothing is injected.
     with suppress(Exception):
-        await openai_ws.send_str(json.dumps({
+        if not config.gate_mode:
+          await openai_ws.send_str(json.dumps({
             "type": "response.create",
-            "response": {"instructions": "Say only 'One moment.'"},
+            "response": {
+                "tool_choice": "none",
+                "instructions": (
+                    "Say only a very short, natural acknowledgement of two to four words, the way a person "
+                    "does while they look something up. Vary it each time, for example 'Sure, one sec.', "
+                    "'Mm, let me check.', 'Okay, give me a moment.' Say nothing else and give no information."
+                ) if config.gate_mode else "Say only 'One moment.'",
+            },
         }))
 
+    async def _hold_lines() -> None:
+        # A person doing something on the phone doesn't go silent for ten seconds.
+        # Every so often, while the consult is still running, let the model say one
+        # brief in-character hold line. Speech only; errors (e.g. the caller or the
+        # model is already talking) are ignored.
+        # Fill dead air, not time: speak only once the line has been quiet for a
+        # couple of seconds, so a lead-in or the caller talking pushes it back.
+        quiet_needed = 2.5
+        spoken = 0
+        while spoken < 8:
+            await asyncio.sleep(0.5)
+            if time.monotonic() - state.last_sound_at < quiet_needed:
+                continue
+            spoken += 1
+            quiet_needed = 5.0  # after the first fill, let silences breathe a bit more
+            state.last_sound_at = time.monotonic()
+            with suppress(Exception):
+                await openai_ws.send_str(json.dumps({
+                    "type": "response.create",
+                    "response": {
+                        "tool_choice": "none",
+                        "instructions": (
+                            "You are still waiting on the lookup you started and the line has gone quiet. Fill the gap "
+                            "the way a person does while working: one short, natural line, different from anything "
+                            "you said before on this call. If you have not said anything since starting the lookup, "
+                            "say what you are doing ('okay, pulling up his calendar now'). Otherwise a hold line "
+                            "('still loading', 'bear with me', 'almost there') or a light, relevant remark. "
+                            "Give no information from the lookup and make no promises."
+                        ),
+                    },
+                }))
+
+    hold_task = None  # the model leads; the bridge injects nothing into the conversation
     try:
         answer = await asyncio.wait_for(
             on_agent_consult(query, list(state.transcript)),
             timeout=config.consult_timeout_s,
         )
     except asyncio.TimeoutError:
+        if hold_task is not None:
+            hold_task.cancel()
         await _submit_tool_result(openai_ws, call_id, {
             "error": "consult timed out",
             "message": "Tell the caller you couldn't finish that right now; offer to follow up.",
         })
         return
     except Exception as exc:
+        if hold_task is not None:
+            hold_task.cancel()
         logger.warning("[realtime] consult failed: %s", exc)
         await _submit_tool_result(openai_ws, call_id, {
             "error": f"consult error: {exc}",
@@ -968,6 +1158,15 @@ async def _dispatch_tool_call(
         })
         return
 
+    if hold_task is not None:
+        hold_task.cancel()
+    if config.gate_mode:
+        await _submit_tool_result(openai_ws, call_id, {
+            "status": "ok",
+            "result": answer,
+            "note": "Tell the caller in your own words; keep the facts as given.",
+        }, state=state)
+        return
     await _submit_tool_result(openai_ws, call_id, {
         "status": "ok",
         "answer": answer,
@@ -1039,7 +1238,8 @@ async def _handle_delete_action(
 
 
 async def _handle_hang_up(
-    openai_ws: Any, inkbox_ws: Any, call_id: str, args: Dict[str, Any], state: _BridgeState
+    openai_ws: Any, inkbox_ws: Any, call_id: str, args: Dict[str, Any], state: _BridgeState,
+    *, gate_mode: bool = False,
 ) -> None:
     """Two-step hangup: arm + goodbye, then drop the line on the second call."""
     if inkbox_ws is None:
@@ -1050,7 +1250,19 @@ async def _handle_hang_up(
     armed = state.hangup_armed_at
     # First attempt (or a stale arm past the window) → arm and say goodbye
     # rather than dropping the caller mid-farewell.
-    if armed is None or (now - armed) > HANGUP_CONFIRM_WINDOW_S:
+    if gate_mode and armed is None:
+        # Forced-tool sessions cannot speak and then call the tool again, so the
+        # bridge says the goodbye as a speech-only response and ends the call itself.
+        state.hangup_armed_at = now
+        await _submit_tool_result(openai_ws, call_id, {"status": "ending"}, response={
+            "tool_choice": "none",
+            "instructions": "Say one brief, natural goodbye and nothing else.",
+        })
+        await asyncio.sleep(4.0)
+        armed = state.hangup_armed_at
+        now = time.monotonic()
+        call_id = ""
+    if not gate_mode and (armed is None or (now - armed) > HANGUP_CONFIRM_WINDOW_S):
         state.hangup_armed_at = now
         await _submit_tool_result(openai_ws, call_id, {
             "status": "confirm_goodbye",
@@ -1070,14 +1282,22 @@ async def _handle_hang_up(
     if state.stream_id:
         stop_frame["stream_id"] = state.stream_id
     # Don't ask the model to speak again — we're ending the call.
-    await _submit_tool_result(
-        openai_ws, call_id,
-        {"status": "hangup_requested", "reason": reason, "message": "The call is ending now."},
-        create_response=False,
-    )
+    if call_id:
+        await _submit_tool_result(
+            openai_ws, call_id,
+            {"status": "hangup_requested", "reason": reason, "message": "The call is ending now."},
+            create_response=False,
+        )
     try:
-        # Let the spoken goodbye land before we drop the carrier leg.
-        await asyncio.sleep(HANGUP_CLOSE_DELAY_S)
+        # Let the spoken goodbye land before we drop the carrier leg: wait for the
+        # agent's current response to finish and for its audio to finish playing
+        # on the phone (speech is generated faster than it plays), then a beat.
+        deadline = time.monotonic() + 12.0
+        while time.monotonic() < deadline:
+            if not state.response_active and time.monotonic() >= state.playback_until:
+                break
+            await asyncio.sleep(0.1)
+        await asyncio.sleep(0.8)
         await inkbox_ws.send_str(json.dumps(stop_frame))
     except Exception as exc:
         logger.debug("[realtime] hangup frame send failed: %s", exc)
@@ -1125,7 +1345,9 @@ async def _maybe_close_ws(ws: Any) -> None:
 
 
 async def _submit_tool_result(
-    openai_ws: Any, call_id: str, output: Dict[str, Any], *, create_response: bool = True
+    openai_ws: Any, call_id: str, output: Dict[str, Any], *, create_response: bool = True,
+    response: Optional[Dict[str, Any]] = None,
+    state: Optional["_BridgeState"] = None,
 ) -> None:
     """Submit a function_call_output and (optionally) prompt the model to speak.
 
@@ -1149,6 +1371,20 @@ async def _submit_tool_result(
             return
         # Bare response.create — let the session's audio settings apply (GA
         # rejects a modalities field here).
+        if state is not None:
+            # Wait for a natural opening: the agent has finished its current
+            # response, its audio has finished playing on the phone, and the
+            # caller isn't mid-sentence. Then speak the result as a new turn.
+            deadline = time.monotonic() + 25.0
+            while time.monotonic() < deadline and not state.closed:
+                now = time.monotonic()
+                if (not state.response_active and now >= state.playback_until + 0.3
+                        and now - state.last_sound_at >= 0.6):
+                    break
+                await asyncio.sleep(0.1)
+        if response:
+            await openai_ws.send_str(json.dumps({"type": "response.create", "response": response}))
+            return
         await openai_ws.send_str(json.dumps({"type": "response.create"}))
     except Exception as exc:
         logger.debug("[realtime] submit_tool_result failed: %s", exc)
