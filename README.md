@@ -1,352 +1,174 @@
-<h1>Claude Code Inkbox Bridge</h1>
+# Blatbot
 
-<img src="assets/claude_code_iphone_avatar.png" alt="Claude Code, now with a phone" width="200" align="left">
+A personal AI assistant that many people can reach, and only one person can command.
 
-<p>
-  <br><br>
-  <b>Give your Claude Code agent its own Inkbox identity:</b><br>
-  a mailbox, iMessage, a phone number for calls and SMS, and an internet address.<br>
-  Step away from the keyboard and keep working with it from anywhere.
-</p>
+Blatbot has its own email address, phone number, and iMessage line. Anyone can write to it or call it. It answers on my behalf, keeps track of what each person asked for, and can act on my calendar, inbox, and documents. The catch that makes this safe: when someone other than me asks it to *do* something, nothing happens until I approve the exact action from my phone.
 
-<p>
-  <code>Email</code> · <code>Calls</code> · <code>SMS / MMS</code> · <code>iMessage</code> · <code>Tunnel</code>
-</p>
+> **Built on Inkbox.** This project is a fork of [inkbox-ai/claude-code-plugin](https://github.com/inkbox-ai/claude-code-plugin), the Inkbox bridge that gives a Claude Code agent a mailbox, a phone number, SMS, iMessage, and a tunnel. All of the transport (receiving webhooks, sending messages, carrying call audio) is Inkbox's work. This fork adds the layer on top: a router, an approval gate, a scoped executor, a task ledger, and a phone surface. The `main` branch is Inkbox's code, untouched. The `blatbot` branch is this project. [See exactly what was added.](https://github.com/aaronblatnoy/blatbot/compare/main...blatbot) Inkbox's original README is kept at [docs/inkbox-plugin-README.md](docs/inkbox-plugin-README.md).
 
-<br clear="left">
+## The problem
 
----
+Most assistant demos have one user. The interesting case is an assistant that lives at a public address. Candidates email it to book time with me. Colleagues text it. I call it while walking down the street. They are all talking to the same agent, and that agent can send email and edit my calendar.
 
-## Prerequisites
+So the real question is not "can the model do the task." It is "who is allowed to make it act, and how do I know what it is about to do." A system prompt that says "only obey Aaron" is not an answer, because prompts can be argued with. Blatbot answers it in code.
 
-- **Claude Code installed and logged in.** The bridge drives a real Claude Code session, so the `claude` CLI has to be on the machine and authenticated — install it ([claude.com/claude-code](https://claude.com/claude-code)), then either sign in with a Claude Pro/Max subscription or set `ANTHROPIC_API_KEY`. `inkbox-claude doctor` checks for it.
-- **Python 3.11+.** The installer finds one and builds the bridge its own venv.
-- **macOS or Linux.** Boot persistence uses a systemd user unit on Linux and a launchd agent on macOS.
-- **An Inkbox agent** — nothing to set up in advance; the setup wizard self-signs up for you (or takes an existing API key).
-
-## Get started — one command
-
-This finds a Python 3.11+, installs the bridge in its own venv, puts `inkbox-claude` on your PATH, and runs the setup wizard:
-
-```bash
-curl -fsSL https://raw.githubusercontent.com/inkbox-ai/claude-code-plugin/main/install.sh | bash
-```
-
-That's the whole setup. The wizard creates a fresh Inkbox agent for you (or takes an existing API key), connects iMessage, provisions a dedicated phone number, mints a webhook signing key, picks the project directory Claude works in, and offers to **keep the bridge running on every boot**. When it finishes, text/email/call your agent and it answers from a real Claude Code session.
-
-The one thing to have ready: be **logged into Claude** — a Claude Pro/Max subscription (via the Claude Code app/CLI) or `ANTHROPIC_API_KEY` set. The installer checks this and warns if it's missing.
-
-Flags: `--start` (launch the background gateway when done), `--no-setup` (install only). From a local checkout, run `./install.sh`. Re-running is safe.
-
-### Bootstrap an existing identity without prompts
-
-For unattended agent setup, keep the identity handle, base URL, and API key supplied by the human who assigned the identity. Do not create a replacement identity. First download the installer once, inspect the exact file that will run, execute that same file with setup disabled, and remove it even if a step fails:
-
-```bash
-(
-  set -euo pipefail
-  installer="$(mktemp)"
-  trap 'rm -f "$installer"' EXIT
-  curl -fsSL https://raw.githubusercontent.com/inkbox-ai/claude-code-plugin/main/install.sh -o "$installer"
-  cat "$installer"
-  bash "$installer" --no-setup
-)
-```
-
-Stop if the downloaded script contains anything unexpected. Once the human-provided credential is available as the transient `INKBOX_API_KEY` environment variable, run the non-interactive bootstrap:
-
-```bash
-inkbox-claude bootstrap --identity '<handle>' --base-url '<url>' --project-dir "$PWD" \
-  --voice-ai --rotate-signing-key --start-gateway
-unset INKBOX_API_KEY
-```
-
-Keep the API key out of command-line arguments, source control, project instructions, and other persistent text. Supply it through a private channel, expose it only to the bootstrap process, and unset the transient environment variable afterward. Bootstrap stores the resulting agent-scoped configuration in the bridge's private local configuration.
-
-`bootstrap` validates that the key can access the requested existing identity, scopes down an admin key before saving it, preserves existing Voice AI settings, and starts or restarts the detached gateway. Signing-key replacement is explicit because it transfers verified webhook delivery away from any gateway using the previous key. The command prints a secret-redacted JSON result and is safe to resume.
-
-- `configured`: continue to verification.
-- `requires_human`: show the human every entry in `human_actions`, wait for them to complete the requested action, then rerun the exact same bootstrap command. Keep using the assigned handle; do not create another identity.
-- `error`: use the JSON `error` and `inkbox-claude doctor` output to diagnose the failed prerequisite or configuration, correct it, then rerun the exact same bootstrap command. Partial progress is preserved across retries.
-
-Check it any time:
-
-```bash
-inkbox-claude doctor    # config, SDKs, claude CLI, identity reachability
-inkbox-claude status    # is the background gateway up? where are the logs?
-```
-
-## What it does
+## How it works
 
 ```
-you (phone)  ── SMS / iMessage / email / call ──▶  Inkbox  ──▶  tunnel  ──▶  bridge
-                                                                              │
-                                                                              ▼
-                                                                  Claude Code session
-                                                                  (full tool access in
-                                                                   your project dir)
+  PEOPLE                                   SURFACES
+ ┌─────────────────┐
+ │ Owner           │──── iMessage ─────┐
+ │ trusted number  │──── phone call ───┼──────────────┐
+ └─────────────────┘                   │              │
+ ┌─────────────────┐                   │              │
+ │ Anyone else     │──── email ────────┤              │
+ │                 │──── SMS ──────────┤              │
+ │                 │──── phone call ───┼──────────────┤
+ └─────────────────┘                   │              │
+                                       v              v
+                         ┌──────────────────┐  ┌───────────────────────────────┐
+                         │ INKBOX           │  │ INKBOX phone line             │
+                         │ mailbox, SMS,    │  │ raw audio, 8 kHz              │
+                         │ iMessage         │  │                               │
+                         └────────┬─────────┘  └───────────────┬───────────────┘
+                                  │ webhook                    │ websocket
+                                  │                            v
+                                  │            ┌───────────────────────────────┐
+                                  │            │ VOICE AGENT   (OpenAI         │
+                                  │            │               GPT-Live)       │
+                                  │            │ runs the whole conversation   │
+                                  │            │ knows nothing about what is   │
+                                  │            │   behind it                   │
+                                  │            │ no tools: it DELEGATES        │
+                                  │            └───────────────┬───────────────┘
+                                  │                            │ only when there
+                                  │                            │ is real work
+══════════════════════════════════╪════════════════════════════╪═════════════════════
+  YOUR SERVER                     │                            │
+                                  v                            v
+ ┌───────────────────────────────────────────────────────────────────────────────┐
+ │ GATEWAY  (code, no model)                          every turn, cannot be skipped
+ │  1. identify sender      2. write inbound      3. load context                │
+ │     trusted = owner's       to TASK LEDGER         ledger + date/time         │
+ │     iMessage thread or                             + recent messages          │
+ │     owner's phone number                           + standing instructions    │
+ └───────────────────────────────────┬───────────────────────────────────────────┘
+                                     v
+                    ┌─────────────────────────────────┐
+                    │ ROUTER        (any cheap LLM)   │
+                    │ NO TOOLS. outputs:              │
+                    │   reply  and/or                 │
+                    │   task = prompt + scopes        │
+                    └───────┬─────────────────┬───────┘
+                   reply    │                 │  task
+                            │                 v
+                            │   ┌──────────────────────────────────┐
+                            │   │ GATE  (code)                     │
+                            │   │ store prompt + hash              │
+                            │   │ from owner ──> approved, run now │
+                            │   │ from others ─> HOLD              │
+                            │   │    text owner: their message,    │
+                            │   │    exact prompt, scopes          │
+                            │   │    "#N yes" / "no" / "edit: ..." │
+                            │   │    expires in 24h                │
+                            │   └────────────────┬─────────────────┘
+                            │                    v  approved
+                            │   ┌──────────────────────────────────┐
+                            │   │ EXECUTOR   (Claude Code)         │
+                            │   │ verifies prompt hash             │
+                            │   │ only the tools the scopes allow  │
+                            │   │ ends with STATUS: OK / FAILED    │
+                            │   └────────────────┬─────────────────┘
+                            │                    v
+                            │      result -> TASK LEDGER (done / failed)
+                            v                    v
+                   reply sent on the same channel the person used
 ```
 
-- Text, iMessage, email, or **call** your agent's Inkbox number. Each remote party gets one Claude Code session spanning every channel — text it on the walk home, then email it details, same conversation.
-- Claude Code runs with full tool access in `CLAUDE_PROJECT_DIR`. It reads, searches, and browses freely; anything risky (running commands, editing files) is **escalated to you as a text**:
+## Design rules
 
-  > Claude wants to run the command: npm test
-  >
-  > Reply 1 (or YES) to allow once, 2 (or ALWAYS) to allow this kind of action for the rest of the session, 3 (or NO) to block it.
+These are the decisions the whole thing rests on.
 
-- When Claude needs you to pick between options (the `AskUserQuestion` tool), you get a numbered poll on whatever channel you're on, and your reply is fed back as the answer.
-- Each message you send is tagged with its channel, so Claude knows whether it's on SMS, iMessage, email, or a call.
-- A channel prompt is appended to Claude Code's system prompt so replies fit a phone: plain text, no markdown, short, jargon kept to a minimum ("saved and published the change", not "pushed to origin/main").
-- Claude also gets Inkbox tools (`inkbox_send_email`, `inkbox_send_sms`, `inkbox_send_imessage`, …) so it can proactively reach you — "email me the full report" works.
+1. **The model that reads strangers' messages has no tools.** The router sees every inbound message, including hostile ones. All it can produce is text: a reply, and optionally a proposed task. It cannot touch anything.
+2. **The gate is code, not a prompt.** Whether a request runs is decided by comparing the sender against the owner's iMessage thread or phone number. No wording in a message can change that comparison. An email that claims to be from the owner, even from the owner's real address, is not the owner.
+3. **The owner approves the exact prompt, and only that prompt runs.** The approval text shows the person's message, what the assistant wants to do, the tool scopes, and the literal prompt. The prompt is hashed when stored and checked again before execution.
+4. **Every task gets the smallest set of tools that covers it.** Scopes map to tool lists. A tool outside the granted scopes is denied at call time, in code.
+5. **One ledger per person, across every channel.** Tasks are keyed by the person's email or phone, so a call, a text, and an email from the same person share one record. The ledger is loaded before every turn, which is what lets the assistant pick a task back up hours later.
+6. **The phone is a surface, not a second brain.** The voice model runs the conversation and is deliberately told nothing about the system behind it. When something real is needed it hands off, and that hand-off enters the same gateway as a text message, under the same rules. A caller who talks the voice model into something gains nothing, because the gate still checks the real caller number.
+7. **The assistant never claims work it has not done.** Replies can only report an action as complete when the ledger shows it completed.
 
-## Manual install
+## A worked example
 
-If you'd rather not run the installer (any Python 3.11+ environment):
+1. A candidate emails: "Could we do Tuesday at 6 for a coffee chat?"
+2. The gateway logs it to that candidate's ledger and sends me a one-line heads-up on iMessage.
+3. The router replies to them, "Let me confirm that with Aaron," and proposes a task: book a 30 minute event Tuesday at 6 PM and email a confirmation. Scopes: calendar, send email.
+4. I get a text with their message, the summary, the scopes, and the exact prompt. I reply `#12 yes`.
+5. The executor runs that prompt with only calendar and email tools, books the event, sends the confirmation, and reports `STATUS: OK`.
+6. The ledger marks it done. The candidate gets their confirmation. I get a one-line "done."
+7. Two days later they write "can we push it 30 minutes?" The router opens the ledger, sees the booking, and proposes the change. It does not ask them what meeting they mean.
 
-```bash
-pip install -e .
+If I had sent the same request from my own iMessage thread, steps 3 to 5 would run immediately with no approval.
 
-inkbox-claude setup    # interactive wizard — writes .env for you
-set -a; source .env; set +a
+## What is in this fork
 
-inkbox-claude doctor
-inkbox-claude run
+Everything custom lives in one folder plus one file.
+
+| Path | What it is |
+|---|---|
+| `inkbox_claude/gate/manager.py` | The core: a session per person, the owner trust check, approval commands, the phone surface |
+| `inkbox_claude/gate/router.py` | The zero-tool router, its rules, and the date and time line |
+| `inkbox_claude/gate/store.py` | SQLite: the task ledger, requests and their states, threads |
+| `inkbox_claude/gate/executor.py` | Runs one approved, hash-checked prompt through Claude Code |
+| `inkbox_claude/gate/scopes.py` | Scope names mapped to tool lists |
+| `inkbox_claude/live.py` | The phone bridge for OpenAI GPT-Live, using client delegation |
+| `tests/test_gate.py`, `tests/test_live.py` | Tests, including simulated phone calls with fake sockets |
+| `docs/blatbot-architecture.md` | Longer design notes and the Live versus Realtime comparison |
+
+The remaining edits are small hooks inside Inkbox's `gateway.py`, `realtime.py`, `config.py`, `tools.py`, and `sessions.py` that plug the gate in. The compare link above shows all of it.
+
+## Running it
+
+Start with Inkbox's own setup, which creates the agent identity and installs the bridge. Follow [docs/inkbox-plugin-README.md](docs/inkbox-plugin-README.md). Then turn on the gate by adding these to the bridge's `.env`:
+
+```
+# Turn on the gate
+INKBOX_MODE=gate
+
+# The router. Any OpenAI-compatible chat model works; DeepSeek is the default.
+DEEPSEEK_API_KEY=
+
+# Who the owner is. These two values are the entire trust boundary.
+INKBOX_APPROVER_PHONE=+15550100001
+INKBOX_APPROVER_IMESSAGE_CONVERSATION_ID=
+
+# Trust the owner's number on phone calls too (caller ID can be spoofed; off by default)
+GATE_VOICE_TRUST_APPROVER=1
+
+# Phone voice. "live" is OpenAI GPT-Live, "realtime" is the older Realtime API.
+OPENAI_API_KEY=
+INKBOX_REALTIME_ENABLED=1
+INKBOX_VOICE_API=live
+INKBOX_LIVE_VOICE=cedar
+
+# Optional
+GATE_VOICE_VOCABULARY="Names and terms callers use, with pronunciation hints"
+GATE_ORG_GOOGLE_ACCOUNT=
+GATE_OWNER_GOOGLE_ACCOUNT=
 ```
 
-`inkbox-claude setup` walks you through everything and writes `.env`: create a fresh Inkbox agent via self-signup (or bring an existing API key), pick or create the identity, attach the Claude Code avatar to the agent's contact card (auto for a new self-signup agent; offered for an existing one with no avatar), provision a phone number, wait for your `START` opt-in, optionally enable OpenAI Realtime voice (validating your key), connect iMessage, mint a webhook signing key, choose the project directory, and set up autostart. Rerun it anytime to reconfigure. Prefer to wire `.env` by hand? Copy `.env.example` to `.env` and fill in `INKBOX_API_KEY`, `INKBOX_IDENTITY`, `INKBOX_SIGNING_KEY`, and `CLAUDE_PROJECT_DIR` yourself.
+Put your own standing instructions (tone, signature, house rules) in `standing.md` next to the `.env`. The router reads it fresh on every turn, so you can change the assistant's behavior by editing a text file.
 
-On startup the bridge opens an Inkbox tunnel, wires mail/text/iMessage webhook subscriptions and the incoming-call channel to it, and routes everything into Claude Code sessions.
+Run the tests with `pytest tests/test_gate.py tests/test_live.py`.
 
-### Running it
+### Honest caveats
 
-```bash
-inkbox-claude run        # foreground (Ctrl+C to stop) — good for first runs and debugging
-```
+- **The scope map is wired to my setup.** `scopes.py` references the specific Google Workspace tool servers I run. To use this yourself, edit that file to point at your own tools. Making this configurable is the next piece of work.
+- **Some prompts still say "Blatbot" and "Aaron."** The persona and a few rules are written for me. They are being moved into config.
+- **Caller ID is not authentication.** Trusting a phone number on voice calls is a convenience with a known weakness, which is why it is a separate switch.
+- **It is a single-owner design.** One assistant, one person who can approve. It is not a multi-tenant service.
 
-Or run it as a background daemon (PID + log under `~/.inkbox-claude/`):
+## Credits and license
 
-```bash
-inkbox-claude start      # detach and run in the background
-inkbox-claude status     # is it running? where are the logs?
-inkbox-claude restart    # restart it
-inkbox-claude stop       # graceful stop (SIGTERM, then SIGKILL after 5s)
+The bridge this is built on is [inkbox-ai/claude-code-plugin](https://github.com/inkbox-ai/claude-code-plugin) by [Inkbox](https://inkbox.ai). Their code is included here as a fork so the project runs as a whole, and all credit for the email, SMS, iMessage, voice transport, and tunnel belongs to them. The upstream repository does not currently state a license, so their code remains theirs and this fork makes no claim over it. If you want to reuse the transport, go to the upstream project.
 
-tail -f ~/.inkbox-claude/gateway.log
-```
-
-`start` auto-loads `.env` from the current directory, so you don't have to `source` it first. `run` is the foreground version a service manager (systemd, Docker) should supervise; `start`/`stop` are the self-contained background option.
-
-### Start on boot
-
-The setup wizard offers to keep the bridge running for you — either just in the background for this session, or as a service that starts on every boot. On Linux it installs a **systemd user unit** (`~/.config/systemd/user/inkbox-claude.service`) and enables it; on macOS it installs a **launchd agent**. To keep a Linux service alive while you're logged out, enable lingering once:
-
-```bash
-sudo loginctl enable-linger "$USER"
-systemctl --user status inkbox-claude   # restart | stop | status
-```
-
-### Uninstall
-
-```bash
-inkbox-claude uninstall           # stop it, remove the boot service + launcher; keep config
-inkbox-claude uninstall --purge   # also delete ~/.inkbox-claude (config, logs, sessions)
-```
-
-This is local-only — webhook subscriptions on the Inkbox side are left as-is; remove them in the [Inkbox Console](https://inkbox.ai/console) if you want.
-
-Then, from your phone:
-
-1. Text `START` to the agent's number (first time only, carrier opt-in).
-2. Text it something like *"clean up the TODOs in the auth module"*.
-3. Approve the permission texts as they arrive. Get the result as a text.
-
-## How escalation works
-
-Claude Code never silently runs anything destructive. The bridge passes a `can_use_tool` callback to the Claude Agent SDK:
-
-- Read-only tools (`Read`, `Grep`, `Glob`, `WebFetch`, …) and the Inkbox messaging tools run without asking. Override with `INKBOX_AUTO_ALLOWED_TOOLS`.
-- Everything else (Bash, Write, Edit, …) blocks the agent mid-turn while the bridge texts you a one-line plain-language summary of what Claude wants to do. Your **next message answers the escalation** instead of starting a new turn — reply `1`/`yes`, `2`/`always` (session-scoped grant), or `3`/`no`.
-- `AskUserQuestion` polls are formatted as numbered options; reply with the number or free text.
-- No reply within `INKBOX_PERMISSION_TIMEOUT_S` (default 10 min) → the tool call is denied and Claude is told you didn't answer; it carries on as best it can.
-
-## Sessions
-
-Sessions are keyed by Inkbox contact, so one person = one conversation across channels. Claude session ids are persisted in `~/.inkbox-claude/sessions.json` and resumed across bridge restarts — your conversation picks up where it left off. Replies go out on the channel you last used. If a voice call ends before Claude finishes a voice reply, that late voice reply is dropped instead of silently switching to SMS or email.
-
-**Typing indicator.** While Claude works on a turn, the bridge keeps a typing indicator alive on your iMessage thread (refreshed every few seconds, since it expires) so you can see it's busy. SMS, email, and voice have no typing indicator, so this is iMessage-only.
-
-**Delivery failures.** An outbound message can die two ways, and the bridge feeds both into one delivery-failure loop. It can be **rejected at send time** — the server's content policy blocks it (markdown artifacts, emoji overload), the recipient has opted out, the address is bad, or the body is too long — which comes back as an error on the send call. Or it can be **accepted and then fail downstream** — a carrier filters the SMS, an iMessage is declined, an email bounces — which Inkbox reports asynchronously (`text.delivery_failed`/`text.delivery_unconfirmed`, `imessage.delivery_failed`, `message.bounced`/`message.failed`). Either way the bridge wakes the affected contact's session to tell Claude *which* message didn't land and *why*, so it can fix and resend or reach you another way using its Inkbox tools. The wake-up runs as a side-effect turn — Claude acts via tools rather than replying on the channel that just failed. Sends are **hard-capped at three per logical reply** with the budget shared across both surfaces (keyed by conversation/recipient): after that the thread goes quiet with a loud log line instead of looping. The budget resets on a fresh inbound, a delivered receipt, or a 30-minute TTL, and repeat webhooks for the same message are de-duplicated. Transient (5xx) send failures are excluded — a bare resend clears those.
-
-**Interrupt by texting again.** Messaging the agent again while it's mid-turn works like pressing Esc in Claude Code and typing a new message: the running turn is interrupted, its partial answer is dropped, and Claude picks up your new message instead. (A reply while it's waiting on a permission/poll still answers that escalation — interrupting only applies while it's actively working.)
-
-**Control commands.** A handful of slash-commands steer the conversation itself and are handled by the bridge instead of being sent to Claude (works on any channel):
-
-- `/clear` (or `/new`) — start a fresh conversation: forgets the resumed session, tears down the client, and clears session-scoped permission grants.
-- `/stop` (or `/cancel`) — interrupt the current turn and drop anything queued, keeping your conversation context intact.
-- `/resume` — texts you back a numbered list of recent conversations for the project (each with a short summary and timestamp); reply with a number to reopen that one. Like `/resume` in the Claude Code CLI.
-- `/status` — reports what the bridge is doing for you right now (working, waiting on a reply, or idle) and whether you're in a fresh or ongoing conversation. Read-only; doesn't disturb a running turn.
-- `/usage` — reports your Claude subscription usage, mirroring the Claude Code `/usage` command: the rolling 5-hour session window and the weekly windows, each with percent used and when it resets.
-- `/health` — reports bridge health: whether Inkbox is reachable (live identity check + which channels are live), the inbound tunnel is connected, and Claude is ready to run (SDK present, authenticated).
-
-These match only when the whole message is exactly the command, so "please /clear the cache" is still a normal turn.
-
-**Errors.** If a turn fails, you get a short plain-language heads-up ("I hit an error while working on that and had to stop") rather than silence.
-
-## Voice
-
-The configured phone voice stack applies to inbound and outbound calls:
-
-- **Inkbox Voice AI:** Inkbox handles the conversation on the agent's behalf.
-  When the call ends, a signed `call.ended` event wakes the same contact-keyed
-  Claude Code session once to execute remaining commitments. Plain model text
-  from that synthetic turn is suppressed; explicit tool side effects still run.
-
-- **OpenAI Realtime** (when configured): the bridge pre-opens an OpenAI Realtime session and accepts the call in raw-media mode, so a natural, low-latency voice handles the conversation. It runs the call itself and has these tools:
-  - `consult_agent` — do real work *now* in the project; runs in the *same* contact-keyed session as your SMS/iMessage and its answer is spoken back.
-  - `register_post_call_action` / `edit_post_call_action` / `delete_post_call_action` — queue, change, or cancel work to run *after* you hang up.
-  - `hang_up_call` — two-step (say goodbye, then end the call).
-
-  When the call ends, queued actions run in your session (and any plain "reflect on the call" follow-up if none were queued) — so "after we hang up, open a PR and text me" actually happens. Enable it in `inkbox-claude setup` (it validates your OpenAI key live) or via the `INKBOX_REALTIME_*` env vars below.
-- **Inkbox STT/TTS** (default / fallback): Inkbox auto-accepts the call and opens a WebSocket to the bridge; finalized transcripts become turns in your same session and Claude's replies are spoken back. The bridge falls back to this automatically if Realtime is off or OpenAI can't be reached (unless `INKBOX_REALTIME_FALLBACK_TO_INKBOX_STT_TTS=false`).
-
-### Two calling lines
-
-Calls — inbound and outbound — can run over either of two lines, and the agent picks the one that matches the channel it's talking on:
-
-- **The dedicated phone number.** The agent's own number (the same line SMS uses). Outbound calls present this number; inbound calls to it ring the agent.
-- **The shared Inkbox iMessage line.** The agent can also place and receive voice calls with a person it's connected to over iMessage, over the same shared line that person already messages. The underlying number is never surfaced — Inkbox resolves it from the iMessage connection — and it only works for people already connected over iMessage (an unknown caller is rejected; an outbound call with no connection is refused).
-
-Inbound answering is configured once per identity (`hosted_agent` for Inkbox Voice AI, otherwise `auto_accept` to the call bridge WebSocket), so a single setting governs both lines. Outbound, the agent sets `origination` on `inkbox_place_call` (`dedicated_number` / `shared_imessage_number`), or omits it — then it resolves to the only line available, or, when both are, to the line matching the current conversation's channel (an iMessage turn calls over the shared line; an SMS/phone turn over the dedicated number).
-
-## External webhooks
-
-Beyond Inkbox's own events, the `/webhook` endpoint can wake the agent for events from **other systems** (e.g. a GitHub Actions failure). Every request is classified by its signature header first, then verified with that source's scheme — routing keys off who actually *signed* the request, never off the body's claimed event type, so a forged payload can't impersonate an Inkbox event:
-
-- **Registered sources** (GitHub via `X-Hub-Signature-256` today; drop a new provider module into `inkbox_claude/webhook_providers/` to add one) are verified with `INKBOX_WEBHOOK_SECRET_<NAME>` and always delivered — registering the provider + secret is the opt-in. The agent is told the event is verified and directed to act via its tools (its text reply on an external thread isn't delivered to anyone).
-- **Unknown/unverified sources** are dropped by default. Set `INKBOX_EXTERNAL_EVENTS_ENABLED=true` to pass them through anyway; the agent then gets a cautious directive forbidding irreversible action on the event's say-so alone.
-
-## Media
-
-**Inbound.** When someone sends an MMS image, an iMessage attachment, or an email with files, the gateway downloads them to `~/.inkbox-claude/media/` (override with `INKBOX_CLAUDE_MEDIA_DIR`) and appends the local paths to the message, so Claude can open them with its Read tool — including viewing images. Media-only messages (no text) still wake the agent.
-
-**Outbound.** Claude sends media with a single tool call per channel — it just passes local file paths, and the tool handles any upload-then-send round trip internally:
-- **Email** — `inkbox_send_email(..., attachment_paths=[...])` (base64 inline, ~25 MB total).
-- **iMessage** — `inkbox_send_imessage(..., media_path=...)` (uploaded + sent, ≤10 MB).
-- **SMS/MMS** — `inkbox_send_sms(..., media_paths=[...])` (uploaded + sent; `media_urls` also accepts already-hosted URLs).
-
-## Config reference
-
-| Env var | Required | Default | Description |
-|---|---|---|---|
-| `INKBOX_API_KEY` | yes | - | Agent-scoped Inkbox API key. |
-| `INKBOX_IDENTITY` | yes | - | Inkbox agent identity handle. |
-| `INKBOX_SIGNING_KEY` | inbound | - | Webhook HMAC secret for signed inbound events. |
-| `CLAUDE_PROJECT_DIR` | yes | cwd | Directory Claude Code works in. |
-| `CLAUDE_MODEL` | no | CLI default | Model override for bridged sessions. |
-| `INKBOX_REQUIRE_SIGNATURE` | no | `true` | Refuse unsigned inbound webhooks unless `false`. |
-| `INKBOX_SKIP_WEBHOOK_RECONCILE` | no | `false` | Leave webhook subscriptions untouched on start. For deployments that provision them ahead of time, where the destination is fixed or this API key may not change it. They must already point at this bridge's webhook URL, or nothing arrives. |
-| `INKBOX_EXTERNAL_EVENTS_ENABLED` | no | `false` | Wake the agent on unrecognised/unverified external webhooks (see [External webhooks](#external-webhooks)). |
-| `INKBOX_CONTACT_MEMORIES_ENABLED` | no | `true` | Include matched-contact memories as background context for human conversations and calls. |
-| `INKBOX_WEBHOOK_SECRET_<NAME>` | per source | - | Verification secret for a registered third-party webhook source (e.g. `INKBOX_WEBHOOK_SECRET_GITHUB`). |
-| `INKBOX_BASE_URL` | no | SDK default | Override the Inkbox API base URL. |
-| `INKBOX_PUBLIC_URL` | no | - | Public bridge URL. Omit to use an Inkbox tunnel. |
-| `INKBOX_TUNNEL_NAME` | no | identity handle | Tunnel name override. |
-| `INKBOX_ALLOWED_USERS` | no | - | Local allowlist (emails / E.164 numbers). Usually leave empty and use Inkbox contact rules. |
-| `INKBOX_ALLOW_ALL_USERS` | no | `false` | Allow all senders admitted by Inkbox contact rules. |
-| `INKBOX_BRIDGE_PORT` | no | `8767` | Local webhook server port. |
-| `INKBOX_PERMISSION_TIMEOUT_S` | no | `600` | Seconds to wait for a permission/poll reply. |
-| `INKBOX_AUTO_ALLOWED_TOOLS` | no | read-only set | Tools that never need a permission text. |
-| `INKBOX_VOICE_STACK` | no | `inkbox_tts_stt` | `inkbox_voice_ai`, `openai_realtime`, or `inkbox_tts_stt`. |
-| `INKBOX_VOICE_AI_AUTHORITY_MODE` | no | `contact_scoped` | Local mirror used by doctor for the saved Voice AI authority. |
-| `INKBOX_VOICEMAIL_DETECTION` | no | `enabled` | Default outbound policy: `enabled` or `disabled`. |
-| `INKBOX_REALTIME_ENABLED` | no | `false` | Use OpenAI Realtime for calls. Needs a key; off → Inkbox STT/TTS. |
-| `INKBOX_REALTIME_API_KEY` | realtime | `OPENAI_API_KEY` | OpenAI key with `/v1/realtime` access. |
-| `INKBOX_REALTIME_MODEL` | no | `gpt-realtime-2` | Realtime model id. |
-| `INKBOX_REALTIME_VOICE` | no | `cedar` | Realtime voice name. |
-| `INKBOX_REALTIME_FALLBACK_TO_INKBOX_STT_TTS` | no | `true` | Fall back to Inkbox STT/TTS if OpenAI connect fails. |
-
-## Tools exposed to Claude
-
-The agent reaches you (or third parties) through an in-process MCP server:
-
-- `inkbox_whoami` — its own identity: handle, mailbox, and its two calling lines (dedicated phone number + shared iMessage line status).
-- `inkbox_send_email` — send email; attach local files with `attachment_paths`.
-- `inkbox_send_sms` — send SMS/MMS; attach local files with `media_paths` (or hosted `media_urls`).
-- `inkbox_send_imessage` — send into an iMessage conversation; attach a local file with `media_path`.
-- `inkbox_place_call` — place an outbound voice call through the running gateway with purpose/opening/context, over either line via `origination` (see [Two calling lines](#two-calling-lines)).
-- `inkbox_list_calls` · `inkbox_get_call_transcript` — browse recent calls and fetch transcript segments.
-- `inkbox_list_text_conversations` · `inkbox_get_text_conversation` — browse SMS threads and history.
-- `inkbox_list_imessage_conversations` · `inkbox_get_imessage_conversation` — browse iMessage threads and history (find the `conversation_id` to send into).
-- `inkbox_lookup_contact` · `inkbox_list_contacts` · `inkbox_get_contact` — resolve and read address-book contacts (reverse-lookup by email/phone, free-text search, or full record by id).
-- `inkbox_create_contact` · `inkbox_update_contact` · `inkbox_delete_contact` — save, edit, and remove organization-wide contacts. Changes affect the shared address book. vCard export/import is not exposed.
-- `inkbox_a2a_call` · `inkbox_a2a_check` · `inkbox_a2a_reply` — delegate work to another agent and follow its task.
-- `inkbox_list_a2a_tasks` · `inkbox_list_a2a_messages` — page and search this identity's inbound and outbound A2A history, with participant, task, context, role, state, and timestamp filters.
-- `inkbox_a2a_complete` · `inkbox_a2a_ask_caller` · `inkbox_a2a_fail` — commit the outcome of a verified inbound A2A task. These tools are rejected outside that task's isolated session.
-
-The bridge requires Inkbox SDK 0.5.9 or newer.
-
-### Phone call voice stack
-
-`inkbox-claude setup` presents a **Phone call voice stack** section with three
-choices:
-
-1. **Inkbox Voice AI** handles the call and wakes Claude Code after it ends.
-   Choose contact-scoped or YOLO authority during setup. Authority changes
-   require an admin API key, but that credential is used only in memory and is
-   never written to the plugin `.env`.
-2. **OpenAI Realtime API** uses a separately validated Realtime API key for
-   low-latency call audio while Claude Code handles complex work.
-3. **Inkbox TTS/STT** keeps the full agent turn in Claude Code and uses Inkbox
-   speech services, with higher latency.
-
-The canonical selection is `INKBOX_VOICE_STACK` (`inkbox_voice_ai`,
-`openai_realtime`, or `inkbox_tts_stt`). `INKBOX_VOICEMAIL_DETECTION` accepts
-`enabled` or `disabled` and applies to outbound calls unless the tool call
-explicitly overrides it. Voice AI outbound calls send a reason and use the
-saved server-side authority default; the plugin does not elevate authority per
-call.
-
-### Local/manual Docker test environment
-
-This image is for interactive local testing. It installs Claude Code, this
-plugin, and the pinned Inkbox SDK, but contains no credentials. It uses your
-native Claude login; an Anthropic or OpenAI API key is not embedded in the
-image. An OpenAI key is only needed if you select OpenAI Realtime for calls.
-
-```bash
-docker build -f Dockerfile.manual-test -t inkbox-claude-manual .
-docker run -d --name inkbox-claude-manual \
-  -v "$HOME/.claude:/home/node/.claude" \
-  -v inkbox-claude-state:/home/node/.inkbox-claude \
-  -v "$PWD:/workspace" \
-  inkbox-claude-manual
-docker exec -it inkbox-claude-manual bash
-claude --version
-inkbox-claude setup
-inkbox-claude doctor
-inkbox-claude run
-```
-
-On a live call, the OpenAI Realtime voice agent additionally gets `consult_agent`, `register_post_call_action` / `edit_post_call_action` / `delete_post_call_action`, and `hang_up_call` — see [Voice](#voice).
-
-## Smoke test
-
-1. `inkbox-claude doctor` — everything green.
-2. Text `START`, then text the agent; verify it replies in the same thread.
-3. Ask it to do something requiring a command (e.g. "run the tests") and verify you get a permission text; reply `1` and verify the result comes back.
-4. Ask it something open-ended enough to trigger a poll; reply with a number.
-5. Email the agent; verify the reply lands as an email on the same thread.
-6. Call the number, ask what it's working on, hang up mid-answer, and verify the late voice tail is not silently sent as SMS or email.
-
-## Development
-
-```bash
-python -m pytest
-```
-
-## Architecture notes
-
-- **Tunnel-first inbound**: with a signing key, the gateway opens an Inkbox tunnel, reconciles mail/text/iMessage webhook subscriptions, and sets the identity's incoming-call action (`auto_accept` + call WebSocket) covering both calling lines.
-- **Contact-keyed sessions**: webhook payloads carry resolved contacts; a single resolved contact id becomes the session key, otherwise the raw address/number does. One human, one session, every channel.
-- **Escalation over the active channel**: a pending permission/poll captures the contact's next inbound message as its answer, on whichever text channel they're using.
-- **Claude Agent SDK**: each session is one `ClaudeSDKClient` (its own Claude Code subprocess) with the `claude_code` system-prompt preset plus a messaging channel prompt appended, `can_use_tool` for escalation, and an in-process MCP server for the Inkbox tools.
+The gate, router, executor, ledger, scopes, and GPT-Live bridge were written by [Aaron Blatnoy](https://github.com/aaronblatnoy).
