@@ -6,3 +6,11 @@ venv/
 *.egg-info/
 dist/
 .pytest_cache/
+
+# Local state and personal data: never commit
+*.db
+*.db-*
+*.log
+standing.md
+.env.*
+.claude/
