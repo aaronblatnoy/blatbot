@@ -18,7 +18,7 @@ from typing import Any, Awaitable, Callable, Dict, List, Optional
 from .executor import Executor
 from .router import Router, RouterOutput
 from .scopes import SCOPES
-from .store import Request, Store, TaskRequired, task_key
+from .store import Person, Request, Store, TaskRequired, task_key
 
 logger = logging.getLogger(__name__)
 
@@ -105,6 +105,13 @@ class GateSession:
                 name = " ".join(str(c.get(k) or "") for k in ("given_name", "family_name")).strip()
             return name
         return ""
+
+    def person(self) -> Person:
+        """The sender as one person: contact id plus every email/phone/name we know."""
+        c = (self.reply_meta or {}).get("contact")
+        p = Person.from_contact(c if isinstance(c, dict) else None, self._sender(), self._sender_name())
+        self.m.store.remember_person(p)
+        return p
 
     def _contact_notes(self) -> str:
         c = (self.reply_meta or {}).get("contact") or {}
@@ -478,7 +485,7 @@ class GateSessionManager:
         if choice.startswith("t") and choice[1:].isdigit():
             cand = self.store.get_task(int(choice[1:]))
             if cand and cand["state"] != "closed":
-                allowed = approver or any(p["key"] == task_key(sender) for p in cand["participants"])
+                allowed = approver or self.store.is_participant(cand["id"], sender)
                 if allowed:
                     chosen = cand
                 else:
@@ -496,9 +503,11 @@ class GateSessionManager:
             chosen = self.store.create_task(title)
             logger.info("[gate] new task T%s: %s", chosen["id"], title)
 
+        if out.task_summary:
+            self.store.set_task_summary(chosen["id"], out.task_summary)
         # Participants: the sender (unless it is Aaron) and any named counterpart.
         if not approver:
-            self.store.add_participant(chosen["id"], sender, sender_name)
+            self.store.add_participant(chosen["id"], session.person())
         if counterpart:
             self.store.add_participant(chosen["id"], counterpart, counterpart)
         else:

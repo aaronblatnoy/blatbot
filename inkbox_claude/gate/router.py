@@ -63,6 +63,9 @@ class RouterOutput(BaseModel):
     # "new" to start one, or null when it is just conversation with no task at all.
     task: Optional[str] = None
     task_title: Optional[str] = None
+    # One or two plain sentences: what this task is and where it stands after this
+    # turn. Stored on the task and shown as "Where it stands" next time.
+    task_summary: Optional[str] = None
 
 
 class Router:
@@ -110,6 +113,12 @@ class Router:
             "  a correction, a status question, the next step. Start a new one when it is a different\n"
             "  job even if the same person is asking. Only Aaron may continue a task he is not part of.\n"
             "  When there is no request and the message is only conversation, task may be null.\n"
+            "  Whenever you set task (existing or new), also set task_summary: one or two plain sentences\n"
+            "  saying what the task is and where it stands after this turn, written so that next time you\n"
+            "  can tell this task apart from others with the same person (e.g. 'Coffee chat with Sam Lee,\n"
+            "  booked Tue 9/22 6 PM at Sosnoff; Sam has asked to move it to 7, awaiting Aaron'). Each\n"
+            "  task in TASK MEMORY shows its current 'Where it stands' line; use those lines, the titles,\n"
+            "  and the participants to choose, not just who is writing.\n"
             "- PHONE: when Channel is voice, the sender is on a live call with a voice agent that runs the\n"
             "  conversation and has handed this to you because something needs doing or looking up. The\n"
             "  message is a speech-recognition transcript excerpt of the call, not a typed request: read\n"

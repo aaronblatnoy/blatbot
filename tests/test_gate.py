@@ -593,3 +593,42 @@ def test_street_noise_blip_does_not_interrupt_but_real_speech_does(monkeypatch):
     cancels = [x for x in oa.sent if x.get("type") == "response.cancel"]
     clears = [x for x in ib.sent if x.get("event") == "clear"]
     assert len(cancels) == 1 and len(clears) == 1  # the horn did nothing; the real interruption did
+
+
+def test_one_person_many_contacts_share_tasks(tmp_path):
+    """Sam emails to book, then calls from his phone to move it: same person, same task."""
+    m, sent = make_manager(tmp_path)
+    contact = {"id": "sam-1", "name": "Sam Lee", "emails": ["Sam@NYU.edu"], "phones": ["+1 (212) 555-0100"]}
+    email_meta = {"sender": "sam@nyu.edu", "to": "sam@nyu.edu", "subject": "chat", "contact": contact}
+    m.router.next = RouterOutput(reply=None, task="new", task_title="Book coffee chat with Sam Lee",
+                                 request=RouterRequest(prompt="Book Tue 6pm", scopes=["calendar"], summary="book chat"))
+    asyncio.run(m.get("sam-1").handle_inbound("tue 6?", "email", email_meta))
+    t = m.store.get_task(m.store.task_id_for_request(1))
+    assert len(t["participants"]) == 1  # one person, not one per address
+    assert sorted(t["participants"][0]["keys"]) == ["2125550100", "sam lee", "sam@nyu.edu"]
+    # a call from the phone number, with no contact hydrated at all, still finds Sam's task
+    assert [x["id"] for x in m.store.tasks_for_person("+12125550100")] == [t["id"]]
+    assert m.store.is_participant(t["id"], "212-555-0100")
+    # and a router pointing the phone turn at that task is allowed
+    m.store.set_state(1, "done")
+    m.router.next = RouterOutput(reply="Moved.", task=f"T{t['id']}",
+                                 request=RouterRequest(prompt="Move to 7", scopes=["calendar"], summary="move chat"))
+    asyncio.run(m.get("sam-1").voice_consult("move it to seven", {"call_id": "c", "sender": "+12125550100", "contact": {}}))
+    assert m.store.task_id_for_request(2) == t["id"]
+    # a stranger on a different number is still refused
+    m.store.set_state(2, "done")
+    m.router.next = RouterOutput(reply=None, task=f"T{t['id']}",
+                                 request=RouterRequest(prompt="Cancel", scopes=["calendar"], summary="cancel"))
+    asyncio.run(m.get("x9").handle_inbound("cancel sam's chat", "sms", {"sender": "+13125550199", "to": "+13125550199", "contact": {}}))
+    assert m.store.task_id_for_request(3) != t["id"]
+
+
+def test_router_summary_is_kept_on_the_task_and_shown_next_time(tmp_path):
+    m, sent = make_manager(tmp_path)
+    m.router.next = RouterOutput(reply=None, task="new", task_title="Coffee chat with Cand Idate",
+                                 task_summary="Cand wants a coffee chat; asked for Tue 6 PM, awaiting Aaron.",
+                                 request=RouterRequest(prompt="Book Tue 6pm", scopes=["calendar"], summary="book chat"))
+    asyncio.run(m.get("c1").handle_inbound("tue 6?", "email", stranger_meta()))
+    m.router.next = RouterOutput(reply="ok", request=None)
+    asyncio.run(m.get("c1").handle_inbound("thanks", "email", stranger_meta()))
+    assert "Where it stands: Cand wants a coffee chat; asked for Tue 6 PM" in m.router.calls[-1]["task_memory"]

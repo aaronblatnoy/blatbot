@@ -61,11 +61,20 @@ CREATE INDEX IF NOT EXISTS tasks_key ON tasks(key, updated_at);
 CREATE INDEX IF NOT EXISTS tasks_state ON tasks(state, updated_at);
 CREATE TABLE IF NOT EXISTS task_participants (
   task_id INTEGER NOT NULL,
-  key TEXT NOT NULL,             -- normalized person: email | phone digits | lowercase name
+  key TEXT NOT NULL,             -- one way to reach the person: email | phone digits | lowercase name
   display TEXT NOT NULL,
+  person_id TEXT NOT NULL DEFAULT '',  -- contact id when known; groups several keys as one person
   PRIMARY KEY (task_id, key)
 );
 CREATE INDEX IF NOT EXISTS task_participants_key ON task_participants(key);
+CREATE TABLE IF NOT EXISTS people (
+  person_id TEXT NOT NULL,       -- contact id
+  key TEXT NOT NULL,             -- every known email / phone / name of that person
+  display TEXT NOT NULL DEFAULT '',
+  updated_at REAL NOT NULL,
+  PRIMARY KEY (person_id, key)
+);
+CREATE INDEX IF NOT EXISTS people_key ON people(key);
 CREATE TABLE IF NOT EXISTS task_events (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   task_id INTEGER NOT NULL,
@@ -80,6 +89,32 @@ CREATE INDEX IF NOT EXISTS task_events_task ON task_events(task_id, id);
 
 TASK_MEMORY_AGE = 21 * 24 * 3600    # finished tasks older than this are not shown
 OPEN_STATES = ("open", "waiting_aaron", "running")
+
+
+@dataclass
+class Person:
+    """One human, however they reached us: a contact id plus every email, phone and
+    name we know for them. Built from the Inkbox contact record on each message."""
+    person_id: str          # contact id, or "" when the sender is unknown
+    display: str
+    keys: List[str]         # normalized, deduplicated, primary first
+
+    @classmethod
+    def from_contact(cls, contact: Optional[Dict[str, Any]], sender: str = "",
+                     name: str = "") -> "Person":
+        contact = contact if isinstance(contact, dict) else {}
+        raw: List[str] = [sender]
+        raw += [str(x) for x in (contact.get("emails") or [])]
+        raw += [str(x) for x in (contact.get("phones") or [])]
+        display = name or str(contact.get("name") or "").strip() or sender
+        if display and "@" not in display and not any(ch.isdigit() for ch in display):
+            raw.append(display)  # a real name is a key too
+        keys: List[str] = []
+        for r in raw:
+            k = task_key(r)
+            if k and k not in keys:
+                keys.append(k)
+        return cls(person_id=str(contact.get("id") or ""), display=display, keys=keys)
 
 
 class TaskRequired(RuntimeError):
@@ -158,6 +193,13 @@ class Store:
             cols = {r["name"] for r in self._db.execute("PRAGMA table_info(requests)")}
             if "task_id" not in cols:
                 self._db.execute("ALTER TABLE requests ADD COLUMN task_id INTEGER")
+            tcols = {r["name"] for r in self._db.execute("PRAGMA table_info(tasks)")}
+            if "summary" not in tcols:
+                self._db.execute("ALTER TABLE tasks ADD COLUMN summary TEXT NOT NULL DEFAULT ''")
+            pcols = {r["name"] for r in self._db.execute("PRAGMA table_info(task_participants)")}
+            if "person_id" not in pcols:
+                self._db.execute("ALTER TABLE task_participants ADD COLUMN person_id TEXT NOT NULL DEFAULT ''")
+            self._db.execute("CREATE INDEX IF NOT EXISTS task_participants_person ON task_participants(person_id)")
             self._migrate_person_keyed_tasks()
             self._db.commit()
 
@@ -314,17 +356,65 @@ class Store:
             self.add_participant(tid, str(raw), str(display or raw))
         return self.get_task(tid)  # type: ignore[return-value]
 
-    def add_participant(self, task_id: int, raw_key: str, display: str = "") -> None:
+    def remember_person(self, person: "Person") -> None:
+        """Record every key we know for a contact, so later lookups by any of them match."""
+        if not person.person_id:
+            return
+        now = time.time()
+        with self._lock:
+            for k in person.keys:
+                self._db.execute(
+                    "INSERT INTO people(person_id,key,display,updated_at) VALUES(?,?,?,?) "
+                    "ON CONFLICT(person_id,key) DO UPDATE SET display=CASE WHEN excluded.display<>'' "
+                    "THEN excluded.display ELSE people.display END, updated_at=excluded.updated_at",
+                    (person.person_id, k, person.display, now),
+                )
+            self._db.commit()
+
+    def person_keys(self, raw_key: str) -> List[str]:
+        """All keys that belong to the same person as ``raw_key`` (itself included)."""
         key = task_key(raw_key)
         if not key:
-            return
+            return []
         with self._lock:
-            self._db.execute(
-                "INSERT INTO task_participants(task_id,key,display) VALUES(?,?,?) "
-                "ON CONFLICT(task_id,key) DO UPDATE SET display=CASE WHEN excluded.display<>'' "
-                "AND instr(excluded.display,'@')=0 THEN excluded.display ELSE task_participants.display END",
-                (task_id, key, display or raw_key),
-            )
+            pid = self._db.execute("SELECT person_id FROM people WHERE key=?", (key,)).fetchone()
+            if not pid:
+                pid = self._db.execute(
+                    "SELECT person_id FROM task_participants WHERE key=? AND person_id<>''", (key,)
+                ).fetchone()
+            if not pid:
+                return [key]
+            rows = self._db.execute(
+                "SELECT key FROM people WHERE person_id=? UNION SELECT key FROM task_participants WHERE person_id=?",
+                (pid["person_id"], pid["person_id"]),
+            ).fetchall()
+        keys = [r["key"] for r in rows]
+        return keys if key in keys else [key] + keys
+
+    def add_participant(self, task_id: int, who: Any, display: str = "") -> None:
+        """Attach a person to a task. ``who`` is a Person, or a bare email/phone/name."""
+        if isinstance(who, Person):
+            person = who
+        else:
+            person = Person(person_id="", display=display or str(who), keys=[task_key(str(who))])
+            # A bare key may already be known as part of a contact.
+            with self._lock:
+                r = self._db.execute("SELECT person_id, display FROM people WHERE key=?", (person.keys[0],)).fetchone()
+            if r:
+                person = Person(person_id=r["person_id"], display=display or r["display"] or str(who),
+                                keys=self.person_keys(person.keys[0]))
+        self.remember_person(person)
+        with self._lock:
+            for k in person.keys:
+                if not k:
+                    continue
+                self._db.execute(
+                    "INSERT INTO task_participants(task_id,key,display,person_id) VALUES(?,?,?,?) "
+                    "ON CONFLICT(task_id,key) DO UPDATE SET "
+                    "display=CASE WHEN excluded.display<>'' AND instr(excluded.display,'@')=0 THEN excluded.display ELSE task_participants.display END, "
+                    "person_id=CASE WHEN excluded.person_id<>'' THEN excluded.person_id ELSE task_participants.person_id END",
+                    (task_id, k, person.display or k, person.person_id),
+                )
             self._db.commit()
 
     def get_task(self, task_id: int) -> Optional[Dict[str, Any]]:
@@ -333,11 +423,28 @@ class Store:
             if not t:
                 return None
             ps = self._db.execute(
-                "SELECT key, display FROM task_participants WHERE task_id=? ORDER BY rowid", (task_id,)
+                "SELECT key, display, person_id FROM task_participants WHERE task_id=? ORDER BY rowid", (task_id,)
             ).fetchall()
         d = dict(t)
-        d["participants"] = [dict(p) for p in ps]
+        # One entry per person: keys sharing a person_id are grouped.
+        people: Dict[str, Dict[str, Any]] = {}
+        for p in ps:
+            gid = p["person_id"] or f"key:{p['key']}"
+            entry = people.setdefault(gid, {"key": p["key"], "display": p["display"], "person_id": p["person_id"], "keys": []})
+            entry["keys"].append(p["key"])
+            if p["display"] and "@" not in p["display"] and not any(ch.isdigit() for ch in p["display"]):
+                entry["display"] = p["display"]
+        d["participants"] = list(people.values())
         return d
+
+    def set_task_summary(self, task_id: int, summary: str) -> None:
+        """The router's own plain-language description of where the task stands."""
+        summary = " ".join((summary or "").split())[:400]
+        if not summary:
+            return
+        with self._lock:
+            self._db.execute("UPDATE tasks SET summary=? WHERE id=?", (summary, task_id))
+            self._db.commit()
 
     def set_task_state(self, task_id: int, state: str) -> None:
         with self._lock:
@@ -346,14 +453,15 @@ class Store:
 
     def tasks_for_person(self, raw_key: str, *, open_only: bool = True, limit: int = 8) -> List[Dict[str, Any]]:
         """Tasks this person is a participant of, most recently touched first."""
-        key = task_key(raw_key)
-        if not key:
+        keys = self.person_keys(raw_key)
+        if not keys:
             return []
         cond = "AND t.state IN ('open','waiting_aaron','running')" if open_only else ""
+        marks = ",".join("?" * len(keys))
         with self._lock:
             rows = self._db.execute(
-                f"SELECT t.* FROM tasks t JOIN task_participants p ON p.task_id=t.id "
-                f"WHERE p.key=? {cond} ORDER BY t.updated_at DESC LIMIT ?", (key, limit),
+                f"SELECT DISTINCT t.id, t.updated_at FROM tasks t JOIN task_participants p ON p.task_id=t.id "
+                f"WHERE p.key IN ({marks}) {cond} ORDER BY t.updated_at DESC LIMIT ?", (*keys, limit),
             ).fetchall()
         return [self.get_task(int(r["id"])) for r in rows]  # type: ignore[misc]
 
@@ -382,6 +490,17 @@ class Store:
         if found:
             return found[0]
         return self.create_task(title or f"Thread with {display or raw_key}", [(raw_key, display or raw_key)])
+
+    def is_participant(self, task_id: int, raw_key: str) -> bool:
+        keys = self.person_keys(raw_key)
+        if not keys:
+            return False
+        marks = ",".join("?" * len(keys))
+        with self._lock:
+            r = self._db.execute(
+                f"SELECT 1 FROM task_participants WHERE task_id=? AND key IN ({marks}) LIMIT 1", (task_id, *keys)
+            ).fetchone()
+        return bool(r)
 
     def task_event(self, task_id: int, kind: str, text: str, *, chat_id: str = "",
                    request_id: Optional[int] = None, state: Optional[str] = None,
@@ -438,7 +557,10 @@ class Store:
     @staticmethod
     def _task_head(t: Dict[str, Any]) -> str:
         who = ", ".join(p["display"] for p in t.get("participants") or []) or "no one in particular"
-        return f"Task T{t['id']} | {t['title']} | with: {who} | state: {t['state']}"
+        head = f"Task T{t['id']} | {t['title']} | with: {who} | state: {t['state']}"
+        if t.get("summary"):
+            head += f"\n  Where it stands: {t['summary']}"
+        return head
 
     def task_memory_for_task(self, task_id: int, now: Optional[float] = None) -> str:
         """One task's ledger, for the executor's context."""
