@@ -50,14 +50,22 @@ CREATE TABLE IF NOT EXISTS requests (
 CREATE INDEX IF NOT EXISTS requests_state ON requests(state);
 CREATE TABLE IF NOT EXISTS tasks (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
-  key TEXT NOT NULL,             -- normalized counterpart: email | phone digits | lowercase name
-  display TEXT NOT NULL,         -- how to show the counterpart
-  title TEXT NOT NULL,
-  state TEXT NOT NULL DEFAULT 'open',  -- open | waiting_aaron | running | done | failed
+  key TEXT NOT NULL DEFAULT '',  -- legacy (pre-participants) counterpart key; unused for new tasks
+  display TEXT NOT NULL DEFAULT '',
+  title TEXT NOT NULL,           -- what the task is
+  state TEXT NOT NULL DEFAULT 'open',  -- open | waiting_aaron | running | done | failed | closed
   created_at REAL NOT NULL,
   updated_at REAL NOT NULL
 );
 CREATE INDEX IF NOT EXISTS tasks_key ON tasks(key, updated_at);
+CREATE INDEX IF NOT EXISTS tasks_state ON tasks(state, updated_at);
+CREATE TABLE IF NOT EXISTS task_participants (
+  task_id INTEGER NOT NULL,
+  key TEXT NOT NULL,             -- normalized person: email | phone digits | lowercase name
+  display TEXT NOT NULL,
+  PRIMARY KEY (task_id, key)
+);
+CREATE INDEX IF NOT EXISTS task_participants_key ON task_participants(key);
 CREATE TABLE IF NOT EXISTS task_events (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   task_id INTEGER NOT NULL,
@@ -70,8 +78,13 @@ CREATE TABLE IF NOT EXISTS task_events (
 CREATE INDEX IF NOT EXISTS task_events_task ON task_events(task_id, id);
 """
 
-TASK_REOPEN_AFTER = 7 * 24 * 3600   # a finished task older than this starts a fresh one
 TASK_MEMORY_AGE = 21 * 24 * 3600    # finished tasks older than this are not shown
+OPEN_STATES = ("open", "waiting_aaron", "running")
+
+
+class TaskRequired(RuntimeError):
+    """Raised when a request would be created without a task. The gateway
+    enforces that every request is written to a task; this is the backstop."""
 
 
 def task_key(raw: str) -> str:
@@ -145,7 +158,44 @@ class Store:
             cols = {r["name"] for r in self._db.execute("PRAGMA table_info(requests)")}
             if "task_id" not in cols:
                 self._db.execute("ALTER TABLE requests ADD COLUMN task_id INTEGER")
+            self._migrate_person_keyed_tasks()
             self._db.commit()
+
+    def _migrate_person_keyed_tasks(self) -> None:
+        """One-time: tasks used to be keyed to a person. Turn each key into a
+        participant row, and give tasks that were only a conversation a real title."""
+        rows = self._db.execute(
+            "SELECT t.id, t.key, t.display, t.title FROM tasks t "
+            "WHERE t.key<>'' AND NOT EXISTS (SELECT 1 FROM task_participants p WHERE p.task_id=t.id)"
+        ).fetchall()
+        for r in rows:
+            key = str(r["key"])
+            if key.startswith("aaron:"):
+                continue  # an errand with no counterpart: no participant
+            self._db.execute(
+                "INSERT OR IGNORE INTO task_participants(task_id,key,display) VALUES(?,?,?)",
+                (r["id"], key, r["display"] or key),
+            )
+        # Every request belongs to a task. Attach any orphan to a task titled from its summary.
+        now = time.time()
+        for r in self._db.execute("SELECT id, summary, state, created_at FROM requests WHERE task_id IS NULL").fetchall():
+            cur = self._db.execute(
+                "INSERT INTO tasks(key,display,title,state,created_at,updated_at) VALUES('','',?,?,?,?)",
+                (r["summary"] or f"Request #{r['id']}",
+                 "done" if r["state"] == "done" else ("failed" if r["state"] in ("failed", "expired", "rejected") else "open"),
+                 r["created_at"], now),
+            )
+            self._db.execute("UPDATE requests SET task_id=? WHERE id=?", (cur.lastrowid, r["id"]))
+            self._db.execute(
+                "INSERT INTO task_events(task_id,kind,chat_id,request_id,text,created_at) VALUES(?,?,?,?,?,?)",
+                (cur.lastrowid, "note", "", r["id"], "Attached during the task-model migration.", now),
+            )
+        # Conversation-only "tasks" (no request ever attached) are closed, not deleted.
+        self._db.execute(
+            "UPDATE tasks SET state='closed' WHERE title LIKE 'Thread with %' "
+            "AND state NOT IN ('done','failed','closed') "
+            "AND NOT EXISTS (SELECT 1 FROM task_events e WHERE e.task_id=tasks.id AND e.kind='request')"
+        )
 
     # -- threads ---------------------------------------------------------
     def thread_state(self, chat_id: str) -> str:
@@ -192,14 +242,19 @@ class Store:
     # -- requests --------------------------------------------------------
     def create_request(self, *, chat_id: str, sender: str, sender_name: str, mode: str, subject: str,
                        original_message: str, summary: str, scopes: List[str], prompt: str,
-                       state: str) -> Request:
+                       state: str, task_id: int) -> Request:
+        """Create a request. ``task_id`` is mandatory: a request is always part of a task."""
+        if not task_id:
+            raise TaskRequired("a request must belong to a task")
         now = time.time()
         with self._lock:
+            if not self._db.execute("SELECT 1 FROM tasks WHERE id=?", (task_id,)).fetchone():
+                raise TaskRequired(f"task T{task_id} does not exist")
             cur = self._db.execute(
                 "INSERT INTO requests(chat_id,sender,sender_name,mode,subject,original_message,summary,"
-                "scopes_json,prompt,prompt_sha256,state,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                "scopes_json,prompt,prompt_sha256,state,created_at,updated_at,task_id) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
                 (chat_id, sender, sender_name, mode, subject, original_message, summary,
-                 json.dumps(scopes), prompt, sha256(prompt), state, now, now),
+                 json.dumps(scopes), prompt, sha256(prompt), state, now, now, task_id),
             )
             self._db.commit()
             rid = cur.lastrowid
@@ -243,27 +298,90 @@ class Store:
         return self.get_request(rid)  # type: ignore[return-value]
 
     # -- tasks -----------------------------------------------------------
-    def task_for(self, raw_key: str, display: str, title: str = "") -> Dict[str, Any]:
-        """Find the live task for a counterpart, or start one. Never raises."""
-        key = task_key(raw_key)
+    def create_task(self, title: str, participants: Optional[List[Any]] = None) -> Dict[str, Any]:
+        """Start a task. ``participants`` is a list of (raw_key, display) pairs or bare strings."""
         now = time.time()
+        title = " ".join((title or "").split())[:160] or "Untitled task"
         with self._lock:
-            r = self._db.execute(
-                "SELECT * FROM tasks WHERE key=? ORDER BY updated_at DESC LIMIT 1", (key,)
-            ).fetchone()
-            if r and (r["state"] not in ("done", "failed") or now - r["updated_at"] < TASK_REOPEN_AFTER):
-                if display and display != r["display"] and "@" not in r["display"]:
-                    self._db.execute("UPDATE tasks SET display=? WHERE id=?", (display, r["id"]))
-                    self._db.commit()
-                    r = self._db.execute("SELECT * FROM tasks WHERE id=?", (r["id"],)).fetchone()
-                return dict(r)
             cur = self._db.execute(
-                "INSERT INTO tasks(key,display,title,state,created_at,updated_at) VALUES(?,?,?,?,?,?)",
-                (key, display or raw_key, title or f"Thread with {display or raw_key}", "open", now, now),
+                "INSERT INTO tasks(key,display,title,state,created_at,updated_at) VALUES('','',?,?,?,?)",
+                (title, "open", now, now),
+            )
+            tid = int(cur.lastrowid)
+            self._db.commit()
+        for p in participants or []:
+            raw, display = (p if isinstance(p, (tuple, list)) else (p, p))
+            self.add_participant(tid, str(raw), str(display or raw))
+        return self.get_task(tid)  # type: ignore[return-value]
+
+    def add_participant(self, task_id: int, raw_key: str, display: str = "") -> None:
+        key = task_key(raw_key)
+        if not key:
+            return
+        with self._lock:
+            self._db.execute(
+                "INSERT INTO task_participants(task_id,key,display) VALUES(?,?,?) "
+                "ON CONFLICT(task_id,key) DO UPDATE SET display=CASE WHEN excluded.display<>'' "
+                "AND instr(excluded.display,'@')=0 THEN excluded.display ELSE task_participants.display END",
+                (task_id, key, display or raw_key),
             )
             self._db.commit()
-            r = self._db.execute("SELECT * FROM tasks WHERE id=?", (cur.lastrowid,)).fetchone()
-        return dict(r)
+
+    def get_task(self, task_id: int) -> Optional[Dict[str, Any]]:
+        with self._lock:
+            t = self._db.execute("SELECT * FROM tasks WHERE id=?", (task_id,)).fetchone()
+            if not t:
+                return None
+            ps = self._db.execute(
+                "SELECT key, display FROM task_participants WHERE task_id=? ORDER BY rowid", (task_id,)
+            ).fetchall()
+        d = dict(t)
+        d["participants"] = [dict(p) for p in ps]
+        return d
+
+    def set_task_state(self, task_id: int, state: str) -> None:
+        with self._lock:
+            self._db.execute("UPDATE tasks SET state=?, updated_at=? WHERE id=?", (state, time.time(), task_id))
+            self._db.commit()
+
+    def tasks_for_person(self, raw_key: str, *, open_only: bool = True, limit: int = 8) -> List[Dict[str, Any]]:
+        """Tasks this person is a participant of, most recently touched first."""
+        key = task_key(raw_key)
+        if not key:
+            return []
+        cond = "AND t.state IN ('open','waiting_aaron','running')" if open_only else ""
+        with self._lock:
+            rows = self._db.execute(
+                f"SELECT t.* FROM tasks t JOIN task_participants p ON p.task_id=t.id "
+                f"WHERE p.key=? {cond} ORDER BY t.updated_at DESC LIMIT ?", (key, limit),
+            ).fetchall()
+        return [self.get_task(int(r["id"])) for r in rows]  # type: ignore[misc]
+
+    def open_tasks(self, limit: int = 30) -> List[Dict[str, Any]]:
+        with self._lock:
+            rows = self._db.execute(
+                "SELECT id FROM tasks WHERE state IN ('open','waiting_aaron','running') "
+                "ORDER BY updated_at DESC LIMIT ?", (limit,),
+            ).fetchall()
+        return [self.get_task(int(r["id"])) for r in rows]  # type: ignore[misc]
+
+    def recent_tasks(self, limit: int = 12) -> List[Dict[str, Any]]:
+        """Live tasks plus recently finished ones, most recently touched first."""
+        cutoff = time.time() - TASK_MEMORY_AGE
+        with self._lock:
+            rows = self._db.execute(
+                "SELECT id FROM tasks WHERE (state IN ('open','waiting_aaron','running') OR updated_at>?) "
+                "AND state<>'closed' ORDER BY updated_at DESC LIMIT ?",
+                (cutoff, limit),
+            ).fetchall()
+        return [self.get_task(int(r["id"])) for r in rows]  # type: ignore[misc]
+
+    def task_for(self, raw_key: str, display: str, title: str = "") -> Dict[str, Any]:
+        """Compatibility: the most recent open task this person is on, or a new one."""
+        found = self.tasks_for_person(raw_key, open_only=True, limit=1)
+        if found:
+            return found[0]
+        return self.create_task(title or f"Thread with {display or raw_key}", [(raw_key, display or raw_key)])
 
     def task_event(self, task_id: int, kind: str, text: str, *, chat_id: str = "",
                    request_id: Optional[int] = None, state: Optional[str] = None,
@@ -305,28 +423,22 @@ class Store:
             ).fetchall()
         return [int(r["task_id"]) for r in rows]
 
-    def recent_tasks(self, limit: int = 12) -> List[Dict[str, Any]]:
-        """Live tasks plus recently finished ones, most recently touched first."""
-        cutoff = time.time() - TASK_MEMORY_AGE
-        with self._lock:
-            rows = self._db.execute(
-                "SELECT * FROM tasks WHERE state NOT IN ('done','failed') OR updated_at>? ORDER BY updated_at DESC LIMIT ?",
-                (cutoff, limit),
-            ).fetchall()
-        return [dict(r) for r in rows]
-
     def task_with_events(self, task_id: int, limit: int = 8) -> Optional[Dict[str, Any]]:
+        d = self.get_task(task_id)
+        if not d:
+            return None
         with self._lock:
-            t = self._db.execute("SELECT * FROM tasks WHERE id=?", (task_id,)).fetchone()
-            if not t:
-                return None
             ev = self._db.execute(
                 "SELECT kind,chat_id,request_id,text,created_at FROM task_events WHERE task_id=? ORDER BY id DESC LIMIT ?",
                 (task_id, limit),
             ).fetchall()
-        d = dict(t)
         d["events"] = [dict(e) for e in reversed(ev)]
         return d
+
+    @staticmethod
+    def _task_head(t: Dict[str, Any]) -> str:
+        who = ", ".join(p["display"] for p in t.get("participants") or []) or "no one in particular"
+        return f"Task T{t['id']} | {t['title']} | with: {who} | state: {t['state']}"
 
     def task_memory_for_task(self, task_id: int, now: Optional[float] = None) -> str:
         """One task's ledger, for the executor's context."""
@@ -334,35 +446,39 @@ class Store:
         if not t:
             return ""
         now = now or time.time()
-        lines = [f"Task T{t['id']} | {t['display']} | {t['title']} | state: {t['state']}"]
+        lines = [self._task_head(t)]
         for e in t["events"]:
             rid = f" (#{e['request_id']})" if e.get("request_id") else ""
             lines.append(f"  - {_age(now - e['created_at'])} {e['kind']}{rid}: {e['text']}")
         return "\n".join(lines)
 
-    def task_memory(self, chat_id: str, *, is_approver: bool, now: Optional[float] = None) -> str:
+    def task_memory(self, chat_id: str, *, is_approver: bool, now: Optional[float] = None,
+                    person: str = "") -> str:
         """Plain-text ledger the router reads before anything else.
 
-        For a counterpart's thread: their task(s). For Aaron: every live task plus
-        the ones his thread touched, so a follow-up hours later lands on the record."""
+        For a person's thread: every task they are on (open first), plus tasks this
+        thread touched. For Aaron: every live task, then recently finished ones."""
         now = now or time.time()
-        ids: List[int] = self.task_ids_for_chat(chat_id)
+        ids: List[int] = []
+        if person:
+            for t in self.tasks_for_person(person, open_only=False, limit=6):
+                ids.append(int(t["id"]))
+        for tid in self.task_ids_for_chat(chat_id):
+            if tid not in ids:
+                ids.append(tid)
         if is_approver:
             for t in self.recent_tasks():
                 if t["id"] not in ids:
-                    ids.append(t["id"])
+                    ids.append(int(t["id"]))
         blocks: List[str] = []
-        for tid in ids[:12]:
+        for tid in ids[:14]:
             t = self.task_with_events(tid)
-            if not t:
+            if not t or t["state"] == "closed":
                 continue
-            head = f"Task T{t['id']} | {t['display']} | {t['title']} | state: {t['state']}"
-            lines = [head]
+            lines = [self._task_head(t)]
             for e in t["events"]:
-                age = now - e["created_at"]
-                when = _age(age)
                 rid = f" (#{e['request_id']})" if e.get("request_id") else ""
-                lines.append(f"  - {when} {e['kind']}{rid}: {e['text']}")
+                lines.append(f"  - {_age(now - e['created_at'])} {e['kind']}{rid}: {e['text']}")
             blocks.append("\n".join(lines))
         return "\n\n".join(blocks) if blocks else "(no tasks on record)"
 

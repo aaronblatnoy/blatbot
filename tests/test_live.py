@@ -166,3 +166,28 @@ def test_owner_is_recognised_by_phone_number_not_contact_name(monkeypatch):
     assert "Aaron himself" in live.build_live_instructions(nameless_owner)
     impostor = make_meta(contact_name="Aaron Blatnoy", remote_phone_number="+12125550100")
     assert "Aaron Blatnoy's assistant" in live.build_live_greeting(impostor)
+
+
+def test_late_identity_tells_the_model_it_is_the_owner(monkeypatch):
+    monkeypatch.setenv("INKBOX_APPROVER_PHONE", "+15550107788")
+    ows = FakeWS()
+    bridge = live.OpenedLiveBridge(session=None, openai_ws=ows, state=live._LiveState(), config=rt.RealtimeConfig(),
+                                   meta=make_meta(contact_known=False, contact_name=None, remote_phone_number=None))
+    asyncio.run(bridge.identify("+15550107788", "", "NOTES FOR THIS CALL ..."))
+    kinds = [x["type"] for x in ows.sent]
+    assert kinds == ["session.instructions.append", "session.thinking.append"]
+    assert "Aaron himself" in ows.sent[0]["content"] and live.is_owner_call(bridge.meta)
+    ows2 = FakeWS()
+    b2 = live.OpenedLiveBridge(session=None, openai_ws=ows2, state=live._LiveState(), config=rt.RealtimeConfig(),
+                               meta=make_meta(contact_known=False, contact_name=None, remote_phone_number=None))
+    asyncio.run(b2.identify("+12125550100", "", ""))
+    assert ows2.sent == []  # an unknown stranger: nothing to tell the model
+
+
+def test_live_is_enforced_unless_fallback_is_explicit(monkeypatch):
+    from inkbox_claude import gateway as gw
+    monkeypatch.delenv("INKBOX_VOICE_FALLBACK", raising=False)
+    monkeypatch.delenv("INKBOX_VOICE_API", raising=False)
+    assert gw._voice_api() == "live" and gw._voice_fallback_allowed() is False
+    monkeypatch.setenv("INKBOX_VOICE_FALLBACK", "realtime")
+    assert gw._voice_fallback_allowed() is True

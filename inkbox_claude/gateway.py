@@ -557,6 +557,15 @@ def _delivery_failure_prompt(
     ])
 
 
+def _voice_api() -> str:
+    return (os.getenv("INKBOX_VOICE_API") or "live").strip().lower()
+
+
+def _voice_fallback_allowed() -> bool:
+    """Only an explicit INKBOX_VOICE_FALLBACK=realtime lets a call be answered by another engine."""
+    return (os.getenv("INKBOX_VOICE_FALLBACK") or "").strip().lower() == "realtime"
+
+
 def _call_ended_prompt(transcript: Any) -> str:
     """Build the Claude Code prompt for a no-actions post-call reflection."""
     convo = _format_transcript(transcript)
@@ -3555,15 +3564,30 @@ class InkboxGateway:
                 )
             # Voice API: GPT-Live (full duplex, delegates to this gateway) by default;
             # INKBOX_VOICE_API=realtime keeps the older single-model Realtime bridge.
-            if (os.getenv("INKBOX_VOICE_API") or "live").strip().lower() != "realtime":
+            # GPT-Live belongs to gate mode; the plain bridge keeps Inkbox's Realtime behaviour.
+            if self.cfg.mode == "gate" and _voice_api() != "realtime":
                 try:
+                    from .live import open_inkbox_live_bridge
+                except ImportError:  # pragma: no cover
+                    from live import open_inkbox_live_bridge
+                last_exc: Optional[Exception] = None
+                for attempt in (1, 2):
                     try:
-                        from .live import open_inkbox_live_bridge
-                    except ImportError:  # pragma: no cover
-                        from live import open_inkbox_live_bridge
-                    return await open_inkbox_live_bridge(config=rt_config, meta=meta)
-                except RealtimeBridgeConnectError as exc:
-                    logger.warning("[bridge] GPT-Live connect failed for call %s (%s); trying Realtime", call_id, exc)
+                        return await open_inkbox_live_bridge(config=rt_config, meta=meta)
+                    except RealtimeBridgeConnectError as exc:
+                        last_exc = exc
+                        logger.warning("[bridge] GPT-Live connect attempt %d failed for call %s: %s",
+                                       attempt, call_id, exc)
+                if not _voice_fallback_allowed():
+                    # Enforced: a call is answered by GPT-Live or not at all. Tell the owner.
+                    logger.error("[bridge] GPT-Live unavailable for call %s; refusing the call (no fallback)", call_id)
+                    notify = getattr(self.sessions, "send_to_approver", None)
+                    if callable(notify):
+                        asyncio.create_task(notify(
+                            f"[Blatbot] Could not answer a call from {remote or 'an unknown number'}: "
+                            f"the GPT-Live voice service did not connect ({last_exc})."))
+                    return None
+                logger.warning("[bridge] falling back to Realtime for call %s (INKBOX_VOICE_FALLBACK=realtime)", call_id)
             return await open_inkbox_realtime_bridge(config=rt_config, meta=meta)
         except RealtimeBridgeConnectError as exc:
             logger.warning(
@@ -3633,11 +3657,15 @@ class InkboxGateway:
         # no caller metadata (Inkbox accepted the call itself), a single
         # call-id lookup resolves the remote party — including shared
         # iMessage-line calls, which have no phone_number on the identity.
+        late_call_lookup: Optional["asyncio.Task[Any]"] = None
         if call_id and not remote and self._inkbox is not None:
             calls_res = getattr(self._inkbox, "calls", None) or getattr(self._inkbox, "_calls", None)
             if calls_res is not None:
                 try:
-                    call = await asyncio.to_thread(calls_res.get, call_id)
+                    # A ringing phone can't wait on a slow API: cap the lookup.
+                    late_call_lookup = asyncio.create_task(asyncio.to_thread(calls_res.get, call_id))
+                    call = await asyncio.wait_for(asyncio.shield(late_call_lookup), timeout=4.0)
+                    late_call_lookup = None
                     remote = str(getattr(call, "remote_phone_number", "") or "").strip()
                     if not self._field(call_context, "direction"):
                         direction = (
@@ -3645,7 +3673,19 @@ class InkboxGateway:
                         )
                 except Exception:
                     logger.warning("[bridge] call lookup failed for call_id=%s", call_id, exc_info=True)
-        contact = await self._resolve_call_contact(call_context, remote)
+        # Pick up fast. The contact lookup is a nicety (name, notes, a stable chat id), so it
+        # gets a short budget and falls back to the last contact seen for this number.
+        cache = self.__dict__.setdefault("_call_contact_cache", {})
+        started_lookup = time.monotonic()
+        try:
+            contact = await asyncio.wait_for(self._resolve_call_contact(call_context, remote), timeout=2.5)
+            if remote and contact and contact.get("id"):
+                cache[remote] = contact
+        except asyncio.TimeoutError:
+            contact = cache.get(remote) or {}
+            logger.warning("[bridge] contact lookup timed out for call %s; using %s", call_id,
+                           "cached contact" if contact else "the phone number")
+        logger.info("[bridge] call %s pre-accept lookups took %.1fs", call_id, time.monotonic() - started_lookup)
         memories = self._webhook_contact_memories(
             call_context,
             resolved_contact_id=(contact or {}).get("id", ""),
@@ -3664,8 +3704,9 @@ class InkboxGateway:
             bridge = await self._open_realtime_bridge(
                 remote, call_id, outbound, contact, direction, memories
             )
-            if bridge is None and not self.cfg.realtime.fallback_to_inkbox_stt_tts:
-                return web.Response(status=503, text="realtime bridge unavailable")
+            strict_live = self.cfg.mode == "gate" and _voice_api() != "realtime" and not _voice_fallback_allowed()
+            if bridge is None and (strict_live or not self.cfg.realtime.fallback_to_inkbox_stt_tts):
+                return web.Response(status=503, text="voice bridge unavailable")
             if bridge is not None:
                 # Raw-media mode: Inkbox must NOT run its own STT/TTS — the
                 # OpenAI model handles both ends of the audio.
@@ -3674,6 +3715,39 @@ class InkboxGateway:
                 await ws.prepare(request)
                 self._active_call_ws[chat_id] = ws
                 logger.info("[bridge] realtime call connected: %s", chat_id or call_id)
+
+                async def _late_identity() -> None:
+                    """The caller lookup was too slow to wait for at pickup. Finish it in the
+                    background and switch the call to the right person as soon as it lands."""
+                    nonlocal remote, contact, chat_id
+                    try:
+                        call = await asyncio.wait_for(late_call_lookup, timeout=45.0)
+                        number = str(getattr(call, "remote_phone_number", "") or "").strip()
+                        if not number:
+                            return
+                        try:
+                            found = await asyncio.wait_for(self._resolve_call_contact(call_context, number), timeout=15.0)
+                        except Exception:
+                            found = None
+                        old_chat = chat_id
+                        remote, contact = number, (found or contact or {})
+                        chat_id = (contact or {}).get("id") or number
+                        if self._active_call_ws.get(old_chat) is ws:
+                            self._active_call_ws.pop(old_chat, None)
+                            self._active_call_ws[chat_id] = ws
+                        logger.info("[bridge] call %s caller identified late: chat %s -> %s", call_id, old_chat, chat_id)
+                        identify = getattr(bridge, "identify", None)
+                        if callable(identify):
+                            notes = ""
+                            gate_session = self.sessions.get(chat_id)
+                            if hasattr(gate_session, "voice_briefing"):
+                                notes = gate_session.voice_briefing({"call_id": call_id, "sender": number, "contact": contact})
+                            await identify(number, (contact or {}).get("name") or "", notes)
+                    except Exception:
+                        logger.warning("[bridge] late caller identification failed for call %s", call_id, exc_info=True)
+
+                if late_call_lookup is not None and not remote:
+                    asyncio.create_task(_late_identity())
 
                 async def _consult(query: str, _transcript: Any) -> str:
                     # Route the model's request into the caller's shared session.

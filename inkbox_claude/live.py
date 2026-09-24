@@ -318,6 +318,31 @@ class OpenedLiveBridge:
         with suppress(Exception):
             await on_call_ended(state.transcript)
 
+    async def identify(self, remote_phone_number: str, contact_name: str = "", notes: str = "") -> None:
+        """The caller was identified after pickup. Tell the model who it is talking to."""
+        self.meta.remote_phone_number = remote_phone_number or self.meta.remote_phone_number
+        if contact_name:
+            self.meta.contact_name, self.meta.contact_known = contact_name, True
+        if is_owner_call(self.meta):
+            who = ("You now know who is on the line: it is Aaron himself, your boss. Call him Aaron and treat him "
+                   "as the person you work for. Do not announce that you just worked this out and do not "
+                   "re-introduce yourself; just carry on naturally.")
+        elif contact_name:
+            who = f"You now know who is on the line: {_escape_contact_memory_tags(contact_name)}. Carry on naturally."
+        else:
+            return
+        with suppress(Exception):
+            await self.openai_ws.send_str(json.dumps({
+                "type": "session.instructions.append", "event_id": self.state.next_event_id("identity"),
+                "delegation_id": None, "content": who,
+            }))
+            if notes.strip():
+                await self.openai_ws.send_str(json.dumps({
+                    "type": "session.thinking.append", "event_id": self.state.next_event_id("notes"),
+                    "delegation_id": None, "content": notes.strip()[:MAX_APPEND_CHARS],
+                }))
+        logger.info("[live] caller identified during the call (owner=%s)", is_owner_call(self.meta))
+
     async def close(self) -> None:
         if self._closed:
             return

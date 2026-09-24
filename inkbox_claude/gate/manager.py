@@ -18,7 +18,7 @@ from typing import Any, Awaitable, Callable, Dict, List, Optional
 from .executor import Executor
 from .router import Router, RouterOutput
 from .scopes import SCOPES
-from .store import Request, Store, task_key
+from .store import Request, Store, TaskRequired, task_key
 
 logger = logging.getLogger(__name__)
 
@@ -47,6 +47,11 @@ DEFAULT_VOICE_VOCABULARY = (
 )
 
 
+def _names_a_task(choice: Optional[str]) -> bool:
+    c = (choice or "").strip().lower()
+    return c == "new" or (c.startswith("t") and c[1:].isdigit())
+
+
 def _digits(s: str) -> str:
     return re.sub(r"\D", "", s or "")[-10:]
 
@@ -72,6 +77,7 @@ class GateSession:
         self.mode = "email"
         self.reply_meta: Dict[str, Any] = {}
         self._lock = asyncio.Lock()
+        self._turn_task_id: Optional[int] = None  # task the current turn's inbound was logged on
 
     # -- identity ----------------------------------------------------------
     def is_approver(self) -> bool:
@@ -106,14 +112,23 @@ class GateSession:
 
     # -- task ledger -----------------------------------------------------------
     def task(self) -> Optional[Dict[str, Any]]:
-        """The live task for this thread's counterpart. Aaron's own thread has none."""
+        """The most recent open task this thread's person is on, if any. Used to
+        log conversation onto the task it most likely concerns. Never creates one."""
         if self.is_approver():
             return None
-        name = self._sender_name()
-        return self.m.store.task_for(self._sender(), name or self._sender())
+        found = self.m.store.tasks_for_person(self._sender(), open_only=True, limit=1)
+        return found[0] if found else None
+
+    def _ensure_inbound_on_task(self, task: Dict[str, Any], body: str) -> None:
+        """The inbound was logged on the person's most recent open task at the top of the
+        turn. If the router routed this turn to a different (or new) task, log it there."""
+        if self._turn_task_id != task["id"]:
+            self.m.store.task_event(task["id"], "inbound", body, chat_id=self.chat_id)
+            self._turn_task_id = task["id"]
 
     def task_memory(self) -> str:
-        return self.m.store.task_memory(self.chat_id, is_approver=self.is_approver())
+        return self.m.store.task_memory(self.chat_id, is_approver=self.is_approver(),
+                                        person="" if self.is_approver() else self._sender())
 
     # -- gateway interface ---------------------------------------------------
     async def handle_inbound(self, text: str, mode: str, meta: Dict[str, Any]) -> None:
@@ -126,9 +141,9 @@ class GateSession:
             # First thing every turn: put this message on the person's task ledger,
             # so the router starts from the record, not from a 20-message window.
             t = self.task()
+            self._turn_task_id = t["id"] if t is not None else None
             if t is not None:
-                self.m.store.task_event(t["id"], "inbound", body, chat_id=self.chat_id,
-                                        state="open" if t["state"] in ("done", "failed") else None)
+                self.m.store.task_event(t["id"], "inbound", body, chat_id=self.chat_id)
             try:
                 if self.is_approver() and self.mode != "voice" and await self.m.handle_approver_command(self, body):
                     return
@@ -162,6 +177,7 @@ class GateSession:
             t = self.task()
             if t is not None:
                 self.m.store.task_event(t["id"], "call_ended", "Phone call ended.", chat_id=self.chat_id)
+            self.m.store.add_message(self.chat_id, "system", "Phone call ended.")
         except Exception:
             logger.exception("[gate %s] call-ended hook failed", self.chat_id)
         return ""
@@ -197,7 +213,7 @@ class GateSession:
                     out = []
                     for r in rows:
                         title = str(r["title"] or "")
-                        if title.startswith("Thread with"):
+                        if title.startswith("Thread with") or r["state"] == "closed":
                             continue  # a bare conversation, not a task
                         hrs = (now - r["updated_at"]) / 3600
                         age = f"{int(hrs * 60)} min ago" if hrs < 1 else (f"{int(hrs)} hours ago" if hrs < 48 else f"{int(hrs / 24)} days ago")
@@ -236,9 +252,9 @@ class GateSession:
             body = (query or "").strip()
             self.m.store.add_message(self.chat_id, "inbound", body, "voice")
             t = self.task()
+            self._turn_task_id = t["id"] if t is not None else None
             if t is not None:
-                self.m.store.task_event(t["id"], "inbound", f"(phone) {body}", chat_id=self.chat_id,
-                                        state="open" if t["state"] in ("done", "failed") else None)
+                self.m.store.task_event(t["id"], "inbound", f"(phone) {body}", chat_id=self.chat_id)
             try:
                 approver = self.is_approver()
                 history = self.m.store.history(self.chat_id, limit=20)
@@ -256,12 +272,14 @@ class GateSession:
                     return reply or "I don't have anything on that."
                 if self.m.store.pending_for_thread(self.chat_id) and not approver:
                     return reply or "I already have a request waiting on Aaron for you."
+                task = self.m.resolve_task(self, out)  # enforced: every request is written to a task
+                self._ensure_inbound_on_task(task, f"(phone) {body}")
                 req = self.m.store.create_request(
                     chat_id=self.chat_id, sender=self._sender(), sender_name=self._sender_name(), mode="voice",
                     subject="", original_message=body, summary=out.request.summary,
                     scopes=out.request.scopes, prompt=out.request.prompt,
-                    state="approved" if approver else "pending")
-                self.m.link_task(req, self, out.request.counterpart)
+                    state="approved" if approver else "pending", task_id=task["id"])
+                self.m.record_request_on_task(req, task, self)
                 if not approver:
                     self.m.store.set_thread(self.chat_id, "awaiting_aaron")
                     await self.m.send_approval_text(req)
@@ -316,6 +334,10 @@ class GateSession:
         )
         if system_note and out.request is not None:
             out.request = None
+        task: Optional[Dict[str, Any]] = None
+        if not system_note and (out.request is not None or _names_a_task(out.task)):
+            task = self.m.resolve_task(self, out)  # enforced: every request is written to a task
+            self._ensure_inbound_on_task(task, body)
         if out.reply:
             await self.send_to_sender(out.reply)
         if out.request is None:
@@ -324,13 +346,14 @@ class GateSession:
         if self.m.store.pending_for_thread(self.chat_id) and not approver:
             self.m.store.add_message(self.chat_id, "system", "A request is already awaiting Aaron; new request not created.")
             return bool(out.reply)
+        assert task is not None
         req = self.m.store.create_request(
             chat_id=self.chat_id, sender=self._sender(), sender_name=self._sender_name(), mode=self.mode,
             subject=str(self.reply_meta.get("subject") or ""), original_message=body,
             summary=out.request.summary, scopes=out.request.scopes, prompt=out.request.prompt,
-            state="approved" if approver else "pending",
+            state="approved" if approver else "pending", task_id=task["id"],
         )
-        self.m.link_task(req, self, out.request.counterpart)
+        self.m.record_request_on_task(req, task, self)
         if approver:
             # Run after this turn releases the session lock; execute() will
             # re-enter the session to phrase the result.
@@ -435,25 +458,61 @@ class GateSessionManager:
             "A bare yes/no works when this is the only one pending."
         )
 
-    def link_task(self, req: Request, session: GateSession, counterpart: Optional[str]) -> None:
-        """Attach a request to the task ledger of the person it concerns."""
-        try:
-            if not session.is_approver():
-                t = session.task()
-            else:
-                who = (counterpart or "").strip() or next(iter(_EMAIL.findall(req.prompt)), "")
-                if not who:
-                    who = f"aaron:{req.id}"  # a personal errand with no counterpart
-                t = self.store.task_for(who, counterpart or who, title=req.summary)
-            if t is None:
-                return
-            self.store.link_request_task(req.id, t["id"])
-            state = "running" if req.state == "approved" else "waiting_aaron"
-            self.store.task_event(t["id"], "request", f"{req.summary} [scopes: {', '.join(req.scopes)}]",
-                                  chat_id=session.chat_id, request_id=req.id, state=state,
-                                  title=req.summary if t["title"].startswith("Thread with") else None)
-        except Exception:
-            logger.exception("[gate] task link failed for request %s", req.id)
+    def resolve_task(self, session: GateSession, out: RouterOutput) -> Dict[str, Any]:
+        """Decide which task a request belongs to. Always returns a task.
+
+        The router proposes: an existing id ("T12"), "new" with a title, or nothing.
+        Code checks the proposal: a non-owner may only continue a task they are on;
+        an unknown or missing choice falls back to the sender's most recent open task
+        (for a non-owner) or to a new task titled from the request summary. Whatever
+        happens, the request ends up on exactly one task. This cannot be skipped."""
+        req = out.request
+        summary = (req.summary if req else "") or "Untitled task"
+        sender = session._sender()
+        sender_name = session._sender_name() or sender
+        approver = session.is_approver()
+        counterpart = ((req.counterpart if req else None) or "").strip()
+        choice = (out.task or "").strip().lower()
+
+        chosen: Optional[Dict[str, Any]] = None
+        if choice.startswith("t") and choice[1:].isdigit():
+            cand = self.store.get_task(int(choice[1:]))
+            if cand and cand["state"] != "closed":
+                allowed = approver or any(p["key"] == task_key(sender) for p in cand["participants"])
+                if allowed:
+                    chosen = cand
+                else:
+                    logger.warning("[gate] %s tried to continue task T%s they are not on; starting a new one",
+                                   sender, cand["id"])
+        if chosen is None and choice == "":
+            # No explicit choice: continue the most recent open task of the person this
+            # concerns (the sender, or the named counterpart when Aaron is asking).
+            person = counterpart if (approver and counterpart) else ("" if approver else sender)
+            found = self.store.tasks_for_person(person, open_only=True, limit=1) if person else []
+            if found:
+                chosen = found[0]
+        if chosen is None:
+            title = (out.task_title or "").strip() or summary
+            chosen = self.store.create_task(title)
+            logger.info("[gate] new task T%s: %s", chosen["id"], title)
+
+        # Participants: the sender (unless it is Aaron) and any named counterpart.
+        if not approver:
+            self.store.add_participant(chosen["id"], sender, sender_name)
+        if counterpart:
+            self.store.add_participant(chosen["id"], counterpart, counterpart)
+        else:
+            for addr in _EMAIL.findall(req.prompt if req else ""):
+                if task_key(addr) != task_key(sender):
+                    self.store.add_participant(chosen["id"], addr, addr)
+                    break
+        return self.store.get_task(chosen["id"])  # type: ignore[return-value]
+
+    def record_request_on_task(self, req: Request, task: Dict[str, Any], session: GateSession) -> None:
+        state = "running" if req.state == "approved" else "waiting_aaron"
+        self.store.task_event(task["id"], "request", f"{req.summary} [scopes: {', '.join(req.scopes)}]",
+                              chat_id=session.chat_id, request_id=req.id, state=state,
+                              title=req.summary if str(task["title"]).startswith("Thread with") else None)
 
     def task_note(self, req: Request, kind: str, text: str, state: Optional[str] = None) -> None:
         tid = self.store.task_id_for_request(req.id)
@@ -463,8 +522,49 @@ class GateSessionManager:
     async def send_approval_text(self, req: Request, revised: bool = False) -> None:
         await self.send_to_approver(self.format_request(req, revised))
 
+    async def handle_task_command(self, session: GateSession, text: str) -> bool:
+        """Aaron's task commands: "tasks" lists open work; "T12 done" / "T12 close" /
+        "T12 reopen" change state; "T12 note: ..." adds a note. Returns True if consumed."""
+        t = (text or "").strip()
+        if t.lower() in ("tasks", "task list", "open tasks", "what's open", "whats open"):
+            rows = self.store.open_tasks(limit=25)
+            if not rows:
+                await self.send_to_approver("No open tasks.")
+                return True
+            lines = ["Open tasks:"]
+            for r in rows:
+                who = ", ".join(p["display"] for p in r["participants"]) or "no one"
+                st = {"waiting_aaron": "waiting on you", "running": "running"}.get(r["state"], r["state"])
+                lines.append(f"T{r['id']} {r['title']} ({who}; {st})")
+            await self.send_to_approver("\n".join(lines))
+            return True
+        m = re.match(r"^\s*t(\d+)\s*[:\-]?\s*(done|close|closed|reopen|open|note\s*:\s*(.+))\s*$", t, re.S | re.I)
+        if not m:
+            return False
+        tid = int(m.group(1))
+        task = self.store.get_task(tid)
+        if not task:
+            await self.send_to_approver(f"No task T{tid}.")
+            return True
+        verb = m.group(2).lower()
+        if verb.startswith("note"):
+            self.store.task_event(tid, "note", f"Aaron: {m.group(3).strip()}", chat_id=session.chat_id)
+            await self.send_to_approver(f"Noted on T{tid}.")
+        elif verb in ("done",):
+            self.store.task_event(tid, "done", "Aaron marked this done.", chat_id=session.chat_id, state="done")
+            await self.send_to_approver(f"T{tid} marked done: {task['title']}")
+        elif verb in ("close", "closed"):
+            self.store.task_event(tid, "note", "Aaron closed this task.", chat_id=session.chat_id, state="closed")
+            await self.send_to_approver(f"T{tid} closed: {task['title']}")
+        else:
+            self.store.task_event(tid, "note", "Aaron reopened this task.", chat_id=session.chat_id, state="open")
+            await self.send_to_approver(f"T{tid} reopened: {task['title']}")
+        return True
+
     async def handle_approver_command(self, session: GateSession, text: str) -> bool:
         """Parse Aaron's reply as a gate command. Returns True if consumed."""
+        if await self.handle_task_command(session, text):
+            return True
         pending = self.store.pending()
         if not pending:
             return False

@@ -77,8 +77,9 @@ def test_router_request_rejects_unknown_scope():
 
 def test_store_request_lifecycle(tmp_path):
     s = Store(str(tmp_path / "g.db"))
+    t = s.create_task("do x")
     r = s.create_request(chat_id="c", sender="a", sender_name="A", mode="email", subject="", original_message="m",
-                         summary="s", scopes=["web"], prompt="do x", state="pending")
+                         summary="s", scopes=["web"], prompt="do x", state="pending", task_id=t["id"])
     assert r.state == "pending" and r.prompt_sha256 == sha256("do x")
     r2 = s.revise_prompt(r.id, "do y")
     assert r2.revision == 1 and r2.prompt_sha256 == sha256("do y") and r2.state == "pending"
@@ -163,8 +164,9 @@ def test_aaron_edit_reshows_then_runs_edited(tmp_path):
 
 def test_hash_mismatch_refused(tmp_path):
     m, sent = make_manager(tmp_path)
+    t = m.store.create_task("s")
     r = m.store.create_request(chat_id="c", sender="a", sender_name="", mode="email", subject="", original_message="m",
-                               summary="s", scopes=["web"], prompt="ok", state="approved")
+                               summary="s", scopes=["web"], prompt="ok", state="approved", task_id=t["id"])
     r.prompt = "tampered"
     asyncio.run(m.execute(r))
     assert m.store.get_request(r.id).state == "failed"
@@ -209,13 +211,23 @@ def test_task_key_normalizes_email_phone_name():
 
 def test_inbound_lands_on_ledger_before_routing(tmp_path):
     m, sent = make_manager(tmp_path)
-    m.router.next = RouterOutput(reply="Sure, what times work?", request=None)
+    # Pure conversation creates no task: the ledger is loaded (empty) before routing.
+    m.router.next = RouterOutput(reply="Hi!", request=None)
     asyncio.run(m.get("c1").handle_inbound("hello there", "email", stranger_meta()))
-    mem = m.router.calls[-1]["task_memory"]
-    assert "Cand Idate" in mem and "inbound: hello there" in mem
-    # the outbound reply is on the ledger too
-    mem2 = m.store.task_memory("c1", is_approver=False)
+    assert m.router.calls[-1]["task_memory"] == "(no tasks on record)"
+    assert m.store.tasks_for_person("cand@nyu.edu", open_only=False) == []
+    # A message that starts a piece of work: the router opens a task and the inbound
+    # and outbound both land on it, so a follow-up hours later finds them.
+    m.router.next = RouterOutput(reply="Sure, what times work?", task="new",
+                                 task_title="Coffee chat with Cand Idate", request=None)
+    asyncio.run(m.get("c1").handle_inbound("can we set up a coffee chat?", "email", stranger_meta()))
+    mem2 = m.store.task_memory("c1", is_approver=False, person="cand@nyu.edu")
+    assert "Coffee chat with Cand Idate" in mem2 and "inbound: can we set up a coffee chat?" in mem2
     assert "outbound: Sure, what times work?" in mem2
+    # next turn the router sees it first
+    m.router.next = RouterOutput(reply="ok", request=None)
+    asyncio.run(m.get("c1").handle_inbound("wed?", "email", stranger_meta()))
+    assert "Coffee chat with Cand Idate" in m.router.calls[-1]["task_memory"]
 
 
 def test_request_approval_and_result_are_on_the_ledger(tmp_path):
@@ -239,9 +251,9 @@ def test_aaron_follow_up_hours_later_sees_candidates_ledger(tmp_path):
     """Aaron asks about a candidate in his own thread; the memory must carry that
     candidate's whole record even though it lived in another chat."""
     m, sent = make_manager(tmp_path)
-    m.router.next = RouterOutput(reply="Got it", request=None)
+    m.router.next = RouterOutput(reply="Got it", task="new", task_title="Coffee chat with Cand Idate", request=None)
     asyncio.run(m.get("c1").handle_inbound("free wed 3pm", "email", stranger_meta()))
-    # Aaron, hours later, asks to book it; the router names the counterpart.
+    # Aaron, hours later, asks to book it; the router names the counterpart but not the task.
     m.router.next = RouterOutput(reply="On it", request=RouterRequest(
         prompt="Book Cand Idate cand@nyu.edu Wed 3pm", scopes=["calendar"], summary="book cand", counterpart="cand@nyu.edu"))
 
@@ -252,24 +264,101 @@ def test_aaron_follow_up_hours_later_sees_candidates_ledger(tmp_path):
     mem_aaron = m.router.calls[-1]["task_memory"]
     assert "inbound: free wed 3pm" in mem_aaron  # candidate thread visible from Aaron's thread
     # Aaron's request linked to the same task as the candidate's thread
-    tids = {m.store.task_id_for_request(r.id) for r in [m.store.get_request(1)]}
-    assert m.store.task_ids_for_chat("c1") and m.store.task_ids_for_chat("aaron")
-    assert set(m.store.task_ids_for_chat("c1")) == set(m.store.task_ids_for_chat("aaron"))
+    tid = m.store.task_id_for_request(1)
+    assert "cand@nyu.edu" in [p["key"] for p in m.store.get_task(tid)["participants"]]
+    assert len(m.store.tasks_for_person("cand@nyu.edu", open_only=False)) == 1  # continued, not duplicated
     # and the candidate's thread now sees Aaron's action + result
     mem_c = m.store.task_memory("c1", is_approver=False)
     assert "book cand" in mem_c and "did it" in mem_c
 
 
-def test_finished_task_reopens_on_new_inbound_and_old_ones_split(tmp_path):
-    import time as _t
+def test_tasks_are_units_of_work_not_people(tmp_path):
+    from inkbox_claude.gate.store import Store, TaskRequired
     s = Store(str(tmp_path / "g.db"))
-    t = s.task_for("x@nyu.edu", "X")
-    s.task_event(t["id"], "done", "booked", state="done")
-    t2 = s.task_for("x@nyu.edu", "X")
-    assert t2["id"] == t["id"]  # recent finished task is continued
-    s._db.execute("UPDATE tasks SET updated_at=? WHERE id=?", (_t.time() - 30 * 86400, t["id"])); s._db.commit()
-    t3 = s.task_for("x@nyu.edu", "X")
-    assert t3["id"] != t["id"]  # a month later, a fresh task starts
+    t1 = s.create_task("Book coffee chat with X", [("x@nyu.edu", "X")])
+    t2 = s.create_task("Send X the application link", [("x@nyu.edu", "X")])
+    t3 = s.create_task("Find the Club Fest date")  # nobody in particular
+    assert t1["id"] != t2["id"]
+    assert [t["id"] for t in s.tasks_for_person("X@NYU.edu")] == [t2["id"], t1["id"]]
+    assert t3["participants"] == []
+    assert "no one in particular" in s.task_memory("aaron", is_approver=True)
+    import pytest
+    with pytest.raises(TaskRequired):
+        s.create_request(chat_id="c", sender="x", sender_name="", mode="email", subject="", original_message="m",
+                         summary="s", scopes=["calendar"], prompt="p", state="pending", task_id=0)
+    with pytest.raises(TaskRequired):
+        s.create_request(chat_id="c", sender="x", sender_name="", mode="email", subject="", original_message="m",
+                         summary="s", scopes=["calendar"], prompt="p", state="pending", task_id=9999)
+
+
+def test_router_picks_the_task_and_code_enforces_it(tmp_path):
+    m, sent = make_manager(tmp_path)
+    # first request: router says new task
+    m.router.next = RouterOutput(reply=None, task="new", task_title="Book coffee chat with Cand Idate",
+                                 request=RouterRequest(prompt="Book Tue 6pm", scopes=["calendar"], summary="book chat"))
+    asyncio.run(m.get("c1").handle_inbound("tue 6?", "email", stranger_meta()))
+    r1 = m.store.get_request(1); t1 = m.store.get_task(r1.__dict__.get("task_id") or m.store.task_id_for_request(1))
+    assert t1["title"] == "Book coffee chat with Cand Idate"
+    assert [p["key"] for p in t1["participants"]] == ["cand@nyu.edu"]
+    # a different job from the same person: router says new again -> second task, same person on both
+    m.store.set_state(1, "done")
+    m.router.next = RouterOutput(reply=None, task="new", task_title="Send the application link",
+                                 request=RouterRequest(prompt="Email link", scopes=["email_send"], summary="send link"))
+    asyncio.run(m.get("c1").handle_inbound("can you send me the app link?", "email", stranger_meta()))
+    t2 = m.store.get_task(m.store.task_id_for_request(2))
+    assert t2["id"] != t1["id"] and [p["key"] for p in t2["participants"]] == ["cand@nyu.edu"]
+    assert len(m.store.tasks_for_person("cand@nyu.edu", open_only=False)) == 2
+    # a follow-up on the first job: router names T<id>
+    m.store.set_state(2, "done")
+    m.router.next = RouterOutput(reply=None, task=f"T{t1['id']}",
+                                 request=RouterRequest(prompt="Move to 7pm", scopes=["calendar"], summary="move chat"))
+    asyncio.run(m.get("c1").handle_inbound("actually 7?", "email", stranger_meta()))
+    assert m.store.task_id_for_request(3) == t1["id"]
+
+
+def test_stranger_cannot_hijack_someone_elses_task(tmp_path):
+    m, sent = make_manager(tmp_path)
+    other = m.store.create_task("Book chat with Someone Else", [("other@nyu.edu", "Other")])
+    m.router.next = RouterOutput(reply=None, task=f"T{other['id']}",
+                                 request=RouterRequest(prompt="Cancel it", scopes=["calendar"], summary="cancel"))
+    asyncio.run(m.get("c1").handle_inbound("cancel that booking", "email", stranger_meta()))
+    tid = m.store.task_id_for_request(1)
+    assert tid != other["id"]  # code refused the router's choice and started a task for the sender
+    assert [p["key"] for p in m.store.get_task(tid)["participants"]] == ["cand@nyu.edu"]
+
+
+def test_aaron_may_continue_any_task_and_errands_have_no_participant(tmp_path):
+    m, sent = make_manager(tmp_path)
+    cand = m.store.create_task("Book chat with Cand", [("cand@nyu.edu", "Cand")])
+    m.router.next = RouterOutput(reply="On it.", task=f"T{cand['id']}",
+                                 request=RouterRequest(prompt="Did the invite go out?", scopes=["calendar"], summary="check invite"))
+    asyncio.run(m.get("aaron").handle_inbound("did cand's invite go out?", "imessage", approver_meta()))
+    assert m.store.task_id_for_request(1) == cand["id"]
+    m.router.next = RouterOutput(reply="On it.", task="new", task_title="Find the Club Fest date",
+                                 request=RouterRequest(prompt="Look up club fest", scopes=["web"], summary="club fest date"))
+    asyncio.run(m.get("aaron").handle_inbound("when is club fest?", "imessage", approver_meta()))
+    t = m.store.get_task(m.store.task_id_for_request(2))
+    assert t["title"] == "Find the Club Fest date" and t["participants"] == []
+
+
+def test_every_request_has_a_task_even_when_the_router_says_nothing(tmp_path):
+    m, sent = make_manager(tmp_path)
+    m.router.next = RouterOutput(reply=None, request=RouterRequest(prompt="Book", scopes=["calendar"], summary="book chat"))
+    asyncio.run(m.get("c1").handle_inbound("book me", "email", stranger_meta()))
+    tid = m.store.task_id_for_request(1)
+    assert tid and m.store.get_task(tid)["title"] == "book chat"
+
+
+def test_aaron_task_commands(tmp_path):
+    m, sent = make_manager(tmp_path)
+    t = m.store.create_task("Book chat with Cand", [("cand@nyu.edu", "Cand")])
+    asyncio.run(m.get("aaron").handle_inbound("tasks", "imessage", approver_meta()))
+    assert f"T{t['id']} Book chat with Cand (Cand; open)" in sent[-1][1]
+    asyncio.run(m.get("aaron").handle_inbound(f"T{t['id']} note: he prefers mornings", "imessage", approver_meta()))
+    asyncio.run(m.get("aaron").handle_inbound(f"T{t['id']} done", "imessage", approver_meta()))
+    assert m.store.get_task(t["id"])["state"] == "done"
+    assert "prefers mornings" in m.store.task_memory("aaron", is_approver=True)
+    assert m.router.calls == []  # commands never reach the router
 
 
 def test_executor_receives_the_persons_ledger(tmp_path):
@@ -380,8 +469,9 @@ def test_voice_briefing_and_gate_prompt(tmp_path):
     from inkbox_claude.realtime import RealtimeCallMeta, build_realtime_instructions
     m, _ = phone_manager(tmp_path, trust=True)
     asyncio.run(m.get("p2").handle_inbound("please book thursday", "voice", voice_meta("+12125550100")))
+    m.voice_vocabulary = "Acme (AK-mee)."
     b = m.get("p1").voice_briefing(voice_meta())
-    assert "It is " in b and "TAMID" in b and "Aaron himself" in b and "not a limit" in b
+    assert "It is " in b and "Acme" in b and "Aaron himself" in b and "not a limit" in b
     stranger = m.get("p2").voice_briefing(voice_meta("+12125550100"))
     assert "NOT Aaron" in stranger
     fields = {f: None for f in RealtimeCallMeta.__dataclass_fields__}

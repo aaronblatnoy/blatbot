@@ -59,6 +59,10 @@ class RouterRequest(BaseModel):
 class RouterOutput(BaseModel):
     reply: Optional[str] = None
     request: Optional[RouterRequest] = None
+    # Which task this turn belongs to: an existing id from TASK MEMORY (e.g. "T12"),
+    # "new" to start one, or null when it is just conversation with no task at all.
+    task: Optional[str] = None
+    task_title: Optional[str] = None
 
 
 class Router:
@@ -97,6 +101,15 @@ class Router:
             "- reply: what to send back to the sender now, or null to send nothing.\n"
             "- request.counterpart: the email (preferred), phone, or full name of the person the task is\n"
             "  about, when it concerns someone other than the sender; null otherwise.\n"
+            "- task: EVERY request must belong to a task, and a task is a unit of work, not a person. One\n"
+            "  person can have several tasks going, and a task can involve nobody in particular. Set\n"
+            "  \"task\" to the id of the task in TASK MEMORY this message continues (e.g. \"T12\"), or\n"
+            "  to \"new\" when it is a different piece of work, and then give \"task_title\": a short\n"
+            "  plain description of the work (\"Book coffee chat with Sam Lee\", \"Find the Club Fest\n"
+            "  date\"). Continue an existing task when the message is about the same work: a follow-up,\n"
+            "  a correction, a status question, the next step. Start a new one when it is a different\n"
+            "  job even if the same person is asking. Only Aaron may continue a task he is not part of.\n"
+            "  When there is no request and the message is only conversation, task may be null.\n"
             "- PHONE: when Channel is voice, the sender is on a live call with a voice agent that runs the\n"
             "  conversation and has handed this to you because something needs doing or looking up. The\n"
             "  message is a speech-recognition transcript excerpt of the call, not a typed request: read\n"
