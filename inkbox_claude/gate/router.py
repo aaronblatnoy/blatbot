@@ -56,6 +56,37 @@ class RouterRequest(BaseModel):
         return sorted(set(v))
 
 
+class TaskQuery(BaseModel):
+    """A structured filter the router emits to find tasks before deciding."""
+    model_config = {"extra": "forbid"}
+    text: Optional[str] = Field(default=None, description="words to match in titles, summaries, events, participants")
+    participant: Optional[str] = Field(default=None, description="a person: email, phone or name")
+    states: Optional[List[str]] = Field(default=None, description="subset of open, waiting_aaron, running, done, failed, or 'live'")
+    touched_within_days: Optional[float] = None
+    created_within_days: Optional[float] = None
+    has_participants: Optional[bool] = Field(default=None, description="true = about someone, false = nobody in particular")
+    this_conversation: bool = Field(default=False, description="only tasks this conversation has touched")
+    limit: int = Field(default=10, ge=1, le=30)
+
+    @field_validator("states")
+    @classmethod
+    def _states_ok(cls, v: Optional[List[str]]) -> Optional[List[str]]:
+        if v is None:
+            return v
+        allowed = {"open", "waiting_aaron", "running", "done", "failed", "closed", "live"}
+        bad = [x for x in v if x not in allowed]
+        if bad:
+            raise ValueError(f"unknown states: {bad}")
+        return v
+
+
+class TaskQueryOutput(BaseModel):
+    """First-pass output: either a query to run, or 'no lookup needed'."""
+    model_config = {"extra": "forbid"}
+    query: Optional[TaskQuery] = None
+    reason: Optional[str] = None
+
+
 class RouterOutput(BaseModel):
     reply: Optional[str] = None
     request: Optional[RouterRequest] = None
@@ -165,13 +196,55 @@ class Router:
             lines.append(f"[{m['kind']}{' ' + m['mode'] if m.get('mode') else ''}] {m['text']}")
         return "\n\n".join(lines) if lines else "(no prior messages)"
 
+    QUERY_SYSTEM = (
+        "You decide what past work to look up before an assistant answers a message. You will see the "
+        "conversation, the new message, and a compact list of the tasks already in view (recent ones for "
+        "this person and this conversation). A task is a unit of work with a title, a 'where it stands' "
+        "summary, participants (people, by email/phone/name), a state (open, waiting_aaron, running, done, "
+        "failed) and dated events.\n"
+        "If the tasks in view clearly cover what the message is about, or the message is pure conversation, "
+        "respond {\"query\": null, \"reason\": \"...\"}.\n"
+        "Otherwise respond with ONE filter to run, as JSON: {\"query\": {\"text\": words or null, "
+        "\"participant\": email/phone/name or null, \"states\": [..] or null (use [\"live\"] for anything "
+        "unfinished), \"touched_within_days\": n or null, \"created_within_days\": n or null, "
+        "\"has_participants\": true/false/null, \"this_conversation\": bool, \"limit\": 1-30}, \"reason\": \"...\"}.\n"
+        "Derive the filter from the message: a name or subject mentioned -> text and/or participant; 'what's "
+        "still open' -> states [\"live\"]; 'what did we do last week' -> touched_within_days 7; 'my errands' -> "
+        "has_participants false; a follow-up in this thread with no keywords -> this_conversation true. "
+        "Use text sparingly (one to three distinctive words), never filler words. Output ONLY the JSON."
+    )
+
+    async def plan_query(self, *, history: List[Dict[str, Any]], message: str, in_view: str,
+                         is_approver: bool) -> Optional[TaskQuery]:
+        """First pass: turn the message into a structured task filter, or nothing."""
+        user = (
+            f"Now: {now_line()}\nSender is {'Aaron, the owner' if is_approver else 'not the owner'}.\n\n"
+            f"Tasks already in view:\n{in_view or '(none)'}\n\n"
+            f"Conversation so far:\n{self.render_history(history[-8:])}\n\n"
+            f"New message:\n{message}"
+        )
+        messages = [{"role": "system", "content": self.QUERY_SYSTEM}, {"role": "user", "content": user}]
+        for attempt in range(2):
+            raw = await self._chat(messages)
+            try:
+                out = TaskQueryOutput.model_validate(json.loads(raw))
+                logger.info("task query: %s (%s)", out.query.model_dump(exclude_none=True) if out.query else None, out.reason)
+                return out.query
+            except (json.JSONDecodeError, ValidationError) as exc:
+                logger.warning("task query output invalid (attempt %d): %s", attempt + 1, exc)
+                messages.append({"role": "assistant", "content": raw})
+                messages.append({"role": "user", "content": f"Invalid: {exc}. Return ONLY the JSON object."})
+        return None
+
     async def route(self, *, history: List[Dict[str, Any]], message: str, mode: str,
                     sender: str, contact_notes: str, is_approver: bool,
-                    task_memory: str = "") -> RouterOutput:
+                    task_memory: str = "", found_tasks: str = "") -> RouterOutput:
         sender_label = f"Aaron Blatnoy (the owner; his private iMessage) {sender}" if is_approver else sender
+        found = f"TASKS FOUND BY YOUR LOOKUP (same format; may include older or other people's tasks):\n{found_tasks}\n\n" if found_tasks else ""
         user = (
             f"Now: {now_line()}\n\n"
             f"TASK MEMORY (authoritative ledger, newest events last):\n{task_memory or '(no tasks on record)'}\n\n"
+            f"{found}"
             f"Channel: {mode}\nSender: {sender_label}\n"
             f"Contact notes: {contact_notes or '(none)'}\n\n"
             f"Conversation so far:\n{self.render_history(history)}\n\n"

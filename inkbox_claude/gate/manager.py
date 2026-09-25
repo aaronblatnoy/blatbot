@@ -133,6 +133,35 @@ class GateSession:
             self.m.store.task_event(task["id"], "inbound", body, chat_id=self.chat_id)
             self._turn_task_id = task["id"]
 
+    async def lookup_tasks(self, history: List[Dict[str, Any]], message: str, in_view: str) -> str:
+        """Query pass: the router emits a structured filter, code runs it. Non-owners
+        are confined to tasks they are on; the owner can query everything."""
+        try:
+            q = await self.m.router.plan_query(history=history, message=message, in_view=in_view,
+                                               is_approver=self.is_approver())
+        except Exception:
+            logger.exception("[gate %s] task query planning failed", self.chat_id)
+            return ""
+        if q is None:
+            return ""
+        kw: Dict[str, Any] = dict(text=q.text or "", states=q.states, touched_within_days=q.touched_within_days,
+                                  created_within_days=q.created_within_days, has_participants=q.has_participants,
+                                  chat_id=self.chat_id if q.this_conversation else "", limit=q.limit)
+        if self.is_approver():
+            kw["participant"] = q.participant or ""
+        else:
+            kw["participant"] = self._sender()  # a non-owner only ever sees their own tasks
+            kw["has_participants"] = None
+        res = self.m.store.query_tasks(**kw)
+        shown = [t for t in res["tasks"] if f"Task T{t['id']} " not in in_view]
+        logger.info("[gate %s] task query -> %d match(es), %d new to the router", self.chat_id, res["total"], len(shown))
+        if not shown:
+            return ""
+        text = self.m.store.render_tasks(shown)
+        if res["total"] > len(res["tasks"]):
+            text += f"\n\n({res['total'] - len(res['tasks'])} more matched; narrow the lookup to see them)"
+        return text
+
     def task_memory(self) -> str:
         return self.m.store.task_memory(self.chat_id, is_approver=self.is_approver(),
                                         person="" if self.is_approver() else self._sender())
@@ -267,9 +296,11 @@ class GateSession:
                 history = self.m.store.history(self.chat_id, limit=20)
                 memory = self.task_memory()
                 logger.info("[gate %s] ledger loaded (voice consult): %d chars", self.chat_id, len(memory))
+                found = await self.lookup_tasks(history[:-1], body, memory)
                 out = await self.m.router.route(
                     history=history[:-1], message=body, mode="voice", sender=self._sender(),
-                    contact_notes=self._contact_notes(), is_approver=approver, task_memory=memory)
+                    contact_notes=self._contact_notes(), is_approver=approver, task_memory=memory,
+                    found_tasks=found)
                 reply = out.reply or ""
                 if reply:
                     self.m.store.add_message(self.chat_id, "outbound", reply, "voice")
@@ -334,10 +365,11 @@ class GateSession:
         memory = self.task_memory()
         logger.info("[gate %s] ledger loaded: %d task(s), %d chars", self.chat_id,
                     memory.count("\nTask T") + (1 if memory.startswith("Task T") else 0), len(memory))
+        found = "" if system_note else await self.lookup_tasks(prior, message, memory)
         out: RouterOutput = await self.m.router.route(
             history=prior, message=message, mode=self.mode, sender=self._sender(),
             contact_notes=self._contact_notes(), is_approver=approver,
-            task_memory=memory,
+            task_memory=memory, found_tasks=found,
         )
         if system_note and out.request is not None:
             out.request = None

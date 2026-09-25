@@ -21,6 +21,12 @@ class FakeRouter:
     def __init__(self):
         self.next = RouterOutput(reply="hi", request=None)
         self.calls = []
+        self.next_query = None      # a TaskQuery the fake "plans", or None
+        self.query_calls = []
+
+    async def plan_query(self, **kw):
+        self.query_calls.append(kw)
+        return self.next_query
 
     async def route(self, **kw):
         self.calls.append(kw)
@@ -632,3 +638,67 @@ def test_router_summary_is_kept_on_the_task_and_shown_next_time(tmp_path):
     m.router.next = RouterOutput(reply="ok", request=None)
     asyncio.run(m.get("c1").handle_inbound("thanks", "email", stranger_meta()))
     assert "Where it stands: Cand wants a coffee chat; asked for Tue 6 PM" in m.router.calls[-1]["task_memory"]
+
+
+def test_query_tasks_filters_and_ranks(tmp_path):
+    from inkbox_claude.gate.store import Store
+    import time as _t
+    s = Store(str(tmp_path / "g.db"))
+    a = s.create_task("Get a quote from the caterer", [("cater@food.com", "Cater Co")])
+    s.set_task_summary(a["id"], "Waiting on the caterer's revised quote for 40 people.")
+    b = s.create_task("Book a call with Sam Lee", [("sam@nyu.edu", "Sam Lee")])
+    c = s.create_task("Renew the domain")  # nobody
+    s.task_event(c["id"], "done", "renewed", state="done")
+    old = s.create_task("Old errand"); s.task_event(old["id"], "done", "x", state="done")
+    s._db.execute("UPDATE tasks SET updated_at=? WHERE id=?", (_t.time() - 40 * 86400, old["id"])); s._db.commit()
+    r = s.query_tasks(text="caterer")
+    assert [t["id"] for t in r["tasks"]] == [a["id"]] and r["total"] == 1
+    r = s.query_tasks(participant="+1 (555) 000-0000")
+    assert r["total"] == 0
+    r = s.query_tasks(participant="Sam Lee")
+    assert [t["id"] for t in r["tasks"]] == [b["id"]]
+    r = s.query_tasks(has_participants=False)
+    assert {t["id"] for t in r["tasks"]} == {c["id"], old["id"]}
+    r = s.query_tasks(states=["live"])
+    assert {t["id"] for t in r["tasks"]} == {a["id"], b["id"]}
+    r = s.query_tasks(touched_within_days=7)
+    assert old["id"] not in {t["id"] for t in r["tasks"]}
+    r = s.query_tasks(text="quote 40 people")  # words across title and summary
+    assert [t["id"] for t in r["tasks"]] == [a["id"]]
+    assert "Where it stands" in s.render_tasks(r["tasks"])
+
+
+def test_router_lookup_feeds_the_decision_and_is_scoped(tmp_path):
+    from inkbox_claude.gate.router import TaskQuery
+    m, sent = make_manager(tmp_path)
+    caterer = m.store.create_task("Get a quote from the caterer", [("cand@nyu.edu", "Cand Idate")])
+    m.store.task_event(caterer["id"], "done", "quote received", state="done")
+    for i in range(8):  # newer tasks push the caterer out of the default per-person view
+        t = m.store.create_task(f"Chore number {i}", [("cand@nyu.edu", "Cand Idate")])
+        m.store.task_event(t["id"], "done", "ok", state="done")
+    assert "caterer" not in m.store.task_memory("c1", is_approver=False, person="cand@nyu.edu")
+    others = m.store.create_task("Aaron's private errand")  # no participants
+    # the candidate asks about the caterer: the router plans a text query, code runs it
+    m.router.next_query = TaskQuery(text="caterer", states=None)
+    m.router.next = RouterOutput(reply="Quote is in.", request=None)
+    asyncio.run(m.get("c1").handle_inbound("any news from the caterer?", "email", stranger_meta()))
+    found = m.router.calls[-1]["found_tasks"]
+    assert "Get a quote from the caterer" in found
+    # a non-owner's lookup can never surface tasks they are not on
+    m.router.next_query = TaskQuery(text="errand", has_participants=False)
+    asyncio.run(m.get("c1").handle_inbound("what about the errand?", "email", stranger_meta()))
+    assert "private errand" not in m.router.calls[-1]["found_tasks"]
+    # the owner can: it is either already in his default view or surfaced by the lookup
+    asyncio.run(m.get("aaron").handle_inbound("what about my errand?", "imessage", approver_meta()))
+    seen = m.router.calls[-1]["task_memory"] + m.router.calls[-1]["found_tasks"]
+    assert "private errand" in seen
+    # and a lookup by the owner for something outside his default view does surface it
+    m.store.task_event(others["id"], "done", "ok", state="done")
+    m.store._db.execute("UPDATE tasks SET updated_at=updated_at-40*86400 WHERE id=?", (others["id"],)); m.store._db.commit()
+    asyncio.run(m.get("aaron").handle_inbound("that old errand?", "imessage", approver_meta()))
+    assert "private errand" not in m.router.calls[-1]["task_memory"]
+    assert "private errand" in m.router.calls[-1]["found_tasks"]
+    # no query planned -> nothing extra passed
+    m.router.next_query = None
+    asyncio.run(m.get("c1").handle_inbound("thanks!", "email", stranger_meta()))
+    assert m.router.calls[-1]["found_tasks"] == ""

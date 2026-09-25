@@ -484,6 +484,90 @@ class Store:
             ).fetchall()
         return [self.get_task(int(r["id"])) for r in rows]  # type: ignore[misc]
 
+    def query_tasks(self, *, text: str = "", participant: str = "", states: Optional[List[str]] = None,
+                    touched_within_days: Optional[float] = None, created_within_days: Optional[float] = None,
+                    has_participants: Optional[bool] = None, chat_id: str = "", ids: Optional[List[int]] = None,
+                    limit: int = 10) -> Dict[str, Any]:
+        """Filter tasks by any combination of criteria and rank the matches.
+
+        text: words matched against title, summary and event text (all must appear
+              somewhere on the task, case-insensitive; a word is also tried as a prefix).
+        participant: a person by email, phone or name; expands to all their contacts.
+        states: e.g. ["open","waiting_aaron"]; "live" means all non-finished states.
+        touched_within_days / created_within_days: recency windows.
+        has_participants: True = tasks about someone; False = tasks with nobody.
+        chat_id: tasks this conversation has logged events on.
+        ids: restrict to these task ids.
+        Returns {"tasks": [...], "total": n} where total counts all matches before limit."""
+        where: List[str] = []
+        args: List[Any] = []
+        now = time.time()
+        if states:
+            expanded: List[str] = []
+            for st in states:
+                expanded += list(OPEN_STATES) if st == "live" else [st]
+            where.append(f"t.state IN ({','.join('?' * len(expanded))})"); args += expanded
+        else:
+            where.append("t.state<>'closed'")
+        if touched_within_days is not None:
+            where.append("t.updated_at>=?"); args.append(now - float(touched_within_days) * 86400)
+        if created_within_days is not None:
+            where.append("t.created_at>=?"); args.append(now - float(created_within_days) * 86400)
+        if has_participants is True:
+            where.append("EXISTS (SELECT 1 FROM task_participants p WHERE p.task_id=t.id)")
+        elif has_participants is False:
+            where.append("NOT EXISTS (SELECT 1 FROM task_participants p WHERE p.task_id=t.id)")
+        if participant:
+            keys = self.person_keys(participant)
+            if keys:
+                where.append(f"EXISTS (SELECT 1 FROM task_participants p WHERE p.task_id=t.id AND "
+                             f"(p.key IN ({','.join('?' * len(keys))}) OR lower(p.display)=?))")
+                args += keys + [participant.strip().lower()]
+            else:
+                where.append("0")
+        if chat_id:
+            where.append("EXISTS (SELECT 1 FROM task_events e WHERE e.task_id=t.id AND e.chat_id=?)"); args.append(chat_id)
+        if ids:
+            where.append(f"t.id IN ({','.join('?' * len(ids))})"); args += [int(i) for i in ids]
+        words = [w for w in "".join(ch if ch.isalnum() or ch in "@.'-" else " " for ch in (text or "").lower()).split() if len(w) > 1]
+        for w in words[:8]:
+            like = f"%{w}%"
+            where.append("(lower(t.title) LIKE ? OR lower(t.summary) LIKE ? "
+                         "OR EXISTS (SELECT 1 FROM task_events e WHERE e.task_id=t.id AND lower(e.text) LIKE ?) "
+                         "OR EXISTS (SELECT 1 FROM task_participants p WHERE p.task_id=t.id AND (p.key LIKE ? OR lower(p.display) LIKE ?)))")
+            args += [like, like, like, like, like]
+        sql_where = " AND ".join(where) if where else "1"
+        with self._lock:
+            total = self._db.execute(f"SELECT COUNT(*) AS n FROM tasks t WHERE {sql_where}", args).fetchone()["n"]
+            rows = self._db.execute(
+                f"SELECT t.id, t.updated_at, t.state, t.title, t.summary FROM tasks t WHERE {sql_where} "
+                f"ORDER BY CASE WHEN t.state IN ('open','waiting_aaron','running') THEN 0 ELSE 1 END, t.updated_at DESC LIMIT ?",
+                (*args, max(1, min(int(limit), 50))),
+            ).fetchall()
+        # Light re-rank: title hits outrank summary/event hits.
+        def score(r: Any) -> float:
+            sc = 0.0
+            tl, sm = (r["title"] or "").lower(), (r["summary"] or "").lower()
+            for w in words:
+                if w in tl: sc += 3
+                elif w in sm: sc += 2
+            return sc
+        ordered = sorted(rows, key=lambda r: (-score(r), 0 if r["state"] in OPEN_STATES else 1, -r["updated_at"]))
+        return {"tasks": [self.task_with_events(int(r["id"]), limit=6) for r in ordered], "total": int(total)}
+
+    def render_tasks(self, tasks: List[Dict[str, Any]], now: Optional[float] = None) -> str:
+        now = now or time.time()
+        blocks: List[str] = []
+        for t in tasks:
+            if not t:
+                continue
+            lines = [self._task_head(t)]
+            for e in t.get("events") or []:
+                rid = f" (#{e['request_id']})" if e.get("request_id") else ""
+                lines.append(f"  - {_age(now - e['created_at'])} {e['kind']}{rid}: {e['text']}")
+            blocks.append("\n".join(lines))
+        return "\n\n".join(blocks)
+
     def task_for(self, raw_key: str, display: str, title: str = "") -> Dict[str, Any]:
         """Compatibility: the most recent open task this person is on, or a new one."""
         found = self.tasks_for_person(raw_key, open_only=True, limit=1)
