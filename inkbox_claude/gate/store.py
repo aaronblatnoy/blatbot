@@ -75,6 +75,10 @@ CREATE TABLE IF NOT EXISTS people (
   PRIMARY KEY (person_id, key)
 );
 CREATE INDEX IF NOT EXISTS people_key ON people(key);
+CREATE VIRTUAL TABLE IF NOT EXISTS task_fts USING fts5(
+  task_id UNINDEXED, title, summary, people, events, requests, dates,
+  tokenize='porter unicode61'
+);
 CREATE TABLE IF NOT EXISTS task_events (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   task_id INTEGER NOT NULL,
@@ -131,6 +135,58 @@ def task_key(raw: str) -> str:
     if len(digits) >= 10:
         return digits[-10:]
     return " ".join(v.split())
+
+
+_MONTHS = {m: i + 1 for i, m in enumerate(["jan", "feb", "mar", "apr", "may", "jun", "jul", "aug", "sep", "oct", "nov", "dec"])}
+
+
+def extract_dates(text: str, anchor: Optional[float] = None) -> List[str]:
+    """Pull calendar dates out of free text as ISO strings (YYYY-MM-DD), in text order.
+
+    Understands 9/22, 9/22/26, 2026-09-22, Sep 22, September 22 2026, Tue 9/22.
+    Two-digit and missing years resolve to the anchor's year."""
+    import re
+    from datetime import datetime
+    year = datetime.fromtimestamp(anchor or time.time()).year
+    found: List[Any] = []  # (position, iso)
+    t = text or ""
+    for m in re.finditer(r"\b(20\d{2})-(\d{1,2})-(\d{1,2})\b", t):
+        found.append((m.start(), f"{int(m[1]):04d}-{int(m[2]):02d}-{int(m[3]):02d}"))
+    for m in re.finditer(r"\b(\d{1,2})/(\d{1,2})(?:/(\d{2,4}))?\b", t):
+        mo, d, y = int(m[1]), int(m[2]), m[3]
+        if 1 <= mo <= 12 and 1 <= d <= 31:
+            yy = int(y) if y else year
+            if yy < 100:
+                yy += 2000
+            found.append((m.start(), f"{yy:04d}-{mo:02d}-{d:02d}"))
+    for m in re.finditer(r"\b(jan|feb|mar|apr|may|jun|jul|aug|sep|sept|oct|nov|dec)[a-z]*\.?\s+(\d{1,2})(?:st|nd|rd|th)?(?:,?\s+(20\d{2}))?\b", t, re.I):
+        mo = _MONTHS[m[1].lower()[:3]]
+        d = int(m[2])
+        yy = int(m[3]) if m[3] else year
+        if 1 <= d <= 31:
+            found.append((m.start(), f"{yy:04d}-{mo:02d}-{d:02d}"))
+    out: List[str] = []
+    for _, iso in sorted(found):
+        if iso not in out:
+            out.append(iso)
+    return out
+
+
+def _fts_query(text: str) -> str:
+    """Turn free text into an FTS5 query: quoted phrases kept, OR honoured, every
+    other word required, with prefix matching so 'cater' finds 'caterer'."""
+    import re
+    parts: List[str] = []
+    for tok in re.findall(r'"[^"]+"|\S+', text or ""):
+        if tok.startswith('"') and tok.endswith('"') and len(tok) > 2:
+            parts.append(tok)
+        elif tok.upper() == "OR":
+            parts.append("OR")
+        else:
+            w = re.sub(r"[^\w@.'-]", "", tok)
+            if len(w) > 1:
+                parts.append('"' + w.replace('"', '') + '"*')
+    return " ".join(parts) or '""'
 
 
 def _age(seconds: float) -> str:
@@ -202,6 +258,10 @@ class Store:
             self._db.execute("CREATE INDEX IF NOT EXISTS task_participants_person ON task_participants(person_id)")
             self._migrate_person_keyed_tasks()
             self._db.commit()
+            n_tasks = self._db.execute("SELECT COUNT(*) AS n FROM tasks").fetchone()["n"]
+            n_fts = self._db.execute("SELECT COUNT(*) AS n FROM task_fts").fetchone()["n"]
+        if n_fts < n_tasks:
+            self.reindex_all()
 
     def _migrate_person_keyed_tasks(self) -> None:
         """One-time: tasks used to be keyed to a person. Turn each key into a
@@ -329,6 +389,9 @@ class Store:
                 (state, json.dumps(status) if status is not None else None, raw_output, time.time(), rid),
             )
             self._db.commit()
+            tid = self._db.execute("SELECT task_id FROM requests WHERE id=?", (rid,)).fetchone()
+        if tid and tid["task_id"]:
+            self.reindex_task(int(tid["task_id"]))
 
     def revise_prompt(self, rid: int, prompt: str) -> Request:
         with self._lock:
@@ -354,6 +417,7 @@ class Store:
         for p in participants or []:
             raw, display = (p if isinstance(p, (tuple, list)) else (p, p))
             self.add_participant(tid, str(raw), str(display or raw))
+        self.reindex_task(tid)
         return self.get_task(tid)  # type: ignore[return-value]
 
     def remember_person(self, person: "Person") -> None:
@@ -416,6 +480,7 @@ class Store:
                     (task_id, k, person.display or k, person.person_id),
                 )
             self._db.commit()
+        self.reindex_task(task_id)
 
     def get_task(self, task_id: int) -> Optional[Dict[str, Any]]:
         with self._lock:
@@ -437,6 +502,49 @@ class Store:
         d["participants"] = list(people.values())
         return d
 
+    def reindex_task(self, task_id: int) -> None:
+        """Rebuild the search document for one task from everything on it."""
+        with self._lock:
+            t = self._db.execute("SELECT * FROM tasks WHERE id=?", (task_id,)).fetchone()
+            if not t:
+                self._db.execute("DELETE FROM task_fts WHERE task_id=?", (task_id,))
+                self._db.commit()
+                return
+            ps = self._db.execute("SELECT key, display FROM task_participants WHERE task_id=?", (task_id,)).fetchall()
+            ev = self._db.execute("SELECT kind, text, created_at FROM task_events WHERE task_id=? ORDER BY id", (task_id,)).fetchall()
+            rq = self._db.execute("SELECT summary, prompt, state, status_json, raw_output FROM requests WHERE task_id=? ORDER BY id", (task_id,)).fetchall()
+            people = " ".join(f"{p['display']} {p['key']}" for p in ps)
+            events = " ".join(f"{e['kind']}: {e['text']}" for e in ev)
+            reqs: List[str] = []
+            for r in rq:
+                res = ""
+                if r["status_json"]:
+                    try:
+                        st = json.loads(r["status_json"]); res = str(st.get("summary") or st.get("error") or "")
+                    except Exception:
+                        res = ""
+                reqs.append(f"{r['state']}: {r['summary']} | {r['prompt']} | {res}")
+            requests_text = " ".join(reqs)
+            dates: List[str] = []
+            for txt, when in [(t["title"], t["created_at"]), (t["summary"], t["updated_at"])] + \
+                             [(e["text"], e["created_at"]) for e in ev] + [(r["prompt"], t["created_at"]) for r in rq]:
+                for d in extract_dates(txt or "", when):
+                    if d not in dates:
+                        dates.append(d)
+            self._db.execute("DELETE FROM task_fts WHERE task_id=?", (task_id,))
+            self._db.execute(
+                "INSERT INTO task_fts(task_id,title,summary,people,events,requests,dates) VALUES(?,?,?,?,?,?,?)",
+                (task_id, t["title"] or "", t["summary"] or "", people, events, requests_text, " ".join(dates)),
+            )
+            self._db.commit()
+
+    def reindex_all(self) -> int:
+        with self._lock:
+            ids = [int(r["id"]) for r in self._db.execute("SELECT id FROM tasks").fetchall()]
+        for tid in ids:
+            self.reindex_task(tid)
+        return len(ids)
+
     def set_task_summary(self, task_id: int, summary: str) -> None:
         """The router's own plain-language description of where the task stands."""
         summary = " ".join((summary or "").split())[:400]
@@ -445,11 +553,13 @@ class Store:
         with self._lock:
             self._db.execute("UPDATE tasks SET summary=? WHERE id=?", (summary, task_id))
             self._db.commit()
+        self.reindex_task(task_id)
 
     def set_task_state(self, task_id: int, state: str) -> None:
         with self._lock:
             self._db.execute("UPDATE tasks SET state=?, updated_at=? WHERE id=?", (state, time.time(), task_id))
             self._db.commit()
+        self.reindex_task(task_id)
 
     def tasks_for_person(self, raw_key: str, *, open_only: bool = True, limit: int = 8) -> List[Dict[str, Any]]:
         """Tasks this person is a participant of, most recently touched first."""
@@ -487,18 +597,32 @@ class Store:
     def query_tasks(self, *, text: str = "", participant: str = "", states: Optional[List[str]] = None,
                     touched_within_days: Optional[float] = None, created_within_days: Optional[float] = None,
                     has_participants: Optional[bool] = None, chat_id: str = "", ids: Optional[List[int]] = None,
-                    limit: int = 10) -> Dict[str, Any]:
+                    date_from: Optional[str] = None, date_to: Optional[str] = None,
+                    any_of: Optional[List[Dict[str, Any]]] = None, limit: int = 10) -> Dict[str, Any]:
         """Filter tasks by any combination of criteria and rank the matches.
 
-        text: words matched against title, summary and event text (all must appear
-              somewhere on the task, case-insensitive; a word is also tried as a prefix).
+        text: full-text search (stemmed, prefix-matched) over EVERYTHING on a task:
+              title, summary, participants, every event, every request's summary,
+              prompt and result. Supports quoted phrases and OR.
         participant: a person by email, phone or name; expands to all their contacts.
         states: e.g. ["open","waiting_aaron"]; "live" means all non-finished states.
         touched_within_days / created_within_days: recency windows.
         has_participants: True = tasks about someone; False = tasks with nobody.
         chat_id: tasks this conversation has logged events on.
-        ids: restrict to these task ids.
+        date_from / date_to: ISO dates; matches tasks that mention a calendar date
+              in that range anywhere (meeting dates, deadlines).
+        any_of: a list of sub-filters (same fields); a task matches if it matches ANY.
         Returns {"tasks": [...], "total": n} where total counts all matches before limit."""
+        if any_of:
+            seen: Dict[int, Dict[str, Any]] = {}
+            total = 0
+            for sub in any_of:
+                r = self.query_tasks(**{k: v for k, v in sub.items() if k != "any_of"}, limit=50)
+                for t in r["tasks"]:
+                    seen.setdefault(int(t["id"]), t)
+            ordered = sorted(seen.values(), key=lambda t: (0 if t["state"] in OPEN_STATES else 1, -t["updated_at"]))
+            return {"tasks": ordered[:max(1, min(int(limit), 50))], "total": len(ordered)}
+
         where: List[str] = []
         args: List[Any] = []
         now = time.time()
@@ -529,31 +653,28 @@ class Store:
             where.append("EXISTS (SELECT 1 FROM task_events e WHERE e.task_id=t.id AND e.chat_id=?)"); args.append(chat_id)
         if ids:
             where.append(f"t.id IN ({','.join('?' * len(ids))})"); args += [int(i) for i in ids]
-        words = [w for w in "".join(ch if ch.isalnum() or ch in "@.'-" else " " for ch in (text or "").lower()).split() if len(w) > 1]
-        for w in words[:8]:
-            like = f"%{w}%"
-            where.append("(lower(t.title) LIKE ? OR lower(t.summary) LIKE ? "
-                         "OR EXISTS (SELECT 1 FROM task_events e WHERE e.task_id=t.id AND lower(e.text) LIKE ?) "
-                         "OR EXISTS (SELECT 1 FROM task_participants p WHERE p.task_id=t.id AND (p.key LIKE ? OR lower(p.display) LIKE ?)))")
-            args += [like, like, like, like, like]
+        if date_from or date_to:
+            # the dates column holds ISO dates; a task matches if any date falls in range
+            lo, hi = (date_from or "0000-01-01"), (date_to or "9999-12-31")
+            where.append("EXISTS (SELECT 1 FROM task_fts f WHERE f.task_id=t.id AND f.dates<>'' AND EXISTS ("
+                         "SELECT 1 FROM json_each('[\"' || replace(f.dates,' ','\",\"') || '\"]') d "
+                         "WHERE d.value BETWEEN ? AND ?))")
+            args += [lo, hi]
+        fts_join, rank_col = "", "0 AS rank"
+        if (text or "").strip():
+            fts_join = "JOIN task_fts f ON f.task_id=t.id"
+            where.append("task_fts MATCH ?")
+            args.append(_fts_query(text))
+            rank_col = "bm25(task_fts, 0.0, 10.0, 6.0, 4.0, 2.0, 2.0, 1.0) AS rank"
         sql_where = " AND ".join(where) if where else "1"
         with self._lock:
-            total = self._db.execute(f"SELECT COUNT(*) AS n FROM tasks t WHERE {sql_where}", args).fetchone()["n"]
+            total = self._db.execute(f"SELECT COUNT(*) AS n FROM tasks t {fts_join} WHERE {sql_where}", args).fetchone()["n"]
             rows = self._db.execute(
-                f"SELECT t.id, t.updated_at, t.state, t.title, t.summary FROM tasks t WHERE {sql_where} "
-                f"ORDER BY CASE WHEN t.state IN ('open','waiting_aaron','running') THEN 0 ELSE 1 END, t.updated_at DESC LIMIT ?",
+                f"SELECT t.id, t.updated_at, t.state, {rank_col} FROM tasks t {fts_join} WHERE {sql_where} "
+                f"ORDER BY rank, CASE WHEN t.state IN ('open','waiting_aaron','running') THEN 0 ELSE 1 END, t.updated_at DESC LIMIT ?",
                 (*args, max(1, min(int(limit), 50))),
             ).fetchall()
-        # Light re-rank: title hits outrank summary/event hits.
-        def score(r: Any) -> float:
-            sc = 0.0
-            tl, sm = (r["title"] or "").lower(), (r["summary"] or "").lower()
-            for w in words:
-                if w in tl: sc += 3
-                elif w in sm: sc += 2
-            return sc
-        ordered = sorted(rows, key=lambda r: (-score(r), 0 if r["state"] in OPEN_STATES else 1, -r["updated_at"]))
-        return {"tasks": [self.task_with_events(int(r["id"]), limit=6) for r in ordered], "total": int(total)}
+        return {"tasks": [self.task_with_events(int(r["id"]), limit=6) for r in rows], "total": int(total)}
 
     def render_tasks(self, tasks: List[Dict[str, Any]], now: Optional[float] = None) -> str:
         now = now or time.time()
@@ -606,6 +727,7 @@ class Store:
             args.append(task_id)
             self._db.execute(f"UPDATE tasks SET {', '.join(sets)} WHERE id=?", args)
             self._db.commit()
+        self.reindex_task(task_id)
 
     def link_request_task(self, rid: int, task_id: int) -> None:
         with self._lock:

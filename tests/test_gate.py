@@ -702,3 +702,32 @@ def test_router_lookup_feeds_the_decision_and_is_scoped(tmp_path):
     m.router.next_query = None
     asyncio.run(m.get("c1").handle_inbound("thanks!", "email", stranger_meta()))
     assert m.router.calls[-1]["found_tasks"] == ""
+
+
+def test_everything_on_a_task_is_searchable(tmp_path):
+    from inkbox_claude.gate.store import Store, extract_dates
+    s = Store(str(tmp_path / "g.db"))
+    t = s.create_task("Venue for the spring mixer", [("eve@venue.com", "Eve Park")])
+    r = s.create_request(chat_id="c", sender="eve@venue.com", sender_name="Eve Park", mode="email", subject="",
+                         original_message="m", summary="ask about capacity", scopes=["email_send"],
+                         prompt="Email Eve Park and ask the maximum capacity of the Grand Hall for Tue 9/22", state="approved",
+                         task_id=t["id"])
+    s.set_state(r.id, "done", status={"ok": True, "summary": "Eve replied: capacity is 180 standing, 120 seated."})
+    s.task_event(t["id"], "note", "Aaron: budget is $4,000 all in", state="open")
+    other = s.create_task("Renew the domain")
+    # words from the request prompt, the result, an event note, a participant, and stems/prefixes
+    for q in ("capacity", "Grand Hall", "seated", "budget", "Eve Park", "venue.com", "mixers", "cater OR mixer", '"120 seated"'):
+        got = [x["id"] for x in s.query_tasks(text=q)["tasks"]]
+        assert got == [t["id"]], (q, got)
+    assert s.query_tasks(text="domain")["tasks"][0]["id"] == other["id"]
+    assert s.query_tasks(text="nonexistentword")["total"] == 0
+    # dates mentioned anywhere on the task are searchable as a range
+    assert extract_dates("Tue 9/22 and Sep 30, 2026 and 2026-10-01", 1789000000)[:3] == ["2026-09-22", "2026-09-30", "2026-10-01"]
+    assert [x["id"] for x in s.query_tasks(date_from="2026-09-20", date_to="2026-09-25")["tasks"]] == [t["id"]]
+    assert s.query_tasks(date_from="2026-10-05", date_to="2026-10-10")["total"] == 0
+    # any_of: OR across sub-filters
+    r2 = s.query_tasks(any_of=[{"text": "domain"}, {"participant": "Eve Park"}])
+    assert {x["id"] for x in r2["tasks"]} == {t["id"], other["id"]}
+    # the index follows later changes
+    s.set_task_summary(t["id"], "Waiting on the deposit invoice.")
+    assert [x["id"] for x in s.query_tasks(text="deposit invoice")["tasks"]] == [t["id"]]

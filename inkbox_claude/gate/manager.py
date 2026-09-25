@@ -144,15 +144,20 @@ class GateSession:
             return ""
         if q is None:
             return ""
-        kw: Dict[str, Any] = dict(text=q.text or "", states=q.states, touched_within_days=q.touched_within_days,
-                                  created_within_days=q.created_within_days, has_participants=q.has_participants,
-                                  chat_id=self.chat_id if q.this_conversation else "", limit=q.limit)
-        if self.is_approver():
-            kw["participant"] = q.participant or ""
-        else:
-            kw["participant"] = self._sender()  # a non-owner only ever sees their own tasks
-            kw["has_participants"] = None
-        res = self.m.store.query_tasks(**kw)
+        def to_kw(tq: Any) -> Dict[str, Any]:
+            kw: Dict[str, Any] = dict(text=tq.text or "", states=tq.states, touched_within_days=tq.touched_within_days,
+                                      created_within_days=tq.created_within_days, has_participants=tq.has_participants,
+                                      chat_id=self.chat_id if tq.this_conversation else "",
+                                      date_from=tq.date_from, date_to=tq.date_to, limit=tq.limit)
+            if self.is_approver():
+                kw["participant"] = tq.participant or ""
+            else:
+                kw["participant"] = self._sender()  # a non-owner only ever sees their own tasks
+                kw["has_participants"] = None
+            if tq.any_of:
+                kw["any_of"] = [to_kw(sub) for sub in tq.any_of]
+            return kw
+        res = self.m.store.query_tasks(**to_kw(q))
         shown = [t for t in res["tasks"] if f"Task T{t['id']} " not in in_view]
         logger.info("[gate %s] task query -> %d match(es), %d new to the router", self.chat_id, res["total"], len(shown))
         if not shown:

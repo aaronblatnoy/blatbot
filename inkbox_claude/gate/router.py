@@ -66,6 +66,9 @@ class TaskQuery(BaseModel):
     created_within_days: Optional[float] = None
     has_participants: Optional[bool] = Field(default=None, description="true = about someone, false = nobody in particular")
     this_conversation: bool = Field(default=False, description="only tasks this conversation has touched")
+    date_from: Optional[str] = Field(default=None, description="ISO date; tasks that mention a calendar date on/after this")
+    date_to: Optional[str] = Field(default=None, description="ISO date; tasks that mention a calendar date on/before this")
+    any_of: Optional[List["TaskQuery"]] = Field(default=None, description="match if ANY of these sub-filters match")
     limit: int = Field(default=10, ge=1, le=30)
 
     @field_validator("states")
@@ -211,7 +214,11 @@ class Router:
         "Derive the filter from the message: a name or subject mentioned -> text and/or participant; 'what's "
         "still open' -> states [\"live\"]; 'what did we do last week' -> touched_within_days 7; 'my errands' -> "
         "has_participants false; a follow-up in this thread with no keywords -> this_conversation true. "
-        "Use text sparingly (one to three distinctive words), never filler words. Output ONLY the JSON."
+        "text is full-text search over everything on a task (title, summary, people, every event, every "
+        "request and its result): use one to three distinctive words, a quoted phrase for exact wording, or "
+        "OR between alternatives. A date or range mentioned ('next Tuesday', 'the 22nd', 'this week') -> "
+        "date_from/date_to as ISO dates computed from Now. Several unrelated things at once -> any_of with one "
+        "sub-filter each. Output ONLY the JSON."
     )
 
     async def plan_query(self, *, history: List[Dict[str, Any]], message: str, in_view: str,
