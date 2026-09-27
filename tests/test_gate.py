@@ -740,3 +740,59 @@ def test_site_admin_scopes_cover_the_admin_mcps():
     assert "mcp__tamid-admin__tamid_update_event" in tools_for(["tamid_site_write"])
     for name in ("sjba_site_read", "sjba_site_write", "tamid_site_read", "tamid_site_write"):
         assert name in SCOPES
+
+
+class FakePicker:
+    def __init__(self, choice=None, conf=0.9):
+        self.choice, self.conf, self.calls = choice, conf, []
+
+    async def pick(self, **kw):
+        self.calls.append(kw)
+        return {"choice": self.choice, "confidence": self.conf, "probabilities": {}, "reason": "ok" if self.choice else "low confidence"}
+
+
+def test_jev_pick_overrides_router_when_confident(tmp_path):
+    m, sent = make_manager(tmp_path)
+    a = m.store.create_task("Book a call with Cand Idate", [("cand@nyu.edu", "Cand Idate")])
+    b = m.store.create_task("Send Cand the venue list", [("cand@nyu.edu", "Cand Idate")])
+    m.task_picker = FakePicker(choice=f"T{b['id']}")
+    m.router.next = RouterOutput(reply=None, task=f"T{a['id']}",  # router guessed the other task
+                                 request=RouterRequest(prompt="Email the list", scopes=["email_send"], summary="send list"))
+    asyncio.run(m.get("c1").handle_inbound("did you send that list yet?", "email", stranger_meta()))
+    assert m.store.task_id_for_request(1) == b["id"]
+    call = m.task_picker.calls[-1]
+    assert {f"T{a['id']}", f"T{b['id']}"} <= {f"T{t['id']}" for t in call["candidates"]}
+    assert call["router_hint"] == f"T{a['id']}"
+
+
+def test_jev_undecided_keeps_router_pick_and_code_rules(tmp_path):
+    m, sent = make_manager(tmp_path)
+    a = m.store.create_task("Book a call with Cand Idate", [("cand@nyu.edu", "Cand Idate")])
+    m.task_picker = FakePicker(choice=None, conf=0.3)
+    m.router.next = RouterOutput(reply=None, task=f"T{a['id']}",
+                                 request=RouterRequest(prompt="Move it", scopes=["calendar"], summary="move call"))
+    asyncio.run(m.get("c1").handle_inbound("can we move it?", "email", stranger_meta()))
+    assert m.store.task_id_for_request(1) == a["id"]
+    # a confident pick of someone else's task is still refused by code
+    other = m.store.create_task("Someone else's job", [("other@nyu.edu", "Other")])
+    m.task_picker = FakePicker(choice=f"T{other['id']}")
+    m.store.set_state(1, "done")
+    m.router.next = RouterOutput(reply=None, task="new", task_title="x",
+                                 request=RouterRequest(prompt="Cancel", scopes=["calendar"], summary="cancel"))
+    asyncio.run(m.get("c1").handle_inbound("cancel it", "email", stranger_meta()))
+    assert m.store.task_id_for_request(2) != other["id"]
+
+
+def test_jev_new_and_none(tmp_path):
+    m, sent = make_manager(tmp_path)
+    a = m.store.create_task("Book a call with Cand Idate", [("cand@nyu.edu", "Cand Idate")])
+    m.task_picker = FakePicker(choice="new")
+    m.router.next = RouterOutput(reply=None, task=f"T{a['id']}", task_title="Get the venue list",
+                                 request=RouterRequest(prompt="Send list", scopes=["email_send"], summary="venue list"))
+    asyncio.run(m.get("c1").handle_inbound("separately, can you send me the venue list?", "email", stranger_meta()))
+    assert m.store.task_id_for_request(1) != a["id"]
+    m.task_picker = FakePicker(choice="none")
+    m.router.next = RouterOutput(reply="You're welcome!", task=f"T{a['id']}", request=None)
+    before = m.store._db.execute("select count(*) from tasks").fetchone()[0]
+    asyncio.run(m.get("c1").handle_inbound("thanks!", "email", stranger_meta()))
+    assert m.store._db.execute("select count(*) from tasks").fetchone()[0] == before

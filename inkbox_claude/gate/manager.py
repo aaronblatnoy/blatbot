@@ -16,6 +16,7 @@ import time
 from typing import Any, Awaitable, Callable, Dict, List, Optional
 
 from .executor import Executor
+from .taskpick import TaskPicker, enabled as jev_enabled
 from .router import Router, RouterOutput
 from .scopes import SCOPES
 from .store import Person, Request, Store, TaskRequired, task_key
@@ -78,6 +79,7 @@ class GateSession:
         self.reply_meta: Dict[str, Any] = {}
         self._lock = asyncio.Lock()
         self._turn_task_id: Optional[int] = None  # task the current turn's inbound was logged on
+        self._found_task_ids: List[int] = []      # tasks surfaced by this turn's lookup
 
     # -- identity ----------------------------------------------------------
     def is_approver(self) -> bool:
@@ -142,6 +144,7 @@ class GateSession:
         except Exception:
             logger.exception("[gate %s] task query planning failed", self.chat_id)
             return ""
+        self._found_task_ids = []
         if q is None:
             return ""
         def to_kw(tq: Any) -> Dict[str, Any]:
@@ -158,6 +161,7 @@ class GateSession:
                 kw["any_of"] = [to_kw(sub) for sub in tq.any_of]
             return kw
         res = self.m.store.query_tasks(**to_kw(q))
+        self._found_task_ids = [int(t["id"]) for t in res["tasks"]]
         shown = [t for t in res["tasks"] if f"Task T{t['id']} " not in in_view]
         logger.info("[gate %s] task query -> %d match(es), %d new to the router", self.chat_id, res["total"], len(shown))
         if not shown:
@@ -166,6 +170,50 @@ class GateSession:
         if res["total"] > len(res["tasks"]):
             text += f"\n\n({res['total'] - len(res['tasks'])} more matched; narrow the lookup to see them)"
         return text
+
+    def candidate_tasks(self) -> List[Dict[str, Any]]:
+        """The task objects behind the ledger text the router saw this turn."""
+        ids: List[int] = []
+        approver = self.is_approver()
+        if not approver:
+            for t in self.m.store.tasks_for_person(self._sender(), open_only=False, limit=6):
+                ids.append(int(t["id"]))
+        for tid in self.m.store.task_ids_for_chat(self.chat_id):
+            if tid not in ids:
+                ids.append(tid)
+        if approver:
+            for t in self.m.store.recent_tasks():
+                if t["id"] not in ids:
+                    ids.append(int(t["id"]))
+        ids += [i for i in self._found_task_ids if i not in ids]
+        out: List[Dict[str, Any]] = []
+        for tid in ids[:40]:
+            t = self.m.store.task_with_events(tid, limit=4)
+            if t and t["state"] != "closed":
+                out.append(t)
+        return out
+
+    async def jev_pick(self, message: str, history: List[Dict[str, Any]], out: RouterOutput) -> None:
+        """Replace the router's task choice with Jev's typed judgment when confident.
+        The router's own answer stays as the fallback and as a hint to Jev."""
+        picker = self.m.task_picker
+        if picker is None:
+            return
+        cands = self.candidate_tasks()
+        approver = self.is_approver()
+        res = await picker.pick(
+            message=message, history=history, candidates=cands,
+            sender_label="Aaron, the owner" if approver else (self._sender_name() or self._sender()),
+            router_hint=out.task, proposed_title=out.task_title or (out.request.summary if out.request else ""))
+        choice = res.get("choice")
+        if choice is None:
+            logger.info("[gate %s] jev undecided (%s); keeping router pick %r", self.chat_id, res.get("reason"), out.task)
+            return
+        if choice == "none":
+            if out.request is None:
+                out.task = None  # pure conversation: no task this turn
+            return
+        out.task = choice
 
     def task_memory(self) -> str:
         return self.m.store.task_memory(self.chat_id, is_approver=self.is_approver(),
@@ -306,6 +354,7 @@ class GateSession:
                     history=history[:-1], message=body, mode="voice", sender=self._sender(),
                     contact_notes=self._contact_notes(), is_approver=approver, task_memory=memory,
                     found_tasks=found)
+                await self.jev_pick(body, history[:-1], out)
                 reply = out.reply or ""
                 if reply:
                     self.m.store.add_message(self.chat_id, "outbound", reply, "voice")
@@ -378,6 +427,8 @@ class GateSession:
         )
         if system_note and out.request is not None:
             out.request = None
+        if not system_note:
+            await self.jev_pick(message, prior, out)
         task: Optional[Dict[str, Any]] = None
         if not system_note and (out.request is not None or _names_a_task(out.task)):
             task = self.m.resolve_task(self, out)  # enforced: every request is written to a task
@@ -442,6 +493,8 @@ class GateSessionManager:
         self.store = Store(store_path)
         self.router = Router(api_key=cfg.deepseek_api_key, model=cfg.deepseek_model, standing_path=standing_path)
         self.executor = Executor(mcp_server=mcp_server, cwd=exec_cwd, model=cfg.claude_model or "sonnet")
+        self.task_picker: Optional[TaskPicker] = TaskPicker() if jev_enabled() else None
+        logger.info("[gate] task picker: %s", "jev (TypeSafe)" if self.task_picker else "router")
         self.approver_conv = cfg.approver_imessage_conversation_id
         self.approver_phone = str(getattr(cfg, "approver_phone", "") or "")
         self.voice_vocabulary = str(os.getenv("GATE_VOICE_VOCABULARY") or DEFAULT_VOICE_VOCABULARY).strip()

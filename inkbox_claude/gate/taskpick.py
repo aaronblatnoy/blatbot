@@ -1,0 +1,141 @@
+"""Task selection as a typed judgment (TypeSafe System One, model Jev).
+
+The router (a chat LLM) writes the reply and the request. Which task a message
+belongs to is a narrower question: given the candidate tasks, pick one or say
+"new". That is a Choice over a defined set, which is what Jev is built for. It
+returns the pick, a probability for every option, and a confidence; code owns
+the threshold and the permission checks.
+
+Configuration (environment):
+  TYPESAFE_API_KEY          required to enable; unset means the router's own pick is used
+  TYPESAFE_MODEL            default jev-latest
+  TYPESAFE_TASK_MIN_CONF    default 0.55; below this the pick is treated as undecided
+  GATE_TASK_PICKER          "jev" (default when the key is set) or "router"
+"""
+
+from __future__ import annotations
+
+import json
+import logging
+import os
+import time
+from typing import Any, Dict, List, Optional
+
+import httpx
+
+logger = logging.getLogger(__name__)
+
+TYPESAFE_URL = "https://api.typesafe.ai/v1/systemone"
+NEW = "new_task"
+NO_TASK = "no_task"
+
+
+def enabled() -> bool:
+    if (os.getenv("GATE_TASK_PICKER") or "").strip().lower() == "router":
+        return False
+    return bool((os.getenv("TYPESAFE_API_KEY") or "").strip())
+
+
+def _age(seconds: float) -> str:
+    seconds = max(0, int(seconds))
+    if seconds < 3600:
+        return f"{seconds // 60} minutes ago"
+    if seconds < 48 * 3600:
+        return f"{seconds // 3600} hours ago"
+    return f"{seconds // 86400} days ago"
+
+
+def candidate_view(t: Dict[str, Any], now: Optional[float] = None) -> Dict[str, Any]:
+    """The facts about one task that decide whether a message continues it."""
+    now = now or time.time()
+    who = [p.get("display") or p.get("key") for p in (t.get("participants") or [])]
+    events = t.get("events") or []
+    return {
+        "title": t.get("title") or "",
+        "where_it_stands": t.get("summary") or "",
+        "people_involved": who or ["nobody in particular"],
+        "state": t.get("state"),
+        "last_touched": _age(now - float(t.get("updated_at") or now)),
+        "recent_events": [f"{e.get('kind')}: {str(e.get('text') or '')[:160]}" for e in events[-4:]],
+    }
+
+
+class TaskPicker:
+    def __init__(self, api_key: Optional[str] = None, model: Optional[str] = None,
+                 min_confidence: Optional[float] = None, timeout: float = 20.0):
+        self.api_key = (api_key or os.getenv("TYPESAFE_API_KEY") or "").strip()
+        self.model = (model or os.getenv("TYPESAFE_MODEL") or "jev-latest").strip()
+        self.min_confidence = float(min_confidence if min_confidence is not None
+                                    else (os.getenv("TYPESAFE_TASK_MIN_CONF") or 0.55))
+        self.timeout = timeout
+
+    async def pick(self, *, message: str, history: List[Dict[str, Any]], sender_label: str,
+                   candidates: List[Dict[str, Any]], router_hint: Optional[str] = None,
+                   proposed_title: Optional[str] = None) -> Dict[str, Any]:
+        """Return {"choice": "T12" | "new" | None, "confidence": float, "probabilities": {...}}.
+
+        ``None`` means undecided (below threshold or no candidates and no request),
+        and the caller falls back to its own rule."""
+        if not self.api_key:
+            return {"choice": None, "confidence": 0.0, "probabilities": {}, "reason": "disabled"}
+        now = time.time()
+        options: Dict[str, Any] = {}
+        for t in candidates[:40]:
+            options[f"T{t['id']}"] = candidate_view(t, now)
+        options[NEW] = {
+            "meaning": "This message is about a different piece of work from every task listed: "
+                       "a new job, even if it is with the same person.",
+            "proposed_title": proposed_title or "",
+        }
+        options[NO_TASK] = "This message is only conversation (a greeting, thanks, small talk, a question " \
+                           "answered without doing anything) and does not belong to any piece of work."
+        state = {
+            "sender": sender_label,
+            "conversation_so_far": [
+                f"[{m.get('kind')}] {str(m.get('text') or '')[:300]}" for m in history[-8:]
+            ],
+            "new_message": message,
+            "router_suggestion": router_hint or "(none)",
+        }
+        body = {
+            "state": state,
+            "model": self.model,
+            "questions": {
+                "task": {
+                    "type": "choice",
+                    "instructions": {
+                        "question": "Which task does `new_message` belong to?",
+                        "how_to_decide": [
+                            "A task is a unit of work, not a person. The same person can have several tasks.",
+                            "Continue an existing task when the message is about that same work: a follow-up, "
+                            "a correction, a status question, or the next step of it.",
+                            f"Choose {NEW} when the message asks for a different job, even from someone who "
+                            "already has tasks.",
+                            f"Choose {NO_TASK} only when nothing needs doing or tracking.",
+                            "`router_suggestion` is a hint from another model and may be wrong.",
+                        ],
+                    },
+                    "criteria": options,
+                },
+            },
+        }
+        try:
+            async with httpx.AsyncClient(timeout=self.timeout) as client:
+                r = await client.post(TYPESAFE_URL, headers={"Authorization": f"Bearer {self.api_key}"}, json=body)
+                r.raise_for_status()
+                ans = r.json()["answers"]["task"]
+        except Exception as exc:
+            logger.warning("task pick via TypeSafe failed: %s", exc)
+            return {"choice": None, "confidence": 0.0, "probabilities": {}, "reason": f"error: {exc}"}
+        choice = str(ans.get("choice") or "")
+        conf = float(ans.get("confidence") or 0.0)
+        probs = ans.get("probabilities") or {}
+        logger.info("task pick: %s (conf %.2f) top=%s", choice, conf,
+                    sorted(probs.items(), key=lambda kv: -kv[1])[:3])
+        if conf < self.min_confidence:
+            return {"choice": None, "confidence": conf, "probabilities": probs, "reason": "low confidence"}
+        if choice == NEW:
+            return {"choice": "new", "confidence": conf, "probabilities": probs, "reason": "ok"}
+        if choice == NO_TASK:
+            return {"choice": "none", "confidence": conf, "probabilities": probs, "reason": "ok"}
+        return {"choice": choice, "confidence": conf, "probabilities": probs, "reason": "ok"}
