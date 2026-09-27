@@ -731,3 +731,12 @@ def test_everything_on_a_task_is_searchable(tmp_path):
     # the index follows later changes
     s.set_task_summary(t["id"], "Waiting on the deposit invoice.")
     assert [x["id"] for x in s.query_tasks(text="deposit invoice")["tasks"]] == [t["id"]]
+
+
+def test_site_admin_scopes_cover_the_admin_mcps():
+    assert "mcp__sjba-admin__sjba_update_board_member" in tools_for(["sjba_site_write"])
+    assert "mcp__sjba-admin__sjba_update_board_member" not in tools_for(["sjba_site_read"])
+    assert "mcp__sjba-admin__sjba_list_board_members" in tools_for(["sjba_site_read"])
+    assert "mcp__tamid-admin__tamid_update_event" in tools_for(["tamid_site_write"])
+    for name in ("sjba_site_read", "sjba_site_write", "tamid_site_read", "tamid_site_write"):
+        assert name in SCOPES
