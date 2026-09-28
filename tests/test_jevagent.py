@@ -368,3 +368,43 @@ def test_error_result_makes_agent_retry_with_other_args(agent, monkeypatch):
     st = asyncio.run(agent.run(_req("find the mentorship sheet")))
     assert st["ok"] and [c[1]["query"] for c in box.calls] == ["first query", "second query"]
     assert st["steps"][0]["ok"] is False and st["steps"][1]["ok"] is True
+
+
+def test_third_consecutive_same_tool_is_not_offered(agent, monkeypatch):
+    search, info = "mcp__tamid-drive__search_drive_files", "mcp__tamid-drive__get_spreadsheet_info"
+    schemas = {search: {"description": "search", "schema": {"type": "object", "required": ["query"], "properties": {"query": {"type": "string"}}}},
+               info: {"description": "info", "schema": {"type": "object", "required": ["spreadsheet_id"], "properties": {"spreadsheet_id": {"type": "string"}}}}}
+    box = FakeBox(schemas, results={search: "Found: Sheet (ID: 1DDDDDDDDDDDDDDDDDDDDDDD4)", info: "3 tabs, 40 rows"})
+    seen_options = []
+    class J(ScriptedJudge):
+        async def choose(self, state, question, options, min_p=None):
+            seen_options.append(sorted(options))
+            return await super().choose(state, question, options, min_p)
+        async def yes(self, state, question):
+            if "fully achieved" in str(question):
+                return 0.9 if not self.picks else 0.1
+            return 0.9
+    class P(ScriptedProse):
+        async def write(self, instruction, facts):
+            self.calls += 1
+            return "q%d" % self.calls
+    judge = J([search, search, info, "c0"])
+    _patch(monkeypatch, box, judge, P(), [search, info])
+    st = asyncio.run(agent.run(_req("how many rows in the sheet")))
+    assert st["ok"] and [c[0] for c in box.calls] == [search, search, info]
+    assert search not in seen_options[2]          # third step: search was withheld
+
+
+def test_unsure_after_reads_with_low_done_score_fails_over(agent, monkeypatch):
+    lst = "mcp__stern-drive__get_events"
+    box = FakeBox({lst: {"description": "list", "schema": {"type": "object", "properties": {}, "required": []}}}, results={lst: "nothing relevant"})
+    class Unsure(ScriptedJudge):
+        async def choose(self, state, question, options, min_p=None):
+            if self.picks:
+                return await super().choose(state, question, options, min_p)
+            return None, 0.2, {}
+        async def yes(self, state, question):
+            return 0.05
+    _patch(monkeypatch, box, Unsure([lst]), ScriptedProse(), [lst])
+    st = asyncio.run(agent.run(_req("book the thing")))
+    assert not st["ok"] and "unsure" in st["error"]

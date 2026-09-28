@@ -407,6 +407,10 @@ class JevAgent:
                         if p_done >= 0.6:
                             break
                     options = dict(tool_options)
+                    if len(steps) >= 2 and steps[-1]["tool"] == steps[-2]["tool"] and len(options) > 1:
+                        # Two calls of the same tool in a row: the next move must be a different
+                        # one (open a result, read a sheet), not a third search.
+                        options.pop(steps[-1]["tool"], None)
                     options[GIVE_UP] = "The goal cannot be achieved with these tools or the information available."
                     choice, conf, probs = await judge.choose(
                         state,
@@ -422,16 +426,17 @@ class JevAgent:
                         options)
                     logger.info("jev agent step %d: %s (conf %.2f)", step + 1, choice, conf)
                     if choice is None:
-                        if steps and steps[-1]["ok"] and not is_write_tool(steps[-1]["tool"]):
-                            # Nothing stands out after a read: what was gathered is the answer
-                            # (the gate's reply model phrases it; reads cost nothing to stop on).
+                        if steps and steps[-1]["ok"] and not is_write_tool(steps[-1]["tool"]) and p_done >= 0.3:
+                            # Nothing stands out after a read and the goal is plausibly met:
+                            # what was gathered is the answer (the gate's reply model phrases it).
                             logger.info("jev agent: no clear next step after reads (p_done %.2f); finishing", p_done)
                             break
                         return self._status(False, "unsure which step to take next", steps, judge, prose, started,
                                             probs=probs)
                     if choice == GIVE_UP:
-                        if steps and all(s["ok"] and not is_write_tool(s["tool"]) for s in steps):
-                            # Everything so far was a successful read: what was found IS the answer.
+                        if steps and p_done >= 0.3 and all(s["ok"] and not is_write_tool(s["tool"]) for s in steps):
+                            # Everything so far was a successful read and the goal is plausibly met:
+                            # what was found IS the answer.
                             # The gateway delivers it to the requester; nothing needs sending.
                             logger.info("jev agent: give_up after reads only; finishing with what was found")
                             break
