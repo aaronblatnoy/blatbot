@@ -277,6 +277,27 @@ class GateSession:
             return
         out.task = choice
 
+    async def jev_scopes(self, out: RouterOutput) -> None:
+        """Replace the router's scope list with Jev's judgment when it yields a
+        non-empty set. Empty or unavailable: the router's list stands. Code never
+        lets this widen beyond the fixed scope map, since pydantic already
+        validated names and the executor only ever grants mapped tools."""
+        picker = self.m.task_picker
+        if picker is None or out.request is None:
+            return
+        res = await picker.judge_scopes(
+            prompt=out.request.prompt, summary=out.request.summary,
+            scopes={k: str(v["description"]) for k, v in SCOPES.items()},
+            router_scopes=list(out.request.scopes))
+        chosen = res.get("scopes")
+        if not chosen:
+            logger.info("[gate %s] scope judgment undecided (%s); keeping router scopes %s",
+                        self.chat_id, res.get("reason"), out.request.scopes)
+            return
+        if set(chosen) != set(out.request.scopes):
+            logger.info("[gate %s] scopes: router %s -> jev %s", self.chat_id, out.request.scopes, chosen)
+        out.request.scopes = chosen
+
     def task_memory(self) -> str:
         mem = self.m.store.task_memory(self.chat_id, is_approver=self.is_approver(),
                                        person="" if self.is_approver() else self._sender())
@@ -430,6 +451,7 @@ class GateSession:
                     contact_notes=self._contact_notes(), is_approver=approver, task_memory=memory,
                     found_tasks=found)
                 await self.jev_pick(body, history[:-1], out)
+                await self.jev_scopes(out)
                 reply = out.reply or ""
                 if reply:
                     self.m.store.add_message(self.chat_id, "outbound", reply, "voice")
@@ -506,6 +528,7 @@ class GateSession:
             out.request = None
         if not system_note:
             await self.jev_pick(message, prior, out)
+            await self.jev_scopes(out)
         task: Optional[Dict[str, Any]] = None
         if not system_note and (out.request is not None or _names_a_task(out.task)):
             task = self.m.resolve_task(self, out)  # enforced: every request is written to a task

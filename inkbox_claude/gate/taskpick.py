@@ -71,6 +71,9 @@ EVENT_KINDS = {
 }
 
 
+SCOPE_MIN_YES = float(os.getenv("TYPESAFE_SCOPE_MIN_YES") or 0.6)
+
+
 class TaskPicker:
     def __init__(self, api_key: Optional[str] = None, model: Optional[str] = None,
                  min_confidence: Optional[float] = None, timeout: float = 20.0):
@@ -79,6 +82,47 @@ class TaskPicker:
         self.min_confidence = float(min_confidence if min_confidence is not None
                                     else (os.getenv("TYPESAFE_TASK_MIN_CONF") or 0.55))
         self.timeout = timeout
+
+    async def judge_scopes(self, *, prompt: str, summary: str, scopes: Dict[str, str],
+                           router_scopes: Optional[List[str]] = None) -> Dict[str, Any]:
+        """Which tool scopes does this task prompt need? One yes/no (Noul) per scope,
+        all asked together over the same prompt. Returns {"scopes": [...], "probabilities": {...}}.
+        A scope is granted when its yes-probability is at or above SCOPE_MIN_YES.
+        The router's own list is a hint in the state and the caller's fallback."""
+        if not self.api_key or not scopes:
+            return {"scopes": None, "probabilities": {}, "reason": "disabled"}
+        state = {
+            "task_summary": summary,
+            "task_prompt": prompt,
+            "another_model_suggested": router_scopes or [],
+        }
+        questions: Dict[str, Any] = {}
+        for name, desc in scopes.items():
+            questions[name] = {
+                "type": "noul",
+                "instructions": {
+                    "capability": desc,
+                    "question": "Does carrying out `task_prompt` require this capability? Judge by what the task "
+                                "must actually do, not by what is merely mentioned.",
+                },
+                "criteria": {
+                    "true": "At least one step of the task cannot be completed without this capability.",
+                    "false": "The task can be completed fully without it, or it is only referenced in passing.",
+                },
+            }
+        body = {"state": state, "model": self.model, "questions": questions}
+        try:
+            async with httpx.AsyncClient(timeout=self.timeout) as client:
+                r = await client.post(TYPESAFE_URL, headers={"Authorization": f"Bearer {self.api_key}"}, json=body)
+                r.raise_for_status()
+                answers = r.json()["answers"]
+        except Exception as exc:
+            logger.warning("scope judgment via TypeSafe failed: %s", exc)
+            return {"scopes": None, "probabilities": {}, "reason": f"error: {exc}"}
+        probs = {k: float((answers.get(k) or {}).get("noul") or 0.0) for k in scopes}
+        chosen = [k for k, v in probs.items() if v >= SCOPE_MIN_YES]
+        logger.info("scope judgment: %s | top=%s", chosen, sorted(probs.items(), key=lambda kv: -kv[1])[:5])
+        return {"scopes": chosen, "probabilities": probs, "reason": "ok"}
 
     async def judge_event(self, *, message: str, sender_label: str, task: Dict[str, Any],
                           history: List[Dict[str, Any]]) -> Dict[str, Any]:

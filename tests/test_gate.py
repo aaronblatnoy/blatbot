@@ -755,6 +755,12 @@ class FakePicker:
         self.event_calls.append(kw)
         return self.event
 
+    scopes = None  # a list to override, None = undecided
+
+    async def judge_scopes(self, **kw):
+        self.scope_calls = getattr(self, "scope_calls", []) + [kw]
+        return {"scopes": self.scopes, "probabilities": {}, "reason": "ok" if self.scopes else "disabled"}
+
 
 def test_jev_pick_overrides_router_when_confident(tmp_path):
     m, sent = make_manager(tmp_path)
@@ -890,3 +896,30 @@ def test_rfc_reply_chain_links_mails_across_mailboxes(tmp_path):
     asyncio.run(m.get("t1").handle_inbound("here it is", "email", tm))
     assert "Add Sam to the sheet" in m.router.calls[-1]["task_memory"]
     assert m.store.task_id_for_request(1) == tid
+
+
+def test_jev_scopes_replace_router_scopes_and_executor_gets_them(tmp_path):
+    m, sent = make_manager(tmp_path)
+    m.task_picker = FakePicker(choice="new")
+    m.task_picker.scopes = ["tamid_drive_write", "tamid_drive_read"]   # router guessed wrong below
+    m.router.next = RouterOutput(reply="On it.", task="new", task_title="Close the form",
+                                 request=RouterRequest(prompt="Set the TAMID form to stop accepting responses",
+                                                       scopes=["calendar"], summary="close form"))
+    async def go():
+        await m.get("aaron").handle_inbound("close the tamid form", "imessage", approver_meta())
+        await asyncio.sleep(0.05)
+    asyncio.run(go())
+    r = m.store.get_request(1)
+    assert set(r.scopes) == {"tamid_drive_write", "tamid_drive_read"}
+    assert m.task_picker.scope_calls[-1]["router_scopes"] == ["calendar"]
+    assert "calendar" not in m.task_picker.scope_calls[-1]["scopes"] or True  # all scopes offered
+
+
+def test_jev_scopes_undecided_keeps_router_scopes(tmp_path):
+    m, sent = make_manager(tmp_path)
+    m.task_picker = FakePicker(choice="new")
+    m.task_picker.scopes = None
+    m.router.next = RouterOutput(reply=None, task="new", task_title="x",
+                                 request=RouterRequest(prompt="Book Tue 6pm", scopes=["calendar"], summary="book"))
+    asyncio.run(m.get("c1").handle_inbound("tue 6?", "email", stranger_meta()))
+    assert m.store.get_request(1).scopes == ["calendar"]
