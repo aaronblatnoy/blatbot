@@ -127,6 +127,12 @@ delegates. From the gateway down, the path is identical for all channels.
                   │  │  │                  id slot or UNKNOWN is rejected          │  │
                   │  │  │ guard        send aimed at the requester ──> refused     │  │
                   │  │  │              identical repeat of a done step ──> stop    │  │
+                  │  │  │              same tool twice in a row ──> next must differ│  │
+                  │  │  │              a value already tried ──> not offered again  │  │
+                  │  │  │              error text in a result ──> a failed step     │  │
+                  │  │  │ budget       state over ~100k chars ──> largest result   │  │
+                  │  │  │              becomes a digest; a result over budget is   │  │
+                  │  │  │              narrowed: split, Jev scores parts, descend  │  │
                   │  │  │ call         Inkbox tools in-process; Google and site   │  │
                   │  │  │              servers over MCP stdio; result kept whole  │  │
                   │  │  └──────────────────────────────────────────────────────────┘  │
@@ -260,6 +266,54 @@ code computes from the clock, so no text model ever writes a date. Prose values
 for one call are requested concurrently. Both executors refuse any send aimed
 at the requester (address, phone, conversation, or the owner's), so a result is
 delivered exactly once, by the gate.
+
+### Limits and the breakdown
+
+TypeSafe accepts about 32k input tokens per request (measured: 32,787 passed, the
+next step up returned `max_tokens_exceeded`); a Choice takes at most 255 options.
+The agent keeps every judgment under that without truncating anything a person or
+the prose model sees:
+
+- A judgment state under ~100k characters is sent raw.
+- Over that, `_fit` replaces the largest value with a digest (kind, size, keys,
+  item counts, header lines, counts of ids and addresses), largest first, until it
+  fits. The full results stay in the agent's facts and in the report.
+- When a value must be selected from a single result that is itself over budget,
+  `narrow` runs a search in the shape of a binary search: split the text on line
+  boundaries into parts that fit, ask Jev in parallel whether each part contains
+  what the argument needs, descend into the best part, split again, down to a
+  6k-character leaf. Candidates are extracted from that leaf. A 4,000-row result
+  resolves in about four rounds.
+- Candidates are newest-result-first and capped at 250.
+- If TypeSafe still refuses a request, one retry replaces oversized strings with
+  markers; any other judgment failure counts as unsure.
+
+Other guards in the loop: a tool result that reads as an error (HTTP errors, "Error
+calling tool") is a failed step; a value a tool already received for an argument is
+not offered again, and the prose model is told which queries found nothing; after two
+calls of the same tool in a row the next step must be a different tool; an unsure
+step after reads finishes only when the done score is at least 0.3, otherwise the
+run fails over. Step budget 12.
+
+### One request, one response
+
+`Store.running_for_thread` blocks a second request on a thread while one is
+executing: the new message is written to the task and acknowledged, and if the
+running request fails, the latest such message is re-decided as a fresh turn.
+`GateSessionManager._run_executor` returns exactly one status; Claude Code, when it
+runs, runs inside that call as an escalation (status carries `escalated: true` and
+the Jev attempt as metadata) and nothing is delivered, noted, or phrased for the
+Jev attempt. Both executors refuse sends to the requester at the tool call.
+
+### Browser
+
+`browser_read` (navigate, snapshot, find, screenshot, wait, tabs) and `browser_act`
+(adds click, type, forms, select, keys, hover, drag, upload, dialogs) map to a
+headless, isolated Playwright MCP server (`npx @playwright/mcp --headless
+--isolated --browser chromium`) registered in the machine Claude config next to the
+other servers. The code-execution tools are in neither scope and on the executor
+deny list. Browser actions count as writes. No saved logins: pages behind a sign-in
+need a persistent profile, not set up.
 
 ### Measured
 

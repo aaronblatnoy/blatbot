@@ -124,6 +124,12 @@ So the real question is not "can the model do the task." It is "who is allowed t
                   │  │  │                  id slot or UNKNOWN is rejected          │  │
                   │  │  │ guard        send aimed at the requester ──> refused     │  │
                   │  │  │              identical repeat of a done step ──> stop    │  │
+                  │  │  │              same tool twice in a row ──> next must differ│  │
+                  │  │  │              a value already tried ──> not offered again  │  │
+                  │  │  │              error text in a result ──> a failed step     │  │
+                  │  │  │ budget       state over ~100k chars ──> largest result   │  │
+                  │  │  │              becomes a digest; a result over budget is   │  │
+                  │  │  │              narrowed: split, Jev scores parts, descend  │  │
                   │  │  │ call         Inkbox tools in-process; Google and site   │  │
                   │  │  │              servers over MCP stdio; result kept whole  │  │
                   │  │  └──────────────────────────────────────────────────────────┘  │
@@ -132,7 +138,9 @@ So the real question is not "can the model do the task." It is "who is allowed t
                   │  │         FAILED: give up, a tool failed twice, an argument      │
                   │  │         could not be filled, step limit                        │
                   │  │  FAILED and nothing written ──> Claude Code runs the same     │
-                  │  │         prompt with the same tools, same send guard            │
+                  │  │         prompt inside this same call: an escalation, not a    │
+                  │  │         second execution; ONE status leaves, nothing is       │
+                  │  │         delivered for the Jev attempt                          │
                   │  │  FAILED after a write ──> stop, report; never retried         │
                   │  └──────────────────────────────┬─────────────────────────────────┘
                   │                                 v
@@ -217,6 +225,13 @@ threshold and every consequence. This is the complete list.
 | 10 | same call | same | for each id / email / phone argument: which of these values? | the candidate values found in the request and earlier results, or "write new" | copies the pick verbatim; top <0.3 on an optional argument omits it |
 | 11 | same call | same | for each date-bound argument: which range? | today / tomorrow / yesterday / this week / last week / next week / next 7 days / past 7 days / this month / next 30 days / "specific" | fills the start or end from ranges computed off the clock |
 | 12 | same call | same | for each enum or boolean: which value? | the enum | copies it |
+| 13 | only when one result is over the API budget | goal, what the argument needs, one part of the result | does this part contain it? one per part, in parallel | probability per part | descends into the best part, splits again, down to a 6k leaf; candidates come from the leaf |
+
+Jev's ceiling is about 32k input tokens per request. A judgment state under that goes
+in raw. Over it, code replaces the largest value with a structural digest (kind, size,
+keys, counts, header lines, how many ids and addresses it holds), largest first, until
+it fits. Only the judgment is shrunk; the full results still reach the prose model, the
+reply model, and the owner.
 
 Anything not on this list is either code (hashing, permissions, the send guard, the
 loop limit, calling the tool) or DeepSeek writing words: the reply to the sender, a
@@ -234,7 +249,8 @@ These are the decisions the whole thing rests on.
 5. **A task is a unit of work, not a person.** One person can have several tasks; a task can involve several people, each reachable by email, phone, and iMessage. Every inbound message is assigned to a task before anything else happens, and every request is written to one. The ledger is full-text searchable and loaded before every turn, which is what lets the assistant pick a task back up hours later.
 6. **The phone is a surface, not a second brain.** The voice model runs the conversation and is deliberately told nothing about the system behind it. When something real is needed it hands off, and that hand-off enters the same gateway as a text message, under the same rules. A caller who talks the voice model into something gains nothing, because the gate still checks the real caller number.
 7. **The assistant never claims work it has not done.** Replies can only report an action as complete when the ledger shows it completed.
-8. **Tools are called by code, not by a chat model.** The agent that runs an approved request is a loop of typed judgments: is the goal met, which tool next, which of the values already in play fills each argument. Dates come from the clock, ids from earlier results. A text model is called only for text that must be composed, such as an email body. Claude Code remains as a fallback for what the loop cannot do, and only when nothing has been written yet.
+8. **One request at a time per thread, one response per request.** A message that arrives while a request is running joins the task and is acknowledged; it never starts a second run. Execution returns exactly one status. When the agent gives up without having written anything, Claude Code runs as an escalation inside that same execution, and only its status leaves. The result is phrased and sent once.
+9. **Tools are called by code, not by a chat model.** The agent that runs an approved request is a loop of typed judgments: is the goal met, which tool next, which of the values already in play fills each argument. Dates come from the clock, ids from earlier results. A text model is called only for text that must be composed, such as an email body. Claude Code remains as a fallback for what the loop cannot do, and only when nothing has been written yet.
 
 ## A worked example
 
@@ -260,7 +276,7 @@ Everything custom lives in one folder plus one file.
 | `inkbox_claude/gate/taskpick.py` | The typed judgments (TypeSafe Jev): which task, whether action is needed, which scopes, what the message did to the task |
 | `inkbox_claude/gate/jevagent.py` | The executor: a loop of typed judgments that picks tools and selects arguments, calls MCP tools directly, prose only on demand |
 | `inkbox_claude/gate/executor.py` | The Claude Code fallback for a hash-checked prompt, tools limited to the scopes |
-| `inkbox_claude/gate/scopes.py` | Scope names mapped to tool lists |
+| `inkbox_claude/gate/scopes.py` | Scope names mapped to tool lists, including a headless browser (Playwright over MCP) as read-only and interactive scopes, and the send-to-requester guard |
 | `inkbox_claude/live.py` | The phone bridge for OpenAI GPT-Live, using client delegation |
 | `tests/test_gate.py`, `tests/test_jevagent.py`, `tests/test_live.py` | Tests, including scripted judgments and simulated phone calls with fake sockets |
 | `docs/blatbot-architecture.md` | Longer design notes and the Live versus Realtime comparison |
