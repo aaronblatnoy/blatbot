@@ -4,6 +4,7 @@ executor hash refusal, routing with a stubbed router. No network."""
 from __future__ import annotations
 
 import asyncio
+import time
 import json
 from types import SimpleNamespace
 
@@ -1169,3 +1170,22 @@ def test_escalation_to_claude_produces_exactly_one_response(tmp_path):
     assert outbound == ["On it.", "There are 40 rows."]                  # one ack, one result, nothing in between
     everything = " ".join(outbound) + " ".join(x["text"] for x in m.store.history("aaron", 50)) + m.store.task_memory_for_task(1)
     assert "JEV-GAVE-UP" not in everything and "CLAUDE-RESULT" in everything
+
+
+def test_stale_running_request_does_not_block_the_thread(tmp_path):
+    m, sent = make_manager(tmp_path)
+    t = m.store.create_task("Old work")
+    old = m.store.create_request(chat_id="aaron", sender="+15550100001", sender_name="Aaron", mode="imessage", subject="",
+                                 original_message="old", summary="old", scopes=["calendar"], prompt="old", state="approved", task_id=t["id"])
+    m.store.set_state(old.id, "running")
+    with m.store._lock:
+        m.store._db.execute("UPDATE requests SET updated_at=? WHERE id=?", (time.time() - 3600, old.id)); m.store._db.commit()
+    assert m.store.running_for_thread("aaron") is None
+    assert m.store.get_request(old.id).state == "failed"
+    m.router.next = RouterOutput(reply="On it.", task="new", task_title="New work",
+                                 request=RouterRequest(prompt="do new", scopes=["calendar"], summary="New work"))
+    async def go():
+        await m.get("aaron").handle_inbound("do the new thing", "imessage", approver_meta())
+        await asyncio.sleep(0.05)
+    asyncio.run(go())
+    assert m.store.get_request(old.id + 1) is not None and m.executor.ran == [old.id + 1]

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import logging
 import sqlite3
 import threading
 import time
@@ -129,6 +130,9 @@ class Person:
             if k and k not in keys:
                 keys.append(k)
         return cls(person_id=str(contact.get("id") or ""), display=display, keys=keys)
+
+
+logger = logging.getLogger(__name__)
 
 
 class TaskRequired(RuntimeError):
@@ -463,13 +467,22 @@ class Store:
             ).fetchone()
         return Request.from_row(r) if r else None
 
+    RUN_STALE_S = 15 * 60  # longer than any executor timeout: a run this old died without reporting
+
     def running_for_thread(self, chat_id: str) -> Optional[Request]:
-        """The request currently executing on this thread, if any."""
+        """The request currently executing on this thread, if any. A run older than
+        RUN_STALE_S is not running any more whatever its row says (a restart mid-run
+        leaves 'running' behind); it is marked failed here so it never blocks a thread."""
         with self._lock:
             r = self._db.execute(
                 "SELECT * FROM requests WHERE chat_id=? AND state IN ('approved','running') ORDER BY id DESC LIMIT 1",
                 (chat_id,),
             ).fetchone()
+            if r and time.time() - float(r["updated_at"]) > self.RUN_STALE_S:
+                self._db.execute("UPDATE requests SET state='failed', updated_at=? WHERE id=?", (time.time(), r["id"]))
+                self._db.commit()
+                logger.warning("[store] request #%s had been 'running' since %s; marked failed (stale)", r["id"], r["updated_at"])
+                return None
         return Request.from_row(r) if r else None
 
     def inbound_since(self, chat_id: str, since: float) -> List[str]:
