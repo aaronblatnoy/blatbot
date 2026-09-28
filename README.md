@@ -61,11 +61,11 @@ So the real question is not "can the model do the task." It is "who is allowed t
  │ DECIDE   TypeSafe Jev. Each answer is a pick from a list or a probability,        │
  │          never free text. About 0.2 s each.                                       │
  │                                                                                   │
- │  1  which task?      Choice over open tasks the sender is on, or on this thread,  │
- │                      or found by search  +  "new task"  +  "no task"              │
- │                      below 0.55 confidence: abstain (a new task is started)       │
- │  2  needs a tool?    yes/no.  "book", "send", "look up", "is X open" ──> yes      │
- │                      thanks, small talk, a question about the assistant ──> no    │
+ │  1  which task?      state: the message, last 6 turns, each candidate task's      │
+ │                      id, title, where it stands, people, age. Choice over them    │
+ │                      + new_task + no_task. Under 0.55 confidence: abstain.        │
+ │  2  needs a tool?    state: message, turns, the task from 1. Noul. p ≥ 0.5 ──> a   │
+ │                      request is built; else the reply writer answers in words.   │
  │  3  what happened?   event kind: asked / provided info / confirmed / changed /    │
  │                      declined / progress / conversation                           │
  │                      who it now waits on: owner / other person / nobody           │
@@ -148,6 +148,54 @@ So the real question is not "can the model do the task." It is "who is allowed t
  └───────────────────────────────────────────────────────────────────────────────────┘
 ```
 
+
+### One request, every call
+
+What actually happened for one owner text on 2026-09-28, from the log. Times are wall
+clock on the server.
+
+```
+03:24:35  iMessage from the owner's thread: "give me a list of all coffee chats from last week."
+03:24:35  gateway: sender matches INKBOX_APPROVER_IMESSAGE_CONVERSATION_ID -> OWNER
+          message stored on the thread; ledger loaded: 12 open tasks, 17,710 chars
+03:24:36  ledger search (DeepSeek planned the filter, code ran the SQL):
+            {text: "coffee chat", states: [live], touched_within_days: 3} -> 0 new matches
+03:24:37  Jev #1 which task?   state = {message, last turns, candidates: [T62 "List
+            Aaron's coffee chats from last week", T65 "List TAMID board members", ...]}
+            answer: T62 (0.96)
+03:24:37  Jev #2 needs a tool?  state = {message, turns, task: T62}   answer: yes (0.96)
+03:24:38  DeepSeek reply writer, told "a request was created on T62 and will run now":
+            reply = "On it, pulling last week's coffee chats now."      -> sent
+03:24:38  code builds the request:
+            prompt  = the message verbatim + last turns + T62's record
+            summary = "List Aaron's coffee chats from last week"
+03:24:38  Jev #6 scopes, one Noul each over that prompt:
+            stern_calendar 0.90  imessage_send 0.69  sms_send 0.62  inbox_read 0.20 ...
+            granted: stern_calendar (+ imessage_send, sms_send that night; since fixed:
+            sending is only for messaging other people)
+03:24:39  Jev #3-5 event on T62: kind=asked, waits on=owner, resolved=0.1 -> ledger
+03:24:39  gate: OWNER -> approved, run now.  prompt hashed and stored as request #155
+03:24:39  AGENT starts. tools = the scope's list; stern-drive MCP server started (2 s cold)
+03:24:41  Jev #8 next tool?  state = {goal, T62 record, now, steps: []}
+            answer: get_events (0.66)
+03:24:42  Jev #9-12 arguments for get_events, one batched call:
+            user_google_email      fixed by code: the owner's account
+            calendar_id  optional  supply? 0.31 -> omitted (primary calendar)
+            time_min     range?    last_week (0.88) -> 2026-09-21T00:00:00-04:00
+            time_max     range?    last_week (0.91) -> 2026-09-28T00:00:00-04:00
+            query        optional  supply? 0.72 -> must be written:
+                                   DeepSeek -> "coffee"
+03:24:45  tool call get_events(...)  -> 6 events, kept in full
+03:24:46  Jev #7 done?  state = {goal, steps: [get_events -> 6 events ...]}  p = 0.54
+03:24:46  Jev #8 next tool?  answer: give_up (0.79)  [it wanted to "send" the list]
+          -> all steps so far were successful reads: finish with the findings
+03:24:47  request #155 done. result = the six events, whole.
+03:24:47  DeepSeek reply writer, told "no action" with the result as a system note:
+            "Coffee chats last week (Mon 9/21 to Fri 9/25): 1. ... 6. ..."   -> sent
+```
+
+Eleven Jev calls, two DeepSeek calls for words and one for a search term, one tool
+call, no Anthropic call. About 12 s including a cold MCP server start; 5 s warm.
 
 ### Every judgment, and what code does with it
 

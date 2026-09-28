@@ -64,11 +64,11 @@ delegates. From the gateway down, the path is identical for all channels.
  │ DECIDE   TypeSafe Jev. Each answer is a pick from a list or a probability,        │
  │          never free text. About 0.2 s each.                                       │
  │                                                                                   │
- │  1  which task?      Choice over open tasks the sender is on, or on this thread,  │
- │                      or found by search  +  "new task"  +  "no task"              │
- │                      below 0.55 confidence: abstain (a new task is started)       │
- │  2  needs a tool?    yes/no.  "book", "send", "look up", "is X open" ──> yes      │
- │                      thanks, small talk, a question about the assistant ──> no    │
+ │  1  which task?      state: the message, last 6 turns, each candidate task's      │
+ │                      id, title, where it stands, people, age. Choice over them    │
+ │                      + new_task + no_task. Under 0.55 confidence: abstain.        │
+ │  2  needs a tool?    state: message, turns, the task from 1. Noul. p ≥ 0.5 ──> a   │
+ │                      request is built; else the reply writer answers in words.   │
  │  3  what happened?   event kind: asked / provided info / confirmed / changed /    │
  │                      declined / progress / conversation                           │
  │                      who it now waits on: owner / other person / nobody           │
