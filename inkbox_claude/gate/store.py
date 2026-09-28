@@ -463,6 +463,24 @@ class Store:
             ).fetchone()
         return Request.from_row(r) if r else None
 
+    def running_for_thread(self, chat_id: str) -> Optional[Request]:
+        """The request currently executing on this thread, if any."""
+        with self._lock:
+            r = self._db.execute(
+                "SELECT * FROM requests WHERE chat_id=? AND state IN ('approved','running') ORDER BY id DESC LIMIT 1",
+                (chat_id,),
+            ).fetchone()
+        return Request.from_row(r) if r else None
+
+    def inbound_since(self, chat_id: str, since: float) -> List[str]:
+        """Inbound message texts on this thread after a point in time, oldest first."""
+        with self._lock:
+            rows = self._db.execute(
+                "SELECT text FROM messages WHERE chat_id=? AND kind='inbound' AND created_at>? ORDER BY id",
+                (chat_id, since),
+            ).fetchall()
+        return [r["text"] for r in rows]
+
     def set_state(self, rid: int, state: str, *, status: Optional[Dict[str, Any]] = None,
                   raw_output: Optional[str] = None) -> None:
         with self._lock:
@@ -700,7 +718,7 @@ class Store:
             seen: Dict[int, Dict[str, Any]] = {}
             total = 0
             for sub in any_of:
-                r = self.query_tasks(**{k: v for k, v in sub.items() if k not in ("any_of", "limit")}, limit=50)
+                r = self.query_tasks(**{k: v for k, v in sub.items() if k != "any_of"}, limit=50)
                 for t in r["tasks"]:
                     seen.setdefault(int(t["id"]), t)
             ordered = sorted(seen.values(), key=lambda t: (0 if t["state"] in OPEN_STATES else 1, -t["updated_at"]))

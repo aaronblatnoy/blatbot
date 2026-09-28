@@ -276,3 +276,30 @@ def test_agent_refuses_to_message_requester(agent, monkeypatch):
     r = _req("text me at 407-808-8771 my coffee chats from last week"); r.sender = "+14078088771"
     st = asyncio.run(agent.run(r))
     assert st["ok"] and [c[0] for c in box.calls] == [lst], box.calls     # the send never happened
+
+
+def test_slim_state_only_replaces_oversized_strings():
+    from inkbox_claude.gate.jevagent import _slim_state, _LARGE
+    st = {"goal": "g", "known_facts": {"a": "x" * (_LARGE + 1), "b": "small"}, "steps": ["s -> " + "y" * (_LARGE + 5)]}
+    out, n = _slim_state(st)
+    assert n == 2 and out["known_facts"]["b"] == "small" and out["goal"] == "g"
+    assert "character tool result" in out["known_facts"]["a"] and "character tool result" in out["steps"][0]
+
+
+def test_judge_retries_slim_on_too_large(monkeypatch):
+    from inkbox_claude.gate import jevagent
+    j = jevagent.Judge()
+    seen = []
+    async def post(state, questions):
+        seen.append(state)
+        if len(seen) == 1:
+            raise jevagent.JudgeTooLarge("max_tokens_exceeded")
+        return {"q": {"noul": 0.9}}
+    j._post = post
+    big = {"goal": "g", "known_facts": {"r": "z" * (jevagent._LARGE + 1)}}
+    ans = asyncio.run(j.ask(big, {"q": {"type": "noul", "instructions": "?"}}))
+    assert ans == {"q": {"noul": 0.9}} and len(seen) == 2 and "character tool result" in seen[1]["known_facts"]["r"]
+
+    async def boom(state, questions): raise RuntimeError("down")
+    j._post = boom
+    assert asyncio.run(j.ask({"goal": "g"}, {"q": {"type": "noul", "instructions": "?"}})) == {}

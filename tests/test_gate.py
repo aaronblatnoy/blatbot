@@ -30,7 +30,7 @@ class FakeRouter:
 
     async def route(self, **kw):
         self.calls.append(kw)
-        return self.next
+        return self.next.model_copy(deep=True)  # a fresh object per call, like the real router
 
 
 class FakeExecutor:
@@ -1078,3 +1078,62 @@ def test_browser_scopes_split_read_from_act():
     assert read < act and "mcp__playwright__browser_fill_form" in act
     assert "mcp__playwright__browser_run_code_unsafe" not in act and "mcp__playwright__browser_evaluate" not in act
     assert is_write_tool("mcp__playwright__browser_click") and not is_write_tool("mcp__playwright__browser_snapshot")
+
+
+class HoldingExecutor(FakeExecutor):
+    """Blocks until released, so a second message can arrive mid-run."""
+    def __init__(self):
+        super().__init__()
+        self.release = asyncio.Event()
+        self.started = asyncio.Event()
+
+    async def run(self, req, context=""):
+        self.started.set()
+        await self.release.wait()
+        return await super().run(req, context)
+
+
+def test_message_during_a_running_request_does_not_start_a_second_one(tmp_path):
+    m, sent = make_manager(tmp_path)
+    m.executor = HoldingExecutor()
+    m.router.next = RouterOutput(reply="On it.", task="new", task_title="Acceptance rate",
+                                 request=RouterRequest(prompt="compute it", scopes=["tamid_drive_read"], summary="Acceptance rate"))
+    async def go():
+        s = m.get("aaron")
+        await s.handle_inbound("what's my acceptance rate as a reviewer?", "imessage", approver_meta())
+        await m.executor.started.wait()
+        m.router.next = RouterOutput(reply="Noted, using that sheet.", task="new", task_title="x",
+                                     request=RouterRequest(prompt="again", scopes=["tamid_drive_read"], summary="again"))
+        await s.handle_inbound("it's in the Fall 2026 responses sheet", "imessage", approver_meta())
+        assert m.store.get_request(2) is None                      # no second request while #1 runs
+        assert m.router.calls[-1]["action"] is True                # router told a request is running
+        m.router.next = RouterOutput(reply="Done: 47%.", task="T1")  # the result phrasing
+        m.executor.release.set()
+        await asyncio.sleep(0.1)
+    asyncio.run(go())
+    assert m.store.get_request(1).state == "done"
+    assert len(m.executor.ran) == 1
+    outbound = [t for _, t, *_ in sent]
+    assert outbound == ["On it.", "Noted, using that sheet.", "Done: 47%."]
+
+
+def test_failed_run_re_decides_the_message_that_arrived_meanwhile(tmp_path):
+    m, sent = make_manager(tmp_path)
+    m.executor = HoldingExecutor()
+    m.executor.result = {"ok": False, "error": "nothing found", "tool_calls": [], "raw": "STATUS: FAILED"}
+    m.router.next = RouterOutput(reply="On it.", task="new", task_title="Acceptance rate",
+                                 request=RouterRequest(prompt="compute it", scopes=["tamid_drive_read"], summary="Acceptance rate"))
+    async def go():
+        s = m.get("aaron")
+        await s.handle_inbound("what's my acceptance rate?", "imessage", approver_meta())
+        await m.executor.started.wait()
+        m.router.next = RouterOutput(reply="Got it.", task="T1",
+                                     request=RouterRequest(prompt="use the sheet", scopes=["tamid_drive_read"], summary="Acceptance rate from sheet"))
+        await s.handle_inbound("use the Fall 2026 responses sheet", "imessage", approver_meta())
+        assert m.store.get_request(2) is None
+        m.executor.release.set()
+        await asyncio.sleep(0.2)
+    asyncio.run(go())
+    r2 = m.store.get_request(2)
+    assert r2 is not None and r2.original_message == "use the Fall 2026 responses sheet"
+    assert m.store.get_request(1).state == "failed"

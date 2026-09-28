@@ -184,6 +184,10 @@ def mcp_config_from_claude_json() -> Dict[str, Dict[str, Any]]:
 # ----------------------------------------------------------------------------
 
 
+class JudgeTooLarge(Exception):
+    """TypeSafe refused the state as over its token limit."""
+
+
 class Judge:
     def __init__(self) -> None:
         self.api_key = (os.getenv("TYPESAFE_API_KEY") or "").strip()
@@ -192,10 +196,33 @@ class Judge:
         self.calls = 0
 
     async def ask(self, state: Any, questions: Dict[str, Any]) -> Dict[str, Any]:
+        """One TypeSafe request. A state over the model's token limit is retried once
+        with the large raw tool results replaced by size markers (candidate values
+        were already extracted from the full text, and the full text still reaches
+        the reply model and the owner untouched). Any other failure returns no
+        answers, which every caller treats as "unsure"."""
         self.calls += 1
+        try:
+            return await self._post(state, questions)
+        except JudgeTooLarge:
+            slim = _slim_state(state)
+            logger.warning("jev agent: state over TypeSafe's limit; retrying with %d large result(s) replaced by markers",
+                           slim[1])
+            try:
+                return await self._post(slim[0], questions)
+            except Exception as exc:
+                logger.warning("jev agent: judgment failed after slimming: %s", exc)
+                return {}
+        except Exception as exc:
+            logger.warning("jev agent: judgment failed: %s", exc)
+            return {}
+
+    async def _post(self, state: Any, questions: Dict[str, Any]) -> Dict[str, Any]:
         async with httpx.AsyncClient(timeout=20.0) as client:
             r = await client.post(TYPESAFE_URL, headers={"Authorization": f"Bearer {self.api_key}"},
                                   json={"state": state, "model": self.model, "questions": questions})
+            if r.status_code == 400 and "max_tokens_exceeded" in r.text:
+                raise JudgeTooLarge(r.text)
             r.raise_for_status()
             return r.json()["answers"]
 
@@ -240,6 +267,27 @@ class Prose:
 # ----------------------------------------------------------------------------
 # The agent
 # ----------------------------------------------------------------------------
+
+
+_LARGE = 20000
+
+
+def _slim_state(state: Any) -> Tuple[Any, int]:
+    """Copy of `state` with every string over _LARGE characters replaced by a marker.
+    Used only when TypeSafe rejects the state as too large. Returns (state, count)."""
+    n = 0
+
+    def walk(v: Any) -> Any:
+        nonlocal n
+        if isinstance(v, str) and len(v) > _LARGE:
+            n += 1
+            return f"(a {len(v):,}-character tool result; its ids, addresses and phones are offered as candidates)"
+        if isinstance(v, dict):
+            return {k: walk(x) for k, x in v.items()}
+        if isinstance(v, list):
+            return [walk(x) for x in v]
+        return v
+    return walk(state), n
 
 
 def _text(v: Any) -> str:

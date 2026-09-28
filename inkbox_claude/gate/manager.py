@@ -187,28 +187,13 @@ class GateSession:
     async def lookup_tasks(self, history: List[Dict[str, Any]], message: str, in_view: str) -> str:
         """Query pass: the router emits a structured filter, code runs it. Non-owners
         are confined to tasks they are on; the owner can query everything."""
-        picker = self.m.task_picker
-        required = False
-        if picker is not None:
-            # Jev decides whether to look anything up; the router only writes the filter.
-            label = "Aaron, the owner" if self.is_approver() else (self._sender_name() or self._sender())
-            j = await picker.judge_lookup(message=message, sender_label=label, history=history, in_view=in_view)
-            logger.info("[gate %s] jev lookup: %s (p=%.2f)", self.chat_id, j.get("needs_lookup"), float(j.get("p") or 0.0))
-            if j.get("needs_lookup") is False:
-                self._found_task_ids = []
-                return ""
-            required = True  # yes or undecided: a lookup is cheap, so look
         try:
             q = await self.m.router.plan_query(history=history, message=message, in_view=in_view,
-                                               is_approver=self.is_approver(), required=required)
+                                               is_approver=self.is_approver())
         except Exception:
             logger.exception("[gate %s] task query planning failed", self.chat_id)
             return ""
         self._found_task_ids = []
-        if q is None and required:
-            # Jev said look; the filter writer abstained. Fall back to everything unfinished.
-            from .router import TaskQuery
-            q = TaskQuery(states=["live"], limit=10)
         if q is None and in_view.strip() in ("", "(no tasks on record)") and not self.is_approver():
             # Nobody on record for this sender: that is exactly when to search for them by name.
             from .router import TaskQuery
@@ -237,13 +222,7 @@ class GateSession:
             if tq.any_of:
                 kw["any_of"] = [to_kw(sub) for sub in tq.any_of]
             return kw
-        try:
-            res = self.m.store.query_tasks(**to_kw(q))
-        except Exception:
-            # The lookup is extra context, not a gate: small talk or a question with no
-            # matching task must still get an answer if the search itself breaks.
-            logger.exception("[gate %s] task query failed; answering without it", self.chat_id)
-            return ""
+        res = self.m.store.query_tasks(**to_kw(q))
         self._found_task_ids = [int(t["id"]) for t in res["tasks"]]
         shown = [t for t in res["tasks"] if f"Task T{t['id']} " not in in_view]
         logger.info("[gate %s] task query -> %d match(es), %d new to the router", self.chat_id, res["total"], len(shown))
@@ -670,6 +649,27 @@ class GateSession:
                     memory.count("\nTask T") + (1 if memory.startswith("Task T") else 0), len(memory))
         found = "" if system_note else await self.lookup_tasks(prior, message, memory)
         task: Optional[Dict[str, Any]] = None
+        running = None if system_note else self.m.store.running_for_thread(self.chat_id)
+        if running is not None:
+            # One request at a time per thread. The new message is already on the
+            # thread and the task; when the running request ends, execute() re-reads
+            # what arrived meanwhile (and re-decides it if the run failed). Creating a
+            # second request here is what made the assistant answer twice.
+            logger.info("[gate %s] request #%s still running; not starting another for this message",
+                        self.chat_id, running.id)
+            t = self._peek_task(RouterOutput(task=f"T{self.m.store.task_id_for_request(running.id)}"))
+            if t:
+                self._ensure_inbound_on_task(t, body)
+            out = await self.m.router.route(
+                history=prior, message=message, mode=self.mode, sender=self._sender(),
+                contact_notes=self._contact_notes(), is_approver=approver,
+                task_memory=memory, found_tasks=found, action=True,
+                action_task=(t or {}).get("title") or running.summary,
+            )
+            out.request = None
+            if out.reply:
+                await self.send_to_sender(out.reply)
+            return bool(out.reply)
         if system_note:
             out: RouterOutput = await self.m.router.route(
                 history=prior, message=message, mode=self.mode, sender=self._sender(),
@@ -721,6 +721,12 @@ class GateSession:
         t = self.task()
         if t is not None:
             self.m.store.task_event(t["id"], "outbound", text, chat_id=self.chat_id)
+
+    async def handle_followup(self, body: str) -> bool:
+        """Re-decide a message that was received while a request was running. The
+        message is already stored on the thread, so this only routes and acts."""
+        async with self._lock:
+            return await self._route_and_act(body)
 
     async def notify_after_request(self, note: str) -> bool:
         """Run the router once with a system note so it can reply to the sender.
@@ -1007,7 +1013,19 @@ class GateSessionManager:
         session = self.get(req.chat_id)
         from_aaron = session.is_approver() or session.is_aaron_on_phone() or req.chat_id in self._approver_chat_ids()
         note = f"Task #{req.id} {outcome}: {req.summary}\nResult:\n{result}"
+        meanwhile = self.store.inbound_since(req.chat_id, req.created_at)
         if from_aaron:
+            if not ok and meanwhile:
+                # The run failed and Aaron said more while it ran (a hint, a correction):
+                # decide that latest message now, as one fresh turn. Exactly one reply.
+                logger.info("[gate] #%s failed with %d message(s) received meanwhile; re-deciding the latest",
+                            req.id, len(meanwhile))
+                self.store.add_message(req.chat_id, "system", note)
+                try:
+                    await session.handle_followup(meanwhile[-1])
+                except Exception:
+                    logger.exception("[gate] follow-up after #%s failed", req.id)
+                return ""
             # Aaron asked for it himself: let the router phrase the answer.
             replied = await session.notify_after_request(note)
             if not replied:
