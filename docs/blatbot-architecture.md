@@ -113,20 +113,20 @@ delegates. From the gateway down, the path is identical for all channels.
                   │  │  tools = only what the scopes map to; schemas read live        │
                   │  │                                                                │
                   │  │  ┌─ loop, at most 8 steps ─────────────────────────────────┐  │
-                  │  │  │ done?        yes/no over goal + steps so far   ≥0.6 stop │  │
-                  │  │  │ next tool    Choice over the allowed tools + give up     │  │
+                  │  │  │ done?        yes/no over goal + steps so far   ≥0.6 stop│  │
+                  │  │  │ next tool    Choice over the allowed tools + give up    │  │
                   │  │  │ arguments    ONE batched request, per argument:         │  │
-                  │  │  │    optional?     yes/no: supply it or leave it           │  │
-                  │  │  │    id/email/tel  Choice over values already in play      │  │
+                  │  │  │    optional?     yes/no: supply it or leave it          │  │
+                  │  │  │    id/email/tel  Choice over values already in play     │  │
                   │  │  │                  (the request, earlier results)         │  │
-                  │  │  │    date bound    Choice over ranges computed from the    │  │
+                  │  │  │    date bound    Choice over ranges computed from the   │  │
                   │  │  │                  clock: today, this week, last week...  │  │
-                  │  │  │    enum/bool     Choice                                  │  │
+                  │  │  │    enum/bool     Choice                                 │  │
                   │  │  │    must be       DeepSeek writes the bare value (an     │  │
                   │  │  │    written       email body, a title); a sentence in an │  │
-                  │  │  │                  id slot or UNKNOWN is rejected          │  │
-                  │  │  │ guard        send aimed at the requester ──> refused     │  │
-                  │  │  │              identical repeat of a done step ──> stop    │  │
+                  │  │  │                  id slot or UNKNOWN is rejected         │  │
+                  │  │  │ guard        send aimed at the requester ──> refused    │  │
+                  │  │  │              identical repeat of a done step ──> stop   │  │
                   │  │  │              same tool twice in a row: the next must dif│  │
                   │  │  │              a value already tried: not offered again   │  │
                   │  │  │              error text in a result: a failed step      │  │
