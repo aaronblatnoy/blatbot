@@ -13,7 +13,7 @@ import logging
 import os
 import re
 import time
-from typing import Any, Awaitable, Callable, Dict, List, Optional
+from typing import Any, Awaitable, Callable, Dict, List, Optional, Tuple
 
 from .executor import Executor
 from .jevagent import JevAgent, enabled as jev_agent_enabled
@@ -305,6 +305,73 @@ class GateSession:
             "what is missing instead of guessing."
         )
 
+    async def decide(self, *, body: str, message: str, prior: List[Dict[str, Any]], mode: str,
+                     memory: str, found: str) -> "Tuple[RouterOutput, Optional[Dict[str, Any]]]":
+        """One turn's decisions: which task, whether to act, the reply, the request.
+
+        Jev-first flow (default when the picker is on): Jev picks the task and judges
+        whether a tool action is needed BEFORE the router runs; the router is told the
+        decision and only writes the reply and the task title/summary; the request is
+        built by code from the task record (summary = the task title, scopes = Jev's
+        judgment over the source prompt). No model paraphrases the request.
+
+        Legacy flow (picker off, or GATE_ROUTER_DEFINES_REQUEST=1): the router proposes
+        the request and Jev checks task, action and scopes afterwards."""
+        approver = self.is_approver()
+        picker = self.m.task_picker
+        if self.m.router_defines_requests or picker is None:
+            out = await self.m.router.route(history=prior, message=message, mode=mode, sender=self._sender(),
+                                            contact_notes=self._contact_notes(), is_approver=approver,
+                                            task_memory=memory, found_tasks=found)
+            await self.jev_pick(message, prior, out)
+            await self.jev_action(message, prior, out, self._peek_task(out))
+            task = None
+            if out.request is not None or _names_a_task(out.task):
+                task = self.m.resolve_task(self, out)
+                self._ensure_inbound_on_task(task, body if mode != "voice" else f"(phone) {body}")
+                if out.request is not None:
+                    out.request.prompt = self.build_task_prompt(body, prior, task)
+                    await self.jev_scopes(out)
+                await self.jev_event(task, body, prior, out)
+            return out, task
+
+        # --- Jev first ---
+        label = "Aaron, the owner" if approver else (self._sender_name() or self._sender())
+        pick = await picker.pick(message=message, history=prior, candidates=self.candidate_tasks(),
+                                 sender_label=label, router_hint=None, proposed_title="")
+        choice = pick.get("choice")
+        task_choice = None if choice in (None, "none") else choice
+        peek = self._peek_task(RouterOutput(task=task_choice))
+        act = await picker.judge_action(message=message, history=prior, task=peek, sender_label=label,
+                                        router_said_action=None)
+        needs_action = act.get("needs_action")
+        if needs_action is None:
+            needs_action = float(act.get("p") or 0.0) >= 0.5
+        logger.info("[gate %s] jev-first: task=%s action=%s (p=%.2f)", self.chat_id, task_choice, needs_action,
+                    float(act.get("p") or 0.0))
+        out = await self.m.router.route(history=prior, message=message, mode=mode, sender=self._sender(),
+                                        contact_notes=self._contact_notes(), is_approver=approver,
+                                        task_memory=memory, found_tasks=found, action=needs_action,
+                                        action_task=(peek or {}).get("title") or "")
+        out.request = None  # the router never defines the request on this path
+        if task_choice is not None:
+            out.task = task_choice            # Jev's pick wins; router's stands only when Jev abstained
+        elif choice == "none" and not needs_action:
+            out.task = None
+        task = None
+        if needs_action or _names_a_task(out.task):
+            task = self.m.resolve_task(self, out)
+            self._ensure_inbound_on_task(task, body if mode != "voice" else f"(phone) {body}")
+            if needs_action:
+                from .router import RouterRequest
+                emails = [e for e in _EMAIL.findall(message) if e.lower() != self._sender().lower()]
+                out.request = RouterRequest(prompt=self.build_task_prompt(body, prior, task),
+                                            scopes=["web"], summary=str(task.get("title") or message[:100])[:160],
+                                            counterpart=emails[0] if (approver and emails) else None)
+                await self.jev_scopes(out, strict=True)
+            await self.jev_event(task, body, prior, out)
+        return out, task
+
     async def jev_action(self, message: str, history: List[Dict[str, Any]], out: RouterOutput,
                          task: Optional[Dict[str, Any]]) -> None:
         """Jev decides whether a tool action is needed. If yes and the router proposed
@@ -330,7 +397,7 @@ class GateSession:
                         self.chat_id, res["p"], out.request.summary)
             out.request = None
 
-    async def jev_scopes(self, out: RouterOutput) -> None:
+    async def jev_scopes(self, out: RouterOutput, strict: bool = False) -> None:
         """Replace the router's scope list with Jev's judgment when it yields a
         non-empty set. Empty or unavailable: the router's list stands. Code never
         lets this widen beyond the fixed scope map, since pydantic already
@@ -341,8 +408,14 @@ class GateSession:
         res = await picker.judge_scopes(
             prompt=out.request.prompt, summary=out.request.summary,  # prompt is the source-built one by now
             scopes={k: str(v["description"]) for k, v in SCOPES.items()},
-            router_scopes=list(out.request.scopes))
+            router_scopes=None if strict else list(out.request.scopes))
         chosen = res.get("scopes")
+        if not chosen and strict:
+            # No router list to fall back on: take the likeliest scopes, else the read-only web scope.
+            probs = res.get("probabilities") or {}
+            top = [k for k, v in sorted(probs.items(), key=lambda kv: -kv[1])[:2] if v >= 0.25]
+            chosen = top or ["web"]
+            logger.info("[gate %s] scope judgment undecided (%s); using %s", self.chat_id, res.get("reason"), chosen)
         if not chosen:
             logger.info("[gate %s] scope judgment undecided (%s); keeping router scopes %s",
                         self.chat_id, res.get("reason"), out.request.scopes)
@@ -499,12 +572,8 @@ class GateSession:
                 memory = self.task_memory()
                 logger.info("[gate %s] ledger loaded (voice consult): %d chars", self.chat_id, len(memory))
                 found = await self.lookup_tasks(history[:-1], body, memory)
-                out = await self.m.router.route(
-                    history=history[:-1], message=body, mode="voice", sender=self._sender(),
-                    contact_notes=self._contact_notes(), is_approver=approver, task_memory=memory,
-                    found_tasks=found)
-                await self.jev_pick(body, history[:-1], out)
-                await self.jev_action(body, history[:-1], out, self._peek_task(out))
+                out, task = await self.decide(body=body, message=body, prior=history[:-1], mode="voice",
+                                              memory=memory, found=found)
                 reply = out.reply or ""
                 if reply:
                     self.m.store.add_message(self.chat_id, "outbound", reply, "voice")
@@ -514,11 +583,7 @@ class GateSession:
                     return reply or "I don't have anything on that."
                 if self.m.store.pending_for_thread(self.chat_id) and not approver:
                     return reply or "I already have a request waiting on Aaron for you."
-                task = self.m.resolve_task(self, out)  # enforced: every request is written to a task
-                self._ensure_inbound_on_task(task, f"(phone) {body}")
-                out.request.prompt = self.build_task_prompt(body, history[:-1], task)
-                await self.jev_scopes(out)
-                await self.jev_event(task, body, history[:-1], out)
+                assert task is not None
                 req = self.m.store.create_request(
                     chat_id=self.chat_id, sender=self._sender(), sender_name=self._sender_name(), mode="voice",
                     subject="", original_message=body, summary=out.request.summary,
@@ -574,26 +639,17 @@ class GateSession:
         logger.info("[gate %s] ledger loaded: %d task(s), %d chars", self.chat_id,
                     memory.count("\nTask T") + (1 if memory.startswith("Task T") else 0), len(memory))
         found = "" if system_note else await self.lookup_tasks(prior, message, memory)
-        out: RouterOutput = await self.m.router.route(
-            history=prior, message=message, mode=self.mode, sender=self._sender(),
-            contact_notes=self._contact_notes(), is_approver=approver,
-            task_memory=memory, found_tasks=found,
-        )
-        if system_note and out.request is not None:
-            out.request = None
         task: Optional[Dict[str, Any]] = None
-        if not system_note:
-            await self.jev_pick(message, prior, out)
-            # Peek at the task (without creating one) so the action judgment has it.
-            peek = self._peek_task(out)
-            await self.jev_action(message, prior, out, peek)
-            if out.request is not None or _names_a_task(out.task):
-                task = self.m.resolve_task(self, out)  # enforced: every request is written to a task
-                self._ensure_inbound_on_task(task, body)
-                if out.request is not None:
-                    out.request.prompt = self.build_task_prompt(body, prior, task)
-                    await self.jev_scopes(out)
-                await self.jev_event(task, body, prior, out)
+        if system_note:
+            out: RouterOutput = await self.m.router.route(
+                history=prior, message=message, mode=self.mode, sender=self._sender(),
+                contact_notes=self._contact_notes(), is_approver=approver,
+                task_memory=memory, found_tasks=found, action=False,
+            )
+            out.request = None
+        else:
+            out, task = await self.decide(body=body, message=message, prior=prior, mode=self.mode,
+                                          memory=memory, found=found)
         if out.reply:
             await self.send_to_sender(out.reply)
         if out.request is None:
@@ -661,6 +717,11 @@ class GateSessionManager:
         self.jev_fallback = (os.getenv("GATE_EXECUTOR_FALLBACK") or "claude").strip().lower() != "none"
         logger.info("[gate] executor: %s", "jev agent (fallback %s)" % ("claude" if self.jev_fallback else "none") if self.jev_agent else "claude code")
         self.task_picker: Optional[TaskPicker] = TaskPicker() if jev_enabled() else None
+        # With Jev on, the request is built by code from the task record (title, ledger,
+        # Jev scopes); DeepSeek only writes replies. GATE_ROUTER_DEFINES_REQUEST=1 restores
+        # the older flow where the router proposes the request and Jev checks it.
+        self.router_defines_requests = self.task_picker is None or \
+            str(os.getenv("GATE_ROUTER_DEFINES_REQUEST") or "").strip().lower() in ("1", "true", "yes")
         logger.info("[gate] task picker: %s", "jev (TypeSafe)" if self.task_picker else "router")
         self.approver_conv = cfg.approver_imessage_conversation_id
         self.approver_phone = str(getattr(cfg, "approver_phone", "") or "")

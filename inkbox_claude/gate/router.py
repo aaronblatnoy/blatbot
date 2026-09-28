@@ -248,11 +248,26 @@ class Router:
 
     async def route(self, *, history: List[Dict[str, Any]], message: str, mode: str,
                     sender: str, contact_notes: str, is_approver: bool,
-                    task_memory: str = "", found_tasks: str = "") -> RouterOutput:
+                    task_memory: str = "", found_tasks: str = "",
+                    action: Optional[bool] = None, action_task: str = "") -> RouterOutput:
+        """`action` is set when typed judgments have already decided whether a tool
+        request exists for this message; the router then only writes the reply
+        (and the task title/summary) and must not define a request."""
         sender_label = f"Aaron Blatnoy (the owner; his private iMessage) {sender}" if is_approver else sender
         found = f"TASKS FOUND BY YOUR LOOKUP (same format; may include older or other people's tasks):\n{found_tasks}\n\n" if found_tasks else ""
+        decided = ""
+        if action is True:
+            decided = ("DECIDED: a tool request has been created for this message" +
+                       (f" on task {action_task}" if action_task else "") +
+                       (" and will run now; reply briefly that you are on it, or say nothing (null) if no acknowledgement is needed. "
+                        if is_approver else
+                        " and will be shown to Aaron for approval; tell the sender you will confirm with Aaron. ") +
+                       "Do not describe steps or claim anything is done. Do NOT output a request.\n\n")
+        elif action is False:
+            decided = ("DECIDED: no tool action will be taken for this message. Answer in words from TASK MEMORY "
+                       "and NOW, or acknowledge. Do NOT output a request.\n\n")
         user = (
-            f"Now: {now_line()}\n\n"
+            f"Now: {now_line()}\n\n{decided}"
             f"TASK MEMORY (authoritative ledger, newest events last):\n{task_memory or '(no tasks on record)'}\n\n"
             f"{found}"
             f"Channel: {mode}\nSender: {sender_label}\n"

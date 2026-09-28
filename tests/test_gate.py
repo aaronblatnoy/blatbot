@@ -974,3 +974,73 @@ def test_jev_action_drops_request_router_invented(tmp_path):
                                  request=RouterRequest(prompt="x", scopes=["web"], summary="look something up"))
     asyncio.run(m.get("c1").handle_inbound("thanks so much!!", "email", stranger_meta()))
     assert m.store.pending() == [] and m.executor.ran == []
+
+
+# --- Jev-first: the router only writes the reply; code builds the request from the task ---
+
+def _jev_first(m, **picker_kw):
+    m.task_picker = FakePicker(**picker_kw)
+    m.router_defines_requests = False
+    return m.task_picker
+
+
+def test_jev_first_builds_request_from_task_not_router(tmp_path):
+    m, sent = make_manager(tmp_path)
+    t = m.store.create_task("Close the TAMID application form")
+    p = _jev_first(m, choice=f"T{t['id']}")
+    p.action, p.scopes = True, ["tamid_drive_write"]
+    # The router tries to define a request anyway; it must be ignored.
+    m.router.next = RouterOutput(reply="On it.", task="new", task_title="Something else",
+                                 request=RouterRequest(prompt="paraphrase", scopes=["calendar"], summary="router's idea"))
+    async def go():
+        await m.get("aaron").handle_inbound("close the tamid form pls", "imessage", approver_meta())
+        await asyncio.sleep(0.05)
+    asyncio.run(go())
+    r = m.store.get_request(1)
+    assert r.summary == "Close the TAMID application form"      # the task title, not DeepSeek's line
+    assert r.scopes == ["tamid_drive_write"]                     # Jev's scopes, no router hint
+    assert "close the tamid form pls" in r.prompt and "paraphrase" not in r.prompt
+    assert m.store.task_id_for_request(1) == t["id"]
+    # The router was told the decision before writing its reply, and no router hint reached Jev.
+    assert m.router.calls[0]["action"] is True and m.router.calls[0]["action_task"] == t["title"]
+    assert p.calls[-1]["router_hint"] is None
+    assert p.scope_calls[-1]["router_scopes"] is None
+    assert any("On it." == s[1] for s in sent)
+
+
+def test_jev_first_no_action_means_no_request_even_if_router_wanted_one(tmp_path):
+    m, sent = make_manager(tmp_path)
+    p = _jev_first(m, choice="none")
+    p.action = False
+    m.router.next = RouterOutput(reply="Sure, 3pm works.", task="new", task_title="x",
+                                 request=RouterRequest(prompt="do stuff", scopes=["calendar"], summary="s"))
+    asyncio.run(m.get("aaron").handle_inbound("thanks!", "imessage", approver_meta()))
+    assert m.store.get_request(1) is None
+    assert m.router.calls[-1]["action"] is False
+    assert m.store.list_tasks() == [] if hasattr(m.store, "list_tasks") else True
+
+
+def test_jev_first_new_task_titled_by_router_scopes_fallback_when_undecided(tmp_path):
+    m, sent = make_manager(tmp_path)
+    p = _jev_first(m, choice="new")
+    p.action, p.scopes = True, None                      # scope judgment undecided
+    m.router.next = RouterOutput(reply=None, task="new", task_title="Book lunch with Sam Rivera")
+    async def go():
+        await m.get("aaron").handle_inbound("book lunch with sam rivera tomorrow", "imessage", approver_meta())
+        await asyncio.sleep(0.05)
+    asyncio.run(go())
+    r = m.store.get_request(1)
+    assert r.summary == "Book lunch with Sam Rivera"
+    assert r.scopes == ["web"]                           # nothing likely: read-only fallback, never empty
+
+
+def test_jev_first_stranger_request_waits_for_aaron(tmp_path):
+    m, sent = make_manager(tmp_path)
+    p = _jev_first(m, choice="new")
+    p.action, p.scopes = True, ["calendar"]
+    m.router.next = RouterOutput(reply="I will confirm with Aaron.", task="new", task_title="Schedule a chat with Cand Idate")
+    asyncio.run(m.get("c1").handle_inbound("can we chat tue 6pm?", "email", stranger_meta()))
+    r = m.store.get_request(1)
+    assert r.state == "pending" and r.scopes == ["calendar"]
+    assert m.router.calls[-1]["action"] is True
+    assert any("[Blatbot #1]" in s[1] for s in sent)

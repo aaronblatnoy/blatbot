@@ -155,6 +155,26 @@ delegates. From the gateway down, the path is identical for all channels.
 | Tests | `tests/test_gate.py` |
 | Env (`~/.inkbox-claude/.env`) | `INKBOX_VOICE_STACK`, `INKBOX_REALTIME_ENABLED`, `OPENAI_API_KEY`, `INKBOX_REALTIME_VOICE`, `GATE_VOICE_TRUST_APPROVER`, `GATE_VOICE_VOCABULARY`, `INKBOX_APPROVER_PHONE` |
 
+## Deciding a turn: Jev first, the router only writes
+
+With the task picker on (`TYPESAFE_API_KEY` set), a message is decided in this order
+(`GateSession.decide`):
+
+1. Jev picks the task (Choice over candidates, new, none). No router hint.
+2. Jev judges whether a tool action is needed (Noul; 0.5 is the line).
+3. DeepSeek runs once, told the decision ("a request has been created and will run /
+   be shown to Aaron" or "no action"), and writes only the reply plus, for a new task,
+   the title and where-it-stands line. Any request it outputs is discarded.
+4. If action: code builds the request. Summary is the task title, prompt is the
+   verbatim message plus conversation plus ledger, scopes are Jev's judgment over
+   that prompt (no router list; undecided falls back to the two likeliest, else
+   `web`). Counterpart is an email in the message when Aaron is asking.
+5. Jev classifies the event on the task.
+
+`GATE_ROUTER_DEFINES_REQUEST=1` restores the older order (router proposes the
+request, Jev checks task, action and scopes afterwards). With the picker off that
+older order is the only one.
+
 ## Executor: Jev agent vs Claude Code
 
 `GATE_EXECUTOR=jev` (default `claude`) runs approved requests through
