@@ -101,6 +101,7 @@ SCOPES: Dict[str, Dict[str, object]] = {
             "mcp__tamid-drive__insert_doc_elements",
             "mcp__tamid-drive__create_form",
             "mcp__tamid-drive__batch_update_form",
+            "mcp__tamid-drive__set_publish_settings",
             "mcp__tamid-drive__create_drive_folder",
         ],
     },
