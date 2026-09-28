@@ -18,7 +18,7 @@ if GATE_EXECUTOR_FALLBACK=claude.
 Configuration:
   GATE_EXECUTOR             claude (default) | jev
   GATE_EXECUTOR_FALLBACK    claude (default) | none   what to do when the jev agent gives up
-  JEV_AGENT_MAX_STEPS       default 8
+  JEV_AGENT_MAX_STEPS       default 12
   JEV_AGENT_MIN_CONF        default 0.55   below this a pick is treated as "unsure"
 """
 
@@ -269,6 +269,17 @@ class Prose:
 # ----------------------------------------------------------------------------
 
 
+def _tried_values(steps: List[Dict[str, Any]], tool: str, arg: str) -> List[Any]:
+    """Values this tool has already been called with for this argument, in order."""
+    out: List[Any] = []
+    for st in steps:
+        if st["tool"] == tool and arg in (st.get("args") or {}):
+            v = st["args"][arg]
+            if v not in out:
+                out.append(v)
+    return out
+
+
 _LARGE = 20000
 
 
@@ -348,7 +359,7 @@ class JevAgent:
         self.inkbox_server = inkbox_server
         self.router = router
         self.mcp_config = mcp_config if mcp_config is not None else mcp_config_from_claude_json()
-        self.max_steps = int(max_steps or os.getenv("JEV_AGENT_MAX_STEPS") or 8)
+        self.max_steps = int(max_steps or os.getenv("JEV_AGENT_MAX_STEPS") or 12)
 
     async def run(self, req: Request, context: str = "") -> Dict[str, Any]:
         if sha256(req.prompt) != req.prompt_sha256:
@@ -392,7 +403,10 @@ class JevAgent:
                          "rules": ["The gateway delivers whatever is found to the person who asked; never send or text the "
                                    "answer to the requester. Sending tools are only for messaging OTHER people the goal names.",
                                    "Read before you write: look things up before booking, sending, or changing.",
-                                   "Do not repeat a step that already succeeded.",
+                                   "When something must be found in a document, sheet, calendar or inbox: search, open the "
+                                   "most likely result, and if it is not the right one open the next likely one, or search "
+                                   "again with different words. A wrong first pick or an empty search is not a reason to give up.",
+                                   "Do not repeat a step that already succeeded with the same arguments.",
                                    f"Choose {GIVE_UP} if a needed tool is missing or a step failed twice."]},
                         options)
                     logger.info("jev agent step %d: %s (conf %.2f)", step + 1, choice, conf)
@@ -481,6 +495,11 @@ class JevAgent:
                                                "criteria": opts}
                 continue
             cs = _candidate_values(name, str(spec.get("description") or ""), typ, facts, steps)
+            tried = _tried_values(steps, tool, name)
+            if cs and tried and len(cs) > len(tried):
+                # Trial and error: a value this tool already got for this argument is
+                # not offered again, so the next likely document/event/row gets tried.
+                cs = [c for c in cs if c not in tried]
             if cs:
                 cands[name] = cs
                 opts = {f"c{i}": {"value": _text(v)} for i, v in enumerate(cands[name])}
@@ -529,11 +548,16 @@ class JevAgent:
         # Must be written: independent values, so all prose calls run at once.
         if to_write:
             facts_text = {k: _text(v) for k, v in facts.items()}
-            texts = await asyncio.gather(*[prose.write(
-                f"Produce ONLY the value for the tool argument `{name}` ({typ}). {desc} "
-                f"Use ISO 8601 with the -04:00 / -05:00 New York offset for any datetime. "
-                f"Output the bare value: no quotes, no label, no explanation. If the facts do not contain enough "
-                f"to determine it, output exactly UNKNOWN.",
+            def _instr(name: str, typ: str, desc: str) -> str:
+                tried = _tried_values(steps, tool, name)
+                again = (f" This tool was already called with `{name}` = {', '.join(repr(t) for t in tried)} and that did "
+                         f"not find what the goal needs; produce a DIFFERENT value (other words, a broader or narrower "
+                         f"search, another likely name)." if tried else "")
+                return (f"Produce ONLY the value for the tool argument `{name}` ({typ}). {desc} "
+                        f"Use ISO 8601 with the -04:00 / -05:00 New York offset for any datetime. "
+                        f"Output the bare value: no quotes, no label, no explanation. If the facts do not contain enough "
+                        f"to determine it, output exactly UNKNOWN.{again}")
+            texts = await asyncio.gather(*[prose.write(_instr(name, typ, desc),
                 {"goal": req.original_message, "tool": short, "facts": facts_text}) for name, typ, desc in to_write])
             for (name, typ, desc), text in zip(to_write, texts):
                 if not _plausible_value(name, text, typ):

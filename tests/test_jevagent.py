@@ -303,3 +303,37 @@ def test_judge_retries_slim_on_too_large(monkeypatch):
     async def boom(state, questions): raise RuntimeError("down")
     j._post = boom
     assert asyncio.run(j.ask({"goal": "g"}, {"q": {"type": "noul", "instructions": "?"}})) == {}
+
+
+def test_wrong_first_document_leads_to_the_next_candidate(agent, monkeypatch):
+    """First sheet opened is not the one; the second call must not be offered it again."""
+    search, info = "mcp__tamid-drive__search_drive_files", "mcp__tamid-drive__get_spreadsheet_info"
+    schemas = {search: {"description": "search", "schema": {"type": "object", "required": ["query"],
+                                                            "properties": {"user_google_email": {"type": "string"}, "query": {"type": "string"}}}},
+               info: {"description": "sheet info", "schema": {"type": "object", "required": ["spreadsheet_id"],
+                                                              "properties": {"user_google_email": {"type": "string"}, "spreadsheet_id": {"type": "string"}}}}}
+    box = FakeBox(schemas, results={search: 'Found: "Coffee Chat Tracker" (ID: 1AAAAAAAAAAAAAAAAAAAAAAAA1) | "New Member App Fall 2026 (Responses)" (ID: 1BBBBBBBBBBBBBBBBBBBBBBBB2)',
+                                    info: "sheet: 3 tabs"})
+    # picks: search, then info with c0 (wrong sheet), then info again: only ONE candidate left, so c0 is now the other id
+    judge = ScriptedJudge([search, info, "c0", info, "c0"])
+    class Never(ScriptedJudge):
+        async def yes(self, state, question):
+            if "fully achieved" in str(question):
+                return 0.9 if not self.picks else 0.1
+            return 0.9
+    judge = Never([search, info, "c0", info, "c0"])
+    prose = ScriptedProse()
+    _patch(monkeypatch, box, judge, prose, [search, info])
+    st = asyncio.run(agent.run(_req("how many rows are in the fall 2026 application responses sheet?")))
+    assert st["ok"]
+    ids = [c[1]["spreadsheet_id"] for c in box.calls if c[0] == info]
+    assert ids == ["1AAAAAAAAAAAAAAAAAAAAAAAA1", "1BBBBBBBBBBBBBBBBBBBBBBBB2"]
+
+
+def test_prose_is_told_which_queries_already_failed():
+    from inkbox_claude.gate.jevagent import _tried_values
+    steps = [{"tool": "t", "args": {"query": "acceptance rate"}, "ok": True, "result": "0 results"},
+             {"tool": "t", "args": {"query": "reviewer"}, "ok": True, "result": "0 results"},
+             {"tool": "other", "args": {"query": "x"}, "ok": True, "result": ""}]
+    assert _tried_values(steps, "t", "query") == ["acceptance rate", "reviewer"]
+    assert _tried_values(steps, "t", "nope") == []
