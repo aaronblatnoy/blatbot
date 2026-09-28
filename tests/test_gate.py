@@ -112,7 +112,7 @@ def test_stranger_request_goes_to_aaron_and_waits(tmp_path):
     approver_msgs = [x for x in sent if x[2] == "imessage" and "[Blatbot #" in x[1]]
     assert len(approver_msgs) == 1
     text = approver_msgs[0][1]
-    assert "can we do tue 6pm?" in text and "Book Tue 6pm" in text and "calendar, email_send" in text
+    assert "can we do tue 6pm?" in text and "book chat" in text and "calendar, email_send" in text
     sender_msgs = [x for x in sent if x[2] == "email"]
     assert sender_msgs and "confirm that with Aaron" in sender_msgs[0][1]
     assert m.store.thread_state("c1") == "awaiting_aaron"
@@ -160,7 +160,8 @@ def test_aaron_edit_reshows_then_runs_edited(tmp_path):
 
     async def go():
         await m.get("aaron").handle_inbound(f"#{rid} edit: P2 instead", "imessage", approver_meta())
-        assert m.store.get_request(rid).prompt == "P2 instead"
+        assert m.store.get_request(rid).prompt.endswith("--- AARON'S INSTRUCTIONS ---\nP2 instead")
+        assert "q" in m.store.get_request(rid).prompt  # the source message is kept
         assert any("revised" in x[1] and "P2 instead" in x[1] for x in sent if x[2] == "imessage")
         await m.get("aaron").handle_inbound(f"#{rid} yes", "imessage", approver_meta())
         await asyncio.sleep(0.05)
@@ -756,6 +757,11 @@ class FakePicker:
         return self.event
 
     scopes = None  # a list to override, None = undecided
+    action = None  # True/False to override, None = undecided
+
+    async def judge_action(self, **kw):
+        self.action_calls = getattr(self, "action_calls", []) + [kw]
+        return {"needs_action": self.action, "p": 0.9 if self.action else 0.1, "reason": "ok"}
 
     async def judge_scopes(self, **kw):
         self.scope_calls = getattr(self, "scope_calls", []) + [kw]
@@ -923,3 +929,48 @@ def test_jev_scopes_undecided_keeps_router_scopes(tmp_path):
                                  request=RouterRequest(prompt="Book Tue 6pm", scopes=["calendar"], summary="book"))
     asyncio.run(m.get("c1").handle_inbound("tue 6?", "email", stranger_meta()))
     assert m.store.get_request(1).scopes == ["calendar"]
+
+
+def test_claude_gets_the_source_not_a_paraphrase(tmp_path):
+    m, sent = make_manager(tmp_path)
+    m.task_picker = FakePicker(choice="new")
+    m.router.next = RouterOutput(reply="On it.", task="new", task_title="Move the Tuesday call",
+                                 request=RouterRequest(prompt="DEEPSEEK PARAPHRASE", scopes=["calendar"], summary="move call"))
+    async def go():
+        await m.get("aaron").handle_inbound("push my tuesday 6pm with sam to 7", "imessage", approver_meta())
+        await asyncio.sleep(0.05)
+    asyncio.run(go())
+    r = m.store.get_request(1)
+    assert "DEEPSEEK PARAPHRASE" not in r.prompt
+    assert "push my tuesday 6pm with sam to 7" in r.prompt          # verbatim message
+    assert "THE TASK THIS BELONGS TO" in r.prompt and "Move the Tuesday call" in r.prompt
+    assert sha256(r.prompt) == r.prompt_sha256                        # what ran is what was stored
+    assert "run exactly this" not in "".join(x[1] for x in sent)
+
+
+def test_jev_action_creates_request_when_router_missed_it(tmp_path):
+    """The Tem case: the router replied politely and proposed nothing; Jev says a tool
+    action is needed because the message supplies what the task was waiting for."""
+    m, sent = make_manager(tmp_path)
+    t = m.store.create_task("Add Sam's application to the sheet", [("sam@example.edu", "Sam Rivera")])
+    m.store.task_event(t["id"], "note", "waiting for Sam to send the application", state="open")
+    m.task_picker = FakePicker(choice=f"T{t['id']}")
+    m.task_picker.action = True
+    m.task_picker.scopes = ["tamid_drive_write"]
+    m.router.next = RouterOutput(reply="Thanks, got it.", task=f"T{t['id']}", request=None)
+    meta = {"sender": "sam@example.edu", "to": "sam@example.edu", "subject": "app", "contact": {"id": "s1", "name": "Sam Rivera"}}
+    asyncio.run(m.get("s1").handle_inbound("Here is my application: name, netid, year...", "email", meta))
+    pend = m.store.pending()
+    assert len(pend) == 1 and pend[0].scopes == ["tamid_drive_write"]
+    assert "Here is my application" in pend[0].prompt and m.store.task_id_for_request(pend[0].id) == t["id"]
+    assert any("[Blatbot #" in x[1] for x in sent)  # went to Aaron for approval
+
+
+def test_jev_action_drops_request_router_invented(tmp_path):
+    m, sent = make_manager(tmp_path)
+    m.task_picker = FakePicker(choice="none")
+    m.task_picker.action = False
+    m.router.next = RouterOutput(reply="You're welcome!", task=None,
+                                 request=RouterRequest(prompt="x", scopes=["web"], summary="look something up"))
+    asyncio.run(m.get("c1").handle_inbound("thanks so much!!", "email", stranger_meta()))
+    assert m.store.pending() == [] and m.executor.ran == []

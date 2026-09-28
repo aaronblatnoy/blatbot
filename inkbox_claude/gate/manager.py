@@ -277,6 +277,58 @@ class GateSession:
             return
         out.task = choice
 
+    def _peek_task(self, out: RouterOutput) -> Optional[Dict[str, Any]]:
+        c = (out.task or "").strip().lower()
+        if c.startswith("t") and c[1:].isdigit():
+            return self.m.store.get_task(int(c[1:]))
+        found = self.m.store.tasks_for_person(self._sender(), open_only=True, limit=1) if not self.is_approver() else []
+        return found[0] if found else None
+
+    def build_task_prompt(self, body: str, history: List[Dict[str, Any]], task: Dict[str, Any]) -> str:
+        """The prompt Claude runs: the sender's own words, the recent conversation, and
+        the task's ledger. No model paraphrases the request. Claude reads the source."""
+        who = "Aaron Blatnoy (the owner)" if self.is_approver() else (self._sender_name() or self._sender())
+        addr = self._sender()
+        convo = "\n".join(f"[{m.get('kind')}] {str(m.get('text') or '')[:600]}" for m in history[-8:]) or "(none)"
+        ledger = self.m.store.task_memory_for_task(int(task["id"])) or "(new task, no events yet)"
+        subject = str((self.reply_meta or {}).get("subject") or "").strip()
+        return (
+            f"A message arrived over {self.mode} from {who} ({addr}).\n"
+            + (f"Subject: {subject}\n" if subject else "")
+            + f"\n--- THEIR MESSAGE (verbatim) ---\n{body.strip()}\n\n"
+            f"--- RECENT CONVERSATION WITH THEM ---\n{convo}\n\n"
+            f"--- THE TASK THIS BELONGS TO ---\n{ledger}\n\n"
+            "Work out what they are asking for, or what this message makes possible on the task (for example, "
+            "information the task was waiting for), and do it with your tools. Do only what the message and the "
+            "task call for; do not invent extra steps. If something essential is missing, stop and say exactly "
+            "what is missing instead of guessing."
+        )
+
+    async def jev_action(self, message: str, history: List[Dict[str, Any]], out: RouterOutput,
+                         task: Optional[Dict[str, Any]]) -> None:
+        """Jev decides whether a tool action is needed. If yes and the router proposed
+        none, synthesise a request from the source; if no and the router proposed one,
+        drop it. Undecided keeps the router's call."""
+        picker = self.m.task_picker
+        if picker is None:
+            return
+        res = await picker.judge_action(
+            message=message, history=history, task=task,
+            sender_label="Aaron, the owner" if self.is_approver() else (self._sender_name() or self._sender()),
+            router_said_action=out.request is not None)
+        na = res.get("needs_action")
+        if na is None:
+            return
+        if na and out.request is None:
+            from .router import RouterRequest
+            title = (task or {}).get("title") or (out.task_title or "") or message[:80]
+            out.request = RouterRequest(prompt="(built from source)", scopes=["web"], summary=f"Act on: {title}"[:120])
+            logger.info("[gate %s] jev: action needed (p=%.2f); router proposed none", self.chat_id, res["p"])
+        elif not na and out.request is not None:
+            logger.info("[gate %s] jev: no action needed (p=%.2f); dropping router request %r",
+                        self.chat_id, res["p"], out.request.summary)
+            out.request = None
+
     async def jev_scopes(self, out: RouterOutput) -> None:
         """Replace the router's scope list with Jev's judgment when it yields a
         non-empty set. Empty or unavailable: the router's list stands. Code never
@@ -286,7 +338,7 @@ class GateSession:
         if picker is None or out.request is None:
             return
         res = await picker.judge_scopes(
-            prompt=out.request.prompt, summary=out.request.summary,
+            prompt=out.request.prompt, summary=out.request.summary,  # prompt is the source-built one by now
             scopes={k: str(v["description"]) for k, v in SCOPES.items()},
             router_scopes=list(out.request.scopes))
         chosen = res.get("scopes")
@@ -451,7 +503,7 @@ class GateSession:
                     contact_notes=self._contact_notes(), is_approver=approver, task_memory=memory,
                     found_tasks=found)
                 await self.jev_pick(body, history[:-1], out)
-                await self.jev_scopes(out)
+                await self.jev_action(body, history[:-1], out, self._peek_task(out))
                 reply = out.reply or ""
                 if reply:
                     self.m.store.add_message(self.chat_id, "outbound", reply, "voice")
@@ -463,6 +515,8 @@ class GateSession:
                     return reply or "I already have a request waiting on Aaron for you."
                 task = self.m.resolve_task(self, out)  # enforced: every request is written to a task
                 self._ensure_inbound_on_task(task, f"(phone) {body}")
+                out.request.prompt = self.build_task_prompt(body, history[:-1], task)
+                await self.jev_scopes(out)
                 await self.jev_event(task, body, history[:-1], out)
                 req = self.m.store.create_request(
                     chat_id=self.chat_id, sender=self._sender(), sender_name=self._sender_name(), mode="voice",
@@ -526,14 +580,19 @@ class GateSession:
         )
         if system_note and out.request is not None:
             out.request = None
+        task: Optional[Dict[str, Any]] = None
         if not system_note:
             await self.jev_pick(message, prior, out)
-            await self.jev_scopes(out)
-        task: Optional[Dict[str, Any]] = None
-        if not system_note and (out.request is not None or _names_a_task(out.task)):
-            task = self.m.resolve_task(self, out)  # enforced: every request is written to a task
-            self._ensure_inbound_on_task(task, body)
-            await self.jev_event(task, body, prior, out)
+            # Peek at the task (without creating one) so the action judgment has it.
+            peek = self._peek_task(out)
+            await self.jev_action(message, prior, out, peek)
+            if out.request is not None or _names_a_task(out.task):
+                task = self.m.resolve_task(self, out)  # enforced: every request is written to a task
+                self._ensure_inbound_on_task(task, body)
+                if out.request is not None:
+                    out.request.prompt = self.build_task_prompt(body, prior, task)
+                    await self.jev_scopes(out)
+                await self.jev_event(task, body, prior, out)
         if out.reply:
             await self.send_to_sender(out.reply)
         if out.request is None:
@@ -645,12 +704,17 @@ class GateSessionManager:
         who = f"{req.sender_name} ({req.sender})" if req.sender_name else req.sender
         subj = f"\nSubject: {req.subject}" if req.subject else ""
         head = f"[Blatbot #{req.id}{' revised' if revised else ''}] {who} via {req.mode}{subj}"
+        marker = "--- AARON'S INSTRUCTIONS ---"
+        yours = ""
+        if marker in req.prompt:
+            yours = "Your instructions: " + req.prompt.split(marker, 1)[1].strip() + "\n\n"
         return (
             f"{head}\n\n--- Their message ---\n{req.original_message}\n\n"
-            f"--- Blatbot wants ---\n{req.summary}\nScopes: {', '.join(req.scopes)}\n\n"
-            f"--- Exact prompt Claude will run ---\n{req.prompt}\n\n"
-            f"Reply \"#{req.id} yes\" to run exactly this, \"#{req.id} no\" to drop, "
-            f"or \"#{req.id} edit: <new prompt>\" to replace it (you will see it again before it runs). "
+            f"--- Blatbot wants ---\n{req.summary}\nTools: {', '.join(req.scopes)}\n\n"
+            "Claude will read their message and the task record and act on it with only those tools.\n"
+            + yours +
+            f"Reply \"#{req.id} yes\" to run, \"#{req.id} no\" to drop, "
+            f"or \"#{req.id} edit: <instructions>\" to add instructions (you will see it again before it runs). "
             "A bare yes/no works when this is the only one pending."
         )
 
@@ -795,7 +859,9 @@ class GateSessionManager:
             return True
         em = re.match(r"^edit\s*:\s*(.+)$", rest, re.S | re.I)
         if em:
-            new = self.store.revise_prompt(req.id, em.group(1).strip())
+            note = em.group(1).strip()
+            base = req.prompt.split("\n\n--- AARON'S INSTRUCTIONS ---")[0]
+            new = self.store.revise_prompt(req.id, f"{base}\n\n--- AARON'S INSTRUCTIONS ---\n{note}")
             await self.send_approval_text(new, revised=True)
             return True
         return False

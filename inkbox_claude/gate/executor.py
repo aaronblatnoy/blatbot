@@ -31,8 +31,10 @@ logger = logging.getLogger(__name__)
 
 EXECUTOR_SYSTEM = (
     "You are running ONE approved task for Blatbot, Executive Assistant to Aaron Blatnoy. "
-    "Do exactly what the task says using only the tools you have, then stop. Do not ask "
-    "questions. Do not send anything the task did not tell you to send.\n"
+    "You are given the sender's message verbatim, the recent conversation, and the task's record. "
+    "Read them and do what the message calls for using only the tools you have, then stop. Do not ask "
+    "questions. Do not send anything the message and task record do not call for. If an essential "
+    "detail is missing, stop and report what is missing.\n"
     f"Accounts: every tamid-drive tool takes user_google_email={ORG_ACCOUNT}; every stern-drive tool "
     f"takes user_google_email={OWNER_ACCOUNT} (Aaron's own calendar and mail). Never any other "
     "address. The Inkbox mailbox is blatbot@inkboxmail.com. Timezone America/New_York.\n"

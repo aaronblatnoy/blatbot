@@ -83,6 +83,61 @@ class TaskPicker:
                                     else (os.getenv("TYPESAFE_TASK_MIN_CONF") or 0.55))
         self.timeout = timeout
 
+    async def judge_action(self, *, message: str, sender_label: str, history: List[Dict[str, Any]],
+                           task: Optional[Dict[str, Any]], router_said_action: Optional[bool] = None) -> Dict[str, Any]:
+        """Does this message call for the assistant to DO something with its tools
+        (look up, book, send, change), as opposed to being answerable in conversation?
+        Returns {"needs_action": bool|None, "p": float}. None = undecided."""
+        if not self.api_key:
+            return {"needs_action": None, "p": 0.0, "reason": "disabled"}
+        state = {
+            "sender": sender_label,
+            "conversation_so_far": [f"[{m.get('kind')}] {str(m.get('text') or '')[:300]}" for m in history[-6:]],
+            "new_message": message,
+            "task_it_belongs_to": candidate_view(task) if task else "none",
+            "another_model_said_action_needed": router_said_action,
+        }
+        body = {"state": state, "model": self.model, "questions": {"needs_action": {
+            "type": "noul",
+            "instructions": {
+                "question": "Should the assistant now go and DO something for this message, using its tools?",
+                "the_assistant_can": "read and change calendars, inboxes, contacts, documents, spreadsheets, forms "
+                                     "and website admin pages; search the web; send email and texts.",
+                "count_as_yes": [
+                    "The sender asks for anything to be booked, moved, cancelled, sent, looked up, checked, "
+                    "changed, added, closed, or found out.",
+                    "The sender asks a question whose answer must be looked up (a calendar, an inbox, a sheet, "
+                    "a website), even if phrased casually.",
+                    "The sender supplies information that `task_it_belongs_to` was waiting for, so its pending "
+                    "step can now be carried out (e.g. an application, availability, a confirmation, details).",
+                    "The sender wants to schedule or set up something (a chat, a meeting, a call).",
+                ],
+                "count_as_no": [
+                    "Thanks, greetings, acknowledgements, small talk.",
+                    "A question about the assistant itself or about what it will do, answerable in words.",
+                    "A clarification that adds nothing actionable yet.",
+                ],
+            },
+            "criteria": {
+                "true": "Yes: at least one tool action should happen now because of this message.",
+                "false": "No: a reply in words is the right response; no tool action is needed yet.",
+            },
+        }}}
+        try:
+            async with httpx.AsyncClient(timeout=self.timeout) as client:
+                r = await client.post(TYPESAFE_URL, headers={"Authorization": f"Bearer {self.api_key}"}, json=body)
+                r.raise_for_status()
+                p = float(r.json()["answers"]["needs_action"].get("noul") or 0.0)
+        except Exception as exc:
+            logger.warning("action judgment via TypeSafe failed: %s", exc)
+            return {"needs_action": None, "p": 0.0, "reason": f"error: {exc}"}
+        logger.info("action judgment: p(needs tool)=%.2f", p)
+        if p >= 0.65:
+            return {"needs_action": True, "p": p, "reason": "ok"}
+        if p <= 0.35:
+            return {"needs_action": False, "p": p, "reason": "ok"}
+        return {"needs_action": None, "p": p, "reason": "undecided"}
+
     async def judge_scopes(self, *, prompt: str, summary: str, scopes: Dict[str, str],
                            router_scopes: Optional[List[str]] = None) -> Dict[str, Any]:
         """Which tool scopes does this task prompt need? One yes/no (Noul) per scope,

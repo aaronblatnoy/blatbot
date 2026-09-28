@@ -40,7 +40,10 @@ Replace this with your own standing instructions in standing.md.
 
 
 class RouterRequest(BaseModel):
-    prompt: str = Field(min_length=1)
+    # The prompt Claude runs is built by the gateway from the original message and the
+    # task record; anything the router writes here is replaced. Kept for the fallback
+    # path when the source-built prompt is unavailable.
+    prompt: str = Field(default="(built from source)")
     scopes: List[str] = Field(min_length=1)
     summary: str = Field(min_length=1)
     # Who the task is about (their email, phone, or full name), so the task
