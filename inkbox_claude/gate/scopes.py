@@ -138,13 +138,27 @@ SCOPES: Dict[str, Dict[str, object]] = {
         "description": "change the TAMID at NYU website: create/update/delete board members (incl. bios and headshots), events and flyers, members, semesters, site config; manage contact requests and newsletter signups. Includes read.",
         "tools": ['mcp__tamid-admin__tamid_list_board_members', 'mcp__tamid-admin__tamid_get_board_member', 'mcp__tamid-admin__tamid_list_events', 'mcp__tamid-admin__tamid_list_upcoming_events', 'mcp__tamid-admin__tamid_get_event', 'mcp__tamid-admin__tamid_list_members', 'mcp__tamid-admin__tamid_list_semesters', 'mcp__tamid-admin__tamid_list_site_config', 'mcp__tamid-admin__tamid_get_site_config', 'mcp__tamid-admin__tamid_list_contact_requests', 'mcp__tamid-admin__tamid_get_contact_request', 'mcp__tamid-admin__tamid_list_newsletter_signups', 'mcp__tamid-admin__tamid_get_newsletter_signup', 'mcp__tamid-admin__tamid_create_board_member', 'mcp__tamid-admin__tamid_update_board_member', 'mcp__tamid-admin__tamid_delete_board_member', 'mcp__tamid-admin__tamid_replace_board_member_headshot', 'mcp__tamid-admin__tamid_create_event', 'mcp__tamid-admin__tamid_update_event', 'mcp__tamid-admin__tamid_delete_event', 'mcp__tamid-admin__tamid_replace_event_flyer', 'mcp__tamid-admin__tamid_create_member', 'mcp__tamid-admin__tamid_update_member', 'mcp__tamid-admin__tamid_delete_member', 'mcp__tamid-admin__tamid_create_semester', 'mcp__tamid-admin__tamid_update_semester', 'mcp__tamid-admin__tamid_delete_semester', 'mcp__tamid-admin__tamid_create_site_config', 'mcp__tamid-admin__tamid_update_site_config', 'mcp__tamid-admin__tamid_delete_site_config', 'mcp__tamid-admin__tamid_update_contact_request', 'mcp__tamid-admin__tamid_delete_contact_request', 'mcp__tamid-admin__tamid_create_newsletter_signup', 'mcp__tamid-admin__tamid_update_newsletter_signup', 'mcp__tamid-admin__tamid_delete_newsletter_signup'],
     },
-    "brightspace_read": {
-        "description": "read the owner's NYU Brightspace (courses, assignments and due dates, instructions and rubrics, grades and feedback, announcements, course content, discussions, calendar); read only, never submits or posts",
-        "tools": ['mcp__brightspace__bs_whoami', 'mcp__brightspace__bs_auth_status', 'mcp__brightspace__bs_list_courses', 'mcp__brightspace__bs_course_overview', 'mcp__brightspace__bs_whats_due', 'mcp__brightspace__bs_overdue_items', 'mcp__brightspace__bs_calendar_events', 'mcp__brightspace__bs_list_assignments', 'mcp__brightspace__bs_get_assignment', 'mcp__brightspace__bs_my_submissions', 'mcp__brightspace__bs_assignment_feedback', 'mcp__brightspace__bs_my_grades', 'mcp__brightspace__bs_final_grade', 'mcp__brightspace__bs_list_announcements', 'mcp__brightspace__bs_get_announcement', 'mcp__brightspace__bs_notifications', 'mcp__brightspace__bs_unread_counts', 'mcp__brightspace__bs_content_toc', 'mcp__brightspace__bs_content_topic', 'mcp__brightspace__bs_search_content', 'mcp__brightspace__bs_content_progress', 'mcp__brightspace__bs_list_forums', 'mcp__brightspace__bs_list_topics', 'mcp__brightspace__bs_list_posts', 'mcp__brightspace__bs_list_quizzes', 'mcp__brightspace__bs_get_quiz', 'mcp__brightspace__bs_quiz_attempts', 'mcp__brightspace__bs_list_surveys', 'mcp__brightspace__bs_list_checklists', 'mcp__brightspace__bs_list_awards', 'mcp__brightspace__bs_list_external_links', 'mcp__brightspace__bs_classlist', 'mcp__brightspace__bs_my_groups', 'mcp__brightspace__bs_my_sections', 'mcp__brightspace__bs_user_profile', 'mcp__brightspace__bs_api_get'],
-    },
     "web": {
         "description": "search the web",
         "tools": ["WebSearch"],
+    },
+    "browser_read": {
+        "description": "open web pages in a headless browser and read them: navigate, take a snapshot of the page, find elements, scroll, wait, screenshot. Read-only: no clicking, typing or form filling. For pages that need a real browser (JavaScript sites, portals) rather than a plain web search.",
+        "tools": ["mcp__playwright__browser_navigate", "mcp__playwright__browser_navigate_back", "mcp__playwright__browser_snapshot",
+                  "mcp__playwright__browser_find", "mcp__playwright__browser_take_screenshot", "mcp__playwright__browser_wait_for",
+                  "mcp__playwright__browser_tabs", "mcp__playwright__browser_resize", "mcp__playwright__browser_console_messages",
+                  "mcp__playwright__browser_network_requests", "mcp__playwright__browser_close"],
+    },
+    "browser_act": {
+        "description": "operate a headless browser like a person: click, type, fill and submit forms, select options, press keys, hover, drag, upload files, handle dialogs, on any website. Use for tasks that must be done through a website's UI (sign-ups, portals, checkouts, admin pages with no API). Includes browser_read.",
+        "tools": ["mcp__playwright__browser_navigate", "mcp__playwright__browser_navigate_back", "mcp__playwright__browser_snapshot",
+                  "mcp__playwright__browser_find", "mcp__playwright__browser_take_screenshot", "mcp__playwright__browser_wait_for",
+                  "mcp__playwright__browser_tabs", "mcp__playwright__browser_resize", "mcp__playwright__browser_console_messages",
+                  "mcp__playwright__browser_network_requests", "mcp__playwright__browser_close",
+                  "mcp__playwright__browser_click", "mcp__playwright__browser_type", "mcp__playwright__browser_fill_form",
+                  "mcp__playwright__browser_select_option", "mcp__playwright__browser_press_key", "mcp__playwright__browser_hover",
+                  "mcp__playwright__browser_drag", "mcp__playwright__browser_drop", "mcp__playwright__browser_file_upload",
+                  "mcp__playwright__browser_handle_dialog", "mcp__playwright__browser_emulate_media"],
     },
 }
 

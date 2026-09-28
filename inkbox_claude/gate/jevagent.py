@@ -520,7 +520,8 @@ class JevAgent:
                 "seconds": round(time.time() - started, 1), "probs": probs}
 
 
-_WRITE_RE = re.compile(r"(send|create|update|modify|delete|manage|append|publish|place_call|move|set_|replace|import|insert|format|resize|run_script|reply|complete|fail)", re.I)
+_WRITE_RE = re.compile(r"(send|create|update|modify|delete|manage|append|publish|place_call|move|set_|replace|import|insert|format|resize|run_script|reply|complete|fail"
+                       r"|browser_click|browser_type|browser_fill_form|browser_select_option|browser_press_key|browser_drag|browser_drop|browser_file_upload|browser_handle_dialog)", re.I)
 
 
 def is_write_tool(name: str) -> bool:

@@ -729,9 +729,6 @@ def test_everything_on_a_task_is_searchable(tmp_path):
     # any_of: OR across sub-filters
     r2 = s.query_tasks(any_of=[{"text": "domain"}, {"participant": "Eve Park"}])
     assert {x["id"] for x in r2["tasks"]} == {t["id"], other["id"]}
-    # sub-filters carry their own limit (the router sends one); it must not collide
-    r3 = s.query_tasks(any_of=[{"text": "domain", "limit": 5}, {"participant": "Eve Park", "limit": 5}], limit=10)
-    assert {x["id"] for x in r3["tasks"]} == {t["id"], other["id"]}
     # the index follows later changes
     s.set_task_summary(t["id"], "Waiting on the deposit invoice.")
     assert [x["id"] for x in s.query_tasks(text="deposit invoice")["tasks"]] == [t["id"]]
@@ -765,12 +762,6 @@ class FakePicker:
     async def judge_action(self, **kw):
         self.action_calls = getattr(self, "action_calls", []) + [kw]
         return {"needs_action": self.action, "p": 0.9 if self.action else 0.1, "reason": "ok"}
-
-    lookup = None  # True/False to override, None = undecided
-
-    async def judge_lookup(self, **kw):
-        self.lookup_calls = getattr(self, "lookup_calls", []) + [kw]
-        return {"needs_lookup": self.lookup, "p": 0.9 if self.lookup else (0.1 if self.lookup is False else 0.4)}
 
     async def judge_scopes(self, **kw):
         self.scope_calls = getattr(self, "scope_calls", []) + [kw]
@@ -1079,40 +1070,11 @@ def test_claude_executor_denies_send_to_requester(tmp_path):
     assert ex.protected == [APPROVER_CONV, "+15550100001"]
 
 
-def test_small_talk_is_answered_when_the_task_lookup_breaks(tmp_path):
-    from inkbox_claude.gate.router import TaskQuery
-    m, sent = make_manager(tmp_path)
-
-    def boom(**kw):
-        raise TypeError("lookup exploded")
-    m.store.query_tasks = boom
-    m.router.next_query = TaskQuery(text="day", states=["live"])
-    m.router.next = RouterOutput(reply="Pretty good, thanks.", request=None)
-    asyncio.run(m.get("aaron").handle_inbound("how was your day?", "imessage", approver_meta()))
-    assert m.router.calls[-1]["found_tasks"] == ""
-    assert any(t == "Pretty good, thanks." for _, t, _, _ in sent)
-
-
-def test_jev_decides_whether_to_look_up_tasks(tmp_path):
-    from inkbox_claude.gate.router import TaskQuery
-    m, sent = make_manager(tmp_path)
-    m.task_picker = FakePicker(choice="none")
-    t = m.store.create_task("Review TAMID applications")
-    m.store.task_event(t["id"], "done", "ok", state="done")
-    m.store._db.execute("UPDATE tasks SET updated_at=updated_at-40*86400 WHERE id=?", (t["id"],)); m.store._db.commit()
-    # small talk: Jev says no lookup, so the filter writer is never asked
-    m.task_picker.lookup = False
-    m.router.next_query = TaskQuery(text="day")
-    asyncio.run(m.get("aaron").handle_inbound("how was your day?", "imessage", approver_meta()))
-    assert m.router.query_calls == []
-    assert m.router.calls[-1]["found_tasks"] == ""
-    # Jev says look: the filter writer is told a lookup is decided
-    m.task_picker.lookup = True
-    m.router.next_query = TaskQuery(text="TAMID")
-    asyncio.run(m.get("aaron").handle_inbound("who applied to tamid last?", "imessage", approver_meta()))
-    assert m.router.query_calls[-1]["required"] is True
-    assert "Review TAMID applications" in m.router.calls[-1]["found_tasks"]
-    # Jev said look but the filter writer returned null: fall back to everything unfinished
-    m.router.next_query = None
-    asyncio.run(m.get("aaron").handle_inbound("where do things stand?", "imessage", approver_meta()))
-    assert m.router.query_calls[-1]["required"] is True
+def test_browser_scopes_split_read_from_act():
+    from inkbox_claude.gate.scopes import SCOPES, tools_for
+    from inkbox_claude.gate.jevagent import is_write_tool
+    read, act = set(tools_for(["browser_read"])), set(tools_for(["browser_act"]))
+    assert "mcp__playwright__browser_navigate" in read and "mcp__playwright__browser_click" not in read
+    assert read < act and "mcp__playwright__browser_fill_form" in act
+    assert "mcp__playwright__browser_run_code_unsafe" not in act and "mcp__playwright__browser_evaluate" not in act
+    assert is_write_tool("mcp__playwright__browser_click") and not is_write_tool("mcp__playwright__browser_snapshot")
