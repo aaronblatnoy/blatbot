@@ -766,6 +766,12 @@ class FakePicker:
         self.action_calls = getattr(self, "action_calls", []) + [kw]
         return {"needs_action": self.action, "p": 0.9 if self.action else 0.1, "reason": "ok"}
 
+    lookup = None  # True/False to override, None = undecided
+
+    async def judge_lookup(self, **kw):
+        self.lookup_calls = getattr(self, "lookup_calls", []) + [kw]
+        return {"needs_lookup": self.lookup, "p": 0.9 if self.lookup else (0.1 if self.lookup is False else 0.4)}
+
     async def judge_scopes(self, **kw):
         self.scope_calls = getattr(self, "scope_calls", []) + [kw]
         return {"scopes": self.scopes, "probabilities": {}, "reason": "ok" if self.scopes else "disabled"}
@@ -1085,3 +1091,28 @@ def test_small_talk_is_answered_when_the_task_lookup_breaks(tmp_path):
     asyncio.run(m.get("aaron").handle_inbound("how was your day?", "imessage", approver_meta()))
     assert m.router.calls[-1]["found_tasks"] == ""
     assert any(t == "Pretty good, thanks." for _, t, _, _ in sent)
+
+
+def test_jev_decides_whether_to_look_up_tasks(tmp_path):
+    from inkbox_claude.gate.router import TaskQuery
+    m, sent = make_manager(tmp_path)
+    m.task_picker = FakePicker(choice="none")
+    t = m.store.create_task("Review TAMID applications")
+    m.store.task_event(t["id"], "done", "ok", state="done")
+    m.store._db.execute("UPDATE tasks SET updated_at=updated_at-40*86400 WHERE id=?", (t["id"],)); m.store._db.commit()
+    # small talk: Jev says no lookup, so the filter writer is never asked
+    m.task_picker.lookup = False
+    m.router.next_query = TaskQuery(text="day")
+    asyncio.run(m.get("aaron").handle_inbound("how was your day?", "imessage", approver_meta()))
+    assert m.router.query_calls == []
+    assert m.router.calls[-1]["found_tasks"] == ""
+    # Jev says look: the filter writer is told a lookup is decided
+    m.task_picker.lookup = True
+    m.router.next_query = TaskQuery(text="TAMID")
+    asyncio.run(m.get("aaron").handle_inbound("who applied to tamid last?", "imessage", approver_meta()))
+    assert m.router.query_calls[-1]["required"] is True
+    assert "Review TAMID applications" in m.router.calls[-1]["found_tasks"]
+    # Jev said look but the filter writer returned null: fall back to everything unfinished
+    m.router.next_query = None
+    asyncio.run(m.get("aaron").handle_inbound("where do things stand?", "imessage", approver_meta()))
+    assert m.router.query_calls[-1]["required"] is True

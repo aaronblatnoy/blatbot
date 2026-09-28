@@ -187,13 +187,28 @@ class GateSession:
     async def lookup_tasks(self, history: List[Dict[str, Any]], message: str, in_view: str) -> str:
         """Query pass: the router emits a structured filter, code runs it. Non-owners
         are confined to tasks they are on; the owner can query everything."""
+        picker = self.m.task_picker
+        required = False
+        if picker is not None:
+            # Jev decides whether to look anything up; the router only writes the filter.
+            label = "Aaron, the owner" if self.is_approver() else (self._sender_name() or self._sender())
+            j = await picker.judge_lookup(message=message, sender_label=label, history=history, in_view=in_view)
+            logger.info("[gate %s] jev lookup: %s (p=%.2f)", self.chat_id, j.get("needs_lookup"), float(j.get("p") or 0.0))
+            if j.get("needs_lookup") is False:
+                self._found_task_ids = []
+                return ""
+            required = True  # yes or undecided: a lookup is cheap, so look
         try:
             q = await self.m.router.plan_query(history=history, message=message, in_view=in_view,
-                                               is_approver=self.is_approver())
+                                               is_approver=self.is_approver(), required=required)
         except Exception:
             logger.exception("[gate %s] task query planning failed", self.chat_id)
             return ""
         self._found_task_ids = []
+        if q is None and required:
+            # Jev said look; the filter writer abstained. Fall back to everything unfinished.
+            from .router import TaskQuery
+            q = TaskQuery(states=["live"], limit=10)
         if q is None and in_view.strip() in ("", "(no tasks on record)") and not self.is_approver():
             # Nobody on record for this sender: that is exactly when to search for them by name.
             from .router import TaskQuery
