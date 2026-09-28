@@ -822,6 +822,18 @@ class Store:
             r = self._db.execute("SELECT task_id FROM requests WHERE id=?", (rid,)).fetchone()
         return int(r["task_id"]) if r and r["task_id"] else None
 
+    def scopes_for_task(self, task_id: int) -> List[str]:
+        """Every scope granted to any earlier request on this task, most recent first.
+        A follow-up ("try again", "yes do that") inherits these."""
+        with self._lock:
+            rows = self._db.execute("SELECT scopes_json FROM requests WHERE task_id=? ORDER BY id DESC", (task_id,)).fetchall()
+        out: List[str] = []
+        for r in rows:
+            for sc in json.loads(r["scopes_json"] or "[]"):
+                if sc not in out:
+                    out.append(sc)
+        return out
+
     def task_ids_for_chat(self, chat_id: str, limit: int = 3) -> List[int]:
         """Tasks this thread has touched, most recent first."""
         with self._lock:

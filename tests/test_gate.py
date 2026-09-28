@@ -1044,3 +1044,21 @@ def test_jev_first_stranger_request_waits_for_aaron(tmp_path):
     assert r.state == "pending" and r.scopes == ["calendar"]
     assert m.router.calls[-1]["action"] is True
     assert any("[Blatbot #1]" in s[1] for s in sent)
+
+
+def test_jev_first_follow_up_inherits_task_scopes(tmp_path):
+    """'try again' says nothing about tools; the task's earlier request did."""
+    m, sent = make_manager(tmp_path)
+    t = m.store.create_task("List the board members from the TAMID site")
+    m.store.create_request(chat_id="aaron", sender="+15550100001", sender_name="Aaron", mode="imessage", subject="",
+                           original_message="list the board", summary="List the board members", scopes=["tamid_site_read"],
+                           prompt="list the board", state="done", task_id=t["id"])
+    p = _jev_first(m, choice=f"T{t['id']}")
+    p.action, p.scopes = True, None                      # scope judgment has nothing to go on
+    m.router.next = RouterOutput(reply="On it.", task=f"T{t['id']}")
+    async def go():
+        await m.get("aaron").handle_inbound("try again.", "imessage", approver_meta())
+        await asyncio.sleep(0.05)
+    asyncio.run(go())
+    r = m.store.get_request(2)
+    assert "tamid_site_read" in r.scopes and "web" in r.scopes

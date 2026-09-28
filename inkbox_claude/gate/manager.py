@@ -369,6 +369,15 @@ class GateSession:
                                             scopes=["web"], summary=str(task.get("title") or message[:100])[:160],
                                             counterpart=emails[0] if (approver and emails) else None)
                 await self.jev_scopes(out, strict=True)
+                # A follow-up on a task keeps the tools its earlier requests had: "try again"
+                # carries no words for the scope judgment, but the task history does.
+                inherited = [sc for sc in self.m.store.scopes_for_task(task["id"]) if sc in SCOPES]
+                if inherited:
+                    merged = list(out.request.scopes) + [sc for sc in inherited if sc not in out.request.scopes]
+                    if merged != out.request.scopes:
+                        logger.info("[gate %s] scopes: +%s inherited from T%s", self.chat_id,
+                                    [sc for sc in inherited if sc not in out.request.scopes], task["id"])
+                    out.request.scopes = merged
             await self.jev_event(task, body, prior, out)
         return out, task
 
