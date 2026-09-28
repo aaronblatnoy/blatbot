@@ -269,6 +269,17 @@ class Prose:
 # ----------------------------------------------------------------------------
 
 
+_ERROR_RE = re.compile(r"^\s*(#+\s*)?(error|api error|httperror|traceback|exception|invalid|failed|unauthori[sz]ed|forbidden|not found)\b"
+                       r"|\berror calling tool\b|\bHttpError \d{3}\b|\breturned \"[^\"]*(error|invalid|denied|not found)", re.I)
+
+
+def _looks_like_error(result: Any) -> bool:
+    """Whether a tool result that was not flagged isError still reads as a failure."""
+    t = result if isinstance(result, str) else _text(result)
+    head = t.lstrip()[:400]
+    return bool(_ERROR_RE.search(head))
+
+
 def _tried_values(steps: List[Dict[str, Any]], tool: str, arg: str) -> List[Any]:
     """Values this tool has already been called with for this argument, in order."""
     out: List[Any] = []
@@ -411,7 +422,7 @@ class JevAgent:
                         options)
                     logger.info("jev agent step %d: %s (conf %.2f)", step + 1, choice, conf)
                     if choice is None:
-                        if steps and not is_write_tool(steps[-1]["tool"]):
+                        if steps and steps[-1]["ok"] and not is_write_tool(steps[-1]["tool"]):
                             # Nothing stands out after a read: what was gathered is the answer
                             # (the gate's reply model phrases it; reads cost nothing to stop on).
                             logger.info("jev agent: no clear next step after reads (p_done %.2f); finishing", p_done)
@@ -438,6 +449,11 @@ class JevAgent:
                         break
                     try:
                         result = await box.call(choice, args)
+                        if _looks_like_error(result):
+                            # Many MCP tools report failures as ordinary text. Count it as a
+                            # failed step so the loop tries different arguments, and never
+                            # "finish with findings" on it.
+                            raise RuntimeError(result if isinstance(result, str) else _text(result))
                         steps.append({"tool": choice, "args": args, "result": result, "ok": True})
                         facts[f"result_of_{choice.split('__')[-1]}_{len(steps)}"] = _text(result)
                     except Exception as exc:
@@ -520,7 +536,7 @@ class JevAgent:
                 continue
             typ = spec.get("type") or "string"
             desc = str(spec.get("description") or "")
-            if name not in required and float((answers.get(f"supply::{name}") or {}).get("noul") or 0.0) < 0.5:
+            if name not in required and float((answers.get(f"supply::{name}") or {}).get("noul") or 0.0) < 0.6:
                 continue
             if f"range::{name}" in questions:
                 pick = _top(f"range::{name}", 0.3)

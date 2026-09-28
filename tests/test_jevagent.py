@@ -337,3 +337,34 @@ def test_prose_is_told_which_queries_already_failed():
              {"tool": "other", "args": {"query": "x"}, "ok": True, "result": ""}]
     assert _tried_values(steps, "t", "query") == ["acceptance rate", "reviewer"]
     assert _tried_values(steps, "t", "nope") == []
+
+
+def test_error_text_results_count_as_failures():
+    from inkbox_claude.gate.jevagent import _looks_like_error
+    assert _looks_like_error("Error calling tool 'search_drive_files': API error in search_drive_files: <HttpError 400 ...>")
+    assert _looks_like_error("### Error\nBrowser is not installed")
+    assert _looks_like_error('API returned "Invalid value"')
+    assert not _looks_like_error("Successfully listed 5 calendars")
+    assert not _looks_like_error('{"success": true, "count": 0, "data": []}')
+    assert not _looks_like_error("Found 10 messages matching 'error report'")
+
+
+def test_error_result_makes_agent_retry_with_other_args(agent, monkeypatch):
+    search = "mcp__tamid-drive__search_drive_files"
+    schemas = {search: {"description": "search", "schema": {"type": "object", "required": ["query"],
+                                                            "properties": {"user_google_email": {"type": "string"}, "query": {"type": "string"}}}}}
+    class Box(FakeBox):
+        async def call(self, name, args):
+            self.calls.append((name, args))
+            return "Error calling tool: HttpError 400 bad corpora" if len(self.calls) == 1 else "Found: X (ID: 1CCCCCCCCCCCCCCCCCCCCCCC3)"
+    box = Box(schemas)
+    class P(ScriptedProse):
+        async def write(self, instruction, facts):
+            self.calls += 1; self.asks.append(instruction)
+            return "second query" if "DIFFERENT" in instruction else "first query"
+    judge = ScriptedJudge([search, search])
+    prose = P()
+    _patch(monkeypatch, box, judge, prose, [search])
+    st = asyncio.run(agent.run(_req("find the mentorship sheet")))
+    assert st["ok"] and [c[1]["query"] for c in box.calls] == ["first query", "second query"]
+    assert st["steps"][0]["ok"] is False and st["steps"][1]["ok"] is True
