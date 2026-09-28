@@ -278,17 +278,15 @@ class Router:
         logger.error("router failed twice: %s", last_err)
         return RouterOutput(reply=None, request=None)
 
-    async def _chat(self, messages: List[Dict[str, str]]) -> str:
+    async def _chat(self, messages: List[Dict[str, str]], json_mode: bool = True) -> str:
+        body: Dict[str, Any] = {"model": self.model, "messages": messages, "temperature": 0.2}
+        if json_mode:
+            body["response_format"] = {"type": "json_object"}
         async with httpx.AsyncClient(timeout=self.timeout) as client:
             r = await client.post(
                 f"{self.base_url}/chat/completions",
                 headers={"Authorization": f"Bearer {self.api_key}"},
-                json={
-                    "model": self.model,
-                    "messages": messages,
-                    "temperature": 0.2,
-                    "response_format": {"type": "json_object"},
-                },
+                json=body,
             )
             r.raise_for_status()
             return r.json()["choices"][0]["message"]["content"]

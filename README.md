@@ -119,6 +119,8 @@ Everything custom lives in one folder plus one file.
 | `inkbox_claude/gate/router.py` | The zero-tool router, its rules, and the date and time line |
 | `inkbox_claude/gate/store.py` | SQLite: the task ledger, requests and their states, threads |
 | `inkbox_claude/gate/executor.py` | Runs one approved, hash-checked prompt through Claude Code |
+| `inkbox_claude/gate/jevagent.py` | Optional executor without a chat model: TypeSafe judgments pick tools, code fills arguments, prose only on demand |
+| `inkbox_claude/gate/taskpick.py` | TypeSafe judgments for the ledger: which task, what kind of event, which scopes, whether action is needed |
 | `inkbox_claude/gate/scopes.py` | Scope names mapped to tool lists |
 | `inkbox_claude/live.py` | The phone bridge for OpenAI GPT-Live, using client delegation |
 | `tests/test_gate.py`, `tests/test_live.py` | Tests, including simulated phone calls with fake sockets |

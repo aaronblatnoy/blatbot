@@ -146,13 +146,43 @@ delegates. From the gateway down, the path is identical for all channels.
 |---|---|
 | Gate: sessions, approvals, phone surface | `inkbox_claude/gate/manager.py` |
 | Router prompt and date/time line | `inkbox_claude/gate/router.py` |
-| Executor | `inkbox_claude/gate/executor.py` |
+| Executor (Claude Code) | `inkbox_claude/gate/executor.py` |
+| Executor (Jev agent, `GATE_EXECUTOR=jev`) | `inkbox_claude/gate/jevagent.py` |
 | Ledger and requests schema | `inkbox_claude/gate/store.py` |
 | Voice bridge, prompt, tool schema | `inkbox_claude/realtime.py` |
 | Voice persona | `_BLATBOT_VOICE` in `inkbox_claude/config.py` |
 | Per-call notes for the voice agent | `GateSession.voice_briefing` |
 | Tests | `tests/test_gate.py` |
 | Env (`~/.inkbox-claude/.env`) | `INKBOX_VOICE_STACK`, `INKBOX_REALTIME_ENABLED`, `OPENAI_API_KEY`, `INKBOX_REALTIME_VOICE`, `GATE_VOICE_TRUST_APPROVER`, `GATE_VOICE_VOCABULARY`, `INKBOX_APPROVER_PHONE` |
+
+## Executor: Jev agent vs Claude Code
+
+`GATE_EXECUTOR=jev` (default `claude`) runs approved requests through
+`inkbox_claude/gate/jevagent.py` instead of Claude Code. No chat model drives the
+loop. Each step is one TypeSafe request:
+
+1. Is the goal achieved by the steps so far? (yes/no judgment; done at 0.6)
+2. Which tool next, out of the scope's list, or give up? (a choice; unsure below
+   `JEV_AGENT_MIN_CONF`, 0.45)
+3. For that tool, one batched request fills the arguments: a yes/no per optional
+   argument (supply it?), a choice among values already in play (ids, addresses,
+   phones found in the request and earlier results), a choice for enums.
+4. Only arguments that must be written (a body, a title, a date string) go to
+   DeepSeek, one short call each, and a value that comes back as prose or
+   UNKNOWN is rejected.
+
+Code owns the loop, the schemas (read live from each MCP server), and every call.
+Inkbox tools are called in-process; Google and site-admin servers are started
+once per request from the same `~/.claude.json` config Claude Code uses. Rules:
+read before write; a step that would repeat identically means the work is done;
+a tool failing twice, an unfillable required argument, or a give-up ends the run
+as FAILED. With `GATE_EXECUTOR_FALLBACK=claude` (default) a failed run that made
+no write is re-run through Claude Code; after a successful write there is no
+fallback (no double sends). `JEV_AGENT_MAX_STEPS` caps the loop (8).
+
+Measured on black-sky: a site-admin read in 1.4 s with 2 judgments; a calendar
+lookup in 8.6 s with 8 judgments and 4 prose calls, arguments exactly right.
+Claude Code took 20 to 60 s for the same shapes.
 
 ## Voice engine: Live vs Realtime
 

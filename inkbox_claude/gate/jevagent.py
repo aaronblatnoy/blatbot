@@ -1,0 +1,510 @@
+"""A tool-calling agent driven by typed judgments (TypeSafe Jev) instead of a chat model.
+
+Replaces the Claude Code executor for a request when GATE_EXECUTOR=jev. The loop:
+
+  1. Jev picks the next tool from the scope's list (a Choice), or "done" / "give_up".
+  2. Code fills that tool's arguments. Values that can be selected from what is
+     already known (a calendar event id, a row, a contact, a date range) are picked
+     by Jev from a candidate list. Values that must be written (an email body, a
+     bio, a note) are composed by the prose model (DeepSeek), and only when Jev has
+     judged that prose is needed.
+  3. Code calls the tool, records the result, and loops.
+
+Jev never sees a tool and never writes text. DeepSeek never chooses a tool. Code
+owns the loop, the argument schemas, and every side effect. When the agent cannot
+make progress it stops with STATUS: FAILED and the gate falls back to Claude Code
+if GATE_EXECUTOR_FALLBACK=claude.
+
+Configuration:
+  GATE_EXECUTOR             claude (default) | jev
+  GATE_EXECUTOR_FALLBACK    claude (default) | none   what to do when the jev agent gives up
+  JEV_AGENT_MAX_STEPS       default 8
+  JEV_AGENT_MIN_CONF        default 0.55   below this a pick is treated as "unsure"
+"""
+
+from __future__ import annotations
+
+import asyncio
+import json
+import logging
+import os
+import re
+import time
+from contextlib import AsyncExitStack
+from datetime import datetime, timedelta
+from typing import Any, Dict, List, Optional, Tuple
+from zoneinfo import ZoneInfo
+
+import httpx
+
+from .scopes import ORG_ACCOUNT, OWNER_ACCOUNT, tools_for
+from .store import Request, sha256
+from .taskpick import TYPESAFE_URL
+
+logger = logging.getLogger(__name__)
+
+TZ = ZoneInfo("America/New_York")
+DONE, GIVE_UP = "done", "give_up"
+
+
+def enabled() -> bool:
+    return (os.getenv("GATE_EXECUTOR") or "claude").strip().lower() == "jev" and bool(os.getenv("TYPESAFE_API_KEY"))
+
+
+# ----------------------------------------------------------------------------
+# Tool access: in-process Inkbox tools + the external MCP servers, one client each
+# ----------------------------------------------------------------------------
+
+
+def _input_schema(t: Any) -> Dict[str, Any]:
+    return getattr(t, "input_schema", None) or getattr(t, "inputSchema", None) or {}
+
+
+def split_tool(name: str) -> Tuple[str, str]:
+    """mcp__<server>__<tool> -> (server, tool)."""
+    m = re.match(r"^mcp__(.+?)__(.+)$", name)
+    if not m:
+        raise ValueError(f"not an mcp tool name: {name}")
+    return m.group(1), m.group(2)
+
+
+class ToolBox:
+    """Uniform access to every tool the gate can grant, by full name
+    (mcp__<server>__<tool>). External servers are started lazily and kept for
+    the life of one request."""
+
+    def __init__(self, inkbox_server: Any, mcp_config: Dict[str, Dict[str, Any]]):
+        self._inkbox = inkbox_server
+        self._cfg = mcp_config
+        self._stack = AsyncExitStack()
+        self._sessions: Dict[str, Any] = {}
+        self._schemas: Dict[str, Dict[str, Any]] = {}
+
+    async def __aenter__(self) -> "ToolBox":
+        await self._stack.__aenter__()
+        return self
+
+    async def __aexit__(self, *exc: Any) -> None:
+        await self._stack.__aexit__(*exc)
+
+    async def _session(self, server: str) -> Any:
+        if server in self._sessions:
+            return self._sessions[server]
+        from mcp import ClientSession
+        from mcp.client.stdio import StdioServerParameters, stdio_client
+        cfg = self._cfg.get(server)
+        if not cfg:
+            raise RuntimeError(f"no launch config for MCP server {server}")
+        params = StdioServerParameters(command=cfg["command"], args=list(cfg.get("args") or []),
+                                       env={**os.environ, **(cfg.get("env") or {})})
+        read, write = await self._stack.enter_async_context(stdio_client(params))
+        session = await self._stack.enter_async_context(ClientSession(read, write))
+        await session.initialize()
+        listed = await session.list_tools()
+        for t in listed.tools:
+            self._schemas[f"mcp__{server}__{t.name}"] = {"description": t.description or "", "schema": _input_schema(t)}
+        self._sessions[server] = session
+        return session
+
+    async def _inkbox_tools(self) -> Dict[str, Dict[str, Any]]:
+        """Tools of the in-process Inkbox server (an mcp.server.Server inside the
+        SDK config dict), read through its own list_tools handler."""
+        if "inkbox" in self._sessions:
+            return self._sessions["inkbox"]
+        from mcp import types as mt
+        inst = self._inkbox["instance"] if isinstance(self._inkbox, dict) else self._inkbox
+        handler = inst.request_handlers[mt.ListToolsRequest]
+        res = await handler(mt.ListToolsRequest(method="tools/list"))
+        out = {}
+        for t in res.root.tools:
+            out[t.name] = {"description": t.description or "", "schema": _input_schema(t)}
+            self._schemas[f"mcp__inkbox__{t.name}"] = out[t.name]
+        self._sessions["inkbox"] = out
+        return out
+
+    async def schema(self, name: str) -> Dict[str, Any]:
+        server, short = split_tool(name)
+        if server == "inkbox":
+            return (await self._inkbox_tools()).get(short, {"description": "", "schema": {}})
+        await self._session(server)
+        return self._schemas.get(name, {"description": "", "schema": {}})
+
+    async def call(self, name: str, args: Dict[str, Any]) -> Any:
+        server, short = split_tool(name)
+        if server == "inkbox":
+            from mcp import types as mt
+            await self._inkbox_tools()
+            inst = self._inkbox["instance"] if isinstance(self._inkbox, dict) else self._inkbox
+            handler = inst.request_handlers[mt.CallToolRequest]
+            res = (await handler(mt.CallToolRequest(method="tools/call",
+                                                    params=mt.CallToolRequestParams(name=short, arguments=args)))).root
+        else:
+            session = await self._session(server)
+            res = await session.call_tool(short, arguments=args)
+        parts = []
+        for c in getattr(res, "content", []) or []:
+            txt = getattr(c, "text", None)
+            parts.append(txt if txt is not None else str(c))
+        text = "\n".join(parts)
+        if getattr(res, "isError", False):
+            raise RuntimeError(text[:800])
+        return text
+
+
+def mcp_config_from_claude_json() -> Dict[str, Dict[str, Any]]:
+    """The same launch config Claude Code uses on this machine."""
+    try:
+        d = json.load(open(os.path.expanduser("~/.claude.json")))
+        return dict(d.get("mcpServers") or {})
+    except Exception:
+        return {}
+
+
+# ----------------------------------------------------------------------------
+# Jev calls
+# ----------------------------------------------------------------------------
+
+
+class Judge:
+    def __init__(self) -> None:
+        self.api_key = (os.getenv("TYPESAFE_API_KEY") or "").strip()
+        self.model = (os.getenv("TYPESAFE_MODEL") or "jev-latest").strip()
+        self.min_conf = float(os.getenv("JEV_AGENT_MIN_CONF") or 0.45)
+        self.calls = 0
+
+    async def ask(self, state: Any, questions: Dict[str, Any]) -> Dict[str, Any]:
+        self.calls += 1
+        async with httpx.AsyncClient(timeout=20.0) as client:
+            r = await client.post(TYPESAFE_URL, headers={"Authorization": f"Bearer {self.api_key}"},
+                                  json={"state": state, "model": self.model, "questions": questions})
+            r.raise_for_status()
+            return r.json()["answers"]
+
+    async def choose(self, state: Any, question: Any, options: Dict[str, Any],
+                     min_p: Optional[float] = None) -> Tuple[Optional[str], float, Dict[str, float]]:
+        """Best option by probability. Returns None as the pick when the top
+        option's probability is under `min_p` (default JEV_AGENT_MIN_CONF)."""
+        a = (await self.ask(state, {"q": {"type": "choice", "instructions": question, "criteria": options}}))["q"]
+        probs = {k: float(v) for k, v in (a.get("probabilities") or {}).items()}
+        top = a.get("choice") or (max(probs, key=probs.get) if probs else None)
+        p = probs.get(top, float(a.get("confidence") or 0.0)) if top else 0.0
+        floor = self.min_conf if min_p is None else min_p
+        return (top if top and p >= floor else None), p, probs
+
+    async def yes(self, state: Any, question: Any) -> float:
+        a = (await self.ask(state, {"q": {"type": "noul", "instructions": question}}))["q"]
+        return float(a.get("noul") or 0.0)
+
+
+# ----------------------------------------------------------------------------
+# Prose (DeepSeek), only when Jev says prose is needed
+# ----------------------------------------------------------------------------
+
+
+class Prose:
+    def __init__(self, router: Any):
+        self.router = router  # the gate's Router: reuse its key/model/_chat
+        self.calls = 0
+
+    async def write(self, instruction: str, facts: Dict[str, Any]) -> str:
+        self.calls += 1
+        sys_p = ("You write short pieces of text for Blatbot, Executive Assistant to Aaron Blatnoy. "
+                 "Use only the facts given. No emojis. No em dashes. Sign emails exactly:\n"
+                 "Best,\nBlatbot\nExecutive Assistant to Aaron Blatnoy\n"
+                 "Never mention how you work or any tooling. Output only the requested text.")
+        user = f"FACTS:\n{json.dumps(facts, ensure_ascii=False, default=str, indent=1)}\n\nWRITE:\n{instruction}"
+        raw = await self.router._chat([{"role": "system", "content": sys_p}, {"role": "user", "content": user}],
+                                      json_mode=False)
+        return raw.strip()
+
+
+# ----------------------------------------------------------------------------
+# The agent
+# ----------------------------------------------------------------------------
+
+
+def _short(v: Any, n: int = 700) -> str:
+    s = v if isinstance(v, str) else json.dumps(v, ensure_ascii=False, default=str)
+    return s if len(s) <= n else s[:n] + "..."
+
+
+def _now_facts() -> Dict[str, str]:
+    now = datetime.now(TZ)
+    return {
+        "now": now.strftime("%A, %B %d, %Y, %-I:%M %p %Z"),
+        "today_iso": now.date().isoformat(),
+        "tomorrow_iso": (now.date() + timedelta(days=1)).isoformat(),
+        "timezone": "America/New_York",
+    }
+
+
+class JevAgent:
+    def __init__(self, *, inkbox_server: Any, router: Any, mcp_config: Optional[Dict[str, Any]] = None,
+                 max_steps: Optional[int] = None):
+        self.inkbox_server = inkbox_server
+        self.router = router
+        self.mcp_config = mcp_config if mcp_config is not None else mcp_config_from_claude_json()
+        self.max_steps = int(max_steps or os.getenv("JEV_AGENT_MAX_STEPS") or 8)
+
+    async def run(self, req: Request, context: str = "") -> Dict[str, Any]:
+        if sha256(req.prompt) != req.prompt_sha256:
+            return {"ok": False, "error": "prompt hash mismatch; refused to run", "tool_calls": []}
+        judge, prose = Judge(), Prose(self.router)
+        allowed = tools_for(req.scopes)
+        started = time.time()
+        steps: List[Dict[str, Any]] = []
+        facts: Dict[str, Any] = {"request": req.original_message, "task_context": context[:3000], **_now_facts(),
+                                 "accounts": {"org_google": ORG_ACCOUNT, "owner_google": OWNER_ACCOUNT}}
+        try:
+            async with ToolBox(self.inkbox_server, self.mcp_config) as box:
+                tool_options: Dict[str, str] = {}
+                for name in allowed:
+                    try:
+                        tool_options[name] = (await box.schema(name))["description"][:220] or name
+                    except Exception as exc:
+                        logger.warning("jev agent: cannot describe %s: %s", name, exc)
+                p_done = 0.0
+                for step in range(self.max_steps):
+                    state = {"goal": req.original_message, "task_context": context[:2500], **_now_facts(),
+                             "steps_so_far": [f"{s['tool']}({_short(s['args'], 200)}) -> {_short(s['result'], 400)}" for s in steps]}
+                    if steps:
+                        p_done = await judge.yes(state, {
+                            "question": "Is `goal` now fully achieved by `steps_so_far`, so no further tool call is needed?",
+                            "criteria": {"true": "Everything the goal asked for has been done or, for a question, "
+                                                 "the right lookup has been made (an empty result from the right "
+                                                 "place still answers the question).",
+                                         "false": "Something the goal asked for has not happened yet, or the lookup "
+                                                  "was aimed at the wrong target and a different call is needed."}})
+                        logger.info("jev agent step %d: p(done)=%.2f", step + 1, p_done)
+                        if p_done >= 0.6:
+                            break
+                    options = dict(tool_options)
+                    options[GIVE_UP] = "The goal cannot be achieved with these tools or the information available."
+                    choice, conf, probs = await judge.choose(
+                        state,
+                        {"question": "What is the single best next step toward `goal`?",
+                         "rules": ["Read before you write: look things up before booking, sending, or changing.",
+                                   "Do not repeat a step that already succeeded.",
+                                   f"Choose {GIVE_UP} if a needed tool is missing or a step failed twice."]},
+                        options)
+                    logger.info("jev agent step %d: %s (conf %.2f)", step + 1, choice, conf)
+                    if choice is None:
+                        if steps and not is_write_tool(steps[-1]["tool"]):
+                            # Nothing stands out after a read: what was gathered is the answer
+                            # (the gate's reply model phrases it; reads cost nothing to stop on).
+                            logger.info("jev agent: no clear next step after reads (p_done %.2f); finishing", p_done)
+                            break
+                        return self._status(False, "unsure which step to take next", steps, judge, prose, started,
+                                            probs=probs)
+                    if choice == GIVE_UP:
+                        return self._status(False, "gave up: goal not achievable with the granted tools", steps, judge, prose, started)
+                    args = await self._fill_args(box, judge, prose, choice, facts, steps, req)
+                    if args is None:
+                        return self._status(False, f"could not determine arguments for {choice}", steps, judge, prose, started)
+                    if any(s["ok"] and s["tool"] == choice and s["args"] == args for s in steps):
+                        # The best next move is one already made: nothing better exists, so the work is done.
+                        logger.info("jev agent: would repeat %s with identical arguments; treating as done", choice)
+                        break
+                    try:
+                        result = await box.call(choice, args)
+                        steps.append({"tool": choice, "args": args, "result": result, "ok": True})
+                        facts[f"result_of_{choice.split('__')[-1]}_{len(steps)}"] = _short(result, 6000)
+                    except Exception as exc:
+                        steps.append({"tool": choice, "args": args, "result": f"ERROR: {exc}", "ok": False})
+                        if sum(1 for s in steps if s["tool"] == choice and not s["ok"]) >= 2:
+                            return self._status(False, f"{choice} failed twice: {exc}", steps, judge, prose, started)
+                else:
+                    return self._status(False, "step limit reached", steps, judge, prose, started)
+        except Exception as exc:
+            logger.exception("jev agent failed for request %s", req.id)
+            return self._status(False, str(exc), steps, judge, prose, started)
+        return self._status(True, "", steps, judge, prose, started)
+
+    async def _fill_args(self, box: ToolBox, judge: Judge, prose: Prose, tool: str, facts: Dict[str, Any],
+                         steps: List[Dict[str, Any]], req: Request) -> Optional[Dict[str, Any]]:
+        """Fill one tool's arguments in ONE TypeSafe request: for each optional
+        argument a Noul (supply it?), for each argument with values already in
+        play a Choice (which one?), for enums/booleans a Choice. Only arguments
+        that must be written go to the prose model afterwards."""
+        meta = await box.schema(tool)
+        schema = meta.get("schema") or {}
+        props: Dict[str, Any] = schema.get("properties") or {}
+        required = list(schema.get("required") or [])
+        server, short = split_tool(tool)
+        args: Dict[str, Any] = {}
+        state = {"goal": req.original_message, "tool": short, "tool_description": (meta.get("description") or "")[:500],
+                 "arguments": {n: {"description": str(sp.get("description") or ""), "type": sp.get("type") or "string",
+                                   "required": n in required} for n, sp in props.items()},
+                 "known_facts": {k: _short(v, 1200) for k, v in facts.items()},
+                 "steps_so_far": [f"{s['tool']} -> {_short(s['result'], 300)}" for s in steps]}
+        questions: Dict[str, Any] = {}
+        cands: Dict[str, List[Any]] = {}
+        for name, spec in props.items():
+            if name == "user_google_email":
+                args[name] = ORG_ACCOUNT if server == "tamid-drive" else OWNER_ACCOUNT
+                continue
+            typ = spec.get("type") or "string"
+            if name not in required:
+                questions[f"supply::{name}"] = {"type": "noul", "instructions": {
+                    "question": f"Should the argument `arguments.{name}` be supplied for this `tool` call, given `goal`?",
+                    "criteria": {"true": "A value is needed for the call to do what the goal requires.",
+                                 "false": "Leave it out; the default is right or it does not apply."}}}
+            if typ == "boolean" or spec.get("enum"):
+                opts = {str(o): f"{name} = {o}" for o in (spec.get("enum") or [True, False])}
+                questions[f"pick::{name}"] = {"type": "choice", "instructions": f"What value should `arguments.{name}` take for this call?",
+                                              "criteria": opts}
+                continue
+            cs = _candidate_values(name, str(spec.get("description") or ""), typ, facts, steps)
+            if cs:
+                cands[name] = cs[:60]
+                opts = {f"c{i}": {"value": _short(v, 300)} for i, v in enumerate(cands[name])}
+                opts["write_new"] = "None of these; the value must be composed from the goal (a date/time, a title, a body, a query)."
+                questions[f"pick::{name}"] = {"type": "choice", "instructions": f"Which of these is the right value for `arguments.{name}`?",
+                                              "criteria": opts}
+        answers = await judge.ask(state, questions) if questions else {}
+
+        def _top(qid: str, floor: float) -> Optional[str]:
+            a = answers.get(qid) or {}
+            probs = {k: float(v) for k, v in (a.get("probabilities") or {}).items()}
+            top = a.get("choice") or (max(probs, key=probs.get) if probs else None)
+            return top if top and probs.get(top, 0.0) >= floor else None
+
+        for name, spec in props.items():
+            if name in args:
+                continue
+            typ = spec.get("type") or "string"
+            desc = str(spec.get("description") or "")
+            if name not in required and float((answers.get(f"supply::{name}") or {}).get("noul") or 0.0) < 0.5:
+                continue
+            if typ == "boolean" or spec.get("enum"):
+                pick = _top(f"pick::{name}", 0.3)
+                if pick is None:
+                    if name in required:
+                        return None
+                    continue
+                args[name] = (pick == "True") if typ == "boolean" else _coerce(pick, typ)
+                continue
+            if name in cands:
+                pick = _top(f"pick::{name}", 0.3)
+                if pick and pick != "write_new":
+                    args[name] = _coerce(cands[name][int(pick[1:])], typ)
+                    continue
+                if pick is None and name not in required:
+                    continue
+            # Must be written. Short structured values (dates, queries, titles) are still text.
+            text = await prose.write(
+                f"Produce ONLY the value for the tool argument `{name}` ({typ}). {desc} "
+                f"Use ISO 8601 with the -04:00 / -05:00 New York offset for any datetime. "
+                f"Output the bare value: no quotes, no label, no explanation. If the facts do not contain enough "
+                f"to determine it, output exactly UNKNOWN.",
+                {"goal": req.original_message, "tool": short, "facts": {k: _short(v, 1500) for k, v in facts.items()}})
+            if not _plausible_value(name, text, typ):
+                logger.info("jev agent: no usable value for %s.%s (%r)", short, name, text[:80])
+                if name in required:
+                    return None
+                continue
+            args[name] = _coerce(text, typ)
+        missing = [r for r in required if r not in args]
+        if missing:
+            logger.warning("jev agent: missing required args %s for %s", missing, tool)
+            return None
+        return args
+
+    @staticmethod
+    def _status(ok: bool, error: str, steps: List[Dict[str, Any]], judge: Judge, prose: Prose,
+                started: float, probs: Optional[Dict[str, float]] = None) -> Dict[str, Any]:
+        lines = [f"{'Done' if ok else 'Failed'} via Jev agent in {time.time() - started:.1f}s "
+                 f"({len(steps)} tool call(s), {judge.calls} Jev judgment(s), {prose.calls} prose call(s))."]
+        for s in steps:
+            lines.append(f"- {s['tool'].split('__')[-1]}: {_short(s['result'], 300)}")
+        if error:
+            lines.append(f"Reason: {error}")
+        lines.append("STATUS: OK" if ok else "STATUS: FAILED")
+        raw = "\n".join(lines)
+        wrote = any(s["ok"] and is_write_tool(s["tool"]) for s in steps)
+        return {"ok": ok, "summary": raw[-1500:], "raw": raw, "tool_calls": [s["tool"] for s in steps], "wrote": wrote,
+                "steps": [{"tool": s["tool"], "args": s["args"], "ok": s["ok"]} for s in steps],
+                "error": error or None, "engine": "jev", "jev_calls": judge.calls, "prose_calls": prose.calls,
+                "seconds": round(time.time() - started, 1), "probs": probs}
+
+
+_WRITE_RE = re.compile(r"(send|create|update|modify|delete|manage|append|publish|place_call|move|set_|replace|import|insert|format|resize|run_script|reply|complete|fail)", re.I)
+
+
+def is_write_tool(name: str) -> bool:
+    """Whether a tool changes the world. A successful write must never be
+    retried by the Claude fallback (double email, duplicate event)."""
+    return bool(_WRITE_RE.search(name.split("__")[-1]))
+
+
+_LABELED_ID_RE = re.compile(r"\b(?:ID|id|Id)\s*[:=]\s*\"?([^\s\"'|,)>]+)")
+_ID_RE = re.compile(r"\b(?=[A-Za-z0-9_-]*\d)[A-Za-z0-9_-]{16,}\b")
+_EMAIL_RE = re.compile(r"[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}")
+_PHONE_RE = re.compile(r"\+?1?[ (.-]*\d{3}[ ).-]*\d{3}[ .-]*\d{4}")
+
+
+def _candidate_values(name: str, desc: str, typ: str, facts: Dict[str, Any], steps: List[Dict[str, Any]]) -> List[Any]:
+    """Values already in play that could fill this argument: ids, addresses, phones,
+    and short strings from tool results. Jev selects among them."""
+    blob = "\n".join(_short(v, 4000) for v in facts.values()) + "\n" + "\n".join(_short(s["result"], 4000) for s in steps)
+    lname = (name + " " + desc).lower()
+    out: List[Any] = []
+    if "email" in lname or name in ("to", "cc", "attendee", "attendees"):
+        out += _EMAIL_RE.findall(blob)
+    elif "phone" in lname or name in ("to_number",):
+        out += _PHONE_RE.findall(blob)
+    elif name.endswith("_id") or name in ("id", "spreadsheet_id", "form_id", "event_id", "message_id", "thread_id", "file_id", "calendar_id"):
+        out += _LABELED_ID_RE.findall(blob) + _ID_RE.findall(blob)
+    seen: List[Any] = []
+    for v in out:
+        v = v.strip()
+        if v and v not in seen:
+            seen.append(v)
+    return seen
+
+
+def _plausible_value(name: str, text: str, typ: str) -> bool:
+    """Reject prose where a value belongs: UNKNOWN, sentences in an id slot, empties."""
+    t = (text or "").strip()
+    if not t or t.upper().startswith("UNKNOWN"):
+        return False
+    lname = name.lower()
+    if lname.endswith("_id") or lname in ("id", "spreadsheet_id", "form_id", "event_id", "file_id", "calendar_id", "message_id", "thread_id"):
+        return " " not in t and len(t) < 200
+    if lname in ("to", "email", "user_google_email") or lname.endswith("_email"):
+        return "@" in t and " " not in t
+    if typ in ("integer", "number"):
+        return re.fullmatch(r"-?\d+(\.\d+)?", t) is not None
+    if "time" in lname or "date" in lname:
+        return re.match(r"\d{4}-\d{2}-\d{2}", t) is not None
+    return len(t) < 20000
+
+
+def _coerce(v: Any, typ: str) -> Any:
+    if typ == "integer":
+        try:
+            return int(str(v).strip())
+        except Exception:
+            return v
+    if typ == "number":
+        try:
+            return float(str(v).strip())
+        except Exception:
+            return v
+    if typ == "array":
+        if isinstance(v, list):
+            return v
+        s = str(v).strip()
+        try:
+            j = json.loads(s)
+            return j if isinstance(j, list) else [j]
+        except Exception:
+            return [x.strip() for x in s.split(",") if x.strip()]
+    if typ == "object":
+        if isinstance(v, dict):
+            return v
+        try:
+            return json.loads(str(v))
+        except Exception:
+            return {}
+    return str(v).strip().strip('"')
