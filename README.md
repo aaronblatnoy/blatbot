@@ -124,12 +124,12 @@ So the real question is not "can the model do the task." It is "who is allowed t
                   │  │  │                  id slot or UNKNOWN is rejected          │  │
                   │  │  │ guard        send aimed at the requester ──> refused     │  │
                   │  │  │              identical repeat of a done step ──> stop    │  │
-                  │  │  │              same tool twice in a row ──> next must differ│  │
-                  │  │  │              a value already tried ──> not offered again  │  │
-                  │  │  │              error text in a result ──> a failed step     │  │
-                  │  │  │ budget       state over ~100k chars ──> largest result   │  │
-                  │  │  │              becomes a digest; a result over budget is   │  │
-                  │  │  │              narrowed: split, Jev scores parts, descend  │  │
+                  │  │  │              same tool twice in a row: the next must dif│  │
+                  │  │  │              a value already tried: not offered again   │  │
+                  │  │  │              error text in a result: a failed step      │  │
+                  │  │  │ budget       state over ~100k chars: largest result beco│  │
+                  │  │  │              a digest; one result over budget is narrowe│  │
+                  │  │  │              split, Jev scores the parts, descend, repea│  │
                   │  │  │ call         Inkbox tools in-process; Google and site   │  │
                   │  │  │              servers over MCP stdio; result kept whole  │  │
                   │  │  └──────────────────────────────────────────────────────────┘  │
