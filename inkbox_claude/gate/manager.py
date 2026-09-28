@@ -718,11 +718,14 @@ class GateSessionManager:
         self.identity_info = identity_info
         self.store = Store(store_path)
         self.router = Router(api_key=cfg.deepseek_api_key, model=cfg.deepseek_model, standing_path=standing_path)
-        self.executor = Executor(mcp_server=mcp_server, cwd=exec_cwd, model=cfg.claude_model or "sonnet")
+        protected = [str(cfg.approver_imessage_conversation_id or ""), str(getattr(cfg, "approver_phone", "") or "")]
+        self.executor = Executor(mcp_server=mcp_server, cwd=exec_cwd, model=cfg.claude_model or "sonnet",
+                                 protected=protected)
         # GATE_EXECUTOR=jev runs requests through the typed-judgment agent
         # (Jev picks tools, code fills arguments, DeepSeek writes prose only when
         # needed); Claude Code stays as the fallback unless GATE_EXECUTOR_FALLBACK=none.
-        self.jev_agent: Optional[JevAgent] = JevAgent(inkbox_server=mcp_server, router=self.router) if jev_agent_enabled() else None
+        self.jev_agent: Optional[JevAgent] = JevAgent(inkbox_server=mcp_server, router=self.router,
+                                                      protected=protected) if jev_agent_enabled() else None
         self.jev_fallback = (os.getenv("GATE_EXECUTOR_FALLBACK") or "claude").strip().lower() != "none"
         logger.info("[gate] executor: %s", "jev agent (fallback %s)" % ("claude" if self.jev_fallback else "none") if self.jev_agent else "claude code")
         self.task_picker: Optional[TaskPicker] = TaskPicker() if jev_enabled() else None

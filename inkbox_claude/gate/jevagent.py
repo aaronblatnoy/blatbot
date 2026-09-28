@@ -37,7 +37,7 @@ from zoneinfo import ZoneInfo
 
 import httpx
 
-from .scopes import ORG_ACCOUNT, OWNER_ACCOUNT, tools_for
+from .scopes import ORG_ACCOUNT, OWNER_ACCOUNT, sends_to_requester, tools_for
 from .store import Request, sha256
 from .taskpick import TYPESAFE_URL
 
@@ -295,7 +295,8 @@ def _date_role(name: str, desc: str) -> Optional[str]:
 
 class JevAgent:
     def __init__(self, *, inkbox_server: Any, router: Any, mcp_config: Optional[Dict[str, Any]] = None,
-                 max_steps: Optional[int] = None):
+                 max_steps: Optional[int] = None, protected: Optional[List[str]] = None):
+        self.protected = list(protected or [])
         self.inkbox_server = inkbox_server
         self.router = router
         self.mcp_config = mcp_config if mcp_config is not None else mcp_config_from_claude_json()
@@ -365,6 +366,10 @@ class JevAgent:
                     args = await self._fill_args(box, judge, prose, choice, facts, steps, req)
                     if args is None:
                         return self._status(False, f"could not determine arguments for {choice}", steps, judge, prose, started)
+                    if sends_to_requester(choice, args, self.protected + [req.sender, req.chat_id]):
+                        # The gateway delivers the answer; a send to the requester would duplicate it.
+                        logger.info("jev agent: refusing %s to the requester; finishing with findings", choice)
+                        break
                     if any(s["ok"] and s["tool"] == choice and s["args"] == args for s in steps):
                         # The best next move is one already made: nothing better exists, so the work is done.
                         logger.info("jev agent: would repeat %s with identical arguments; treating as done", choice)
@@ -538,9 +543,9 @@ def _candidate_values(name: str, desc: str, typ: str, facts: Dict[str, Any], ste
     out: List[Any] = []
     if "email" in lname or name in ("to", "cc", "attendee", "attendees"):
         out += _EMAIL_RE.findall(blob)
-    elif "phone" in lname or name in ("to_number",):
-        out += _PHONE_RE.findall(blob)
-    elif name.endswith("_id") or name in ("id", "spreadsheet_id", "form_id", "event_id", "message_id", "thread_id", "file_id", "calendar_id"):
+    if "phone" in lname or "sms" in lname or "number" in lname or name in ("to", "to_number"):
+        out += [m.strip() for m in _PHONE_RE.findall(blob)]
+    if name.endswith("_id") or name in ("id", "spreadsheet_id", "form_id", "event_id", "message_id", "thread_id", "file_id", "calendar_id"):
         out += _LABELED_ID_RE.findall(blob) + _ID_RE.findall(blob)
     seen: List[Any] = []
     for v in out:
@@ -558,8 +563,10 @@ def _plausible_value(name: str, text: str, typ: str) -> bool:
     lname = name.lower()
     if lname.endswith("_id") or lname in ("id", "spreadsheet_id", "form_id", "event_id", "file_id", "calendar_id", "message_id", "thread_id"):
         return " " not in t
-    if lname in ("to", "email", "user_google_email") or lname.endswith("_email"):
+    if lname in ("email", "user_google_email") or lname.endswith("_email"):
         return "@" in t and " " not in t
+    if lname in ("to", "to_number") or "phone" in lname:
+        return ("@" in t and " " not in t) or sum(ch.isdigit() for ch in t) >= 7
     if typ in ("integer", "number"):
         return re.fullmatch(r"-?\d+(\.\d+)?", t) is not None
     if "time" in lname or "date" in lname:

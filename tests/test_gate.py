@@ -1062,3 +1062,9 @@ def test_jev_first_follow_up_inherits_task_scopes(tmp_path):
     asyncio.run(go())
     r = m.store.get_request(2)
     assert "tamid_site_read" in r.scopes and "web" in r.scopes
+
+
+def test_claude_executor_denies_send_to_requester(tmp_path):
+    from inkbox_claude.gate.executor import Executor
+    ex = Executor(mcp_server=None, cwd=str(tmp_path), protected=[APPROVER_CONV, "+15550100001"])
+    assert ex.protected == [APPROVER_CONV, "+15550100001"]

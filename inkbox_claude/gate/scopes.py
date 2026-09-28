@@ -152,3 +152,28 @@ def tools_for(scopes: List[str]) -> List[str]:
             if t not in out:
                 out.append(t)
     return out
+
+
+_SEND_TOOLS = ("inkbox_send_imessage", "inkbox_send_sms", "inkbox_send_email")
+
+
+def _norm(v: str) -> str:
+    v = (v or "").strip().lower()
+    digits = "".join(ch for ch in v if ch.isdigit())
+    return digits[-10:] if digits and "@" not in v and len(digits) >= 7 else v
+
+
+def sends_to_requester(tool_name: str, args: dict, protected: list) -> bool:
+    """True when a send tool is aimed at the person who asked (their address, phone
+    or conversation). The gateway delivers results itself; an executor sending the
+    answer as well means the requester gets it twice."""
+    short = tool_name.split("__")[-1]
+    if short not in _SEND_TOOLS:
+        return False
+    keys = {_norm(p) for p in protected if p}
+    targets = []
+    to = args.get("to")
+    targets += to if isinstance(to, list) else ([to] if to else [])
+    if args.get("conversation_id"):
+        targets.append(args["conversation_id"])
+    return any(_norm(str(t)) in keys for t in targets)

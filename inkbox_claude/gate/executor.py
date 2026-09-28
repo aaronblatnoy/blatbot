@@ -24,7 +24,7 @@ from claude_agent_sdk import (
 )
 
 from .router import now_line
-from .scopes import ORG_ACCOUNT, OWNER_ACCOUNT, tools_for
+from .scopes import ORG_ACCOUNT, OWNER_ACCOUNT, sends_to_requester, tools_for
 from .store import Request, sha256
 
 logger = logging.getLogger(__name__)
@@ -49,11 +49,14 @@ EXECUTOR_SYSTEM = (
 
 
 class Executor:
-    def __init__(self, *, mcp_server: Any, cwd: str, model: str = "sonnet", timeout_s: float = 600.0):
+    def __init__(self, *, mcp_server: Any, cwd: str, model: str = "sonnet", timeout_s: float = 600.0,
+                 protected: Optional[List[str]] = None):
         self.mcp_server = mcp_server
         self.cwd = cwd
         self.model = model
         self.timeout_s = timeout_s
+        # Addresses/conversations the gateway itself replies to (the owner's).
+        self.protected = list(protected or [])
 
     async def run(self, req: Request, context: str = "") -> Dict[str, Any]:
         """Run an approved request. Returns a status dict; never raises.
@@ -68,10 +71,16 @@ class Executor:
         tool_calls: List[str] = []
         texts: List[str] = []
 
+        protected = self.protected + [req.sender, req.chat_id]
+
         async def can_use(tool_name: str, input_data: Dict[str, Any], context: Any):
-            if tool_name in allowed_set:
-                return PermissionResultAllow()
-            return PermissionResultDeny(message=f"{tool_name} is outside this task's scope; do not retry it.")
+            if tool_name not in allowed_set:
+                return PermissionResultDeny(message=f"{tool_name} is outside this task's scope; do not retry it.")
+            if sends_to_requester(tool_name, input_data or {}, protected):
+                # Enforced, not just prompted: the gateway delivers the result to whoever asked.
+                return PermissionResultDeny(message="Do not message the requester; the gateway delivers your "
+                                                    "result. Put the answer in your final status and stop.")
+            return PermissionResultAllow()
 
         system_append = EXECUTOR_SYSTEM + f"\nNow: {now_line()}. Resolve 'today', 'tomorrow', weekday names and relative dates from this.\n"
         if context.strip():
