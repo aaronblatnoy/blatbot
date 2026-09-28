@@ -411,6 +411,18 @@ def test_unsure_after_reads_with_low_done_score_fails_over(agent, monkeypatch):
     assert not st["ok"] and "unsure" in st["error"]
 
 
+def test_fit_leaves_states_under_budget_untouched_and_digests_only_when_over():
+    from inkbox_claude.gate.jevagent import _fit, _BUDGET
+    mid = {"goal": "g", "steps_so_far": [{"result": "x" * 60000}]}          # big, but under budget
+    assert _fit(mid) == mid
+    over = {"goal": "g", "steps_so_far": [{"result": "y" * 90000}, {"result": "z" * 90000}]}
+    fitted = _fit(over)
+    assert fitted["goal"] == "g" and len(json.dumps(fitted)) <= _BUDGET
+    results = [st["result"] for st in fitted["steps_so_far"]]
+    assert any(isinstance(r, dict) for r in results)                         # the largest got digested
+    assert any(r == "y" * 90000 or r == "z" * 90000 for r in results) or all(isinstance(r, dict) for r in results)
+
+
 def test_digest_breaks_large_results_down_and_passes_small_ones_through():
     from inkbox_claude.gate.jevagent import _digest, _LARGE
     assert _digest("Successfully listed 5 calendars") == "Successfully listed 5 calendars"
@@ -451,10 +463,11 @@ def test_agent_selects_from_a_narrowed_large_result_and_never_judges_raw_text(ag
     schemas = {lst: {"description": "read", "schema": {"type": "object", "properties": {}, "required": []}},
                get: {"description": "get one response", "schema": {"type": "object", "required": ["response_id"],
                                                                    "properties": {"response_id": {"type": "string", "description": "the response id"}}}}}
-    rows = ["row %05d | ID: resp_%05dAAAAAAAAAAAAAA | filler filler filler filler" % (i, i) for i in range(4000)]
+    from inkbox_claude.gate.jevagent import _BUDGET
+    rows = ["row %05d | ID: resp_%05dAAAAAAAAAAAAAA | filler filler filler filler filler filler" % (i, i) for i in range(4000)]
     rows[2500] = "row 02500 | ID: resp_NEEDLE0000000000000 | Cand Idate"
     big = "\n".join(rows)
-    assert len(big) > _LARGE
+    assert len(big) > _BUDGET
     box = FakeBox(schemas, results={lst: big, get: "the response"})
     seen_states = []
     class J(ScriptedJudge):
@@ -490,7 +503,7 @@ def test_agent_selects_from_a_narrowed_large_result_and_never_judges_raw_text(ag
     for state in seen_states:
         for v in json.loads(json.dumps(state)).values() if isinstance(state, dict) else []:
             pass
-        assert all(len(x) <= _LARGE * 2.5 for x in _strings(state)), "raw large text reached a judgment"
+        assert len(json.dumps(state, default=str)) <= _BUDGET * 1.05, "an over-budget state reached a judgment"
     assert big in st["raw"]                                          # the full result still reaches the report
 
 

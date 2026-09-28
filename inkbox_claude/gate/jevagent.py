@@ -206,7 +206,7 @@ class Judge:
             return await self._post(state, questions)
         except JudgeTooLarge:
             slim = _slim_state(state)
-            logger.warning("jev agent: state over TypeSafe's limit; retrying with %d large result(s) replaced by markers",
+            logger.warning("jev agent: state still over TypeSafe's limit; retrying with %d large value(s) replaced by markers",
                            slim[1])
             try:
                 return await self._post(slim[0], questions)
@@ -291,19 +291,57 @@ def _tried_values(steps: List[Dict[str, Any]], tool: str, arg: str) -> List[Any]
     return out
 
 
-_LARGE = 20000          # a result above this is never placed raw in a judgment state
-_PART = 48000           # largest text one narrowing judgment sees (well under the 32k-token ceiling)
+_BUDGET = 100000        # characters per TypeSafe request that stay under its ~32k-token ceiling
+_LARGE = 20000          # a string counts as "large" for digesting purposes only once a state must be shrunk
+_PART = 48000           # largest text one narrowing judgment sees
 _LEAF = 6000            # stop narrowing here: small enough to extract candidates from precisely
 _MAX_CANDIDATES = 250   # a Choice takes at most 255 options
 
 
-def _digest(result: Any) -> Any:
-    """What a judgment sees instead of a raw tool result: a structural breakdown.
-    Small results pass through whole. Large ones become shape + counts + header
-    lines + the ids, addresses, phones and dates found in them. Nothing is decided
-    from this alone; values are always selected from the real text (see `narrow`)."""
+def _fit(state: Any) -> Any:
+    """Keep a judgment state under the API budget. Raw results stay raw; only when the
+    whole state would overload Jev is the largest string replaced by its digest,
+    largest first, until it fits. Below the budget nothing is touched."""
+    if len(json.dumps(state, ensure_ascii=False, default=str)) <= _BUDGET:
+        return state
+    state = json.loads(json.dumps(state, ensure_ascii=False, default=str))
+
+    def biggest(v: Any, path: Tuple = ()) -> Tuple[int, Tuple]:
+        if isinstance(v, str):
+            return (len(v), path)
+        if isinstance(v, dict):
+            return max((biggest(x, path + (k,)) for k, x in v.items()), default=(0, path))
+        if isinstance(v, list):
+            return max((biggest(x, path + (i,)) for i, x in enumerate(v)), default=(0, path))
+        return (0, path)
+
+    def setp(v: Any, path: Tuple, val: Any) -> None:
+        for k in path[:-1]:
+            v = v[k]
+        v[path[-1]] = val
+
+    def getp(v: Any, path: Tuple) -> Any:
+        for k in path:
+            v = v[k]
+        return v
+
+    for _ in range(50):
+        if len(json.dumps(state, ensure_ascii=False, default=str)) <= _BUDGET:
+            break
+        n, path = biggest(state)
+        if n < 2000 or not path:
+            break
+        setp(state, path, _digest(getp(state, path), force=True))
+        logger.info("jev agent: state over budget; replaced a %s-char value at %s with its digest", f"{n:,}", "/".join(map(str, path)))
+    return state
+
+
+def _digest(result: Any, force: bool = False) -> Any:
+    """A structural breakdown of a tool result: shape, size, keys, counts, header
+    lines, how many ids and addresses it holds. Used only when a judgment state
+    would otherwise overload Jev (see `_fit`)."""
     t = result if isinstance(result, str) else _text(result)
-    if len(t) <= _LARGE:
+    if not force and len(t) <= _LARGE:
         return result
     lines = t.splitlines()
     d: Dict[str, Any] = {"size": f"{len(t):,} characters, {len(lines):,} lines", "kind": "text"}
@@ -466,7 +504,8 @@ class JevAgent:
                 p_done = 0.0
                 for step in range(self.max_steps):
                     state = {"goal": req.original_message, "task_context": context, **_now_facts(),
-                             "steps_so_far": [{"tool": s["tool"], "args": s["args"], "ok": s["ok"], "result": _digest(s["result"])} for s in steps]}
+                             "steps_so_far": [{"tool": s["tool"], "args": s["args"], "ok": s["ok"], "result": s["result"]} for s in steps]}
+                    state = _fit(state)
                     if steps:
                         p_done = await judge.yes(state, {
                             "question": "Is `goal` now fully achieved by `steps_so_far`, so no further tool call is needed?",
@@ -559,8 +598,9 @@ class JevAgent:
         state = {"goal": req.original_message, "tool": short, "tool_description": meta.get("description") or "",
                  "arguments": {n: {"description": str(sp.get("description") or ""), "type": sp.get("type") or "string",
                                    "required": n in required} for n, sp in props.items()},
-                 "known_facts": {k: _digest(v) for k, v in facts.items()},
-                 "steps_so_far": [{"tool": s["tool"], "ok": s["ok"], "result": _digest(s["result"])} for s in steps]}
+                 "known_facts": dict(facts),
+                 "steps_so_far": [{"tool": s["tool"], "ok": s["ok"], "result": s["result"]} for s in steps]}
+        state = _fit(state)
         questions: Dict[str, Any] = {}
         cands: Dict[str, List[Any]] = {}
         for name, spec in props.items():
@@ -676,7 +716,7 @@ class JevAgent:
         for st in reversed(steps):
             r = st["result"]
             t = r if isinstance(r, str) else _text(r)
-            if len(t) > _LARGE:
+            if len(t) > _BUDGET:
                 t = await narrow(judge, t, need, req.original_message)
             sources.append(t)
         for k, v in facts.items():
