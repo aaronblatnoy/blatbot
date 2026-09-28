@@ -76,7 +76,7 @@ class Executor:
         if context.strip():
             system_append += (
                 "\n\nTASK LEDGER (read-only background on this person; the task text below is what to do):\n"
-                + context.strip()[:4000]
+                + context.strip()
             )
         options = ClaudeAgentOptions(
             cwd=self.cwd,

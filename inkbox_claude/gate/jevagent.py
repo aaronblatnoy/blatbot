@@ -147,7 +147,7 @@ class ToolBox:
             parts.append(txt if txt is not None else str(c))
         text = "\n".join(parts)
         if getattr(res, "isError", False):
-            raise RuntimeError(text[:800])
+            raise RuntimeError(text)
         return text
 
 
@@ -223,9 +223,9 @@ class Prose:
 # ----------------------------------------------------------------------------
 
 
-def _short(v: Any, n: int = 700) -> str:
-    s = v if isinstance(v, str) else json.dumps(v, ensure_ascii=False, default=str)
-    return s if len(s) <= n else s[:n] + "..."
+def _text(v: Any) -> str:
+    """Whole value as text. Nothing is ever truncated on its way to a model."""
+    return v if isinstance(v, str) else json.dumps(v, ensure_ascii=False, default=str)
 
 
 def _now_facts() -> Dict[str, str]:
@@ -253,20 +253,22 @@ class JevAgent:
         allowed = tools_for(req.scopes)
         started = time.time()
         steps: List[Dict[str, Any]] = []
-        facts: Dict[str, Any] = {"request": req.original_message, "task_context": context[:3000], **_now_facts(),
+        facts: Dict[str, Any] = {"request": req.original_message, "task_context": context, **_now_facts(),
                                  "accounts": {"org_google": ORG_ACCOUNT, "owner_google": OWNER_ACCOUNT}}
         try:
             async with ToolBox(self.inkbox_server, self.mcp_config) as box:
                 tool_options: Dict[str, str] = {}
                 for name in allowed:
                     try:
-                        tool_options[name] = (await box.schema(name))["description"][:220] or name
+                        tool_options[name] = (await box.schema(name))["description"] or name
+                    except ValueError:
+                        continue  # a Claude built-in (WebSearch, WebFetch): not callable here
                     except Exception as exc:
                         logger.warning("jev agent: cannot describe %s: %s", name, exc)
                 p_done = 0.0
                 for step in range(self.max_steps):
-                    state = {"goal": req.original_message, "task_context": context[:2500], **_now_facts(),
-                             "steps_so_far": [f"{s['tool']}({_short(s['args'], 200)}) -> {_short(s['result'], 400)}" for s in steps]}
+                    state = {"goal": req.original_message, "task_context": context, **_now_facts(),
+                             "steps_so_far": [f"{s['tool']}({_text(s['args'])}) -> {_text(s['result'])}" for s in steps]}
                     if steps:
                         p_done = await judge.yes(state, {
                             "question": "Is `goal` now fully achieved by `steps_so_far`, so no further tool call is needed?",
@@ -308,7 +310,7 @@ class JevAgent:
                     try:
                         result = await box.call(choice, args)
                         steps.append({"tool": choice, "args": args, "result": result, "ok": True})
-                        facts[f"result_of_{choice.split('__')[-1]}_{len(steps)}"] = _short(result, 6000)
+                        facts[f"result_of_{choice.split('__')[-1]}_{len(steps)}"] = _text(result)
                     except Exception as exc:
                         steps.append({"tool": choice, "args": args, "result": f"ERROR: {exc}", "ok": False})
                         if sum(1 for s in steps if s["tool"] == choice and not s["ok"]) >= 2:
@@ -332,11 +334,11 @@ class JevAgent:
         required = list(schema.get("required") or [])
         server, short = split_tool(tool)
         args: Dict[str, Any] = {}
-        state = {"goal": req.original_message, "tool": short, "tool_description": (meta.get("description") or "")[:500],
+        state = {"goal": req.original_message, "tool": short, "tool_description": meta.get("description") or "",
                  "arguments": {n: {"description": str(sp.get("description") or ""), "type": sp.get("type") or "string",
                                    "required": n in required} for n, sp in props.items()},
-                 "known_facts": {k: _short(v, 1200) for k, v in facts.items()},
-                 "steps_so_far": [f"{s['tool']} -> {_short(s['result'], 300)}" for s in steps]}
+                 "known_facts": {k: _text(v) for k, v in facts.items()},
+                 "steps_so_far": [f"{s['tool']} -> {_text(s['result'])}" for s in steps]}
         questions: Dict[str, Any] = {}
         cands: Dict[str, List[Any]] = {}
         for name, spec in props.items():
@@ -356,8 +358,8 @@ class JevAgent:
                 continue
             cs = _candidate_values(name, str(spec.get("description") or ""), typ, facts, steps)
             if cs:
-                cands[name] = cs[:60]
-                opts = {f"c{i}": {"value": _short(v, 300)} for i, v in enumerate(cands[name])}
+                cands[name] = cs
+                opts = {f"c{i}": {"value": _text(v)} for i, v in enumerate(cands[name])}
                 opts["write_new"] = "None of these; the value must be composed from the goal (a date/time, a title, a body, a query)."
                 questions[f"pick::{name}"] = {"type": "choice", "instructions": f"Which of these is the right value for `arguments.{name}`?",
                                               "criteria": opts}
@@ -397,9 +399,9 @@ class JevAgent:
                 f"Use ISO 8601 with the -04:00 / -05:00 New York offset for any datetime. "
                 f"Output the bare value: no quotes, no label, no explanation. If the facts do not contain enough "
                 f"to determine it, output exactly UNKNOWN.",
-                {"goal": req.original_message, "tool": short, "facts": {k: _short(v, 1500) for k, v in facts.items()}})
+                {"goal": req.original_message, "tool": short, "facts": {k: _text(v) for k, v in facts.items()}})
             if not _plausible_value(name, text, typ):
-                logger.info("jev agent: no usable value for %s.%s (%r)", short, name, text[:80])
+                logger.info("jev agent: no usable value for %s.%s (%r)", short, name, text)
                 if name in required:
                     return None
                 continue
@@ -415,14 +417,16 @@ class JevAgent:
                 started: float, probs: Optional[Dict[str, float]] = None) -> Dict[str, Any]:
         lines = [f"{'Done' if ok else 'Failed'} via Jev agent in {time.time() - started:.1f}s "
                  f"({len(steps)} tool call(s), {judge.calls} Jev judgment(s), {prose.calls} prose call(s))."]
+        # Full results, never truncated: the reply model answers from this text.
         for s in steps:
-            lines.append(f"- {s['tool'].split('__')[-1]}: {_short(s['result'], 300)}")
+            r = s["result"] if isinstance(s["result"], str) else json.dumps(s["result"], ensure_ascii=False, default=str)
+            lines.append(f"- {s['tool'].split('__')[-1]}:\n{r}")
         if error:
             lines.append(f"Reason: {error}")
         lines.append("STATUS: OK" if ok else "STATUS: FAILED")
         raw = "\n".join(lines)
         wrote = any(s["ok"] and is_write_tool(s["tool"]) for s in steps)
-        return {"ok": ok, "summary": raw[-1500:], "raw": raw, "tool_calls": [s["tool"] for s in steps], "wrote": wrote,
+        return {"ok": ok, "summary": raw, "raw": raw, "tool_calls": [s["tool"] for s in steps], "wrote": wrote,
                 "steps": [{"tool": s["tool"], "args": s["args"], "ok": s["ok"]} for s in steps],
                 "error": error or None, "engine": "jev", "jev_calls": judge.calls, "prose_calls": prose.calls,
                 "seconds": round(time.time() - started, 1), "probs": probs}
@@ -446,7 +450,7 @@ _PHONE_RE = re.compile(r"\+?1?[ (.-]*\d{3}[ ).-]*\d{3}[ .-]*\d{4}")
 def _candidate_values(name: str, desc: str, typ: str, facts: Dict[str, Any], steps: List[Dict[str, Any]]) -> List[Any]:
     """Values already in play that could fill this argument: ids, addresses, phones,
     and short strings from tool results. Jev selects among them."""
-    blob = "\n".join(_short(v, 4000) for v in facts.values()) + "\n" + "\n".join(_short(s["result"], 4000) for s in steps)
+    blob = "\n".join(_text(v) for v in facts.values()) + "\n" + "\n".join(_text(s["result"]) for s in steps)
     lname = (name + " " + desc).lower()
     out: List[Any] = []
     if "email" in lname or name in ("to", "cc", "attendee", "attendees"):
@@ -470,14 +474,14 @@ def _plausible_value(name: str, text: str, typ: str) -> bool:
         return False
     lname = name.lower()
     if lname.endswith("_id") or lname in ("id", "spreadsheet_id", "form_id", "event_id", "file_id", "calendar_id", "message_id", "thread_id"):
-        return " " not in t and len(t) < 200
+        return " " not in t
     if lname in ("to", "email", "user_google_email") or lname.endswith("_email"):
         return "@" in t and " " not in t
     if typ in ("integer", "number"):
         return re.fullmatch(r"-?\d+(\.\d+)?", t) is not None
     if "time" in lname or "date" in lname:
         return re.match(r"\d{4}-\d{2}-\d{2}", t) is not None
-    return len(t) < 20000
+    return True
 
 
 def _coerce(v: Any, typ: str) -> Any:

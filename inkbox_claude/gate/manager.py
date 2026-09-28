@@ -966,11 +966,11 @@ class GateSessionManager:
         self.store.set_thread(req.chat_id, "idle")
         outcome = "done" if ok else "FAILED"
         result = _clean_result(status.get("summary") or status.get("error") or "")
-        self.task_note(req, "done" if ok else "failed", f"{req.summary} -> {result[:500]}",
+        self.task_note(req, "done" if ok else "failed", f"{req.summary} -> {result}",
                        state="done" if ok else "failed")
         if not notify:
             self.store.add_message(req.chat_id, "system", f"Task #{req.id} {outcome}: {req.summary}\nResult:\n{result}")
-            return f"{'Done' if ok else 'That failed'}. {result[:600]}"
+            return f"{'Done' if ok else 'That failed'}. {result}"
         session = self.get(req.chat_id)
         from_aaron = session.is_approver() or session.is_aaron_on_phone() or req.chat_id in self._approver_chat_ids()
         note = f"Task #{req.id} {outcome}: {req.summary}\nResult:\n{result}"
@@ -978,11 +978,11 @@ class GateSessionManager:
             # Aaron asked for it himself: let the router phrase the answer.
             replied = await session.notify_after_request(note)
             if not replied:
-                await self.send_to_approver(f"{'Done' if ok else 'Failed'}: {req.summary}\n{result[:600]}")
+                await self.send_to_approver(f"{'Done' if ok else 'Failed'}: {req.summary}\n{result}")
             return ""
         # Someone else's request: short status to Aaron, and the router may
         # tell the sender the outcome (never Claude's raw text).
-        await self.send_to_approver(f"[Blatbot #{req.id} {outcome}] {req.summary}\n{result[:500]}")
+        await self.send_to_approver(f"[Blatbot #{req.id} {outcome}] {req.summary}\n{result}")
         await session.notify_after_request(note)
         return ""
 
