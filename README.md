@@ -46,55 +46,134 @@ So the real question is not "can the model do the task." It is "who is allowed t
 ══════════════════════════════════╪════════════════════════════╪═════════════════════
   YOUR SERVER                     │                            │
                                   v                            v
- ┌───────────────────────────────────────────────────────────────────────────────┐
- │ GATEWAY  (code, no model)                          every turn, cannot be skipped
- │  1. identify sender      2. write inbound      3. load context                │
- │     trusted = owner's       to TASK LEDGER         ledger + date/time         │
- │     iMessage thread or                             + recent messages          │
- │     owner's phone number                           + standing instructions    │
- └───────────────────────────────────┬───────────────────────────────────────────┘
-                                     v
-        ┌────────────────────────────────────────────────────────┐
-        │ DECIDE   (TypeSafe Jev: typed judgments, no text)      │
-        │  which task is this?        Choice over the ledger     │
-        │  does it need a tool?       yes / no                   │
-        └──────────────┬─────────────────────────┬───────────────┘
-                       │                         │ yes
-                       v                         v
-        ┌──────────────────────────┐   ┌──────────────────────────────────┐
-        │ REPLY WRITER (DeepSeek)  │   │ REQUEST   (code, no model)       │
-        │ told the decision;       │   │ prompt = their exact words       │
-        │ writes only the words    │   │   + conversation + task record   │
-        │ sent back                │   │ scopes = Jev, one yes/no each    │
-        └──────────────┬───────────┘   │ hashed and stored                │
-                       │               └────────────────┬─────────────────┘
-                       │                                v
-                       │               ┌──────────────────────────────────┐
-                       │               │ GATE  (code)                     │
-                       │               │ from owner ──> approved, run now │
-                       │               │ from others ─> HOLD              │
-                       │               │    text owner: their message,    │
-                       │               │    what it will do, the tools    │
-                       │               │    "#N yes" / "no" / "edit: ..." │
-                       │               └────────────────┬─────────────────┘
-                       │                                v  approved
-                       │               ┌──────────────────────────────────┐
-                       │               │ AGENT  (Jev judgments + code)    │
-                       │               │ loop: done? -> next tool ->      │
-                       │               │   fill arguments -> call         │
-                       │               │ arguments are SELECTED from      │
-                       │               │   values in play, never written  │
-                       │               │ prose model only for text that   │
-                       │               │   must be composed (an email)    │
-                       │               │ only the tools the scopes allow  │
-                       │               │ fallback: Claude Code, only if   │
-                       │               │   nothing was written yet        │
-                       │               └────────────────┬─────────────────┘
-                       │                                v
-                       │      result -> TASK LEDGER (done / failed)
-                       v                          v
-              reply sent once, on the same channel the person used
+ ┌───────────────────────────────────────────────────────────────────────────────────┐
+ │ GATEWAY   code, no model. Runs on every turn; nothing below can be skipped.       │
+ │                                                                                   │
+ │  sender ──> trusted?  owner's iMessage thread or owner's phone number ──> OWNER   │
+ │                       anything else, including email from the owner's   ──> OTHER │
+ │                       own address                                                 │
+ │  message ──> stored on its thread (email reply chains linked by Message-ID)       │
+ │  context ──> task ledger for this person/thread · last 20 messages                │
+ │              · New York date and time · standing instructions · contact notes     │
+ └─────────────────────────────────────────┬─────────────────────────────────────────┘
+                                           v
+ ┌───────────────────────────────────────────────────────────────────────────────────┐
+ │ DECIDE   TypeSafe Jev. Each answer is a pick from a list or a probability,        │
+ │          never free text. About 0.2 s each.                                       │
+ │                                                                                   │
+ │  1  which task?      Choice over open tasks the sender is on, or on this thread,  │
+ │                      or found by search  +  "new task"  +  "no task"              │
+ │                      below 0.55 confidence: abstain (a new task is started)       │
+ │  2  needs a tool?    yes/no.  "book", "send", "look up", "is X open" ──> yes      │
+ │                      thanks, small talk, a question about the assistant ──> no    │
+ │  3  what happened?   event kind: asked / provided info / confirmed / changed /    │
+ │                      declined / progress / conversation                           │
+ │                      who it now waits on: owner / other person / nobody           │
+ │                      does this resolve the task?  ──> written to the ledger       │
+ └────────────────┬──────────────────────────────────────────┬───────────────────────┘
+                  │ decision                                 │ needs a tool
+                  v                                          v
+ ┌──────────────────────────────────┐   ┌──────────────────────────────────────────────┐
+ │ REPLY WRITER   DeepSeek          │   │ REQUEST   code, no model                     │
+ │                                  │   │                                              │
+ │ in:  the decision ("a request    │   │ prompt  = sender's exact words               │
+ │      was created and will run /  │   │           + the conversation so far          │
+ │      will be shown to Aaron" or  │   │           + this task's record               │
+ │      "no action"), the ledger,   │   │ summary = the task's title                   │
+ │      the conversation            │   │ scopes  = Jev, one yes/no per scope          │
+ │ out: the words sent back, and a  │   │           (calendar, email send, Drive read, │
+ │      title for a brand-new task  │   │           site admin, ...) granted at 0.6,   │
+ │ cannot: create a request, call   │   │           plus every scope this task's       │
+ │      a tool, claim work is done  │   │           earlier requests had               │
+ └────────────────┬─────────────────┘   │ stored with a SHA-256 of the prompt          │
+                  │                     └──────────────────────┬───────────────────────┘
+                  │                                            v
+                  │                     ┌──────────────────────────────────────────────┐
+                  │                     │ GATE   code                                  │
+                  │                     │                                              │
+                  │                     │ OWNER ──────────────────> approved, run now  │
+                  │                     │ OTHER ──> HOLD, text the owner:              │
+                  │                     │           their message · the task ·         │
+                  │                     │           the tools it will get              │
+                  │                     │           "#N yes"  ─> run                   │
+                  │                     │           "#N no"   ─> drop, tell them       │
+                  │                     │           "#N edit: <instructions>" ─>       │
+                  │                     │              appended to the prompt,         │
+                  │                     │              shown again                     │
+                  │                     │           24 h ─> expires                    │
+                  │                     └──────────────────────┬───────────────────────┘
+                  │                                            v  approved
+                  │  ┌────────────────────────────────────────────────────────────────┐
+                  │  │ AGENT   Jev judgments + code. No chat model drives the loop.  │
+                  │  │                                                                │
+                  │  │  hash of the prompt re-checked ──> mismatch: refuse            │
+                  │  │  tools = only what the scopes map to; schemas read live        │
+                  │  │                                                                │
+                  │  │  ┌─ loop, at most 8 steps ─────────────────────────────────┐  │
+                  │  │  │ done?        yes/no over goal + steps so far   ≥0.6 stop │  │
+                  │  │  │ next tool    Choice over the allowed tools + give up     │  │
+                  │  │  │ arguments    ONE batched request, per argument:         │  │
+                  │  │  │    optional?     yes/no: supply it or leave it           │  │
+                  │  │  │    id/email/tel  Choice over values already in play      │  │
+                  │  │  │                  (the request, earlier results)         │  │
+                  │  │  │    date bound    Choice over ranges computed from the    │  │
+                  │  │  │                  clock: today, this week, last week...  │  │
+                  │  │  │    enum/bool     Choice                                  │  │
+                  │  │  │    must be       DeepSeek writes the bare value (an     │  │
+                  │  │  │    written       email body, a title); a sentence in an │  │
+                  │  │  │                  id slot or UNKNOWN is rejected          │  │
+                  │  │  │ guard        send aimed at the requester ──> refused     │  │
+                  │  │  │              identical repeat of a done step ──> stop    │  │
+                  │  │  │ call         Inkbox tools in-process; Google and site   │  │
+                  │  │  │              servers over MCP stdio; result kept whole  │  │
+                  │  │  └──────────────────────────────────────────────────────────┘  │
+                  │  │                                                                │
+                  │  │  ends:  OK with every result in full                           │
+                  │  │         FAILED: give up, a tool failed twice, an argument      │
+                  │  │         could not be filled, step limit                        │
+                  │  │  FAILED and nothing written ──> Claude Code runs the same     │
+                  │  │         prompt with the same tools, same send guard            │
+                  │  │  FAILED after a write ──> stop, report; never retried         │
+                  │  └──────────────────────────────┬─────────────────────────────────┘
+                  │                                 v
+                  │                   result ──> TASK LEDGER: done / failed
+                  │                                 │
+                  v                                 v
+ ┌───────────────────────────────────────────────────────────────────────────────────┐
+ │ DELIVERY   exactly once                                                           │
+ │  the reply writer phrases the result for whoever asked; sent on their channel     │
+ │  executors cannot message the requester (denied at the tool call, in code)        │
+ │  someone else's task: the owner gets a one-line done/failed note                  │
+ │  phone: the result goes back to the voice agent as tool output; it says it        │
+ └───────────────────────────────────────────────────────────────────────────────────┘
 ```
+
+
+### Every judgment, and what code does with it
+
+Jev (TypeSafe's System One model) never writes text. Each call is a question over a JSON
+state and returns a pick with probabilities, or a probability of yes. Code owns every
+threshold and every consequence. This is the complete list.
+
+| # | when | state it sees | question | answers | code does |
+|---|---|---|---|---|---|
+| 1 | every message | message, last turns, candidate tasks (title, where it stands, participants, age) | which task is this? | `T12` ... / `new_task` / `no_task` | picks the task; below 0.55 confidence abstains and a new task is started; permission still checked in code |
+| 2 | every message | message, last turns, the task from #1 | does this need a tool action now? | probability of yes | ≥0.5 a request is built; else reply only |
+| 3 | every message | message, the task | what did this message do to the task? | kind: asked / provided_information / confirmed / changed / declined / progress / conversation | writes the typed event to the ledger |
+| 4 | every message | same | who does the task wait on now? | owner / other / nobody | updates the "where it stands" line |
+| 5 | every message | same | is the task resolved? | probability | ≥0.8 marks it done |
+| 6 | request built | the full prompt, the task title, each scope's description | does carrying this out require this capability? one per scope, asked together | probability per scope | grants every scope ≥0.6, plus the scopes this task's earlier requests had; if none clears, the two likeliest, else read-only web |
+| 7 | agent, each step | goal, task record, date, steps so far with results | is the goal fully achieved? | probability | ≥0.6 stop, report |
+| 8 | agent, each step | same, plus every allowed tool's description | which tool next? | one of the allowed tools / give up | top probability <0.45 after reads: stop with findings; give up after reads: same; give up otherwise: FAILED |
+| 9 | agent, per tool, one batched call | goal, the tool's schema, all facts and results | for each optional argument: supply it? | probability | <0.5 omitted |
+| 10 | same call | same | for each id / email / phone argument: which of these values? | the candidate values found in the request and earlier results, or "write new" | copies the pick verbatim; top <0.3 on an optional argument omits it |
+| 11 | same call | same | for each date-bound argument: which range? | today / tomorrow / yesterday / this week / last week / next week / next 7 days / past 7 days / this month / next 30 days / "specific" | fills the start or end from ranges computed off the clock |
+| 12 | same call | same | for each enum or boolean: which value? | the enum | copies it |
+
+Anything not on this list is either code (hashing, permissions, the send guard, the
+loop limit, calling the tool) or DeepSeek writing words: the reply to the sender, a
+title for a new task, and a bare value the agent could not select (an email body, a
+subject, a search query).
 
 ## Design rules
 
