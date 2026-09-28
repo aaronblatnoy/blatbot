@@ -28,6 +28,16 @@ CREATE TABLE IF NOT EXISTS messages (
   created_at REAL NOT NULL
 );
 CREATE INDEX IF NOT EXISTS messages_chat ON messages(chat_id, id);
+CREATE TABLE IF NOT EXISTS mail_ids (
+  message_id TEXT PRIMARY KEY,   -- RFC Message-ID of a mail we have seen
+  root TEXT NOT NULL             -- Message-ID of the first mail in its reply chain
+);
+CREATE TABLE IF NOT EXISTS thread_links (
+  thread_key TEXT NOT NULL,      -- e.g. email:<provider thread id>
+  chat_id TEXT NOT NULL,
+  updated_at REAL NOT NULL,
+  PRIMARY KEY (thread_key, chat_id)
+);
 CREATE TABLE IF NOT EXISTS requests (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   chat_id TEXT NOT NULL,
@@ -340,6 +350,79 @@ class Store:
                 (chat_id, limit),
             ).fetchall()
         return [dict(r) for r in reversed(rows)]
+
+    # -- threads that span conversations (an email thread with several senders) --
+    def thread_root(self, *, message_id: str = "", in_reply_to: str = "", references: Optional[List[str]] = None) -> str:
+        """Resolve an email to the root of its reply chain and remember it. Returns ""
+        when the mail carries no RFC ids at all."""
+        refs = [r for r in (references or []) if r]
+        if not (message_id or in_reply_to or refs):
+            return ""
+        with self._lock:
+            root = ""
+            for cand in ([in_reply_to] if in_reply_to else []) + list(reversed(refs)):
+                r = self._db.execute("SELECT root FROM mail_ids WHERE message_id=?", (cand,)).fetchone()
+                if r:
+                    root = r["root"]; break
+            if not root:
+                root = refs[0] if refs else (in_reply_to or message_id)
+            for mid in [message_id, in_reply_to] + refs:
+                if mid:
+                    self._db.execute("INSERT OR IGNORE INTO mail_ids(message_id, root) VALUES(?,?)", (mid, root))
+            self._db.commit()
+        return root
+
+    def link_thread(self, thread_key: str, chat_id: str) -> None:
+        if not thread_key or not chat_id:
+            return
+        with self._lock:
+            self._db.execute(
+                "INSERT INTO thread_links(thread_key,chat_id,updated_at) VALUES(?,?,?) "
+                "ON CONFLICT(thread_key,chat_id) DO UPDATE SET updated_at=excluded.updated_at",
+                (thread_key, chat_id, time.time()),
+            )
+            self._db.commit()
+
+    def thread_chats(self, thread_key: str) -> List[str]:
+        """Every conversation that has taken part in this thread."""
+        if not thread_key:
+            return []
+        with self._lock:
+            rows = self._db.execute(
+                "SELECT chat_id FROM thread_links WHERE thread_key=? ORDER BY updated_at", (thread_key,)
+            ).fetchall()
+        return [r["chat_id"] for r in rows]
+
+    def thread_history(self, thread_key: str, exclude_chat: str = "", limit: int = 12) -> List[Dict[str, Any]]:
+        """Recent messages from the OTHER participants of a thread, oldest first, each
+        labelled with who it was from, so a reply can be read in context."""
+        chats = [c for c in self.thread_chats(thread_key) if c != exclude_chat]
+        if not chats:
+            return []
+        marks = ",".join("?" * len(chats))
+        with self._lock:
+            rows = self._db.execute(
+                f"SELECT chat_id,kind,mode,text,created_at FROM messages WHERE chat_id IN ({marks}) "
+                f"AND kind IN ('inbound','outbound') ORDER BY id DESC LIMIT ?", (*chats, limit),
+            ).fetchall()
+        out = []
+        for r in reversed(rows):
+            d = dict(r)
+            d["kind"] = f"{r['kind']} (other participant {r['chat_id'][:8]})"
+            out.append(d)
+        return out
+
+    def task_ids_for_thread(self, thread_key: str, limit: int = 5) -> List[int]:
+        chats = self.thread_chats(thread_key)
+        if not chats:
+            return []
+        marks = ",".join("?" * len(chats))
+        with self._lock:
+            rows = self._db.execute(
+                f"SELECT task_id, MAX(id) AS last FROM task_events WHERE chat_id IN ({marks}) "
+                f"GROUP BY task_id ORDER BY last DESC LIMIT ?", (*chats, limit),
+            ).fetchall()
+        return [int(r["task_id"]) for r in rows]
 
     # -- requests --------------------------------------------------------
     def create_request(self, *, chat_id: str, sender: str, sender_name: str, mode: str, subject: str,

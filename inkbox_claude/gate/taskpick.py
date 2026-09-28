@@ -60,6 +60,17 @@ def candidate_view(t: Dict[str, Any], now: Optional[float] = None) -> Dict[str, 
     }
 
 
+EVENT_KINDS = {
+    "asked_for_something": "The message asks for work to be done, information, or a decision.",
+    "provided_information": "The message supplies information the task was waiting for (details, an answer, a file, availability).",
+    "confirmed": "The message agrees to or confirms something already proposed on the task.",
+    "changed_or_corrected": "The message changes or corrects something already on the task (a time, a detail, a decision).",
+    "declined_or_cancelled": "The message declines, cancels or withdraws.",
+    "reported_progress": "The message reports that something was done or is in progress.",
+    "conversation_only": "Small talk, thanks, acknowledgement, or nothing that changes the task.",
+}
+
+
 class TaskPicker:
     def __init__(self, api_key: Optional[str] = None, model: Optional[str] = None,
                  min_confidence: Optional[float] = None, timeout: float = 20.0):
@@ -68,6 +79,61 @@ class TaskPicker:
         self.min_confidence = float(min_confidence if min_confidence is not None
                                     else (os.getenv("TYPESAFE_TASK_MIN_CONF") or 0.55))
         self.timeout = timeout
+
+    async def judge_event(self, *, message: str, sender_label: str, task: Dict[str, Any],
+                          history: List[Dict[str, Any]]) -> Dict[str, Any]:
+        """Given the task the message was assigned to, judge what the message did to it
+        and whether the task is now waiting on the owner, on the other person, or done.
+
+        Returns {"kind": <EVENT_KINDS key>, "kind_conf": float, "waiting_on": "owner"|"other"|"nobody"|None,
+                 "resolves_task": float}. Text for the event line is composed by code."""
+        if not self.api_key:
+            return {"kind": None, "kind_conf": 0.0, "waiting_on": None, "resolves_task": 0.0, "reason": "disabled"}
+        state = {
+            "task": candidate_view(task),
+            "sender": sender_label,
+            "conversation_so_far": [f"[{m.get('kind')}] {str(m.get('text') or '')[:300]}" for m in history[-6:]],
+            "new_message": message,
+        }
+        body = {
+            "state": state, "model": self.model,
+            "questions": {
+                "kind": {
+                    "type": "choice",
+                    "instructions": "What did `new_message` do to `task`?",
+                    "criteria": EVENT_KINDS,
+                },
+                "waiting_on": {
+                    "type": "choice",
+                    "instructions": "After `new_message`, who does `task` wait on next?",
+                    "criteria": {
+                        "owner": "The owner (the assistant's boss) must decide, approve, or act next.",
+                        "other": "The other person on the task must reply or provide something next.",
+                        "nobody": "Nothing is outstanding right now; the next step is the assistant's own or the task is done.",
+                    },
+                },
+                "resolves_task": {
+                    "type": "noul",
+                    "instructions": "Does `new_message` complete the work described in `task`, so nothing more is needed on it?",
+                    "criteria": {"true": "The task's work is finished by this message.",
+                                 "false": "Work on the task remains."},
+                },
+            },
+        }
+        try:
+            async with httpx.AsyncClient(timeout=self.timeout) as client:
+                r = await client.post(TYPESAFE_URL, headers={"Authorization": f"Bearer {self.api_key}"}, json=body)
+                r.raise_for_status()
+                a = r.json()["answers"]
+        except Exception as exc:
+            logger.warning("event judgment via TypeSafe failed: %s", exc)
+            return {"kind": None, "kind_conf": 0.0, "waiting_on": None, "resolves_task": 0.0, "reason": f"error: {exc}"}
+        kind, kc = a["kind"].get("choice"), float(a["kind"].get("confidence") or 0)
+        wo, wc = a["waiting_on"].get("choice"), float(a["waiting_on"].get("confidence") or 0)
+        res = float(a["resolves_task"].get("noul") or 0)
+        logger.info("event judgment: kind=%s (%.2f) waiting_on=%s (%.2f) resolves=%.2f", kind, kc, wo, wc, res)
+        return {"kind": kind if kc >= self.min_confidence else None, "kind_conf": kc,
+                "waiting_on": wo if wc >= self.min_confidence else None, "resolves_task": res, "reason": "ok"}
 
     async def pick(self, *, message: str, history: List[Dict[str, Any]], sender_label: str,
                    candidates: List[Dict[str, Any]], router_hint: Optional[str] = None,

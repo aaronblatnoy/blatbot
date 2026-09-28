@@ -743,12 +743,17 @@ def test_site_admin_scopes_cover_the_admin_mcps():
 
 
 class FakePicker:
-    def __init__(self, choice=None, conf=0.9):
-        self.choice, self.conf, self.calls = choice, conf, []
+    def __init__(self, choice=None, conf=0.9, event=None):
+        self.choice, self.conf, self.calls, self.event_calls = choice, conf, [], []
+        self.event = event or {"kind": None, "kind_conf": 0.0, "waiting_on": None, "resolves_task": 0.0}
 
     async def pick(self, **kw):
         self.calls.append(kw)
         return {"choice": self.choice, "confidence": self.conf, "probabilities": {}, "reason": "ok" if self.choice else "low confidence"}
+
+    async def judge_event(self, **kw):
+        self.event_calls.append(kw)
+        return self.event
 
 
 def test_jev_pick_overrides_router_when_confident(tmp_path):
@@ -796,3 +801,92 @@ def test_jev_new_and_none(tmp_path):
     before = m.store._db.execute("select count(*) from tasks").fetchone()[0]
     asyncio.run(m.get("c1").handle_inbound("thanks!", "email", stranger_meta()))
     assert m.store._db.execute("select count(*) from tasks").fetchone()[0] == before
+
+
+def test_fyi_is_not_truncated(tmp_path):
+    m, sent = make_manager(tmp_path)
+    long = "word " * 300
+    asyncio.run(m.get("c1").handle_inbound(long, "email", stranger_meta()))
+    fyi = [x for x in sent if "[Blatbot FYI]" in x[1]][0][1]
+    assert "..." not in fyi and fyi.count("word") == 300
+
+
+def test_email_thread_shares_tasks_and_history_across_senders(tmp_path):
+    """Aaron replies in a thread with an instruction; the candidate replies in the same
+    thread later. The router must see Aaron's instruction and the task it created."""
+    m, sent = make_manager(tmp_path)
+    aaron_email = {"sender": "owner@example.edu", "to": "owner@example.edu", "subject": "Re: Workshop",
+                   "thread_id": "thr-1", "contact": {"id": "a1", "name": "Aaron Blatnoy"}}
+    tem_email = {"sender": "sam@example.edu", "to": "sam@example.edu", "subject": "Re: Workshop",
+                 "thread_id": "thr-1", "contact": {"id": "t1", "name": "Sam Rivera"}}
+    m.router.next = RouterOutput(reply="Will do.", task="new", task_title="Add Sam's application to the sheet",
+                                 task_summary="When Tem sends the application, add it to the sheet.", request=None)
+    asyncio.run(m.get("a1").handle_inbound("When Sam responds, add their application to the sheet.", "email", aaron_email))
+    tid = m.store.task_ids_for_chat("a1")[0]
+    m.router.next = RouterOutput(reply="Thanks.", task=f"T{tid}",
+                                 request=RouterRequest(prompt="Add Tem to sheet", scopes=["tamid_drive_write"], summary="add to sheet"))
+    asyncio.run(m.get("t1").handle_inbound("Here is my application: ...", "email", tem_email))
+    call = m.router.calls[-1]
+    assert "Add Sam's application to the sheet" in call["task_memory"]          # the thread's task is in view
+    assert any("When Sam responds" in h["text"] for h in call["history"])       # and Aaron's instruction is in history
+    assert m.store.task_id_for_request(1) == tid                                # Tem was allowed onto that task
+    assert m.store.is_participant(tid, "sam@example.edu")
+
+
+def test_unknown_sender_triggers_a_name_search(tmp_path):
+    from inkbox_claude.gate.router import TaskQuery
+    m, sent = make_manager(tmp_path)
+    t = m.store.create_task("Get Sam Rivera's application onto the sheet")
+    m.store.task_event(t["id"], "note", "waiting for Sam Rivera to send it", state="open")
+    m.router.next_query = None  # the planner declines; code searches by name anyway
+    m.router.next = RouterOutput(reply="ok", request=None)
+    meta = {"sender": "sam@example.edu", "to": "sam@example.edu", "subject": "hi", "contact": {"id": "t1", "name": "Sam Rivera"}}
+    asyncio.run(m.get("t1").handle_inbound("here it is", "email", meta))
+    # a stranger still can't see a task they aren't on and that isn't on their thread
+    assert "Sam Rivera's application" not in m.router.calls[-1]["found_tasks"]
+    # but the owner asking about Tem finds it
+    m.router.next_query = TaskQuery(text="Sam Rivera")
+    asyncio.run(m.get("aaron").handle_inbound("where's tem's app?", "imessage", approver_meta()))
+    assert "Sam Rivera's application" in (m.router.calls[-1]["found_tasks"] + m.router.calls[-1]["task_memory"])
+
+
+def test_jev_event_judgment_writes_typed_event_summary_and_state(tmp_path):
+    m, sent = make_manager(tmp_path)
+    t = m.store.create_task("Add Sam's application to the sheet", [("sam@example.edu", "Sam Rivera")])
+    m.task_picker = FakePicker(choice=f"T{t['id']}", event={"kind": "provided_information", "kind_conf": 0.9,
+                                                           "waiting_on": "owner", "resolves_task": 0.1})
+    m.router.next = RouterOutput(reply="Thanks.", task=f"T{t['id']}", request=None)
+    meta = {"sender": "sam@example.edu", "to": "sam@example.edu", "subject": "app", "contact": {"id": "t1", "name": "Sam Rivera"}}
+    asyncio.run(m.get("t1").handle_inbound("Here is my application: name, netid, ...", "email", meta))
+    tk = m.store.task_with_events(t["id"])
+    kinds = [e["kind"] for e in tk["events"]]
+    assert "provided_information" in kinds and tk["state"] == "waiting_aaron"
+    assert "Waiting on Aaron" in tk["summary"]
+    # a message that resolves the task marks it done
+    m.task_picker = FakePicker(choice=f"T{t['id']}", event={"kind": "confirmed", "kind_conf": 0.9,
+                                                           "waiting_on": "nobody", "resolves_task": 0.95})
+    asyncio.run(m.get("t1").handle_inbound("all set, thanks!", "email", meta))
+    assert m.store.get_task(t["id"])["state"] == "done"
+
+
+def test_rfc_reply_chain_links_mails_across_mailboxes(tmp_path):
+    from inkbox_claude.gate.store import Store
+    s = Store(str(tmp_path / "g.db"))
+    r1 = s.thread_root(message_id="<a@x>")                                   # first mail
+    r2 = s.thread_root(message_id="<b@y>", in_reply_to="<a@x>", references=["<a@x>"])   # reply from another mailbox
+    r3 = s.thread_root(message_id="<c@z>", in_reply_to="<b@y>", references=["<a@x>", "<b@y>"])
+    assert r1 == r2 == r3 == "<a@x>"
+    assert s.thread_root(message_id="<d@w>") == "<d@w>"   # unrelated mail: its own root
+    # the session uses the chain even when provider thread ids differ
+    m, sent = make_manager(tmp_path)
+    a = {"sender": "owner@example.edu", "to": "owner@example.edu", "subject": "Re: W", "thread_id": "provider-1",
+         "message_id": "<a@x>", "contact": {"id": "a1", "name": "Aaron Blatnoy"}}
+    tm = {"sender": "sam@example.edu", "to": "sam@example.edu", "subject": "Re: W", "thread_id": "provider-2",
+          "message_id": "<b@y>", "in_reply_to": "<a@x>", "references": ["<a@x>"], "contact": {"id": "t1", "name": "Sam Rivera"}}
+    m.router.next = RouterOutput(reply="ok", task="new", task_title="Add Sam to the sheet", request=None)
+    asyncio.run(m.get("a1").handle_inbound("When Sam responds, add them to the sheet.", "email", a))
+    tid = m.store.task_ids_for_chat("a1")[0]
+    m.router.next = RouterOutput(reply="ok", task=f"T{tid}", request=RouterRequest(prompt="Add", scopes=["tamid_drive_write"], summary="add"))
+    asyncio.run(m.get("t1").handle_inbound("here it is", "email", tm))
+    assert "Add Sam to the sheet" in m.router.calls[-1]["task_memory"]
+    assert m.store.task_id_for_request(1) == tid

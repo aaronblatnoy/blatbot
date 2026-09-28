@@ -108,6 +108,23 @@ class GateSession:
             return name
         return ""
 
+    def thread_key(self) -> str:
+        """The email thread this message belongs to. Prefers the RFC reply chain
+        (Message-ID / In-Reply-To / References), which survives across mailboxes;
+        falls back to the provider's thread id."""
+        if self.mode != "email":
+            return ""
+        meta = self.reply_meta or {}
+        root = self.m.store.thread_root(
+            message_id=str(meta.get("message_id") or "").strip(),
+            in_reply_to=str(meta.get("in_reply_to") or "").strip(),
+            references=[str(x) for x in (meta.get("references") or [])],
+        )
+        if root:
+            return f"email:{root}"
+        tid = str(meta.get("thread_id") or "").strip()
+        return f"email:{tid}" if tid else ""
+
     def person(self) -> Person:
         """The sender as one person: contact id plus every email/phone/name we know."""
         c = (self.reply_meta or {}).get("contact")
@@ -135,6 +152,37 @@ class GateSession:
             self.m.store.task_event(task["id"], "inbound", body, chat_id=self.chat_id)
             self._turn_task_id = task["id"]
 
+    async def jev_event(self, task: Dict[str, Any], body: str, history: List[Dict[str, Any]],
+                        out: RouterOutput) -> None:
+        """Second judgment: what this message did to the task it was assigned to.
+        Writes a typed event line, updates the summary and, when confident, the state."""
+        picker = self.m.task_picker
+        if picker is None:
+            return
+        approver = self.is_approver()
+        res = await picker.judge_event(
+            message=body, task=task, history=history,
+            sender_label="Aaron, the owner" if approver else (self._sender_name() or self._sender()))
+        kind = res.get("kind")
+        if not kind or kind == "conversation_only":
+            return
+        who = "Aaron" if approver else (self._sender_name() or self._sender())
+        label = kind.replace("_", " ")
+        line = f"{who} {label}: {body.strip()[:300]}"
+        new_state: Optional[str] = None
+        if res.get("resolves_task", 0) >= 0.8 and out.request is None:
+            new_state = "done"
+        elif res.get("waiting_on") == "owner" and out.request is None:
+            new_state = "waiting_aaron"
+        elif task.get("state") in ("done", "failed") and kind in ("asked_for_something", "changed_or_corrected"):
+            new_state = "open"
+        self.m.store.task_event(task["id"], kind, line, chat_id=self.chat_id, state=new_state)
+        if not out.task_summary:
+            # The router gave no summary this turn: keep the ledger honest with a short one.
+            wo = res.get("waiting_on")
+            tail = {"owner": "Waiting on Aaron.", "other": f"Waiting on {who}.", "nobody": "Nothing outstanding."}.get(wo or "", "")
+            self.m.store.set_task_summary(task["id"], f"Latest: {who} {label}. {tail}".strip())
+
     async def lookup_tasks(self, history: List[Dict[str, Any]], message: str, in_view: str) -> str:
         """Query pass: the router emits a structured filter, code runs it. Non-owners
         are confined to tasks they are on; the owner can query everything."""
@@ -145,6 +193,12 @@ class GateSession:
             logger.exception("[gate %s] task query planning failed", self.chat_id)
             return ""
         self._found_task_ids = []
+        if q is None and in_view.strip() in ("", "(no tasks on record)") and not self.is_approver():
+            # Nobody on record for this sender: that is exactly when to search for them by name.
+            from .router import TaskQuery
+            q = TaskQuery(text=(self._sender_name() or "").strip() or None, states=["live"], limit=10)
+            if not q.text:
+                q = None
         if q is None:
             return ""
         def to_kw(tq: Any) -> Dict[str, Any]:
@@ -155,7 +209,14 @@ class GateSession:
             if self.is_approver():
                 kw["participant"] = tq.participant or ""
             else:
-                kw["participant"] = self._sender()  # a non-owner only ever sees their own tasks
+                thread_ids = self.m.store.task_ids_for_thread(self.thread_key())
+                if thread_ids:
+                    # their own tasks, or tasks living on the email thread they are replying in
+                    kw["any_of"] = [dict(kw, participant=self._sender(), has_participants=None),
+                                    dict(kw, ids=thread_ids, has_participants=None)]
+                    kw["participant"] = ""
+                else:
+                    kw["participant"] = self._sender()  # a non-owner only ever sees their own tasks
                 kw["has_participants"] = None
             if tq.any_of:
                 kw["any_of"] = [to_kw(sub) for sub in tq.any_of]
@@ -185,6 +246,7 @@ class GateSession:
             for t in self.m.store.recent_tasks():
                 if t["id"] not in ids:
                     ids.append(int(t["id"]))
+        ids += [i for i in self.m.store.task_ids_for_thread(self.thread_key()) if i not in ids]
         ids += [i for i in self._found_task_ids if i not in ids]
         out: List[Dict[str, Any]] = []
         for tid in ids[:40]:
@@ -216,8 +278,18 @@ class GateSession:
         out.task = choice
 
     def task_memory(self) -> str:
-        return self.m.store.task_memory(self.chat_id, is_approver=self.is_approver(),
-                                        person="" if self.is_approver() else self._sender())
+        mem = self.m.store.task_memory(self.chat_id, is_approver=self.is_approver(),
+                                       person="" if self.is_approver() else self._sender())
+        extra = []
+        for tid in self.m.store.task_ids_for_thread(self.thread_key()):
+            if f"Task T{tid} " not in mem:
+                t = self.m.store.task_with_events(tid)
+                if t and t["state"] != "closed":
+                    extra.append(t)
+        if extra:
+            block = self.m.store.render_tasks(extra)
+            mem = block if mem == "(no tasks on record)" else mem + "\n\n" + block
+        return mem
 
     # -- gateway interface ---------------------------------------------------
     async def handle_inbound(self, text: str, mode: str, meta: Dict[str, Any]) -> None:
@@ -227,6 +299,8 @@ class GateSession:
             self.m.store.set_thread(self.chat_id, "routing", mode, self.reply_meta_for_store())
             body = _strip_quoted(text) if mode == "email" else text.strip()
             self.m.store.add_message(self.chat_id, "inbound", body, mode)
+            if self.thread_key():
+                self.m.store.link_thread(self.thread_key(), self.chat_id)
             # First thing every turn: put this message on the person's task ledger,
             # so the router starts from the record, not from a 20-message window.
             t = self.task()
@@ -248,7 +322,8 @@ class GateSession:
 
     def reply_meta_for_store(self) -> Dict[str, Any]:
         keep = {k: v for k, v in (self.reply_meta or {}).items()
-                if k in ("to", "sender", "subject", "thread_id", "conversation_id", "conversation_kind")}
+                if k in ("to", "sender", "subject", "thread_id", "conversation_id", "conversation_kind",
+                         "message_id", "in_reply_to", "references")}
         return keep
 
     async def run_consult(self, *args: Any, **kwargs: Any) -> str:
@@ -366,6 +441,7 @@ class GateSession:
                     return reply or "I already have a request waiting on Aaron for you."
                 task = self.m.resolve_task(self, out)  # enforced: every request is written to a task
                 self._ensure_inbound_on_task(task, f"(phone) {body}")
+                await self.jev_event(task, body, history[:-1], out)
                 req = self.m.store.create_request(
                     chat_id=self.chat_id, sender=self._sender(), sender_name=self._sender_name(), mode="voice",
                     subject="", original_message=body, summary=out.request.summary,
@@ -411,7 +487,8 @@ class GateSession:
     # -- core ----------------------------------------------------------------
     async def _route_and_act(self, body: str, system_note: Optional[str] = None) -> bool:
         approver = self.is_approver()
-        history = self.m.store.history(self.chat_id, limit=20)
+        history = self.m.store.thread_history(self.thread_key(), exclude_chat=self.chat_id) + \
+            self.m.store.history(self.chat_id, limit=20)
         if system_note:
             prior, message = history, "(No new message from the sender. A system note with a task result was just added above. Write the reply the sender should receive: for Aaron, give him the answer or outcome clearly and naturally, in his voice preference (brief, no emojis); for anyone else, tell them only what concerns them, without internal details. Reply null only if there is truly nothing to say. Do not create a request.)"
         else:
@@ -433,6 +510,7 @@ class GateSession:
         if not system_note and (out.request is not None or _names_a_task(out.task)):
             task = self.m.resolve_task(self, out)  # enforced: every request is written to a task
             self._ensure_inbound_on_task(task, body)
+            await self.jev_event(task, body, prior, out)
         if out.reply:
             await self.send_to_sender(out.reply)
         if out.request is None:
@@ -531,9 +609,7 @@ class GateSessionManager:
         sender = session._sender()
         who = f"{who} ({sender})" if who else sender
         subj = str((session.reply_meta or {}).get("subject") or "").strip()
-        snippet = re.sub(r"\s+", " ", body).strip()
-        if len(snippet) > 500:
-            snippet = snippet[:500] + "..."
+        snippet = body.strip()  # the whole message; Aaron asked for no truncation
         head = f"[Blatbot FYI] {who} via {session.mode}"
         if subj:
             head += f" | {subj}"
@@ -575,7 +651,8 @@ class GateSessionManager:
         if choice.startswith("t") and choice[1:].isdigit():
             cand = self.store.get_task(int(choice[1:]))
             if cand and cand["state"] != "closed":
-                allowed = approver or self.store.is_participant(cand["id"], sender)
+                allowed = (approver or self.store.is_participant(cand["id"], sender)
+                           or cand["id"] in self.store.task_ids_for_thread(session.thread_key()))
                 if allowed:
                     chosen = cand
                 else:
