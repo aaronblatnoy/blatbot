@@ -196,3 +196,40 @@ def test_manager_fallback_rules(monkeypatch):
     assert not st["ok"]
     st = asyncio.run(M({"ok": False, "error": "x", "wrote": False}, fallback=False)._run_executor(req, ""))
     assert not st["ok"]
+
+
+def test_give_up_after_reads_finishes_with_findings(agent, monkeypatch):
+    lst = "mcp__stern-drive__get_events"
+    box = FakeBox({lst: {"description": "list", "schema": {"type": "object", "properties": {}, "required": []}}},
+                  results={lst: "6 events"})
+    j = ScriptedJudge([lst, "give_up"])
+    async def never_done(state, question):
+        return 0.4
+    j.yes = never_done
+    _patch(monkeypatch, box, j, ScriptedProse(), [lst, "mcp__inkbox__inkbox_send_imessage"])
+    st = asyncio.run(agent.run(_req("list my coffee chats last week")))
+    assert st["ok"] and st["tool_calls"] == [lst] and "6 events" in st["raw"]
+
+
+def test_inkbox_server_call_across_mcp_versions():
+    from inkbox_claude.gate.jevagent import _call_server
+
+    class Entry:
+        def __init__(self): self.handler = self.h
+        async def h(self, ctx, params): return {"got": params}
+
+    class New:  # method-keyed entries with (ctx, params) handlers
+        def get_request_handler(self, m): return Entry() if m == "tools/list" else None
+
+    class Req:
+        def __init__(self, method, params=None): self.method, self.params = method, params
+
+    class Old:  # request-class keyed callables
+        request_handlers = {}
+    async def old_h(req): return type("R", (), {"root": {"old": req.method}})()
+    Old.request_handlers[Req] = old_h
+
+    assert asyncio.run(_call_server(New(), "tools/list", Req, {"a": 1})) == {"got": {"a": 1}}
+    assert asyncio.run(_call_server(Old(), "x", Req, None)) == {"old": "x"}
+    with pytest.raises(RuntimeError):
+        asyncio.run(_call_server(New(), "tools/call", Req, None))

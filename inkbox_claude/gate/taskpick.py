@@ -150,6 +150,9 @@ class TaskPicker:
             "task_summary": summary,
             "task_prompt": prompt,
             "another_model_suggested": router_scopes or [],
+            "delivery": "The gateway itself delivers the task's answer to whoever asked. Sending capabilities "
+                        "(email, text, iMessage) are needed only when the task must message SOMEONE ELSE, never "
+                        "to report the result back to the requester.",
         }
         questions: Dict[str, Any] = {}
         for name, desc in scopes.items():

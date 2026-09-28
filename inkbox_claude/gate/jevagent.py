@@ -56,6 +56,27 @@ def enabled() -> bool:
 # ----------------------------------------------------------------------------
 
 
+async def _call_server(server: Any, method: str, request_type: Any, params: Any) -> Any:
+    """Invoke one of the in-process mcp Server's handlers directly, across library
+    versions: newer servers keep (ctx, params) entries keyed by method string;
+    older ones keep request-typed callables keyed by request class."""
+    get = getattr(server, "get_request_handler", None)
+    entry = get(method) if callable(get) else None
+    if entry is not None and hasattr(entry, "handler"):
+        res = await entry.handler(None, params)
+        return res
+    for attr in ("request_handlers", "_request_handlers"):
+        table = getattr(server, attr, None) or {}
+        h = table.get(request_type) or table.get(method)
+        if h is None:
+            continue
+        if hasattr(h, "handler"):
+            return await h.handler(None, params)
+        res = await h(request_type(method=method, params=params) if params is not None else request_type(method=method))
+        return getattr(res, "root", res)
+    raise RuntimeError(f"no handler for {method}")
+
+
 def _input_schema(t: Any) -> Dict[str, Any]:
     return getattr(t, "input_schema", None) or getattr(t, "inputSchema", None) or {}
 
@@ -113,10 +134,9 @@ class ToolBox:
             return self._sessions["inkbox"]
         from mcp import types as mt
         inst = self._inkbox["instance"] if isinstance(self._inkbox, dict) else self._inkbox
-        handler = inst.request_handlers[mt.ListToolsRequest]
-        res = await handler(mt.ListToolsRequest(method="tools/list"))
+        res = await _call_server(inst, "tools/list", mt.ListToolsRequest, None)
         out = {}
-        for t in res.root.tools:
+        for t in res.tools:
             out[t.name] = {"description": t.description or "", "schema": _input_schema(t)}
             self._schemas[f"mcp__inkbox__{t.name}"] = out[t.name]
         self._sessions["inkbox"] = out
@@ -135,9 +155,8 @@ class ToolBox:
             from mcp import types as mt
             await self._inkbox_tools()
             inst = self._inkbox["instance"] if isinstance(self._inkbox, dict) else self._inkbox
-            handler = inst.request_handlers[mt.CallToolRequest]
-            res = (await handler(mt.CallToolRequest(method="tools/call",
-                                                    params=mt.CallToolRequestParams(name=short, arguments=args)))).root
+            res = await _call_server(inst, "tools/call", mt.CallToolRequest,
+                                     mt.CallToolRequestParams(name=short, arguments=args))
         else:
             session = await self._session(server)
             res = await session.call_tool(short, arguments=args)
@@ -285,7 +304,9 @@ class JevAgent:
                     choice, conf, probs = await judge.choose(
                         state,
                         {"question": "What is the single best next step toward `goal`?",
-                         "rules": ["Read before you write: look things up before booking, sending, or changing.",
+                         "rules": ["The gateway delivers whatever is found to the person who asked; never send or text the "
+                                   "answer to the requester. Sending tools are only for messaging OTHER people the goal names.",
+                                   "Read before you write: look things up before booking, sending, or changing.",
                                    "Do not repeat a step that already succeeded.",
                                    f"Choose {GIVE_UP} if a needed tool is missing or a step failed twice."]},
                         options)
@@ -299,6 +320,11 @@ class JevAgent:
                         return self._status(False, "unsure which step to take next", steps, judge, prose, started,
                                             probs=probs)
                     if choice == GIVE_UP:
+                        if steps and all(s["ok"] and not is_write_tool(s["tool"]) for s in steps):
+                            # Everything so far was a successful read: what was found IS the answer.
+                            # The gateway delivers it to the requester; nothing needs sending.
+                            logger.info("jev agent: give_up after reads only; finishing with what was found")
+                            break
                         return self._status(False, "gave up: goal not achievable with the granted tools", steps, judge, prose, started)
                     args = await self._fill_args(box, judge, prose, choice, facts, steps, req)
                     if args is None:
