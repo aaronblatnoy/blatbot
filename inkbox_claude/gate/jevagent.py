@@ -291,7 +291,79 @@ def _tried_values(steps: List[Dict[str, Any]], tool: str, arg: str) -> List[Any]
     return out
 
 
-_LARGE = 20000
+_LARGE = 20000          # a result above this is never placed raw in a judgment state
+_PART = 48000           # largest text one narrowing judgment sees (well under the 32k-token ceiling)
+_LEAF = 6000            # stop narrowing here: small enough to extract candidates from precisely
+_MAX_CANDIDATES = 250   # a Choice takes at most 255 options
+
+
+def _digest(result: Any) -> Any:
+    """What a judgment sees instead of a raw tool result: a structural breakdown.
+    Small results pass through whole. Large ones become shape + counts + header
+    lines + the ids, addresses, phones and dates found in them. Nothing is decided
+    from this alone; values are always selected from the real text (see `narrow`)."""
+    t = result if isinstance(result, str) else _text(result)
+    if len(t) <= _LARGE:
+        return result
+    lines = t.splitlines()
+    d: Dict[str, Any] = {"size": f"{len(t):,} characters, {len(lines):,} lines", "kind": "text"}
+    try:
+        j = json.loads(t)
+        d["kind"] = "json"
+        if isinstance(j, dict):
+            d["keys"] = list(j)[:40]
+            for k, v in j.items():
+                if isinstance(v, list):
+                    d[f"{k}_count"] = len(v)
+                    if v and isinstance(v[0], dict):
+                        d[f"{k}_item_keys"] = list(v[0])[:30]
+        elif isinstance(j, list):
+            d["items"] = len(j)
+            if j and isinstance(j[0], dict):
+                d["item_keys"] = list(j[0])[:30]
+    except Exception:
+        d["first_lines"] = [ln[:200] for ln in lines[:5]]
+    d["emails_found"] = len(set(_EMAIL_RE.findall(t)))
+    d["ids_found"] = len(set(_LABELED_ID_RE.findall(t)))
+    d["note"] = "large result; its values are offered as candidates after a narrowing search"
+    return d
+
+
+def _split(text: str, parts: int) -> List[str]:
+    """Split on line boundaries into about `parts` pieces (rows/records stay whole)."""
+    lines = text.splitlines(keepends=True)
+    if len(lines) < parts * 2:
+        n = max(1, len(text) // parts)
+        return [text[i:i + n] for i in range(0, len(text), n)]
+    per = max(1, len(lines) // parts)
+    return ["".join(lines[i:i + per]) for i in range(0, len(lines), per)]
+
+
+async def narrow(judge: "Judge", text: str, need: str, goal: str) -> str:
+    """Binary-search style: split `text` into parts small enough to judge, ask Jev in
+    parallel which part contains what `need` describes, descend into the best one,
+    repeat until a leaf small enough to extract from. log(n) rounds, one request per
+    part per round."""
+    cur = text
+    rounds = 0
+    while len(cur) > _LEAF and rounds < 12:
+        n = max(2, -(-len(cur) // _PART))
+        parts = [p for p in _split(cur, n) if p.strip()]
+        if len(parts) < 2:
+            break
+        async def score(part: str) -> float:
+            a = await judge.ask({"goal": goal, "looking_for": need, "part": part},
+                                {"q": {"type": "noul", "instructions": {
+                                    "question": "Does `part` contain the information described by `looking_for` (the row, entry, "
+                                                "record or value that `goal` needs)?",
+                                    "criteria": {"true": "It is in this part.", "false": "It is not in this part."}}}})
+            return float((a.get("q") or {}).get("noul") or 0.0)
+        probs = await asyncio.gather(*[score(p) for p in parts])
+        best = max(range(len(parts)), key=lambda i: probs[i])
+        logger.info("jev agent: narrowing %s chars -> part %d/%d (p=%.2f)", f"{len(cur):,}", best + 1, len(parts), probs[best])
+        cur = parts[best]
+        rounds += 1
+    return cur
 
 
 def _slim_state(state: Any) -> Tuple[Any, int]:
@@ -394,7 +466,7 @@ class JevAgent:
                 p_done = 0.0
                 for step in range(self.max_steps):
                     state = {"goal": req.original_message, "task_context": context, **_now_facts(),
-                             "steps_so_far": [f"{s['tool']}({_text(s['args'])}) -> {_text(s['result'])}" for s in steps]}
+                             "steps_so_far": [{"tool": s["tool"], "args": s["args"], "ok": s["ok"], "result": _digest(s["result"])} for s in steps]}
                     if steps:
                         p_done = await judge.yes(state, {
                             "question": "Is `goal` now fully achieved by `steps_so_far`, so no further tool call is needed?",
@@ -487,8 +559,8 @@ class JevAgent:
         state = {"goal": req.original_message, "tool": short, "tool_description": meta.get("description") or "",
                  "arguments": {n: {"description": str(sp.get("description") or ""), "type": sp.get("type") or "string",
                                    "required": n in required} for n, sp in props.items()},
-                 "known_facts": {k: _text(v) for k, v in facts.items()},
-                 "steps_so_far": [f"{s['tool']} -> {_text(s['result'])}" for s in steps]}
+                 "known_facts": {k: _digest(v) for k, v in facts.items()},
+                 "steps_so_far": [{"tool": s["tool"], "ok": s["ok"], "result": _digest(s["result"])} for s in steps]}
         questions: Dict[str, Any] = {}
         cands: Dict[str, List[Any]] = {}
         for name, spec in props.items():
@@ -515,7 +587,7 @@ class JevAgent:
                                                f"`arguments.{name}` is the {role} of a time range. Which named range does `goal` mean?",
                                                "criteria": opts}
                 continue
-            cs = _candidate_values(name, str(spec.get("description") or ""), typ, facts, steps)
+            cs = await self._candidates(judge, name, str(spec.get("description") or ""), typ, facts, steps, req)
             tried = _tried_values(steps, tool, name)
             if cs and tried and len(cs) > len(tried):
                 # Trial and error: a value this tool already got for this argument is
@@ -592,6 +664,28 @@ class JevAgent:
             logger.warning("jev agent: missing required args %s for %s", missing, tool)
             return None
         return args
+
+    async def _candidates(self, judge: "Judge", name: str, desc: str, typ: str, facts: Dict[str, Any],
+                          steps: List[Dict[str, Any]], req: Request) -> List[Any]:
+        """Candidate values for one argument. Small sources are scanned whole; a large
+        result is first narrowed to the part that holds what this argument needs,
+        so a 300-row sheet yields the right row's values, not 300 of them. Newest
+        results are scanned first and the list is capped at what a Choice accepts."""
+        need = f"{name}: {desc}".strip(": ")
+        sources: List[Any] = []
+        for st in reversed(steps):
+            r = st["result"]
+            t = r if isinstance(r, str) else _text(r)
+            if len(t) > _LARGE:
+                t = await narrow(judge, t, need, req.original_message)
+            sources.append(t)
+        for k, v in facts.items():
+            if k.startswith("result_of_"):
+                continue  # same text as the steps above
+            sources.append(v)
+        small_facts = {"request": req.original_message}
+        out = _candidate_values(name, desc, typ, small_facts, [{"result": src} for src in sources])
+        return out[:_MAX_CANDIDATES]
 
     @staticmethod
     def _status(ok: bool, error: str, steps: List[Dict[str, Any]], judge: Judge, prose: Prose,

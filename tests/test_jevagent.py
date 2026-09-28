@@ -1,5 +1,6 @@
 """The Jev agent: typed judgments pick tools, code fills arguments, prose only on demand."""
 import asyncio
+import json
 import os
 
 import pytest
@@ -408,3 +409,93 @@ def test_unsure_after_reads_with_low_done_score_fails_over(agent, monkeypatch):
     _patch(monkeypatch, box, Unsure([lst]), ScriptedProse(), [lst])
     st = asyncio.run(agent.run(_req("book the thing")))
     assert not st["ok"] and "unsure" in st["error"]
+
+
+def test_digest_breaks_large_results_down_and_passes_small_ones_through():
+    from inkbox_claude.gate.jevagent import _digest, _LARGE
+    assert _digest("Successfully listed 5 calendars") == "Successfully listed 5 calendars"
+    rows = [{"id": "row%04d_ABCDEFGHIJKLMNOP" % i, "email": "p%d@example.org" % i, "name": "Person %d" % i} for i in range(1500)]
+    big_json = json.dumps({"success": True, "count": len(rows), "data": rows})
+    assert len(big_json) > _LARGE
+    d = _digest(big_json)
+    assert d["kind"] == "json" and d["data_count"] == 1500 and "email" in d["data_item_keys"] and d["emails_found"] == 1500
+    big_text = "\n".join("row %d | p%d@example.org | Person %d" % (i, i, i) for i in range(3000))
+    d = _digest(big_text)
+    assert d["kind"] == "text" and len(d["first_lines"]) == 5 and "3,000 lines" in d["size"]
+    assert len(json.dumps(d)) < 2000
+
+
+class NeedleJudge:
+    """Scores a part high only if it contains NEEDLE."""
+    def __init__(self): self.calls = 0
+    async def ask(self, state, questions):
+        self.calls += 1
+        part = state.get("part", "")
+        return {"q": {"noul": 0.95 if "NEEDLE" in part else 0.05}}
+
+
+def test_narrow_finds_the_part_with_the_needle_in_log_rounds():
+    from inkbox_claude.gate.jevagent import narrow, _LEAF
+    lines = ["row %05d | filler filler filler filler filler filler filler filler | x%05d@example.org" % (i, i) for i in range(6000)]
+    lines[4321] = "row 04321 | NEEDLE Cand Idate | cand@example.org"
+    text = "\n".join(lines)
+    j = NeedleJudge()
+    leaf = asyncio.run(narrow(j, text, "the row for Cand Idate", "email cand idate"))
+    assert "NEEDLE" in leaf and len(leaf) <= _LEAF * 1.2
+    assert j.calls <= 40                       # a handful of parallel rounds, not one call per row
+
+
+def test_agent_selects_from_a_narrowed_large_result_and_never_judges_raw_text(agent, monkeypatch):
+    from inkbox_claude.gate.jevagent import _LARGE
+    lst, get = "mcp__tamid-drive__read_sheet_values", "mcp__tamid-drive__get_form_response"
+    schemas = {lst: {"description": "read", "schema": {"type": "object", "properties": {}, "required": []}},
+               get: {"description": "get one response", "schema": {"type": "object", "required": ["response_id"],
+                                                                   "properties": {"response_id": {"type": "string", "description": "the response id"}}}}}
+    rows = ["row %05d | ID: resp_%05dAAAAAAAAAAAAAA | filler filler filler filler" % (i, i) for i in range(4000)]
+    rows[2500] = "row 02500 | ID: resp_NEEDLE0000000000000 | Cand Idate"
+    big = "\n".join(rows)
+    assert len(big) > _LARGE
+    box = FakeBox(schemas, results={lst: big, get: "the response"})
+    seen_states = []
+    class J(ScriptedJudge):
+        async def ask(self, state, questions):
+            seen_states.append(state)
+            if "part" in state:
+                return {"q": {"noul": 0.95 if "NEEDLE" in state["part"] else 0.05}}
+            return await super().ask(state, questions)
+        async def choose(self, state, question, options, min_p=None):
+            seen_states.append(state)
+            return await super().choose(state, question, options, min_p)
+        async def yes(self, state, question):
+            seen_states.append(state)
+            if "fully achieved" in str(question):
+                return 0.9 if not self.picks else 0.1
+            return 0.9
+        async def ask(self, state, questions):  # batched argument questions: pick the candidate holding the needle
+            seen_states.append(state)
+            if "part" in state:
+                return {"q": {"noul": 0.95 if "NEEDLE" in state["part"] else 0.05}}
+            out = {}
+            for qid, q in questions.items():
+                if q["type"] == "noul":
+                    out[qid] = {"noul": 0.9}
+                else:
+                    hit = [k for k, v in q["criteria"].items() if "NEEDLE" in json.dumps(v)]
+                    out[qid] = {"choice": hit[0], "probabilities": {hit[0]: 0.97}}
+            return out
+    judge = J([lst, get])
+    _patch(monkeypatch, box, judge, ScriptedProse(), [lst, get])
+    st = asyncio.run(agent.run(_req("open cand idate's application response")))
+    assert st["ok"] and box.calls[1][1]["response_id"] == "resp_NEEDLE0000000000000"
+    for state in seen_states:
+        for v in json.loads(json.dumps(state)).values() if isinstance(state, dict) else []:
+            pass
+        assert all(len(x) <= _LARGE * 2.5 for x in _strings(state)), "raw large text reached a judgment"
+    assert big in st["raw"]                                          # the full result still reaches the report
+
+
+def _strings(v):
+    if isinstance(v, str): return [v]
+    if isinstance(v, dict): return [s for x in v.values() for s in _strings(x)]
+    if isinstance(v, list): return [s for x in v for s in _strings(x)]
+    return []
