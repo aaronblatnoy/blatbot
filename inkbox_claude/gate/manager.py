@@ -975,6 +975,11 @@ class GateSessionManager:
 
     # -- executor --------------------------------------------------------------
     async def _run_executor(self, req: Request, context: str) -> Dict[str, Any]:
+        """Run one request and return exactly ONE status object. Claude Code is an
+        escalation inside this call, not a second execution: nothing is delivered,
+        noted, or phrased for the Jev attempt when it escalates; only the final
+        status leaves this function. Executors themselves never message anyone who
+        asked (denied at the tool call)."""
         if not self.jev_agent:
             return await self.executor.run(req, context=context)
         status = await self.jev_agent.run(req, context=context)
@@ -988,6 +993,7 @@ class GateSessionManager:
             return status
         logger.info("[gate] jev agent gave up on #%s (%s); falling back to claude code", req.id, status.get("error"))
         fallback = await self.executor.run(req, context=context)
+        fallback["escalated"] = True
         fallback["jev_attempt"] = {k: status.get(k) for k in ("error", "tool_calls", "jev_calls", "prose_calls", "seconds")}
         return fallback
 

@@ -28,8 +28,12 @@ class FakeRouter:
         self.query_calls.append(kw)
         return self.next_query
 
+    next_note = None            # what to answer when phrasing a result (action=False), if set
+
     async def route(self, **kw):
         self.calls.append(kw)
+        if kw.get("action") is False and self.next_note is not None:
+            return self.next_note.model_copy(deep=True)
         return self.next.model_copy(deep=True)  # a fresh object per call, like the real router
 
 
@@ -1137,3 +1141,31 @@ def test_failed_run_re_decides_the_message_that_arrived_meanwhile(tmp_path):
     r2 = m.store.get_request(2)
     assert r2 is not None and r2.original_message == "use the Fall 2026 responses sheet"
     assert m.store.get_request(1).state == "failed"
+
+
+def test_escalation_to_claude_produces_exactly_one_response(tmp_path):
+    """Jev agent fails without writing -> Claude runs. One status, one delivery, and
+    nothing about the Jev attempt reaches the sender, the note, or the ledger."""
+    m, sent = make_manager(tmp_path)
+
+    class FakeJev:
+        def __init__(self): self.ran = 0
+        async def run(self, req, context=""):
+            self.ran += 1
+            return {"ok": False, "error": "JEV-GAVE-UP", "summary": "JEV-GAVE-UP", "raw": "JEV-GAVE-UP\nSTATUS: FAILED",
+                    "tool_calls": [], "wrote": False, "engine": "jev"}
+    m.jev_agent, m.jev_fallback = FakeJev(), True
+    m.executor.result = {"ok": True, "summary": "CLAUDE-RESULT", "tool_calls": [], "raw": "CLAUDE-RESULT\nSTATUS: OK"}
+    m.router.next = RouterOutput(reply="On it.", task="new", task_title="Row count",
+                                 request=RouterRequest(prompt="count rows", scopes=["tamid_drive_read"], summary="Row count"))
+    m.router.next_note = RouterOutput(reply="There are 40 rows.", task="T1")
+    async def go():
+        await m.get("aaron").handle_inbound("how many rows?", "imessage", approver_meta())
+        await asyncio.sleep(0.15)
+    asyncio.run(go())
+    r = m.store.get_request(1)
+    assert r.state == "done" and r.status["escalated"] is True and m.jev_agent.ran == 1 and m.executor.ran == [1]
+    outbound = [t for _, t, *_ in sent]
+    assert outbound == ["On it.", "There are 40 rows."]                  # one ack, one result, nothing in between
+    everything = " ".join(outbound) + " ".join(x["text"] for x in m.store.history("aaron", 50)) + m.store.task_memory_for_task(1)
+    assert "JEV-GAVE-UP" not in everything and "CLAUDE-RESULT" in everything
