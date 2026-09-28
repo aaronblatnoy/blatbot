@@ -222,7 +222,13 @@ class GateSession:
             if tq.any_of:
                 kw["any_of"] = [to_kw(sub) for sub in tq.any_of]
             return kw
-        res = self.m.store.query_tasks(**to_kw(q))
+        try:
+            res = self.m.store.query_tasks(**to_kw(q))
+        except Exception:
+            # The lookup is extra context, not a gate: small talk or a question with no
+            # matching task must still get an answer if the search itself breaks.
+            logger.exception("[gate %s] task query failed; answering without it", self.chat_id)
+            return ""
         self._found_task_ids = [int(t["id"]) for t in res["tasks"]]
         shown = [t for t in res["tasks"] if f"Task T{t['id']} " not in in_view]
         logger.info("[gate %s] task query -> %d match(es), %d new to the router", self.chat_id, res["total"], len(shown))

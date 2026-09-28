@@ -1071,3 +1071,17 @@ def test_claude_executor_denies_send_to_requester(tmp_path):
     from inkbox_claude.gate.executor import Executor
     ex = Executor(mcp_server=None, cwd=str(tmp_path), protected=[APPROVER_CONV, "+15550100001"])
     assert ex.protected == [APPROVER_CONV, "+15550100001"]
+
+
+def test_small_talk_is_answered_when_the_task_lookup_breaks(tmp_path):
+    from inkbox_claude.gate.router import TaskQuery
+    m, sent = make_manager(tmp_path)
+
+    def boom(**kw):
+        raise TypeError("lookup exploded")
+    m.store.query_tasks = boom
+    m.router.next_query = TaskQuery(text="day", states=["live"])
+    m.router.next = RouterOutput(reply="Pretty good, thanks.", request=None)
+    asyncio.run(m.get("aaron").handle_inbound("how was your day?", "imessage", approver_meta()))
+    assert m.router.calls[-1]["found_tasks"] == ""
+    assert any(t == "Pretty good, thanks." for _, t, _, _ in sent)
