@@ -64,8 +64,8 @@ So the real question is not "can the model do the task." It is "who is allowed t
  │  1  which task?      state: the message, last 6 turns, each candidate task's      │
  │                      id, title, where it stands, people, age. Choice over them    │
  │                      + new_task + no_task. Under 0.55 confidence: abstain.        │
- │  2  needs a tool?    state: message, turns, the task from 1. Noul. p ≥ 0.5 ──> a   │
- │                      request is built; else the reply writer answers in words.   │
+ │  2  needs a tool?    state: message, turns, the task from 1. Noul. p ≥ 0.5 ──> a  │
+ │                      request is built; else the reply writer answers in words.    │
  │  3  what happened?   event kind: asked / provided info / confirmed / changed /    │
  │                      declined / progress / conversation                           │
  │                      who it now waits on: owner / other person / nobody           │
