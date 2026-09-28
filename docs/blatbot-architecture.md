@@ -1,6 +1,8 @@
 # Blatbot architecture
 
-As deployed, 2026-09-20. Gate mode (`inkbox_claude/gate/`), voice via
+As deployed, 2026-09-28. Gate mode (`inkbox_claude/gate/`), decisions and
+execution by TypeSafe Jev judgments (`taskpick.py`, `jevagent.py`), replies by
+DeepSeek (`router.py`), Claude Code as fallback (`executor.py`), voice via
 OpenAI GPT-Live (`inkbox_claude/live.py`), with the older Realtime bridge
 (`inkbox_claude/realtime.py`) selectable by env.
 
@@ -58,42 +60,49 @@ delegates. From the gateway down, the path is identical for all channels.
  │  4. FYI to Aaron if sender is someone else   (text/email only, not calls)     │
  └───────────────────────────────────┬───────────────────────────────────────────┘
                                      v
-                    ┌─────────────────────────────────┐
-                    │ ROUTER            (DeepSeek)    │
-                    │ no tools. outputs:              │
-                    │   reply  and/or                 │
-                    │   task = prompt + scopes        │
-                    └───────┬─────────────────┬───────┘
-                   reply    │                 │  task
-                            │                 v
-                            │   ┌──────────────────────────────────┐
-                            │   │ GATE  (code)                     │
-                            │   │ store prompt + hash              │
-                            │   │                                  │
-                            │   │ from Aaron ──> approved, run now │
-                            │   │ from others ─> HOLD              │
-                            │   │    text Aaron: their message,    │
-                            │   │    exact prompt, scopes          │
-                            │   │    "#N yes" / "no" / "edit: ..." │
-                            │   │    expires in 24h                │
-                            │   └────────────────┬─────────────────┘
-                            │                    v  approved
-                            │   ┌──────────────────────────────────┐
-                            │   │ EXECUTOR   (Claude Sonnet,       │
-                            │   │             via Claude Code)     │
-                            │   │ verifies prompt hash             │
-                            │   │ only tools the scopes allow:     │
-                            │   │  Stern cal · TAMID cal · email   │
-                            │   │  texts · contacts · Drive · web  │
-                            │   │ ends with STATUS: OK / FAILED    │
-                            │   └────────────────┬─────────────────┘
-                            │                    v
-                            │      result -> TASK LEDGER (done / failed)
-                            │                    │
-                            v                    v
+        ┌────────────────────────────────────────────────────────┐
+        │ DECIDE   (TypeSafe Jev: typed judgments, no text)      │
+        │  which task is this?        Choice over the ledger     │
+        │  does it need a tool?       yes / no                   │
+        └──────────────┬─────────────────────────┬───────────────┘
+                       │                         │ yes
+                       v                         v
+        ┌──────────────────────────┐   ┌──────────────────────────────────┐
+        │ REPLY WRITER (DeepSeek)  │   │ REQUEST   (code, no model)       │
+        │ told the decision;       │   │ prompt = their exact words       │
+        │ writes only the words    │   │   + conversation + task record   │
+        │ sent back                │   │ scopes = Jev, one yes/no each    │
+        └──────────────┬───────────┘   │ hashed and stored                │
+                       │               └────────────────┬─────────────────┘
+                       │                                v
+                       │               ┌──────────────────────────────────┐
+                       │               │ GATE  (code)                     │
+                       │               │ from owner ──> approved, run now │
+                       │               │ from others ─> HOLD              │
+                       │               │    text owner: their message,    │
+                       │               │    what it will do, the tools    │
+                       │               │    "#N yes" / "no" / "edit: ..." │
+                       │               └────────────────┬─────────────────┘
+                       │                                v  approved
+                       │               ┌──────────────────────────────────┐
+                       │               │ AGENT  (Jev judgments + code)    │
+                       │               │ loop: done? -> next tool ->      │
+                       │               │   fill arguments -> call         │
+                       │               │ arguments are SELECTED from      │
+                       │               │   values in play, never written  │
+                       │               │ prose model only for text that   │
+                       │               │   must be composed (an email)    │
+                       │               │ only the tools the scopes allow  │
+                       │               │ fallback: Claude Code, only if   │
+                       │               │   nothing was written yet        │
+                       │               └────────────────┬─────────────────┘
+                       │                                v
+                       │      result -> TASK LEDGER (done / failed)
+                       │                          │
+                       v                          v
  ┌───────────────────────────────────────────────────────────────────────────────┐
- │ DELIVERY                                                                      │
- │  text/email : router's words sent verbatim, same channel, signature enforced  │
+ │ DELIVERY   exactly once: executors are denied any send to the requester       │
+ │  text/email : reply writer's words sent verbatim, same channel, signature     │
  │  phone      : result returned to voice agent as tool output, it says it       │
  │               its own way. Hung up or over ~75s: iMessage (Aaron) / SMS       │
  │  to Aaron   : done/failed note on iMessage when the task was someone else's   │
@@ -101,10 +110,13 @@ delegates. From the gateway down, the path is identical for all channels.
 
  ┌───────────────────────────────────────────────────────────────────────────────┐
  │ TASK LEDGER   SQLite: ~/.inkbox-claude/gate.db                                │
- │ one task per person, keyed by email/phone -> phone, text, email share it      │
+ │ a task = a unit of work; participants = people (one person, many contacts)    │
+ │ every inbound is assigned to a task by Jev; every request is written to one   │
  │ events: inbound · outbound · request · approved · rejected · done · failed    │
- │         · expired · call_ended                                                │
- │ read by: gateway every turn, router, executor.   NOT exposed to voice agent   │
+ │         · expired · call_ended, typed by Jev (asked / provided / confirmed..) │
+ │ full-text search over title, summary, people, events; dates; any_of filters  │
+ │ read by: gateway every turn, judgments, reply writer, agent.                  │
+ │ NOT exposed to voice agent                                                    │
  │ except the short recent-task summary at call pickup                           │
  └───────────────────────────────────────────────────────────────────────────────┘
 
@@ -117,9 +129,9 @@ delegates. From the gateway down, the path is identical for all channels.
 |---|---|---|
 | First thing to see the words | Gateway code | OpenAI voice model |
 | Who handles small talk | Router, every message | Voice agent, never reaches the gate |
-| Who decides it is a task | Router | Voice agent escalates, then router defines the task |
-| Who writes the words delivered | Router, sent verbatim | Voice agent, paraphrasing the result |
-| Models involved | DeepSeek, Sonnet | gpt-live-1, DeepSeek, Sonnet |
+| Who decides it is a task | Jev (task pick + action judgment) | Voice agent escalates, then Jev decides the same way |
+| Who writes the words delivered | Reply writer (DeepSeek), sent verbatim | Voice agent, paraphrasing the result |
+| Models involved | Jev, DeepSeek; Sonnet only as fallback | gpt-live-1, Jev, DeepSeek; Sonnet only as fallback |
 | Trust | Aaron's iMessage thread only | Aaron's phone number (`GATE_VOICE_TRUST_APPROVER=1`) |
 | Other people's requests | Held for Aaron's yes | Held for Aaron's yes, same approval text |
 | FYI to Aaron per message | Yes | No, and no transcripts |
@@ -200,9 +212,32 @@ as FAILED. With `GATE_EXECUTOR_FALLBACK=claude` (default) a failed run that made
 no write is re-run through Claude Code; after a successful write there is no
 fallback (no double sends). `JEV_AGENT_MAX_STEPS` caps the loop (8).
 
-Measured on black-sky: a site-admin read in 1.4 s with 2 judgments; a calendar
-lookup in 8.6 s with 8 judgments and 4 prose calls, arguments exactly right.
-Claude Code took 20 to 60 s for the same shapes.
+Arguments that are range bounds (`time_min`, `time_max`) are a Choice over
+named ranges (today, this week, last week, next 7 days, ...) whose ISO bounds
+code computes from the clock, so no text model ever writes a date. Prose values
+for one call are requested concurrently. Both executors refuse any send aimed
+at the requester (address, phone, conversation, or the owner's), so a result is
+delivered exactly once, by the gate.
+
+### Measured
+
+Same box, same tool servers, 2026-09-28. Executor time only; the reply
+phrasing after it is the same for both.
+
+| request | Jev agent | Claude Code |
+|---|---|---|
+| TAMID board members and titles | 1.4 s | 14.1 s |
+| Is the TAMID application open | 1.6 s | 8.0 s |
+| SJBA upcoming events | 2.0 s | 9.5 s |
+| TAMID calendar this week | 4.9 s | 8.4 s |
+| Stern calendar today | 4.7 s | 12.5 s |
+| Latest Stern email from a sender | 5.3 s | 10.7 s |
+| Coffee chats last week | 9.4 s | 47 s (with the old fallback) |
+
+Live request table, approval to result: Claude Code over 29 requests, median
+18.3 s, mean 22.1 s, range 6 to 56 s. Jev agent over the requests since the
+switch, median 3.5 s, mean 4.0 s, range 1.8 to 8.7 s. Site reads make zero
+text-model calls; calendar lookups make zero since the date-range change.
 
 ## Voice engine: Live vs Realtime
 
