@@ -729,6 +729,9 @@ def test_everything_on_a_task_is_searchable(tmp_path):
     # any_of: OR across sub-filters
     r2 = s.query_tasks(any_of=[{"text": "domain"}, {"participant": "Eve Park"}])
     assert {x["id"] for x in r2["tasks"]} == {t["id"], other["id"]}
+    # sub-filters carry their own limit (the router sends one); it must not collide
+    r3 = s.query_tasks(any_of=[{"text": "domain", "limit": 5}, {"participant": "Eve Park", "limit": 5}], limit=10)
+    assert {x["id"] for x in r3["tasks"]} == {t["id"], other["id"]}
     # the index follows later changes
     s.set_task_summary(t["id"], "Waiting on the deposit invoice.")
     assert [x["id"] for x in s.query_tasks(text="deposit invoice")["tasks"]] == [t["id"]]
