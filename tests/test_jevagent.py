@@ -110,7 +110,7 @@ def test_calendar_write_fills_args_and_finishes(agent, monkeypatch):
                        "description": {"type": "string"}}}}}
     box = FakeBox(schemas, results={create: "Event created id=abc"})
     # step 1 tool pick, then action enum, then summary write_new (no candidates -> straight to prose), start write_new, then done
-    judge = ScriptedJudge([create, "create"], yes=0.1)  # optional description skipped (0.1)
+    judge = ScriptedJudge([create, "create", "write_new"], yes=0.1)  # enum, then start_time: no named range fits noon tomorrow
     prose = ScriptedProse()
     _patch(monkeypatch, box, judge, prose, [create])
     st = asyncio.run(agent.run(_req(), context="T1 lunch"))
@@ -233,3 +233,22 @@ def test_inkbox_server_call_across_mcp_versions():
     assert asyncio.run(_call_server(Old(), "x", Req, None)) == {"old": "x"}
     with pytest.raises(RuntimeError):
         asyncio.run(_call_server(New(), "tools/call", Req, None))
+
+
+def test_date_range_bounds_are_picked_not_written(agent, monkeypatch):
+    from inkbox_claude.gate.jevagent import _date_ranges
+    get = "mcp__stern-drive__get_events"
+    schemas = {get: {"description": "events", "schema": {"type": "object", "required": ["time_min", "time_max"],
+                                                        "properties": {"user_google_email": {"type": "string"},
+                                                                       "time_min": {"type": "string", "description": "RFC3339 start"},
+                                                                       "time_max": {"type": "string", "description": "RFC3339 end"}}}}}
+    box = FakeBox(schemas, results={get: "6 events"})
+    judge = ScriptedJudge([get, "last_week", "last_week"])
+    prose = ScriptedProse()
+    _patch(monkeypatch, box, judge, prose, [get])
+    st = asyncio.run(agent.run(_req("list my coffee chats from last week")))
+    assert st["ok"] and prose.calls == 0
+    args = box.calls[0][1]
+    r = _date_ranges()["last_week"]
+    assert args["time_min"] == r["start"] and args["time_max"] == r["end"]
+    assert args["time_min"] < args["time_max"]

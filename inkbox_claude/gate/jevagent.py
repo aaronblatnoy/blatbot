@@ -257,6 +257,42 @@ def _now_facts() -> Dict[str, str]:
     }
 
 
+def _date_ranges(now: Optional[datetime] = None) -> Dict[str, Dict[str, str]]:
+    """Canonical ranges as ISO datetimes in New York, keyed by name. Jev picks the
+    name; code supplies the start or end depending on the argument."""
+    now = now or datetime.now(TZ)
+    day = now.replace(hour=0, minute=0, second=0, microsecond=0)
+    monday = day - timedelta(days=day.weekday())
+    month_start = day.replace(day=1)
+    next_month = (month_start + timedelta(days=32)).replace(day=1)
+    def rng(a: datetime, b: datetime, label: str) -> Dict[str, str]:
+        return {"start": a.isoformat(), "end": b.isoformat(), "label": label}
+    return {
+        "today": rng(day, day + timedelta(days=1), "today"),
+        "tomorrow": rng(day + timedelta(days=1), day + timedelta(days=2), "tomorrow"),
+        "yesterday": rng(day - timedelta(days=1), day, "yesterday"),
+        "this_week": rng(monday, monday + timedelta(days=7), "this week, Monday through Sunday"),
+        "last_week": rng(monday - timedelta(days=7), monday, "last week, Monday through Sunday"),
+        "next_week": rng(monday + timedelta(days=7), monday + timedelta(days=14), "next week, Monday through Sunday"),
+        "next_7_days": rng(now, now + timedelta(days=7), "from now through the next seven days"),
+        "past_7_days": rng(now - timedelta(days=7), now, "the past seven days up to now"),
+        "this_month": rng(month_start, next_month, "this calendar month"),
+        "next_30_days": rng(now, now + timedelta(days=30), "from now through the next thirty days"),
+    }
+
+
+def _date_role(name: str, desc: str) -> Optional[str]:
+    """'start' or 'end' for a datetime argument, None when it is not a range bound."""
+    n = name.lower()
+    if not any(k in n or k in desc.lower() for k in ("time", "date")):
+        return None
+    if any(k in n for k in ("min", "start", "from", "after", "begin")):
+        return "start"
+    if any(k in n for k in ("max", "end", "until", "before", "to_")) or n in ("to",):
+        return "end"
+    return None
+
+
 class JevAgent:
     def __init__(self, *, inkbox_server: Any, router: Any, mcp_config: Optional[Dict[str, Any]] = None,
                  max_steps: Optional[int] = None):
@@ -382,6 +418,15 @@ class JevAgent:
                 questions[f"pick::{name}"] = {"type": "choice", "instructions": f"What value should `arguments.{name}` take for this call?",
                                               "criteria": opts}
                 continue
+            role = _date_role(name, str(spec.get("description") or ""))
+            if role and typ == "string":
+                ranges = _date_ranges()
+                opts = {k: f"{v['label']} ({v['start'][:10]} to {v['end'][:10]})" for k, v in ranges.items()}
+                opts["write_new"] = "None of these ranges; a specific date or time must be composed from the goal."
+                questions[f"range::{name}"] = {"type": "choice", "instructions":
+                                               f"`arguments.{name}` is the {role} of a time range. Which named range does `goal` mean?",
+                                               "criteria": opts}
+                continue
             cs = _candidate_values(name, str(spec.get("description") or ""), typ, facts, steps)
             if cs:
                 cands[name] = cs
@@ -397,6 +442,7 @@ class JevAgent:
             top = a.get("choice") or (max(probs, key=probs.get) if probs else None)
             return top if top and probs.get(top, 0.0) >= floor else None
 
+        to_write: List[Tuple[str, str, str]] = []
         for name, spec in props.items():
             if name in args:
                 continue
@@ -404,6 +450,13 @@ class JevAgent:
             desc = str(spec.get("description") or "")
             if name not in required and float((answers.get(f"supply::{name}") or {}).get("noul") or 0.0) < 0.5:
                 continue
+            if f"range::{name}" in questions:
+                pick = _top(f"range::{name}", 0.3)
+                if pick and pick != "write_new":
+                    args[name] = _date_ranges()[pick][_date_role(name, desc) or "start"]
+                    continue
+                if pick is None and name not in required:
+                    continue
             if typ == "boolean" or spec.get("enum"):
                 pick = _top(f"pick::{name}", 0.3)
                 if pick is None:
@@ -419,19 +472,23 @@ class JevAgent:
                     continue
                 if pick is None and name not in required:
                     continue
-            # Must be written. Short structured values (dates, queries, titles) are still text.
-            text = await prose.write(
+            to_write.append((name, typ, desc))
+        # Must be written: independent values, so all prose calls run at once.
+        if to_write:
+            facts_text = {k: _text(v) for k, v in facts.items()}
+            texts = await asyncio.gather(*[prose.write(
                 f"Produce ONLY the value for the tool argument `{name}` ({typ}). {desc} "
                 f"Use ISO 8601 with the -04:00 / -05:00 New York offset for any datetime. "
                 f"Output the bare value: no quotes, no label, no explanation. If the facts do not contain enough "
                 f"to determine it, output exactly UNKNOWN.",
-                {"goal": req.original_message, "tool": short, "facts": {k: _text(v) for k, v in facts.items()}})
-            if not _plausible_value(name, text, typ):
-                logger.info("jev agent: no usable value for %s.%s (%r)", short, name, text)
-                if name in required:
-                    return None
-                continue
-            args[name] = _coerce(text, typ)
+                {"goal": req.original_message, "tool": short, "facts": facts_text}) for name, typ, desc in to_write])
+            for (name, typ, desc), text in zip(to_write, texts):
+                if not _plausible_value(name, text, typ):
+                    logger.info("jev agent: no usable value for %s.%s (%r)", short, name, text)
+                    if name in required:
+                        return None
+                    continue
+                args[name] = _coerce(text, typ)
         missing = [r for r in required if r not in args]
         if missing:
             logger.warning("jev agent: missing required args %s for %s", missing, tool)
