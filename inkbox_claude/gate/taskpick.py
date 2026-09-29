@@ -279,6 +279,78 @@ class TaskPicker:
         return {"kind": kind if kc >= self.min_confidence else None, "kind_conf": kc,
                 "waiting_on": wo if wc >= self.min_confidence else None, "resolves_task": res, "reason": "ok"}
 
+    async def plan_lookup(self, *, message: str, history: List[Dict[str, Any]], sender_label: str,
+                          in_view_titles: List[str], candidates: List[str]) -> Dict[str, Any]:
+        """Should the ledger be searched for a task not already in view, and for what?
+
+        Two typed judgments in one call: `lookup` (no lookup / live tasks / any state)
+        and `terms` (which phrase from the message to search for, chosen from
+        `candidates`, all taken from words in play). Returns {"lookup": "none" |
+        "live" | "any" | None, "text": str, "confidence": float, "reason": str}.
+        None means undecided: the caller falls back to its own planner."""
+        if not self.api_key:
+            return {"lookup": None, "text": "", "confidence": 0.0, "reason": "disabled"}
+        NONE_TERM = "(none)"
+        terms = [c for c in candidates if c][:40]
+        state = {
+            "sender": sender_label,
+            "tasks_already_in_view": in_view_titles[:60] or ["(no tasks on record)"],
+            "conversation_so_far": [f"[{m.get('kind')}] {str(m.get('text') or '')[:300]}" for m in history[-8:]],
+            "new_message": message,
+        }
+        questions: Dict[str, Any] = {
+            "lookup": {
+                "type": "choice",
+                "instructions": {
+                    "question": "Does acting on `new_message` need a task that is NOT in `tasks_already_in_view`?",
+                    "how_to_decide": [
+                        "The view already holds every live task for this sender. A follow-up, correction, "
+                        "or status question about work listed there needs no lookup.",
+                        "A person, subject, or piece of work named in the message that no title in the view "
+                        "covers needs a lookup.",
+                        "Choose any_state when the message refers to work that may already be finished or failed "
+                        "(\"what happened with\", \"last week\", \"did you ever\").",
+                    ],
+                },
+                "criteria": {
+                    "no_lookup": "Every task the message could concern is already in view, or the message is "
+                                 "only conversation.",
+                    "live_tasks": "Search open, waiting and running tasks for what the message names.",
+                    "any_state": "Search tasks in every state, including done and failed.",
+                },
+            },
+        }
+        if terms:
+            questions["terms"] = {
+                "type": "choice",
+                "instructions": {
+                    "question": "If a lookup is made, which phrase from `new_message` identifies the task or "
+                                "person to search for?",
+                    "how_to_decide": ["Prefer a person's name or email, then the subject of the work.",
+                                      f"Choose {NONE_TERM} when no phrase would find anything useful."],
+                },
+                "criteria": {t: f"search the ledger for \"{t}\"" for t in terms} | {NONE_TERM: "no useful search phrase"},
+            }
+        body = {"state": state, "model": self.model, "questions": questions}
+        try:
+            async with httpx.AsyncClient(timeout=self.timeout) as client:
+                r = await client.post(TYPESAFE_URL, headers={"Authorization": f"Bearer {self.api_key}"}, json=body)
+                r.raise_for_status()
+                answers = r.json()["answers"]
+        except Exception as exc:
+            logger.warning("lookup planning via TypeSafe failed: %s", exc)
+            return {"lookup": None, "text": "", "confidence": 0.0, "reason": f"error: {exc}"}
+        look = answers.get("lookup") or {}
+        choice = str(look.get("choice") or "")
+        conf = float(look.get("confidence") or 0.0)
+        term = str(((answers.get("terms") or {}).get("choice")) or "")
+        text = "" if term == NONE_TERM else term
+        logger.info("lookup plan: %s (conf %.2f) terms=%r", choice, conf, text)
+        if conf < self.min_confidence:
+            return {"lookup": None, "text": text, "confidence": conf, "reason": "low confidence"}
+        kind = {"no_lookup": "none", "live_tasks": "live", "any_state": "any"}.get(choice)
+        return {"lookup": kind, "text": text, "confidence": conf, "reason": "ok"}
+
     async def pick(self, *, message: str, history: List[Dict[str, Any]], sender_label: str,
                    candidates: List[Dict[str, Any]], router_hint: Optional[str] = None,
                    proposed_title: Optional[str] = None) -> Dict[str, Any]:

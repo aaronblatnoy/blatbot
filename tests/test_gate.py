@@ -1505,3 +1505,45 @@ def test_stranger_requests_keep_the_strict_scope_judgment(tmp_path):
     m.router.next = RouterOutput(reply="I will confirm with Aaron.", task="new", task_title="x")
     asyncio.run(m.get("c1").handle_inbound("can we chat tue 6pm?", "email", stranger_meta()))
     assert m.store.get_request(1).scopes == ["calendar"]
+
+
+class LookupPicker(FakePicker):
+    """A picker that also plans the ledger lookup (Jev as the router's lookup planner)."""
+    def __init__(self, plan, **kw):
+        super().__init__(**kw)
+        self.plan, self.lookup_calls = plan, []
+
+    async def plan_lookup(self, **kw):
+        self.lookup_calls.append(kw)
+        return self.plan
+
+
+def test_jev_plans_the_lookup_and_the_chat_model_does_not(tmp_path):
+    m, sent = make_manager(tmp_path)
+    m.store.create_task("Update Jared's SJBA bio", [])
+    hidden = m.store.create_task("Private errand for Sam Rivera", [])
+    m.store.set_task_state(hidden["id"], "done") if hasattr(m.store, "set_task_state") else None
+    m.task_picker = LookupPicker({"lookup": "any", "text": "Sam Rivera", "confidence": 0.9, "reason": "ok"},
+                                 choice="none")
+    m.router.next = RouterOutput(reply="checking", request=None)
+    asyncio.run(m.get(APPROVER_CONV).handle_inbound("what happened with Sam Rivera's errand?", "imessage", approver_meta()))
+    assert m.router.query_calls == []                       # the chat model never planned the lookup
+    call = m.task_picker.lookup_calls[-1]
+    assert "Sam Rivera" in call["candidates"]
+    assert any("Update Jared's SJBA bio" in t for t in call["in_view_titles"])
+    assert "Private errand for Sam Rivera" in m.router.calls[-1]["found_tasks"]
+
+
+def test_jev_no_lookup_skips_the_search(tmp_path):
+    m, sent = make_manager(tmp_path)
+    m.task_picker = LookupPicker({"lookup": "none", "text": "", "confidence": 0.9, "reason": "ok"}, choice="none")
+    asyncio.run(m.get(APPROVER_CONV).handle_inbound("thank you blatbot", "imessage", approver_meta()))
+    assert m.router.query_calls == []
+    assert m.router.calls[-1]["found_tasks"] == ""
+
+
+def test_jev_undecided_lookup_falls_back_to_the_chat_planner(tmp_path):
+    m, sent = make_manager(tmp_path)
+    m.task_picker = LookupPicker({"lookup": None, "text": "", "confidence": 0.2, "reason": "low confidence"}, choice="none")
+    asyncio.run(m.get(APPROVER_CONV).handle_inbound("hm", "imessage", approver_meta()))
+    assert len(m.router.query_calls) == 1

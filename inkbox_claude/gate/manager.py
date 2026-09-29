@@ -188,12 +188,39 @@ class GateSession:
     async def lookup_tasks(self, history: List[Dict[str, Any]], message: str, in_view: str) -> str:
         """Query pass: the router emits a structured filter, code runs it. Non-owners
         are confined to tasks they are on; the owner can query everything."""
-        try:
-            q = await self.m.router.plan_query(history=history, message=message, in_view=in_view,
-                                               is_approver=self.is_approver())
-        except Exception:
-            logger.exception("[gate %s] task query planning failed", self.chat_id)
-            return ""
+        q: Any = None
+        planned = False
+        picker = self.m.task_picker
+        if picker is not None and hasattr(picker, "plan_lookup"):
+            # Jev decides whether the ledger is searched and for which phrase (taken from
+            # words in the message). The chat model plans only when Jev is undecided.
+            from .jevagent import _span_candidates
+            from .router import TaskQuery
+            emails = _EMAIL.findall(message)
+            spans = list(emails)
+            for c in _span_candidates(message, [], limit=40):
+                for v in (re.sub(r"['\u2019]s\b", "", c), c):     # "Sam Rivera's" also offers "Sam Rivera"
+                    if v and v not in spans:
+                        spans.append(v)
+            titles = [" ".join(ln[len("Task "):].split(" | ")[:2]) for ln in in_view.splitlines() if ln.startswith("Task T")]
+            label = "Aaron, the owner" if self.is_approver() else (self._sender_name() or self._sender())
+            plan = await picker.plan_lookup(message=message, history=history, sender_label=label,
+                                            in_view_titles=titles, candidates=spans)
+            if plan.get("lookup") == "none":
+                return ""
+            if plan.get("lookup") in ("live", "any"):
+                planned = True
+                text = plan.get("text") or ""
+                participant = text if text in emails and self.is_approver() else None
+                q = TaskQuery(text=None if participant else (text or None), participant=participant,
+                              states=["live"] if plan["lookup"] == "live" else None, limit=10)
+        if not planned:
+            try:
+                q = await self.m.router.plan_query(history=history, message=message, in_view=in_view,
+                                                   is_approver=self.is_approver())
+            except Exception:
+                logger.exception("[gate %s] task query planning failed", self.chat_id)
+                return ""
         self._found_task_ids = []
         if q is None and in_view.strip() in ("", "(no tasks on record)") and not self.is_approver():
             # Nobody on record for this sender: that is exactly when to search for them by name.
