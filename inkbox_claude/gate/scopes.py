@@ -143,6 +143,10 @@ SCOPES: Dict[str, Dict[str, object]] = {
         "tools": ["WebSearch", "mcp__playwright__browser_search", "mcp__playwright__browser_navigate", "mcp__playwright__browser_snapshot",
                   "mcp__playwright__browser_find", "mcp__playwright__browser_wait_for", "mcp__playwright__browser_navigate_back"],
     },
+    "host_read": {
+        "description": "see what is running on the server Blatbot itself runs on (black-sky): containers, services, uptime, disk, memory, GPUs. Read-only status only; no commands, no changes.",
+        "tools": ["mcp__host__host_status"],
+    },
     "browser_read": {
         "description": "read a public web page in a headless browser (navigate, snapshot, find, screenshot), for things that are only online and not in Aaron's own systems. Read-only: no clicking, typing or form filling.",
         "tools": ["mcp__playwright__browser_search", "mcp__playwright__browser_navigate", "mcp__playwright__browser_navigate_back", "mcp__playwright__browser_snapshot",
@@ -202,6 +206,7 @@ def sends_to_requester(tool_name: str, args: dict, protected: list) -> bool:
 # the next tool instead of the servers' own (often long, implementation-flavoured)
 # descriptions. Tools not listed fall back to the server's description.
 TOOL_PURPOSE: Dict[str, str] = {
+    "mcp__host__host_status": "WHAT IS RUNNING ON BLACK-SKY (the server Blatbot runs on): containers, services, uptime, disk, memory, GPUs. Read-only.",
     # web
     "mcp__playwright__browser_search": "SEARCH THE PUBLIC WEB (last resort for facts that live OUTSIDE Aaron's own systems): a person's LinkedIn or employer, an outside organization's leadership, an article, a public page. Not for anything that lives in TAMID/SJBA sheets, forms, rosters, calendars or inboxes; use those tools first.",
     "mcp__playwright__browser_navigate": "OPEN A PUBLIC WEB PAGE by URL in the browser (a search result, a profile, an article). Only for things online; follow with browser_snapshot or browser_find to read it.",

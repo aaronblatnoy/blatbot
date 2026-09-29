@@ -1335,7 +1335,7 @@ def test_still_ungrounded_reply_falls_back_to_the_raw_result(tmp_path):
         await asyncio.sleep(0.2)
     asyncio.run(go())
     outbound = [t for _, t, *_ in sent]
-    assert outbound[-1].startswith("Here is what I found, without interpretation:") and "Cand Idate: Co-President" in outbound[-1]
+    assert outbound[-1].startswith("Found 2 matches for President") and "Cand Idate: Co-President" in outbound[-1]
     assert "Jamie Rivera" not in " ".join(outbound)
 
 
@@ -1377,3 +1377,26 @@ def test_escalation_findings_go_to_a_file_not_the_argv(tmp_path):
         exmod.query = monkey
     assert len(captured["system"]) < 20000 and "request-77.txt" in captured["system"]
     assert (tmp_path / "findings" / "request-77.txt").read_text().startswith("- read_sheet_values:")
+
+
+def test_no_action_reply_may_not_promise_action(tmp_path):
+    m, sent = make_manager(tmp_path)
+    p = _jev_first(m, choice="none")
+    p.action = False
+    drafts = [RouterOutput(reply="Resubmitting now with the access it needs.", task=None),
+              RouterOutput(reply="Nothing is running for that; I would need a host tool to check.", task=None)]
+    async def route(**kw):
+        m.router.calls.append(kw)
+        return drafts.pop(0).model_copy(deep=True)
+    m.router.route = route
+    asyncio.run(m.get("aaron").handle_inbound("give it such scopes.", "imessage", approver_meta()))
+    assert [t for _, t, *_ in sent] == ["Nothing is running for that; I would need a host tool to check."]
+    assert "no request has been created" in m.router.calls[-1]["action_task"]
+
+
+def test_host_read_scope_maps_to_the_status_tool():
+    from inkbox_claude.gate.scopes import tools_for
+    from inkbox_claude.gate import hosttools
+    assert tools_for(["host_read"]) == ["mcp__host__host_status"]
+    out = asyncio.run(hosttools.host_status({"parts": ["uptime_load", "nope"]}))
+    assert out.startswith("## uptime_load") and "nope" not in out

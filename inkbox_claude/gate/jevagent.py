@@ -38,6 +38,7 @@ from zoneinfo import ZoneInfo
 import httpx
 
 from .scopes import ORG_ACCOUNT, OWNER_ACCOUNT, TOOL_PURPOSE, sends_to_requester, tools_for
+from . import hosttools
 from .store import Request, sha256
 from .taskpick import TYPESAFE_URL
 
@@ -92,6 +93,7 @@ def split_tool(name: str) -> Tuple[str, str]:
 SEARCH_URL = os.getenv("GATE_SEARCH_URL") or "http://127.0.0.1:8888/search"
 
 VIRTUAL_TOOLS: Dict[str, Dict[str, Any]] = {
+    "mcp__host__host_status": {"description": hosttools.DESCRIPTION, "schema": hosttools.SCHEMA},
     # A web search done THROUGH the browser: the Playwright server opens the local
     # SearXNG results page (which queries Google/Bing server-side, so no bot walls)
     # and reads it. Two browser calls, one tool from the agent's point of view.
@@ -168,6 +170,8 @@ class ToolBox:
     async def call(self, name: str, args: Dict[str, Any]) -> Any:
         if name == "mcp__playwright__browser_search":
             return await self._browser_search(str(args.get("query") or ""))
+        if name == "mcp__host__host_status":
+            return await hosttools.host_status(args)
         server, short = split_tool(name)
         if server == "inkbox":
             from mcp import types as mt

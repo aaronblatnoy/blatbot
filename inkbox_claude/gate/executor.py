@@ -26,6 +26,7 @@ from claude_agent_sdk import (
 
 from .router import now_line
 from .scopes import ORG_ACCOUNT, OWNER_ACCOUNT, sends_to_requester, tools_for
+from . import hosttools
 from .store import Request, sha256
 
 logger = logging.getLogger(__name__)
@@ -114,7 +115,7 @@ class Executor:
             setting_sources=["user", "project"],
             permission_mode="default",
             allowed_tools=allowed,
-            mcp_servers={"inkbox": self.mcp_server},
+            mcp_servers={"inkbox": self.mcp_server, "host": hosttools.sdk_server()},
             can_use_tool=can_use,
             max_turns=30,
         )

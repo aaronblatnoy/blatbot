@@ -354,6 +354,16 @@ class GateSession:
                                         task_memory=memory, found_tasks=found, action=needs_action,
                                         action_task=(peek or {}).get("title") or "")
         out.request = None  # the router never defines the request on this path
+        if not needs_action and out.reply and _promises_action(out.reply):
+            # No request exists, so a reply that says "on it" / "submitting now" would be a lie.
+            logger.info("[gate %s] reply promised an action but none was decided; rewriting", self.chat_id)
+            out2 = await self.m.router.route(history=prior, message=message, mode=mode, sender=self._sender(),
+                                             contact_notes=self._contact_notes(), is_approver=approver,
+                                             task_memory=memory, found_tasks=found, action=False,
+                                             action_task="(NOTE: no request has been created and none will run for this "
+                                                         "message; do not say you are doing, submitting or checking anything. "
+                                                         "Answer from what is known, or ask what is needed.)")
+            out.reply = out2.reply if out2.reply and not _promises_action(out2.reply) else None
         if needs_action and out.reply and not _is_acknowledgement(out.reply):
             # A request will run and its result will be delivered. A reply that answers
             # the question now would make two answers; only a short acknowledgement passes.
@@ -775,7 +785,7 @@ class GateSession:
             return reply2
         logger.warning("[gate %s] rewrite still not grounded (p=%.2f); sending the result itself", self.chat_id, res2["p"])
         head = results.strip().splitlines()
-        return "Here is what I found, without interpretation:\n" + "\n".join(head[:40])
+        return "\n".join(head[:40])
 
     async def handle_followup(self, body: str, inbound_id: Optional[int] = None) -> bool:
         """Re-decide a message that was received while a request was running. The
@@ -801,6 +811,15 @@ class GateSession:
 
 
 ACK_MAX_WORDS = 20
+
+
+_PROMISE_RE = re.compile(r"\b(on it|i will (check|pull|look|submit|resubmit|run|send|book|pull)|submitting|resubmitting|"
+                         r"checking now|pulling|looking (it |that )?up now|running it now|let me (check|pull|look))\b", re.I)
+
+
+def _promises_action(text: str) -> bool:
+    """A reply that announces work the assistant is about to do."""
+    return bool(_PROMISE_RE.search(text or ""))
 
 
 def _is_acknowledgement(text: str) -> bool:
