@@ -237,6 +237,7 @@ class Request:
     raw_output: Optional[str]
     created_at: float
     updated_at: float
+    inbound_id: Optional[int] = None
 
     @classmethod
     def from_row(cls, r: sqlite3.Row) -> "Request":
@@ -249,6 +250,7 @@ class Request:
             revision=r["revision"],
             status=json.loads(r["status_json"]) if r["status_json"] else None,
             raw_output=r["raw_output"], created_at=r["created_at"], updated_at=r["updated_at"],
+            inbound_id=(int(r["inbound_id"]) if "inbound_id" in r.keys() and r["inbound_id"] else None),
         )
 
 
@@ -263,6 +265,15 @@ class Store:
             cols = {r["name"] for r in self._db.execute("PRAGMA table_info(requests)")}
             if "task_id" not in cols:
                 self._db.execute("ALTER TABLE requests ADD COLUMN task_id INTEGER")
+            if "inbound_id" not in cols:
+                self._db.execute("ALTER TABLE requests ADD COLUMN inbound_id INTEGER")
+            mcols = {r["name"] for r in self._db.execute("PRAGMA table_info(messages)")}
+            if "reply_to" not in mcols:
+                # Every outbound is linked to the inbound it answers and typed ack|answer,
+                # so "one answer per message" can be enforced, not just intended.
+                self._db.execute("ALTER TABLE messages ADD COLUMN reply_to INTEGER")
+                self._db.execute("ALTER TABLE messages ADD COLUMN role TEXT")
+                self._db.execute("CREATE INDEX IF NOT EXISTS messages_reply_to ON messages(reply_to)")
             tcols = {r["name"] for r in self._db.execute("PRAGMA table_info(tasks)")}
             if "summary" not in tcols:
                 self._db.execute("ALTER TABLE tasks ADD COLUMN summary TEXT NOT NULL DEFAULT ''")
@@ -339,13 +350,26 @@ class Store:
         return {"mode": r["mode"], "meta": json.loads(r["meta_json"])}
 
     # -- messages --------------------------------------------------------
-    def add_message(self, chat_id: str, kind: str, text: str, mode: str = "") -> None:
+    def add_message(self, chat_id: str, kind: str, text: str, mode: str = "",
+                    reply_to: Optional[int] = None, role: Optional[str] = None) -> int:
+        """Store a message and return its id. Outbound messages carry `reply_to`
+        (the inbound they respond to) and `role` ('ack' or 'answer')."""
         with self._lock:
-            self._db.execute(
-                "INSERT INTO messages(chat_id,kind,mode,text,created_at) VALUES(?,?,?,?,?)",
-                (chat_id, kind, mode, text, time.time()),
+            cur = self._db.execute(
+                "INSERT INTO messages(chat_id,kind,mode,text,created_at,reply_to,role) VALUES(?,?,?,?,?,?,?)",
+                (chat_id, kind, mode, text, time.time(), reply_to, role),
             )
             self._db.commit()
+            return int(cur.lastrowid)
+
+    def responses_to(self, inbound_id: int) -> List[str]:
+        """Roles of the outbound messages already sent for one inbound message."""
+        if not inbound_id:
+            return []
+        with self._lock:
+            rows = self._db.execute("SELECT role FROM messages WHERE reply_to=? AND kind='outbound' ORDER BY id",
+                                    (inbound_id,)).fetchall()
+        return [r["role"] or "answer" for r in rows]
 
     def history(self, chat_id: str, limit: int = 20) -> List[Dict[str, Any]]:
         with self._lock:
@@ -431,7 +455,7 @@ class Store:
     # -- requests --------------------------------------------------------
     def create_request(self, *, chat_id: str, sender: str, sender_name: str, mode: str, subject: str,
                        original_message: str, summary: str, scopes: List[str], prompt: str,
-                       state: str, task_id: int) -> Request:
+                       state: str, task_id: int, inbound_id: Optional[int] = None) -> Request:
         """Create a request. ``task_id`` is mandatory: a request is always part of a task."""
         if not task_id:
             raise TaskRequired("a request must belong to a task")
@@ -441,9 +465,9 @@ class Store:
                 raise TaskRequired(f"task T{task_id} does not exist")
             cur = self._db.execute(
                 "INSERT INTO requests(chat_id,sender,sender_name,mode,subject,original_message,summary,"
-                "scopes_json,prompt,prompt_sha256,state,created_at,updated_at,task_id) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                "scopes_json,prompt,prompt_sha256,state,created_at,updated_at,task_id,inbound_id) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
                 (chat_id, sender, sender_name, mode, subject, original_message, summary,
-                 json.dumps(scopes), prompt, sha256(prompt), state, now, now, task_id),
+                 json.dumps(scopes), prompt, sha256(prompt), state, now, now, task_id, inbound_id),
             )
             self._db.commit()
             rid = cur.lastrowid
@@ -485,14 +509,14 @@ class Store:
                 return None
         return Request.from_row(r) if r else None
 
-    def inbound_since(self, chat_id: str, since: float) -> List[str]:
-        """Inbound message texts on this thread after a point in time, oldest first."""
+    def inbound_since(self, chat_id: str, since: float) -> List[Dict[str, Any]]:
+        """Inbound messages ({id, text}) on this thread after a point in time, oldest first."""
         with self._lock:
             rows = self._db.execute(
-                "SELECT text FROM messages WHERE chat_id=? AND kind='inbound' AND created_at>? ORDER BY id",
+                "SELECT id, text FROM messages WHERE chat_id=? AND kind='inbound' AND created_at>? ORDER BY id",
                 (chat_id, since),
             ).fetchall()
-        return [r["text"] for r in rows]
+        return [{"id": int(r["id"]), "text": r["text"]} for r in rows]
 
     def set_state(self, rid: int, state: str, *, status: Optional[Dict[str, Any]] = None,
                   raw_output: Optional[str] = None) -> None:

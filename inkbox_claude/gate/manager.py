@@ -460,7 +460,7 @@ class GateSession:
             self.reply_meta = dict(meta or {})
             self.m.store.set_thread(self.chat_id, "routing", mode, self.reply_meta_for_store())
             body = _strip_quoted(text) if mode == "email" else text.strip()
-            self.m.store.add_message(self.chat_id, "inbound", body, mode)
+            self.inbound_id = self.m.store.add_message(self.chat_id, "inbound", body, mode)
             if self.thread_key():
                 self.m.store.link_thread(self.thread_key(), self.chat_id)
             # First thing every turn: put this message on the person's task ledger,
@@ -576,7 +576,7 @@ class GateSession:
             self.mode, self.reply_meta = "voice", dict(meta or {})
             self.m.store.set_thread(self.chat_id, "routing")  # state only: keep their text/email route
             body = (query or "").strip()
-            self.m.store.add_message(self.chat_id, "inbound", body, "voice")
+            self.inbound_id = self.m.store.add_message(self.chat_id, "inbound", body, "voice")
             t = self.task()
             self._turn_task_id = t["id"] if t is not None else None
             if t is not None:
@@ -603,7 +603,7 @@ class GateSession:
                     chat_id=self.chat_id, sender=self._sender(), sender_name=self._sender_name(), mode="voice",
                     subject="", original_message=body, summary=out.request.summary,
                     scopes=out.request.scopes, prompt=out.request.prompt,
-                    state="approved" if approver else "pending", task_id=task["id"])
+                    state="approved" if approver else "pending", task_id=task["id"], inbound_id=self.inbound_id)
                 self.m.record_request_on_task(req, task, self)
                 if not approver:
                     self.m.store.set_thread(self.chat_id, "awaiting_aaron")
@@ -674,7 +674,7 @@ class GateSession:
             )
             out.request = None
             if out.reply:
-                await self.send_to_sender(out.reply)
+                await self.send_to_sender(out.reply, role="ack")
             return bool(out.reply)
         if system_note:
             out: RouterOutput = await self.m.router.route(
@@ -686,20 +686,23 @@ class GateSession:
         else:
             out, task = await self.decide(body=body, message=message, prior=prior, mode=self.mode,
                                           memory=memory, found=found)
+        sent_reply = False
         if out.reply:
-            await self.send_to_sender(out.reply)
+            # Alongside a request the reply is an acknowledgement; on its own, or when
+            # phrasing a result, it is THE answer to that inbound message.
+            sent_reply = await self.send_to_sender(out.reply, role="ack" if out.request is not None else "answer")
         if out.request is None:
-            return bool(out.reply)
+            return sent_reply
         # Validate scopes (pydantic already rejected unknown ones).
         if self.m.store.pending_for_thread(self.chat_id) and not approver:
             self.m.store.add_message(self.chat_id, "system", "A request is already awaiting Aaron; new request not created.")
-            return bool(out.reply)
+            return sent_reply
         assert task is not None
         req = self.m.store.create_request(
             chat_id=self.chat_id, sender=self._sender(), sender_name=self._sender_name(), mode=self.mode,
             subject=str(self.reply_meta.get("subject") or ""), original_message=body,
             summary=out.request.summary, scopes=out.request.scopes, prompt=out.request.prompt,
-            state="approved" if approver else "pending", task_id=task["id"],
+            state="approved" if approver else "pending", task_id=task["id"], inbound_id=self.inbound_id,
         )
         self.m.record_request_on_task(req, task, self)
         if approver:
@@ -709,11 +712,20 @@ class GateSession:
             return True
         self.m.store.set_thread(self.chat_id, "awaiting_aaron")
         await self.m.send_approval_text(req)
-        if not out.reply:
-            await self.send_to_sender(HANDOFF_LINE)
+        if not sent_reply:
+            await self.send_to_sender(HANDOFF_LINE, role="ack")
         return True
 
-    async def send_to_sender(self, text: str) -> None:
+    inbound_id: Optional[int] = None   # the inbound message this turn is responding to
+
+    async def send_to_sender(self, text: str, role: str = "answer") -> bool:
+        """Deliver to the sender. Enforced: per inbound message at most one 'ack' and
+        one 'answer' go out. A second of either is refused here, whatever produced it.
+        Returns whether it was sent."""
+        given = self.m.store.responses_to(self.inbound_id or 0)
+        if self.inbound_id and role in given:
+            logger.warning("[gate %s] refused a second %s for inbound #%s: %r", self.chat_id, role, self.inbound_id, text)
+            return False
         if self.mode == "voice" and not self.m.call_active(self.chat_id):
             # The call ended before this was ready: deliver by text instead.
             if self.is_aaron_on_phone():
@@ -723,23 +735,32 @@ class GateSession:
                 await self.m.send_fn(f"sms:{num}", text, "sms", {"to": num, "sender": num})
         else:
             await self.m.send_fn(self.chat_id, text, self.mode, self.reply_meta)
-        self.m.store.add_message(self.chat_id, "outbound", text, self.mode)
+        self.m.store.add_message(self.chat_id, "outbound", text, self.mode, reply_to=self.inbound_id, role=role)
         t = self.task()
         if t is not None:
             self.m.store.task_event(t["id"], "outbound", text, chat_id=self.chat_id)
+        return True
 
-    async def handle_followup(self, body: str) -> bool:
+    async def handle_followup(self, body: str, inbound_id: Optional[int] = None) -> bool:
         """Re-decide a message that was received while a request was running. The
         message is already stored on the thread, so this only routes and acts."""
         async with self._lock:
+            if inbound_id:
+                self.inbound_id = inbound_id
             return await self._route_and_act(body)
 
-    async def notify_after_request(self, note: str) -> bool:
-        """Run the router once with a system note so it can reply to the sender.
-
-        Returns True if a reply was sent."""
+    async def notify_after_request(self, note: str, inbound_id: Optional[int] = None) -> bool:
+        """Phrase a request's result for the sender. The result is THE answer to the
+        inbound that raised the request; if that inbound already has an answer the
+        send is refused (returns True: handled, nothing more to deliver)."""
         async with self._lock:
+            if inbound_id:
+                self.inbound_id = inbound_id
             self.m.store.add_message(self.chat_id, "system", note)
+            if self.inbound_id and "answer" in self.m.store.responses_to(self.inbound_id):
+                logger.warning("[gate %s] inbound #%s already answered; result of a request not delivered again",
+                               self.chat_id, self.inbound_id)
+                return True
             return await self._route_and_act("", system_note=note)
 
 
@@ -1044,19 +1065,19 @@ class GateSessionManager:
                             req.id, len(meanwhile))
                 self.store.add_message(req.chat_id, "system", note)
                 try:
-                    await session.handle_followup(meanwhile[-1])
+                    await session.handle_followup(meanwhile[-1]["text"], inbound_id=meanwhile[-1]["id"])
                 except Exception:
                     logger.exception("[gate] follow-up after #%s failed", req.id)
                 return ""
             # Aaron asked for it himself: let the router phrase the answer.
-            replied = await session.notify_after_request(note)
+            replied = await session.notify_after_request(note, inbound_id=req.inbound_id)
             if not replied:
                 await self.send_to_approver(f"{'Done' if ok else 'Failed'}: {req.summary}\n{result}")
             return ""
         # Someone else's request: short status to Aaron, and the router may
         # tell the sender the outcome (never Claude's raw text).
         await self.send_to_approver(f"[Blatbot #{req.id} {outcome}] {req.summary}\n{result}")
-        await session.notify_after_request(note)
+        await session.notify_after_request(note, inbound_id=req.inbound_id)
         return ""
 
     def _approver_chat_ids(self) -> set:

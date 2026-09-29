@@ -1212,3 +1212,52 @@ def test_reply_alongside_a_request_must_be_an_acknowledgement(tmp_path):
     assert _is_acknowledgement("On it. I will look up Jonathan Fried's email.")
     assert not _is_acknowledgement("Did you mean the TAMID one or the SJBA one?")
     assert not _is_acknowledgement(" ".join(["word"] * 21))
+
+
+# --- every outbound is flagged against the inbound it responds to: one ack, one answer ---
+
+def _roles(m, chat="aaron"):
+    with m.store._lock:
+        rows = m.store._db.execute("SELECT reply_to, role, text FROM messages WHERE chat_id=? AND kind='outbound' ORDER BY id", (chat,)).fetchall()
+    return [(r["reply_to"], r["role"], r["text"]) for r in rows]
+
+
+def test_reply_only_turn_is_flagged_as_the_answer(tmp_path):
+    m, sent = make_manager(tmp_path)
+    m.router.next = RouterOutput(reply="Donald Trump.", task=None)
+    asyncio.run(m.get("aaron").handle_inbound("who is the president?", "imessage", approver_meta()))
+    inbound = m.store.history("aaron", 5)[0]
+    roles = _roles(m)
+    assert len(roles) == 1 and roles[0][1] == "answer" and roles[0][0] is not None
+    assert m.store.responses_to(roles[0][0]) == ["answer"]
+
+
+def test_request_turn_gets_one_ack_then_one_answer_both_linked(tmp_path):
+    m, sent = make_manager(tmp_path)
+    m.router.next = RouterOutput(reply="On it.", task="new", task_title="Count rows",
+                                 request=RouterRequest(prompt="count", scopes=["tamid_drive_read"], summary="Count rows"))
+    m.router.next_note = RouterOutput(reply="40 rows.", task="T1")
+    async def go():
+        await m.get("aaron").handle_inbound("how many rows?", "imessage", approver_meta())
+        await asyncio.sleep(0.15)
+    asyncio.run(go())
+    roles = _roles(m)
+    assert [(r[1], r[2]) for r in roles] == [("ack", "On it."), ("answer", "40 rows.")]
+    assert roles[0][0] == roles[1][0] and roles[0][0] is not None      # both point at the same inbound
+    assert m.store.get_request(1).inbound_id == roles[0][0]
+
+
+def test_second_answer_for_the_same_inbound_is_refused(tmp_path):
+    """Whatever produces it (a reply writer that answered early, a result phrasing),
+    the store already holds an answer for that inbound and the send is refused."""
+    m, sent = make_manager(tmp_path)
+    s = m.get("aaron")
+    m.router.next = RouterOutput(reply="First answer.", task=None)
+    asyncio.run(s.handle_inbound("question?", "imessage", approver_meta()))
+    assert asyncio.run(s.send_to_sender("Second answer.", role="answer")) is False
+    assert asyncio.run(s.send_to_sender("Late ack.", role="ack")) is True     # a different role is still allowed once
+    assert asyncio.run(s.send_to_sender("Another ack.", role="ack")) is False
+    assert [t for _, t, *_ in sent] == ["First answer.", "Late ack."]
+    # and a result phrasing for that inbound is refused too, reported as handled
+    assert asyncio.run(s.notify_after_request("Task #9 done: x\nResult:\ny", inbound_id=s.inbound_id)) is True
+    assert [t for _, t, *_ in sent] == ["First answer.", "Late ack."]
