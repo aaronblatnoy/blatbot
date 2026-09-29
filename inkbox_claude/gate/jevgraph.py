@@ -65,6 +65,7 @@ class AgentState(TypedDict, total=False):
     outcome: Optional[str]          # "ok" | "fail" | "confirm"
     error: str
     confirm: Optional[Dict[str, Any]]
+    partial: Optional[float]
 
 
 def _rt(config: RunnableConfig) -> Dict[str, Any]:
@@ -139,15 +140,20 @@ async def plan(state: AgentState, config: RunnableConfig) -> Dict[str, Any]:
             logger.info("jev graph step %d (retry): %s (conf %.2f)", step + 1, choice, conf)
             if choice == ja.GIVE_UP:
                 choice = None
+    reads_only = bool(steps) and any(s["ok"] for s in steps) and all(not ja.is_write_tool(s["tool"]) for s in steps if s["ok"])
     if choice is None:
         logger.info("jev graph: unsure; top options %s", sorted(probs.items(), key=lambda kv: -kv[1])[:5])
-        if steps and steps[-1]["ok"] and not ja.is_write_tool(steps[-1]["tool"]) and p_done >= ja.DONE_MIN:
-            return {"outcome": "ok", "chosen": None, "extras": [], "probs": probs}
+        if reads_only:
+            # Reads exhausted: deliver what was gathered with the confidence stated.
+            logger.info("jev graph: reads exhausted at confidence %.2f; delivering findings as partial", p_done)
+            return {"outcome": "ok", "chosen": None, "extras": [], "probs": probs, "partial": p_done if p_done < ja.DONE_MIN else None}
         return {"outcome": "fail", "chosen": None, "extras": [], "probs": probs,
                 "error": f"insufficient evidence to answer with confidence (done {p_done:.2f}); no further useful step found"}
     if choice == ja.GIVE_UP:
-        if steps and p_done >= ja.DONE_MIN and all(s["ok"] and not ja.is_write_tool(s["tool"]) for s in steps):
-            return {"outcome": "ok", "chosen": None, "extras": [], "probs": probs}
+        if reads_only:
+            if p_done < ja.DONE_MIN:
+                logger.info("jev graph: give_up after reads at confidence %.2f; delivering findings as partial", p_done)
+            return {"outcome": "ok", "chosen": None, "extras": [], "probs": probs, "partial": p_done if p_done < ja.DONE_MIN else None}
         return {"outcome": "fail", "chosen": None, "extras": [], "probs": probs,
                 "error": "gave up: goal not achievable with the granted tools"}
     extras = []
@@ -340,4 +346,4 @@ async def run(agent: "ja.JevAgent", req: Any, context: str = "") -> Dict[str, An
     except Exception as exc:
         logger.exception("jev graph failed for request %s", req.id)
         return agent._status(False, str(exc), steps, judge, prose, started)
-    return agent._status(True, "", steps, judge, prose, started)
+    return agent._status(True, "", steps, judge, prose, started, partial=final.get("partial"))

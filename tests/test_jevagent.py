@@ -156,7 +156,7 @@ def test_give_up_and_unsure_fail_without_side_effects(agent, monkeypatch):
             return None, 0.3, {}
     _patch(monkeypatch, box, Unsure([]), ScriptedProse(), [t])
     st = asyncio.run(agent.run(_req("do a thing")))
-    assert not st["ok"] and "insufficient evidence" in st["error"]
+    assert not st["ok"] and "insufficient evidence" in st["error"]      # nothing gathered: nothing to deliver
 
 
 def test_tool_failing_twice_stops(agent, monkeypatch):
@@ -416,7 +416,7 @@ def test_unsure_after_reads_with_low_done_score_fails_over(agent, monkeypatch):
             return 0.05
     _patch(monkeypatch, box, Unsure([lst]), ScriptedProse(), [lst])
     st = asyncio.run(agent.run(_req("book the thing")))
-    assert not st["ok"] and "insufficient evidence" in st["error"]
+    assert st["ok"] and st["partial"] is not None and "CONFIDENCE:" in st["raw"]
 
 
 def test_fit_leaves_states_under_budget_untouched_and_digests_only_when_over():
@@ -712,4 +712,5 @@ def test_run_ends_only_with_confidence(agent, monkeypatch):
             return 0.5 if "WITH CONFIDENCE" in str(question) else 0.0     # plausible is not enough
     _patch(monkeypatch, box, J([lst]), ScriptedProse(), [lst])
     st = asyncio.run(agent.run(_req("what's on my calendar")))
-    assert not st["ok"] and "insufficient evidence" in st["error"] and "0.50" in st["error"]
+    # reads exhausted: findings are delivered, with the confidence stated for the reply writer
+    assert st["ok"] and st["partial"] == 0.5 and "CONFIDENCE: 0.50" in st["raw"]

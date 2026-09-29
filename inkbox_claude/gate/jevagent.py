@@ -644,6 +644,7 @@ class JevAgent:
                     except Exception as exc:
                         logger.warning("jev agent: cannot describe %s: %s", name, exc)
                 p_done = 0.0
+                partial: Optional[float] = None   # set when reads ran out before confidence was reached
                 excluded: set = set()   # tools that have nothing new to give this run
 
                 for step in range(self.max_steps):
@@ -706,9 +707,19 @@ class JevAgent:
                             # what was gathered is the answer (the gate's reply model phrases it).
                             logger.info("jev agent: no clear next step after reads (p_done %.2f); finishing", p_done)
                             break
+                        if steps and all(s["ok"] and not is_write_tool(s["tool"]) for s in steps if s["ok"]) and any(s["ok"] for s in steps):
+                            # Reads exhausted: deliver what was gathered with the confidence stated.
+                            logger.info("jev agent: reads exhausted at confidence %.2f; delivering findings as partial", p_done)
+                            partial = p_done
+                            break
                         return self._status(False, f"insufficient evidence to answer with confidence (done {p_done:.2f}); "
                                                    "no further useful step found", steps, judge, prose, started, probs=probs)
                     if choice == GIVE_UP:
+                        if steps and any(s["ok"] for s in steps) and all(not is_write_tool(s["tool"]) for s in steps if s["ok"]):
+                            if p_done < DONE_MIN:
+                                logger.info("jev agent: give_up after reads at confidence %.2f; delivering findings as partial", p_done)
+                                partial = p_done
+                            break
                         if steps and p_done >= DONE_MIN and all(s["ok"] and not is_write_tool(s["tool"]) for s in steps):
                             # Everything so far was a successful read and the goal is plausibly met:
                             # what was found IS the answer.
@@ -831,9 +842,10 @@ class JevAgent:
                                                "criteria": opts}
                 continue
             cs = await self._candidates(judge, name, str(spec.get("description") or ""), typ, facts, steps, req)
-            if not cs and typ == "string":
+            if not cs and typ == "string" and not _id_like(name):
                 # Select instead of generate: phrases already in the message and in
                 # small results are offered as choices; DeepSeek only on "write new".
+                # Never for ids: a phrase is not an id.
                 cs = _span_candidates(req.original_message, steps)
             if avoid and name in avoid and len(cs) > 1:
                 cs = [c for c in cs if c != avoid[name]]      # the value just used is not offered again
@@ -997,13 +1009,19 @@ class JevAgent:
 
     @staticmethod
     def _status(ok: bool, error: str, steps: List[Dict[str, Any]], judge: Judge, prose: Prose,
-                started: float, probs: Optional[Dict[str, float]] = None) -> Dict[str, Any]:
+                started: float, probs: Optional[Dict[str, float]] = None, partial: Optional[float] = None) -> Dict[str, Any]:
         lines = [f"{'Done' if ok else 'Failed'} via Jev agent in {time.time() - started:.1f}s "
                  f"({len(steps)} tool call(s), {judge.calls} Jev judgment(s), {prose.calls} prose call(s))."]
+        if partial is not None:
+            lines.append(f"CONFIDENCE: {partial:.2f}. The lookups available were exhausted before the answer was certain; "
+                         "the reply must say what the results show and what could not be established.")
         writes = [s for s in steps if s["ok"] and is_write_tool(s["tool"])]
         lines.append("WRITES PERFORMED: " + ("; ".join(
             f"{s['tool'].split('__')[-1]}({json.dumps({k: v for k, v in s['args'].items() if k not in _FIXED_ARGS}, ensure_ascii=False)})"
             for s in writes) if writes else "none. Nothing was sent, created, changed or deleted."))
+        if partial is not None:
+            lines.append(f"CONFIDENCE: {partial:.2f}. The lookups available were exhausted before the answer was certain; "
+                         "the reply must say what the results show and what could not be established.")
         writes = [s for s in steps if s["ok"] and is_write_tool(s["tool"])]
         lines.append("WRITES PERFORMED: " + ("; ".join(
             f"{s['tool'].split('__')[-1]}({json.dumps({k: v for k, v in s['args'].items() if k not in _FIXED_ARGS}, ensure_ascii=False)})"
@@ -1017,7 +1035,7 @@ class JevAgent:
         lines.append("STATUS: OK" if ok else "STATUS: FAILED")
         raw = "\n".join(lines)
         wrote = any(s["ok"] and is_write_tool(s["tool"]) for s in steps)
-        return {"ok": ok, "summary": raw, "raw": raw, "tool_calls": [s["tool"] for s in steps], "wrote": wrote,
+        return {"ok": ok, "summary": raw, "raw": raw, "tool_calls": [s["tool"] for s in steps], "wrote": wrote, "partial": partial,
                 "steps": [{"tool": s["tool"], "args": s["args"], "ok": s["ok"]} for s in steps],
                 "error": error or None, "engine": "jev", "jev_calls": judge.calls, "prose_calls": prose.calls,
                 "seconds": round(time.time() - started, 1), "probs": probs}
@@ -1078,6 +1096,11 @@ _SPAN_STOP = {"the", "a", "an", "and", "or", "of", "for", "to", "in", "on", "at"
               "what", "which", "who", "how", "many", "did", "do", "does", "check", "find", "look", "up", "please", "me",
               "my", "his", "her", "their", "he", "she", "they", "see", "get", "tell", "show", "give", "list", "out", "with",
               "from", "into", "about", "can", "you", "i", "we", "be", "there", "if", "so", "now", "just"}
+
+
+def _id_like(name: str) -> bool:
+    n = name.lower()
+    return n.endswith("_id") or n.endswith("id") and len(n) <= 12 or n in ("id", "page_token", "token", "cursor")
 
 
 def _span_candidates(message: str, steps: List[Dict[str, Any]], limit: int = 120) -> List[str]:
