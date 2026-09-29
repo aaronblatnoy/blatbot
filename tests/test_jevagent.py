@@ -714,3 +714,30 @@ def test_run_ends_only_with_confidence(agent, monkeypatch):
     st = asyncio.run(agent.run(_req("what's on my calendar")))
     # reads exhausted: findings are delivered, with the confidence stated for the reply writer
     assert st["ok"] and st["partial"] == 0.5 and "CONFIDENCE: 0.50" in st["raw"]
+
+
+def test_blind_delete_is_never_offered_for_confirmation(agent, monkeypatch):
+    """No event was looked up: a delete with a written id is refused and the agent
+    goes and lists events; the confirmation names the real event."""
+    find, change = "mcp__tamid-drive__get_events", "mcp__tamid-drive__manage_event"
+    schemas = {find: {"description": "events", "schema": {"type": "object", "properties": {"query": {"type": "string"}}, "required": []}},
+               change: {"description": "change", "schema": {"type": "object", "required": ["action", "event_id"],
+                                                            "properties": {"action": {"type": "string", "enum": ["create", "update", "delete"]},
+                                                                           "event_id": {"type": "string"}}}}}
+    box = FakeBox(schemas, results={find: '- "Sam Rivera and TAMID at NYU (Quant)" (Starts: 2026-10-02T09:00) ID: evt_REAL000000000000001'})
+    class P(ScriptedProse):
+        async def write(self, instruction, facts):
+            self.calls += 1
+            return "3sq" if "event_id" in instruction else "Sam Rivera"
+    class J(ScriptedJudge):
+        async def yes(self, state, question):
+            return 0.1 if "WITH CONFIDENCE" in str(question) else 0.9
+    # first pick: delete straight away (no evidence yet); then look up; then delete with the real id
+    judge = J([change, "delete", find, change, "delete", "c0"])
+    _patch(monkeypatch, box, judge, P(), [find, change])
+    st = asyncio.run(agent.run(_req("cancel sam rivera's 9am interview")))
+    assert not st["ok"] and st.get("confirm"), st.get("error")
+    assert st["confirm"]["args"]["event_id"] == "evt_REAL000000000000001"
+    assert st["confirm"]["about"] and "Sam Rivera" in st["confirm"]["about"][0]
+    assert [c[0] for c in box.calls] == [find]                                   # nothing deleted, one lookup
+    assert "3sq" not in json.dumps(st["confirm"])

@@ -729,17 +729,33 @@ class JevAgent:
                         return self._status(False, "gave up: goal not achievable with the granted tools", steps, judge, prose, started)
                     args = await self._fill_args(box, judge, prose, choice, facts, steps, req)
                     if args is None:
-                        return self._status(False, f"could not determine arguments for {choice}", steps, judge, prose, started)
+                        # The call cannot be made yet (an id not in evidence, a value not determinable):
+                        # a failed attempt, and the loop goes on to collect what is missing.
+                        steps.append({"tool": choice, "args": {}, "ok": False,
+                                      "result": "ERROR: this call needs a value (an id or item) that no gathered result "
+                                                "contains yet; look the item up first"})
+                        if sum(1 for s in steps if s["tool"] == choice and not s["ok"]) >= 3:
+                            return self._status(False, f"could not determine arguments for {choice}", steps, judge, prose, started)
+                        continue
                     if sends_to_requester(choice, args, self.protected + [req.sender, req.chat_id]):
                         # The gateway delivers the answer; a send to the requester would duplicate it.
                         logger.info("jev agent: refusing %s to the requester; finishing with findings", choice)
                         break
                     if is_destructive(choice, args):
+                        about = _mentions(steps, args)
+                        if not about:
+                            # The target is not described by anything gathered: never ask the owner to
+                            # confirm a blind delete. Count it as a failed attempt and keep collecting.
+                            logger.info("jev agent: %s target not in evidence; looking things up first", choice.split("__")[-1])
+                            steps.append({"tool": choice, "args": args, "ok": False,
+                                          "result": "ERROR: the target of this change is not identified in any gathered result; "
+                                                    "look the item up (list or search it) before changing it"})
+                            continue
                         # Nothing is deleted, cancelled or replaced without the owner's yes. The run
                         # stops here with the exact call and what it refers to; the gate asks Aaron
                         # and performs this one call on "yes".
                         st = self._status(False, "confirmation required", steps, judge, prose, started)
-                        st["confirm"] = {"tool": choice, "args": args, "about": _mentions(steps, args)}
+                        st["confirm"] = {"tool": choice, "args": args, "about": about}
                         logger.info("jev agent: %s needs the owner's confirmation; pausing", choice.split("__")[-1])
                         return st
                     if any(s["ok"] and s["tool"] == choice and s["args"] == args for s in steps) and p_done < DONE_MIN:
@@ -904,6 +920,13 @@ class JevAgent:
                     continue
                 if pick is None and name not in required:
                     continue
+            if _id_like(name):
+                # Ids are selected from evidence, never written. None in evidence yet means
+                # this call cannot be made until a lookup has found the item.
+                if name in required:
+                    logger.info("jev agent: %s.%s has no id in evidence; a lookup must come first", short, name)
+                    return None
+                continue
             to_write.append((name, typ, desc))
         # Must be written: independent values, so all prose calls run at once.
         if to_write:
@@ -920,6 +943,13 @@ class JevAgent:
             texts = await asyncio.gather(*[prose.write(_instr(name, typ, desc),
                 {"goal": req.original_message, "tool": short, "facts": facts_text}) for name, typ, desc in to_write])
             for (name, typ, desc), text in zip(to_write, texts):
+                if _id_like(name) and not _in_evidence(text, steps, facts):
+                    # An id must be selected from evidence, never written: a made-up id
+                    # deletes the wrong thing or nothing. Leave it unfilled.
+                    logger.info("jev agent: rejected written id %s.%s=%r (not in evidence)", short, name, text)
+                    if name in required:
+                        return None
+                    continue
                 if not _plausible_value(name, text, typ):
                     logger.info("jev agent: no usable value for %s.%s (%r)", short, name, text)
                     if name in required:
@@ -1096,6 +1126,17 @@ _SPAN_STOP = {"the", "a", "an", "and", "or", "of", "for", "to", "in", "on", "at"
               "what", "which", "who", "how", "many", "did", "do", "does", "check", "find", "look", "up", "please", "me",
               "my", "his", "her", "their", "he", "she", "they", "see", "get", "tell", "show", "give", "list", "out", "with",
               "from", "into", "about", "can", "you", "i", "we", "be", "there", "if", "so", "now", "just"}
+
+
+def _in_evidence(value: str, steps: List[Dict[str, Any]], facts: Dict[str, Any]) -> bool:
+    """Whether a value appears verbatim in any tool result or fact gathered so far."""
+    v = (value or "").strip()
+    if len(v) < 6:
+        return False
+    for st in steps:
+        if v in _text(st.get("result")):
+            return True
+    return any(v in _text(x) for k, x in facts.items() if k not in ("request",))
 
 
 def _id_like(name: str) -> bool:

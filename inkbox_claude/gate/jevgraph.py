@@ -190,15 +190,31 @@ async def guard(state: AgentState, config: RunnableConfig) -> Dict[str, Any]:
     filled = [f for f in state.get("filled", []) if f.get("tool") != "__reset__" and f.get("__round__") == state["round"]]
     primary = next((f for f in filled if f["primary"]), None)
     if primary is None or primary["args"] is None:
-        return {"outcome": "fail", "batch": [], "error": f"could not determine arguments for {state['chosen']}"}
+        # The call cannot be made yet (an id not in evidence): a failed attempt; go collect.
+        chosen = state["chosen"]
+        if sum(1 for s in steps if s["tool"] == chosen and not s["ok"]) >= 2:
+            return {"outcome": "fail", "batch": [], "error": f"could not determine arguments for {chosen}"}
+        return {"outcome": None, "batch": [], "step": state.get("step", 0) + 1,
+                "steps": [{"tool": chosen, "args": {}, "ok": False, "primary": True,
+                           "result": "ERROR: this call needs a value (an id or item) that no gathered result contains yet; "
+                                     "look the item up first"}]}
     choice, args = primary["tool"], primary["args"]
     if ja.sends_to_requester(choice, args, agent.protected + [req.sender, req.chat_id]):
         logger.info("jev graph: refusing %s to the requester; finishing with findings", choice)
         return {"outcome": "ok", "batch": []}
     if ja.is_destructive(choice, args):
+        about = ja._mentions(steps, args)
+        if not about:
+            # Never ask the owner to confirm a blind delete: the target must be described by
+            # gathered evidence. Record a failed attempt and go collect.
+            logger.info("jev graph: %s target not in evidence; looking things up first", choice.split("__")[-1])
+            return {"outcome": None, "batch": [], "step": state.get("step", 0) + 1,
+                    "steps": [{"tool": choice, "args": args, "ok": False, "primary": True,
+                               "result": "ERROR: the target of this change is not identified in any gathered result; "
+                                         "look the item up (list or search it) before changing it"}]}
         logger.info("jev graph: %s needs the owner's confirmation; pausing", choice.split("__")[-1])
         return {"outcome": "confirm", "batch": [], "error": "confirmation required",
-                "confirm": {"tool": choice, "args": args, "about": ja._mentions(steps, args)}}
+                "confirm": {"tool": choice, "args": args, "about": about}}
     identical = lambda a: any(s["ok"] and s["tool"] == choice and s["args"] == a for s in steps)
     if identical(args) and p_done < ja.DONE_MIN:
         again = await agent._fill_args(box, judge, prose, choice, state.get("facts", {}), steps, req, avoid=args)
