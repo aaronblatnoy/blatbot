@@ -1339,6 +1339,27 @@ def test_still_ungrounded_reply_falls_back_to_the_raw_result(tmp_path):
     assert "Jamie Rivera" not in " ".join(outbound)
 
 
+def test_long_unverified_result_sends_the_rewrite_with_a_caveat_not_a_dump(tmp_path):
+    m, sent = make_manager(tmp_path)
+    p = _jev_first(m, choice="new")
+    p.action, p.scopes = True, ["calendar"]
+    async def judge_grounded(**kw):
+        return {"grounded": False, "p": 0.2, "reason": "ok"}
+    p.judge_grounded = judge_grounded
+    big = "Done via Jev agent in 4.7s (1 tool call(s)).\n- get_events:\n" + "\n".join(
+        "- \"Event %d\" (Starts: 2026-10-01T%02d:00:00-04:00)" % (i, 9 + i % 10) for i in range(80)) + "\nSTATUS: OK"
+    m.executor.result = {"ok": True, "summary": big, "tool_calls": [], "raw": big}
+    m.router.next = RouterOutput(reply="On it.", task="new", task_title="x")
+    m.router.next_note = RouterOutput(reply="Open slots Thursday: 11:00, 12:30, 3:00.", task="T1")
+    async def go():
+        await m.get("aaron").handle_inbound("what slots are open thursday?", "imessage", approver_meta())
+        await asyncio.sleep(0.2)
+    asyncio.run(go())
+    last = [t for _, t, *_ in sent][-1]
+    assert last.startswith("Open slots Thursday") and "could not fully verify" in last
+    assert "Done via Jev agent" not in last and "get_events" not in last
+
+
 def test_provider_billing_failure_is_reported_to_the_owner_once(tmp_path):
     import httpx
     m, sent = make_manager(tmp_path)

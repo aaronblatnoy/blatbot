@@ -781,11 +781,17 @@ class GateSession:
             contact_notes=self._contact_notes(), is_approver=approver, task_memory=memory, found_tasks=found, action=False)
         reply2 = out2.reply or reply
         res2 = await picker.judge_grounded(reply=reply2, results=results, question=question)
-        if res2.get("grounded") is not False:
+        p2 = float(res2.get("p") or 0.0)
+        if res2.get("grounded") is not False or p2 >= 0.35:
+            # A rewrite from the results only, near or over the line: send it. Derived
+            # answers (free slots from a list of events, a count from rows) score low
+            # on literal support even when they are right.
             return reply2
-        logger.warning("[gate %s] rewrite still not grounded (p=%.2f); sending the result itself", self.chat_id, res2["p"])
-        head = results.strip().splitlines()
-        return "\n".join(head[:40])
+        logger.warning("[gate %s] rewrite still not grounded (p=%.2f); sending it with a caveat", self.chat_id, p2)
+        body = _result_bodies(results)
+        if len(body) <= 1500:
+            return body                                   # short enough to show as is
+        return reply2 + "\n\nI could not fully verify that against the data I pulled; tell me if it looks off."
 
     async def handle_followup(self, body: str, inbound_id: Optional[int] = None) -> bool:
         """Re-decide a message that was received while a request was running. The
@@ -820,6 +826,19 @@ _PROMISE_RE = re.compile(r"\b(on it|i will (check|pull|look|submit|resubmit|run|
 def _promises_action(text: str) -> bool:
     """A reply that announces work the assistant is about to do."""
     return bool(_PROMISE_RE.search(text or ""))
+
+
+def _result_bodies(results: str) -> str:
+    """Tool output only: drop the agent's own header, tool labels and status line."""
+    keep = []
+    for ln in (results or "").splitlines():
+        t = ln.strip()
+        if t.startswith(("Done via Jev agent", "Failed via Jev agent", "STATUS:", "Reason:")):
+            continue
+        if re.fullmatch(r"- [a-z_]+:", t):
+            continue
+        keep.append(ln)
+    return "\n".join(keep).strip()
 
 
 def _is_acknowledgement(text: str) -> bool:
