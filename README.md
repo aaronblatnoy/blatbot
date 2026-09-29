@@ -148,8 +148,9 @@ So the real question is not "can the model do the task." It is "who is allowed t
                   │                                 │
                   v                                 v
  ┌───────────────────────────────────────────────────────────────────────────────────┐
- │ DELIVERY   exactly once                                                           │
- │  the reply writer phrases the result for whoever asked; sent on their channel     │
+ │ DELIVERY   exactly once, grounded                                                 │
+ │  the reply writer phrases the result; Jev checks every claim against the results  │
+ │  (unsupported: rewritten from the results only, else the raw result is sent)      │
  │  executors cannot message the requester (denied at the tool call, in code)        │
  │  someone else's task: the owner gets a one-line done/failed note                  │
  │  phone: the result goes back to the voice agent as tool output; it says it        │
@@ -226,6 +227,8 @@ threshold and every consequence. This is the complete list.
 | 11 | same call | same | for each date-bound argument: which range? | today / tomorrow / yesterday / this week / last week / next week / next 7 days / past 7 days / this month / next 30 days / "specific" | fills the start or end from ranges computed off the clock |
 | 12 | same call | same | for each enum or boolean: which value? | the enum | copies it |
 | 13 | only when one result is over the API budget | goal, what the argument needs, one part of the result | does this part contain it? one per part, in parallel | probability per part | descends into the best part, splits again, down to a 6k leaf; candidates come from the leaf |
+| 14 | agent, when #8 has no clear pick | same as #8 | of the three likeliest, which is the most useful next attempt? | one of three / give up | tries it; give up here means escalation |
+| 15 | before a result reply is sent | the question, the retrieved results, the draft reply | is every factual claim in the draft supported by the results? | probability | under 0.5 the reply is rewritten from the results only; still under, the raw result is sent with no interpretation |
 
 Jev's ceiling is about 32k input tokens per request. A judgment state under that goes
 in raw. Over it, code replaces the largest value with a structural digest (kind, size,
@@ -250,7 +253,8 @@ These are the decisions the whole thing rests on.
 6. **The phone is a surface, not a second brain.** The voice model runs the conversation and is deliberately told nothing about the system behind it. When something real is needed it hands off, and that hand-off enters the same gateway as a text message, under the same rules. A caller who talks the voice model into something gains nothing, because the gate still checks the real caller number.
 7. **The assistant never claims work it has not done.** Replies can only report an action as complete when the ledger shows it completed.
 8. **One request at a time per thread, one response per request.** A message that arrives while a request is running joins the task and is acknowledged; it never starts a second run. Execution returns exactly one status. When the agent gives up without having written anything, Claude Code runs as an escalation inside that same execution, and only its status leaves. The result is phrased and sent once.
-9. **Tools are called by code, not by a chat model.** The agent that runs an approved request is a loop of typed judgments: is the goal met, which tool next, which of the values already in play fills each argument. Dates come from the clock, ids from earlier results. A text model is called only for text that must be composed, such as an email body. Claude Code remains as a fallback for what the loop cannot do, and only when nothing has been written yet.
+9. **No confident wrong answers.** A result reply is checked by a judgment against the retrieved results before it is sent: names, titles, numbers, dates and "current" claims must appear in the results, or the reply is rewritten from the results only, or replaced by the raw result. In the agent, a web search result is a lead, not an answer; the page is opened and read before the run can end.
+10. **Tools are called by code, not by a chat model.** The agent that runs an approved request is a loop of typed judgments: is the goal met, which tool next, which of the values already in play fills each argument. Dates come from the clock, ids from earlier results. A text model is called only for text that must be composed, such as an email body. Claude Code remains as a fallback for what the loop cannot do, and only when nothing has been written yet.
 
 ## A worked example
 
@@ -326,7 +330,7 @@ Run the tests with `pytest tests`.
 
 ### Speed
 
-Measured on the deployed box over the same day, executor time from approval to result. Claude Code, 29 requests: median 18 s, range 6 to 56 s. Jev agent, the requests that followed: median 3.5 s, range 1.8 to 8.7 s. Simple site or sheet reads run in under 2 s with two judgments and no text model at all. Details and the per-request table are in [docs/blatbot-architecture.md](docs/blatbot-architecture.md).
+Measured on the deployed box, executor time from approval to result. Claude Code, 29 requests: median 18 s, range 6 to 56 s. Jev agent: site and roster reads 1.5 to 6 s; calendar and inbox questions 5 s; a multi-hop sheet question (find the form, its responses sheet, the right tab, read it) about 10 s; a web lookup that opens and reads a page 4 to 12 s. Escalation to Claude Code is the last resort and now starts from the agent's findings. Details and the per-request table are in [docs/blatbot-architecture.md](docs/blatbot-architecture.md).
 
 ### Honest caveats
 

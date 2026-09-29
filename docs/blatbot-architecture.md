@@ -325,6 +325,33 @@ margin (top at least 0.2 and twice the runner-up) when many tools split the
 probability. When the agent still escalates, Claude Code receives the agent's
 steps and full results as work already done, and continues from them.
 
+### Grounded delivery
+
+`GateSession.ground_reply` runs before any result reply goes out. Jev
+(`TaskPicker.judge_grounded`) sees the question, the tool results the executor
+returned, and the draft, and answers whether every factual claim is supported:
+names, titles, numbers, dates, emails, "current"/"former" status, and claims of
+having checked a source all count. Under 0.5 the reply writer is re-run with a
+GROUNDING instruction (results are the only source; say what is unconfirmed);
+if that draft also fails, the raw result is sent as "Here is what I found,
+without interpretation". One judgment per result, about 0.2 s; a rewrite only on
+failure.
+
+### Trying before escalating
+
+Escalation is the last resort. In the agent: an unsure next-step pick is re-asked
+over the three likeliest options as "what do we try next"; a required argument
+takes the best candidate rather than aborting; an identical repeat re-fills its
+arguments avoiding the values just used (another tab, another record) and only
+ends the run when the goal is plausibly met (done score at least 0.3); a tool
+result that reads as an error, including a sign-in wall, is a failed step. The
+done check accepts retrieved data that suffices to answer (counting or filtering
+retrieved rows is the reply writer's job, not a tool call). After a sheet read the
+agent fetches the spreadsheet's tab list and offers tab names as range candidates;
+after a form-responses call it locates the form's "(Responses)" spreadsheet. Each
+step's arguments and result head are logged, and an escalated request keeps the
+agent's full report in its status.
+
 ### Browser
 
 `browser_read` (navigate, snapshot, find, screenshot, wait, tabs) and `browser_act`
@@ -335,7 +362,7 @@ other servers. The code-execution tools are in neither scope and on the executor
 deny list. Browser actions count as writes. No saved logins: pages behind a sign-in
 need a persistent profile, not set up.
 
-### Measured
+### Measured (executor only)
 
 Same box, same tool servers, 2026-09-28. Executor time only; the reply
 phrasing after it is the same for both.
