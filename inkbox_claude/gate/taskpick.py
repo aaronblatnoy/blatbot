@@ -106,6 +106,9 @@ class TaskPicker:
                     "Every specific claim can be pointed to in the results.",
                     "The reply says plainly what was NOT found or not confirmed.",
                     "Summaries, counts and comparisons computed from the results themselves.",
+                    "An inference stated as one (\"so\", \"which means\", \"likely\") whose premises are in the "
+                    "results: an email sent to a list reached the people on it; a person with no slot has not "
+                    "booked; an event on the calendar means the meeting is scheduled.",
                 ],
             },
             "criteria": {"true": "All claims are supported by the results.",

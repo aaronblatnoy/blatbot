@@ -94,6 +94,10 @@ class TaskQueryOutput(BaseModel):
 
 
 class RouterOutput(BaseModel):
+    # Written FIRST when phrasing a result: what the results establish, what follows
+    # from them, what stays unknown. Never sent; it makes the reply a conclusion
+    # instead of a list of hedges.
+    reasoning: Optional[str] = None
     reply: Optional[str] = None
     request: Optional[RouterRequest] = None
     # Which task this turn belongs to: an existing id from TASK MEMORY (e.g. "T12"),
@@ -137,7 +141,7 @@ class Router:
             "Available task scopes (choose the minimal set):\n"
             f"{scope_lines}\n\n"
             "Respond with ONLY a JSON object, no prose, of the form:\n"
-            '{"reply": string or null, "request": null or {"prompt": string, "scopes": [string], "summary": string, "counterpart": string or null}}\n'
+            '{"reasoning": string or null, "reply": string or null, "request": null or {"prompt": string, "scopes": [string], "summary": string, "counterpart": string or null}}\n'
             "- reply: what to send back to the sender now, or null to send nothing.\n"
             "- request.counterpart: the email (preferred), phone, or full name of the person the task is\n"
             "  about, when it concerns someone other than the sender; null otherwise.\n"
@@ -265,7 +269,14 @@ class Router:
                        "Do not describe steps or claim anything is done. Do NOT output a request.\n\n")
         elif action is False:
             decided = ("DECIDED: no tool action will be taken for this message. Answer in words from TASK MEMORY "
-                       "and NOW, or acknowledge. Do NOT output a request.\n\n")
+                       "and NOW, or acknowledge. Do NOT output a request.\n"
+                       "REASON FIRST: when a task result is being answered, fill \"reasoning\" BEFORE \"reply\": "
+                       "(1) what the results establish as fact, (2) what follows from those facts by ordinary "
+                       "inference (an email sent to the whole list reached everyone on it; a person with no slot "
+                       "has not booked), (3) what genuinely stays unknown. Then write \"reply\" as a conclusion: "
+                       "answer the question directly in the first sentence, state inferences as inferences "
+                       "(\"so\", \"which means\"), and reserve \"cannot confirm\" for what (3) lists. Do not "
+                       "hedge what (1) and (2) settle.\n\n")
         user = (
             f"Now: {now_line()}\n\n{decided}"
             f"TASK MEMORY (authoritative ledger, newest events last):\n{task_memory or '(no tasks on record)'}\n\n"

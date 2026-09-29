@@ -778,10 +778,11 @@ class GateSession:
         if res.get("grounded") is not False:
             return reply
         logger.info("[gate %s] reply not grounded (p=%.2f); rewriting from the results only", self.chat_id, res["p"])
-        strict = ("(GROUNDING: your previous draft made claims the task result does not support. Write the reply again "
-                  "using ONLY the task result above as the source of facts. Name only what it contains. If the result "
-                  "is a search snippet or partial, say the answer is unconfirmed and offer to open the source. State "
-                  "plainly what was not found. Do not create a request.)")
+        strict = ("(GROUNDING: your previous draft stated something the task result does not support. Fill "
+                  "\"reasoning\" first: what the result establishes, what follows from it by ordinary inference, "
+                  "what stays unknown. Then write the reply as a conclusion from that: answer the question directly, "
+                  "name only what the result contains or what plainly follows from it, mark inferences as inferences, "
+                  "and say what stays unknown. Do not create a request.)")
         out2 = await self.m.router.route(
             history=prior + [{"kind": "system", "text": strict}], message=strict, mode=self.mode, sender=self._sender(),
             contact_notes=self._contact_notes(), is_approver=approver, task_memory=memory, found_tasks=found, action=False)
