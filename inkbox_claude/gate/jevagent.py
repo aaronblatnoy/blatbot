@@ -803,6 +803,10 @@ class JevAgent:
                                                "criteria": opts}
                 continue
             cs = await self._candidates(judge, name, str(spec.get("description") or ""), typ, facts, steps, req)
+            if not cs and typ == "string":
+                # Select instead of generate: phrases already in the message and in
+                # small results are offered as choices; DeepSeek only on "write new".
+                cs = _span_candidates(req.original_message, steps)
             if avoid and name in avoid and len(cs) > 1:
                 cs = [c for c in cs if c != avoid[name]]      # the value just used is not offered again
             variable_args = [k for k in props if k not in _FIXED_ARGS]
@@ -955,6 +959,50 @@ _TAB_RE = re.compile(r'^\s*-\s+"([^"]+)"\s+\(ID:\s*\d+\)\s*\|\s*Size:', re.M)
 def _sheet_tabs(info_text: str) -> List[str]:
     """Tab names out of a get_spreadsheet_info result."""
     return [m for m in _TAB_RE.findall(info_text or "")]
+
+
+_SPAN_STOP = {"the", "a", "an", "and", "or", "of", "for", "to", "in", "on", "at", "is", "are", "was", "it", "this", "that",
+              "what", "which", "who", "how", "many", "did", "do", "does", "check", "find", "look", "up", "please", "me",
+              "my", "his", "her", "their", "he", "she", "they", "see", "get", "tell", "show", "give", "list", "out", "with",
+              "from", "into", "about", "can", "you", "i", "we", "be", "there", "if", "so", "now", "just"}
+
+
+def _span_candidates(message: str, steps: List[Dict[str, Any]], limit: int = 120) -> List[str]:
+    """Phrases a text argument could be, taken from words already in play: quoted
+    strings, runs of capitalised words, 1-5 word phrases of the message (not made
+    only of stop words), and short cell-like values from small results."""
+    out: List[str] = []
+
+    def add(v: str) -> None:
+        v = " ".join(v.split()).strip(" ,.;:!?\"'")
+        if 2 <= len(v) <= 80 and v.lower() not in {o.lower() for o in out}:
+            out.append(v)
+
+    for q in re.findall(r"\"([^\"]{2,80})\"|'([^']{2,80})'", message or ""):
+        add(q[0] or q[1])
+    for m in re.findall(r"(?:[A-Z][\w'&-]*)(?:\s+[A-Z][\w'&-]*)+", message or ""):
+        add(m)
+    words = re.findall(r"[\w'&.@-]+", message or "")
+    for n in (5, 4, 3, 2, 1):
+        for i in range(0, max(0, len(words) - n + 1)):
+            gram = words[i:i + n]
+            if all(w.lower() in _SPAN_STOP for w in gram):
+                continue
+            if gram[0].lower() in _SPAN_STOP or gram[-1].lower() in _SPAN_STOP:
+                continue
+            add(" ".join(gram))
+            if len(out) >= limit:
+                return out[:limit]
+    for st in steps[-3:]:
+        t = st.get("evidence") or st.get("result")
+        t = t if isinstance(t, str) else _text(t)
+        if len(t) > _LARGE:
+            continue
+        for cell in re.findall(r"'([^']{2,60})'|\"([^\"]{2,60})\"", t)[:80]:
+            add(cell[0] or cell[1])
+            if len(out) >= limit:
+                break
+    return out[:limit]
 
 
 def _candidate_values(name: str, desc: str, typ: str, facts: Dict[str, Any], steps: List[Dict[str, Any]]) -> List[Any]:

@@ -60,6 +60,9 @@ class ScriptedJudge:
         for qid, q in questions.items():
             if q["type"] == "noul":
                 out[qid] = {"noul": self.yes_p}
+            elif (not self.picks or self.picks[0] not in q["criteria"]) and "write_new" in q["criteria"]:
+                # a span/candidate question this script did not plan for: let prose write it
+                out[qid] = {"choice": "write_new", "probabilities": {"write_new": 0.95}}
             else:
                 want = self.picks.pop(0)
                 assert want in q["criteria"], (want, list(q["criteria"]))
@@ -625,3 +628,30 @@ def test_large_result_is_read_into_evidence_before_judging(agent, monkeypatch):
     done_states = [x for x in seen if "steps_so_far" in x]
     assert done_states and "NEEDLE" in json.dumps(done_states[-1]) and len(json.dumps(done_states[-1])) < 20000
     assert big in st["raw"]
+
+
+def test_text_arguments_are_selected_from_spans_before_being_written(agent, monkeypatch):
+    from inkbox_claude.gate.jevagent import _span_candidates
+    spans = _span_candidates("check tamid coffee chat tracking form for fall 2026 and see how many coffee chats Max Levy did.", [])
+    assert "Max Levy" in spans and "coffee chat tracking form" in spans and "the" not in spans
+    search = "mcp__tamid-drive__search_drive_files"
+    schemas = {search: {"description": "search", "schema": {"type": "object", "required": ["query"],
+                                                            "properties": {"query": {"type": "string", "description": "words to search for"}}}}}
+    box = FakeBox(schemas, results={search: "Found: Coffee Chat Tracker (ID: 1AAAAAAAAAAAAAAAAAAAAAAAA1)"})
+    class J(ScriptedJudge):
+        async def ask(self, state, questions):
+            self.calls += 1
+            out = {}
+            for qid, q in questions.items():
+                if q["type"] == "noul":
+                    out[qid] = {"noul": 0.9}
+                else:
+                    want = next(k for k, v in q["criteria"].items() if json.dumps(v) == json.dumps({"value": "coffee chat tracking form"}))
+                    out[qid] = {"choice": want, "probabilities": {want: 0.9}}
+            return out
+        async def yes(self, state, question):
+            return 0.9
+    prose = ScriptedProse()
+    _patch(monkeypatch, box, J([search]), prose, [search])
+    st = asyncio.run(agent.run(_req("check tamid coffee chat tracking form for fall 2026 and see how many coffee chats Max Levy did.")))
+    assert st["ok"] and box.calls[0][1]["query"] == "coffee chat tracking form" and prose.calls == 0
