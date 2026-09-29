@@ -225,13 +225,10 @@ class Router:
     )
 
     async def plan_query(self, *, history: List[Dict[str, Any]], message: str, in_view: str,
-                         is_approver: bool, required: bool = False) -> Optional[TaskQuery]:
-        """First pass: turn the message into a structured task filter, or nothing.
-        required=True means Jev already decided a lookup runs: write a filter, never null."""
-        decided = ("DECIDED: a lookup will run for this message. Write the filter; do not return null.\n\n"
-                   if required else "")
+                         is_approver: bool) -> Optional[TaskQuery]:
+        """First pass: turn the message into a structured task filter, or nothing."""
         user = (
-            f"Now: {now_line()}\n{decided}Sender is {'Aaron, the owner' if is_approver else 'not the owner'}.\n\n"
+            f"Now: {now_line()}\nSender is {'Aaron, the owner' if is_approver else 'not the owner'}.\n\n"
             f"Tasks already in view:\n{in_view or '(none)'}\n\n"
             f"Conversation so far:\n{self.render_history(history[-8:])}\n\n"
             f"New message:\n{message}"

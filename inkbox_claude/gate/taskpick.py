@@ -138,56 +138,6 @@ class TaskPicker:
             return {"needs_action": False, "p": p, "reason": "ok"}
         return {"needs_action": None, "p": p, "reason": "undecided"}
 
-    async def judge_lookup(self, *, message: str, sender_label: str, history: List[Dict[str, Any]],
-                           in_view: str) -> Dict[str, Any]:
-        """Before answering: does this message need past work looked up beyond the tasks
-        already in view? Small talk and questions the in-view tasks already cover do not.
-        Returns {"needs_lookup": bool|None, "p": float}. None = undecided."""
-        if not self.api_key:
-            return {"needs_lookup": None, "p": 0.0, "reason": "disabled"}
-        state = {
-            "sender": sender_label,
-            "conversation_so_far": [f"[{m.get('kind')}] {m.get('text') or ''}" for m in history[-6:]],
-            "new_message": message,
-            "tasks_already_in_view": in_view or "(none)",
-        }
-        body = {"state": state, "model": self.model, "questions": {"needs_lookup": {
-            "type": "noul",
-            "instructions": {
-                "question": "To answer this message well, must the assistant search its records of past and "
-                            "ongoing tasks beyond `tasks_already_in_view`?",
-                "count_as_yes": [
-                    "The message refers to a person, event, application, request or piece of work that is not "
-                    "clearly covered by `tasks_already_in_view`.",
-                    "The message asks what happened, what is open, what was done, or where something stands.",
-                    "The message follows up on earlier work ('did that go through', 'any update').",
-                ],
-                "count_as_no": [
-                    "Greetings, thanks, acknowledgements, small talk ('how was your day').",
-                    "A question fully answered by `tasks_already_in_view` or by the conversation so far.",
-                    "A brand-new request that has no history to look up.",
-                ],
-            },
-            "criteria": {
-                "true": "Yes: search the task records before answering.",
-                "false": "No: answer from what is already in view.",
-            },
-        }}}
-        try:
-            async with httpx.AsyncClient(timeout=self.timeout) as client:
-                r = await client.post(TYPESAFE_URL, headers={"Authorization": f"Bearer {self.api_key}"}, json=body)
-                r.raise_for_status()
-                p = float(r.json()["answers"]["needs_lookup"].get("noul") or 0.0)
-        except Exception as exc:
-            logger.warning("lookup judgment via TypeSafe failed: %s", exc)
-            return {"needs_lookup": None, "p": 0.0, "reason": f"error: {exc}"}
-        logger.info("lookup judgment: p(needs lookup)=%.2f", p)
-        if p >= 0.5:
-            return {"needs_lookup": True, "p": p, "reason": "ok"}
-        if p <= 0.3:
-            return {"needs_lookup": False, "p": p, "reason": "ok"}
-        return {"needs_lookup": None, "p": p, "reason": "undecided"}
-
     async def judge_scopes(self, *, prompt: str, summary: str, scopes: Dict[str, str],
                            router_scopes: Optional[List[str]] = None) -> Dict[str, Any]:
         """Which tool scopes does this task prompt need? One yes/no (Noul) per scope,
