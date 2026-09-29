@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import os
 from typing import Any, Dict, List, Optional
 
 from claude_agent_sdk import (
@@ -92,10 +93,19 @@ class Executor:
                 + context.strip()
             )
         if prior_work.strip():
+            # The system prompt travels as a command-line argument to the CLI, so large
+            # findings go to a file Claude reads; only a short head rides in the prompt.
+            findings_dir = os.path.join(self.cwd, "findings")
+            os.makedirs(findings_dir, exist_ok=True)
+            path = os.path.join(findings_dir, f"request-{req.id}.txt")
+            with open(path, "w", encoding="utf-8") as fh:
+                fh.write(prior_work)
+            head = prior_work.strip()
+            head = head if len(head) <= 6000 else head[:6000] + "\n... (continues in the file)"
             system_append += (
                 "\n\nWORK ALREADY DONE on this task by a faster agent before you (its tool calls and their FULL "
-                "results; it stopped because it could not decide the next step). Do not repeat these calls. "
-                "Continue from them:\n" + prior_work.strip()
+                f"results; it stopped because it could not decide the next step). The complete record is in {path}; "
+                "Read it before calling any tool. Do not repeat those calls. Continue from them. Head of the record:\n" + head
             )
         options = ClaudeAgentOptions(
             cwd=self.cwd,

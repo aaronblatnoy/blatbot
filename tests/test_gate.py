@@ -13,7 +13,7 @@ import pytest
 from inkbox_claude.gate import manager as gm
 from inkbox_claude.gate.router import RouterOutput, RouterRequest
 from inkbox_claude.gate.scopes import SCOPES, tools_for
-from inkbox_claude.gate.store import Store, sha256
+from inkbox_claude.gate.store import Request, Store, sha256
 
 APPROVER_CONV = "conv-aaron"
 
@@ -1354,3 +1354,26 @@ def test_provider_billing_failure_is_reported_to_the_owner_once(tmp_path):
     asyncio.run(go())
     notices = [t for _, t, *_ in sent if "out of credit" in t]
     assert len(notices) == 1 and "DeepSeek" in notices[0] and "not answered" in notices[0]
+
+
+def test_escalation_findings_go_to_a_file_not_the_argv(tmp_path):
+    from inkbox_claude.gate.executor import Executor
+    ex = Executor(mcp_server=None, cwd=str(tmp_path))
+    big = "- read_sheet_values:\n" + ("Row: ['a','b']\n" * 40000)     # far past any argv limit
+    captured = {}
+    async def fake_query(prompt, options):
+        captured["system"] = options.system_prompt["append"] if isinstance(options.system_prompt, dict) else str(options.system_prompt)
+        return
+        yield
+    import inkbox_claude.gate.executor as exmod
+    monkey = exmod.query
+    exmod.query = fake_query
+    try:
+        req = Request(id=77, chat_id="c", sender="s", sender_name="", mode="imessage", subject="", original_message="m",
+                      summary="m", scopes=["tamid_drive_read"], prompt="m", prompt_sha256=sha256("m"), state="approved",
+                      revision=0, status=None, raw_output=None, created_at=0, updated_at=0)
+        asyncio.run(ex.run(req, context="", prior_work=big))
+    finally:
+        exmod.query = monkey
+    assert len(captured["system"]) < 20000 and "request-77.txt" in captured["system"]
+    assert (tmp_path / "findings" / "request-77.txt").read_text().startswith("- read_sheet_values:")

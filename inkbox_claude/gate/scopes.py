@@ -139,19 +139,19 @@ SCOPES: Dict[str, Dict[str, object]] = {
         "tools": ['mcp__tamid-admin__tamid_list_board_members', 'mcp__tamid-admin__tamid_get_board_member', 'mcp__tamid-admin__tamid_list_events', 'mcp__tamid-admin__tamid_list_upcoming_events', 'mcp__tamid-admin__tamid_get_event', 'mcp__tamid-admin__tamid_list_members', 'mcp__tamid-admin__tamid_list_semesters', 'mcp__tamid-admin__tamid_list_site_config', 'mcp__tamid-admin__tamid_get_site_config', 'mcp__tamid-admin__tamid_list_contact_requests', 'mcp__tamid-admin__tamid_get_contact_request', 'mcp__tamid-admin__tamid_list_newsletter_signups', 'mcp__tamid-admin__tamid_get_newsletter_signup', 'mcp__tamid-admin__tamid_create_board_member', 'mcp__tamid-admin__tamid_update_board_member', 'mcp__tamid-admin__tamid_delete_board_member', 'mcp__tamid-admin__tamid_replace_board_member_headshot', 'mcp__tamid-admin__tamid_create_event', 'mcp__tamid-admin__tamid_update_event', 'mcp__tamid-admin__tamid_delete_event', 'mcp__tamid-admin__tamid_replace_event_flyer', 'mcp__tamid-admin__tamid_create_member', 'mcp__tamid-admin__tamid_update_member', 'mcp__tamid-admin__tamid_delete_member', 'mcp__tamid-admin__tamid_create_semester', 'mcp__tamid-admin__tamid_update_semester', 'mcp__tamid-admin__tamid_delete_semester', 'mcp__tamid-admin__tamid_create_site_config', 'mcp__tamid-admin__tamid_update_site_config', 'mcp__tamid-admin__tamid_delete_site_config', 'mcp__tamid-admin__tamid_update_contact_request', 'mcp__tamid-admin__tamid_delete_contact_request', 'mcp__tamid-admin__tamid_create_newsletter_signup', 'mcp__tamid-admin__tamid_update_newsletter_signup', 'mcp__tamid-admin__tamid_delete_newsletter_signup'],
     },
     "web": {
-        "description": "search the web and open web pages: find a person, company, article, LinkedIn profile, or any public page, then read it in the headless browser",
+        "description": "search the public web and open web pages, only when the answer lives OUTSIDE Aaron's own systems (a person's LinkedIn or employer, an outside club's leadership, news, a public page). Not for anything in TAMID/SJBA Drive, sheets, forms, calendars, inboxes or the club websites' admin backends.",
         "tools": ["WebSearch", "mcp__playwright__browser_search", "mcp__playwright__browser_navigate", "mcp__playwright__browser_snapshot",
                   "mcp__playwright__browser_find", "mcp__playwright__browser_wait_for", "mcp__playwright__browser_navigate_back"],
     },
     "browser_read": {
-        "description": "open web pages in a headless browser and read them: navigate, take a snapshot of the page, find elements, scroll, wait, screenshot. Read-only: no clicking, typing or form filling. For pages that need a real browser (JavaScript sites, portals) rather than a plain web search.",
+        "description": "read a public web page in a headless browser (navigate, snapshot, find, screenshot), for things that are only online and not in Aaron's own systems. Read-only: no clicking, typing or form filling.",
         "tools": ["mcp__playwright__browser_search", "mcp__playwright__browser_navigate", "mcp__playwright__browser_navigate_back", "mcp__playwright__browser_snapshot",
                   "mcp__playwright__browser_find", "mcp__playwright__browser_take_screenshot", "mcp__playwright__browser_wait_for",
                   "mcp__playwright__browser_tabs", "mcp__playwright__browser_resize", "mcp__playwright__browser_console_messages",
                   "mcp__playwright__browser_network_requests", "mcp__playwright__browser_close"],
     },
     "browser_act": {
-        "description": "operate a headless browser like a person: click, type, fill and submit forms, select options, press keys, hover, drag, upload files, handle dialogs, on any website. Use for tasks that must be done through a website's UI (sign-ups, portals, checkouts, admin pages with no API). Includes browser_read.",
+        "description": "operate a headless browser like a person (click, type, fill and submit forms, select options, upload, dialogs) for something that can only be done through a website's own UI and has no tool of its own. Last resort, never the first choice when a Drive, calendar, inbox, contacts or site-admin tool covers it. Includes browser_read.",
         "tools": ["mcp__playwright__browser_search", "mcp__playwright__browser_navigate", "mcp__playwright__browser_navigate_back", "mcp__playwright__browser_snapshot",
                   "mcp__playwright__browser_find", "mcp__playwright__browser_take_screenshot", "mcp__playwright__browser_wait_for",
                   "mcp__playwright__browser_tabs", "mcp__playwright__browser_resize", "mcp__playwright__browser_console_messages",
@@ -203,8 +203,8 @@ def sends_to_requester(tool_name: str, args: dict, protected: list) -> bool:
 # descriptions. Tools not listed fall back to the server's description.
 TOOL_PURPOSE: Dict[str, str] = {
     # web
-    "mcp__playwright__browser_search": "SEARCH THE WEB: type a query, get result titles, links and snippets. First step for any 'look up', 'find online', LinkedIn, company, person, or news question.",
-    "mcp__playwright__browser_navigate": "OPEN A WEB PAGE by URL in the browser (a search result, a profile, an article). Follow with browser_snapshot or browser_find to read it.",
+    "mcp__playwright__browser_search": "SEARCH THE PUBLIC WEB (last resort for facts that live OUTSIDE Aaron's own systems): a person's LinkedIn or employer, an outside organization's leadership, an article, a public page. Not for anything that lives in TAMID/SJBA sheets, forms, rosters, calendars or inboxes; use those tools first.",
+    "mcp__playwright__browser_navigate": "OPEN A PUBLIC WEB PAGE by URL in the browser (a search result, a profile, an article). Only for things online; follow with browser_snapshot or browser_find to read it.",
     "mcp__playwright__browser_snapshot": "READ THE CURRENT PAGE: the full text and links of the page that is open.",
     "mcp__playwright__browser_find": "FIND TEXT ON THE CURRENT PAGE: locate a name, number or phrase on the open page and read around it.",
     "mcp__playwright__browser_wait_for": "WAIT for the page to finish loading or for text to appear (only after a page opened blank).",

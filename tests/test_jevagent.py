@@ -560,55 +560,68 @@ def test_ids_are_found_under_camelcase_and_json_keys():
     assert "ACYDBNhX0m9vQ" in ids and "1OGQhnPoO9OzdYqzUgdtBcxYdeEdeLjYGTzE7" in ids and "18FY8UeEMQsKqYUHlrm7" in ids and "evt_abc123def456" in ids
 
 
-def test_sheet_read_learns_the_other_tabs_and_offers_them(agent, monkeypatch):
-    from inkbox_claude.gate.jevagent import _sheet_tabs
-    info = ('Spreadsheet: "Tracker" (ID: 1AAA) | Locale: en_US\nSheets (3):\n'
-            '  - "Form Responses" (ID: 1714329655) | Size: 201x27 | Conditional formats: 1\n'
-            '  - "Chat Tracking" (ID: 1543636823) | Size: 988x27 | Conditional formats: 0\n'
-            '  - "Board Member Tracking" (ID: 398141727) | Size: 1000x26 | Conditional formats: 0\n')
-    assert _sheet_tabs(info) == ["Form Responses", "Chat Tracking", "Board Member Tracking"]
-    read, meta = "mcp__tamid-drive__read_sheet_values", "mcp__tamid-drive__get_spreadsheet_info"
+
+
+
+def test_multi_argument_tools_keep_offering_a_value_read_once(agent, monkeypatch):
+    """A spreadsheet read once (no range) must stay offerable for a read with a range."""
+    read = "mcp__tamid-drive__read_sheet_values"
     schemas = {read: {"description": "read", "schema": {"type": "object", "required": ["spreadsheet_id"],
                                                         "properties": {"user_google_email": {"type": "string"}, "spreadsheet_id": {"type": "string"},
-                                                                       "range_name": {"type": "string", "description": "range like Sheet1!A1:D10"}}}},
-               meta: {"description": "info", "schema": {"type": "object", "required": ["spreadsheet_id"],
-                                                        "properties": {"user_google_email": {"type": "string"}, "spreadsheet_id": {"type": "string"}}}}}
-    box = FakeBox(schemas, results={read: "Successfully read 101 rows from range 'A1:Z1000': Row 1: ['Timestamp', 'Email']", meta: info})
+                                                                       "range_name": {"type": "string", "description": "range"}}}}}
+    box = FakeBox(schemas, results={read: "Successfully read 2 rows: Row 1: ['x'] (ID: 1AAAAAAAAAAAAAAAAAAAAAAAA1)"})
     class J(ScriptedJudge):
         async def ask(self, state, questions):
             self.calls += 1
             out = {}
             for qid, q in questions.items():
                 if q["type"] == "noul":
-                    out[qid] = {"noul": 0.9 if qid == "supply::range_name" and len(box.calls) >= 2 else 0.3}
+                    out[qid] = {"noul": 0.9 if qid == "supply::range_name" and len(box.calls) >= 1 else 0.2}
                 else:
                     opts = q["criteria"]
-                    want = next((k for k, v in opts.items() if "Board Member Tracking" in json.dumps(v)), None) or next(k for k in opts if k.startswith("c"))
+                    want = next((k for k, v in opts.items() if "1AAAA" in json.dumps(v)), None) or "write_new"
                     out[qid] = {"choice": want, "probabilities": {want: 0.95}}
             return out
         async def yes(self, state, question):
             if "fully achieved" in str(question):
                 return 0.9 if not self.picks else 0.1
             return 0.9
+    class P(ScriptedProse):
+        async def write(self, instruction, facts):
+            self.calls += 1
+            return "'Tab2'!A1:Z10" if "range" in instruction else "UNKNOWN"
     judge = J([read, read])
-    _patch(monkeypatch, box, judge, ScriptedProse(), [read, meta])
-    st = asyncio.run(agent.run(_req("how many coffee chats did Sam Rivera do? check the board member tracking tab of sheet 1AAAAAAAAAAAAAAAAAAAAAAAA1")))
-    assert st["ok"]
-    calls = [(c[0].split("__")[-1], c[1].get("range_name")) for c in box.calls]
-    assert calls[0][0] == "read_sheet_values" and calls[1][0] == "get_spreadsheet_info"      # tabs learned right after the first read
-    assert calls[2] == ("read_sheet_values", "'Board Member Tracking'!A1:Z1000")             # second read targets the right tab
-    assert "tabs:" in st["raw"] and "Board Member Tracking" in st["raw"]
+    _patch(monkeypatch, box, judge, P(), [read])
+    st = asyncio.run(agent.run(_req("read sheet 1AAAAAAAAAAAAAAAAAAAAAAAA1 tab2")))
+    ids = [c[1].get("spreadsheet_id") for c in box.calls]
+    assert st["ok"] and len(ids) >= 2 and set(ids) == {"1AAAAAAAAAAAAAAAAAAAAAAAA1"}
 
 
-def test_search_snippets_alone_do_not_finish_a_run(agent, monkeypatch):
-    search, nav = "mcp__playwright__browser_search", "mcp__playwright__browser_navigate"
-    schemas = {search: {"description": "search", "schema": {"type": "object", "required": ["query"], "properties": {"query": {"type": "string"}}}},
-               nav: {"description": "open", "schema": {"type": "object", "required": ["url"], "properties": {"url": {"type": "string", "description": "the url"}}}}}
-    box = FakeBox(schemas, results={search: "1. Leadership\n   url: https://example.org/board\n   co-presidents: A and B", nav: "Page Title: Board\nCo-President: A"})
+def test_large_result_is_read_into_evidence_before_judging(agent, monkeypatch):
+    """A huge sheet read becomes a small piece of evidence about the goal; the done
+    judgment and the report both work from it."""
+    from inkbox_claude.gate.jevagent import _LARGE
+    read = "mcp__tamid-drive__read_sheet_values"
+    schemas = {read: {"description": "read", "schema": {"type": "object", "properties": {}, "required": []}}}
+    rows = ["Row %d: ['p%d@nyu.edu', 'Person %d', 'CAS', 'filler filler filler filler']" % (i, i, i) for i in range(4000)]
+    rows[2222] = "Row 2222: ['ci@nyu.edu', 'Cand Idate', 'Stern', 'NEEDLE']"
+    big = "\n".join(rows); assert len(big) > _LARGE
+    box = FakeBox(schemas, results={read: big})
+    seen = []
     class J(ScriptedJudge):
+        async def ask(self, state, questions):
+            seen.append(state)
+            if "part" in state:
+                return {"q": {"noul": 0.95 if "NEEDLE" in state["part"] else 0.05}}
+            return await super().ask(state, questions)
         async def yes(self, state, question):
-            return 0.7 if "fully achieved" in str(question) else 0.9   # "done" right after the search
-    judge = J([search, nav, "c0"])
-    _patch(monkeypatch, box, judge, ScriptedProse(), [search, nav])
-    st = asyncio.run(agent.run(_req("who is the president of the example board?")))
-    assert st["ok"] and [c[0] for c in box.calls] == [search, nav]      # it opened the page before finishing
+            seen.append(state)
+            if "fully achieved" in str(question):
+                return 0.9 if any("NEEDLE" in json.dumps(st) for st in [state]) else 0.1
+            return 0.9
+    _patch(monkeypatch, box, J([read]), ScriptedProse(), [read])
+    st = asyncio.run(agent.run(_req("which school is Cand Idate in? check the responses sheet")))
+    assert st["ok"] and st["tool_calls"] == [read]
+    done_states = [x for x in seen if "steps_so_far" in x]
+    assert done_states and "NEEDLE" in json.dumps(done_states[-1]) and len(json.dumps(done_states[-1])) < 20000
+    assert big in st["raw"]
