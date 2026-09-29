@@ -325,6 +325,30 @@ margin (top at least 0.2 and twice the runner-up) when many tools split the
 probability. When the agent still escalates, Claude Code receives the agent's
 steps and full results as work already done, and continues from them.
 
+### Collecting until confident, in parallel
+
+The stopping judgment asks whether the goal can be answered with confidence from
+the evidence gathered, every needed fact in hand; the run ends at
+`JEV_AGENT_DONE_MIN` (0.7) and no shortcut ends it below that. Out of useful
+moves, the run reports "insufficient evidence" with what it found. Alongside each
+next-step pick, `_useful_reads` rates every allowed read tool in one request
+("would calling this now add needed, not-yet-gathered information?"); those at
+`JEV_AGENT_PARALLEL_MIN` (0.7), up to `JEV_AGENT_PARALLEL_MAX` (3), have their
+arguments filled and run concurrently with the pick, and all results are read and
+placed in the state before the next judgment. Writes never run in a batch.
+
+The agent's state carries `background`: the source prompt (the message, the
+recent conversation, the task's ledger with earlier results), so what the gate
+already knows is in front of every judgment. Owner requests are granted every
+read scope plus writes at 0.35; non-owner requests keep the strict judgment.
+
+### Reasoned replies
+
+When a task result is phrased, the reply writer fills `reasoning` before `reply`:
+what the results establish, what follows by ordinary inference, what stays unknown;
+the reply answers directly and marks inferences. Grounding counts a stated
+inference with its premises in the results as supported.
+
 ### Confirmation before destructive calls
 
 `is_destructive` (tool name or `action` matching delete, remove, trash, cancel,

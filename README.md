@@ -216,11 +216,13 @@ threshold and every consequence. This is the complete list.
 |---|---|---|---|---|---|
 | 1 | every message | message, last turns, candidate tasks (title, where it stands, participants, age) | which task is this? | `T12` ... / `new_task` / `no_task` | picks the task; below 0.55 confidence abstains and a new task is started; permission still checked in code |
 | 2 | every message | message, last turns, the task from #1 | does this need a tool action now? | probability of yes | ≥0.5 a request is built; else reply only |
+| 2b | result reply | the question, the results, the draft | (DeepSeek, not Jev) reasoning first: facts established, what follows, what stays unknown; then the reply as a conclusion | text | the reasoning is never sent |
 | 3 | every message | message, the task | what did this message do to the task? | kind: asked / provided_information / confirmed / changed / declined / progress / conversation | writes the typed event to the ledger |
 | 4 | every message | same | who does the task wait on now? | owner / other / nobody | updates the "where it stands" line |
 | 5 | every message | same | is the task resolved? | probability | ≥0.8 marks it done |
 | 6 | request built | the full prompt, the task title, each scope's description | does carrying this out require this capability? one per scope, asked together | probability per scope | grants every scope ≥0.6, plus the scopes this task's earlier requests had; if none clears, the two likeliest, else read-only web |
-| 7 | agent, each step | goal, task record, date, steps so far with results | is the goal fully achieved? | probability | ≥0.6 stop, report |
+| 7 | agent, each step | goal, task record, background, steps so far with results | can the goal be answered with confidence from the evidence, every needed fact in hand? | probability | ≥0.7 stop, report; below, keep collecting; out of moves: "insufficient evidence" with what was found |
+| 7b | agent, each step | same, plus each read tool's purpose | would calling this tool now add needed, not-yet-gathered information? one per read tool | probability per tool | ≥0.7 run it in parallel with the pick (up to 3) |
 | 8 | agent, each step | same, plus every allowed tool's description | which tool next? | one of the allowed tools / give up | top probability <0.45 after reads: stop with findings; give up after reads: same; give up otherwise: FAILED |
 | 9 | agent, per tool, one batched call | goal, the tool's schema, all facts and results | for each optional argument: supply it? | probability | <0.5 omitted |
 | 10 | same call | same | for each id / email / phone argument: which of these values? | the candidate values found in the request and earlier results, or "write new" | copies the pick verbatim; top <0.3 on an optional argument omits it |
@@ -228,7 +230,8 @@ threshold and every consequence. This is the complete list.
 | 12 | same call | same | for each enum or boolean: which value? | the enum | copies it |
 | 13 | only when one result is over the API budget | goal, what the argument needs, one part of the result | does this part contain it? one per part, in parallel | probability per part | descends into the best part, splits again, down to a 6k leaf; candidates come from the leaf |
 | 14 | agent, when #8 has no clear pick | same as #8 | of the three likeliest, which is the most useful next attempt? | one of three / give up | tries it; give up here means escalation |
-| 15 | before a result reply is sent | the question, the retrieved results, the draft reply | is every factual claim in the draft supported by the results? | probability | under 0.5 the reply is rewritten from the results only; still under, the raw result is sent with no interpretation |
+| 15 | before a result reply is sent | the question, the retrieved results, the draft reply | is every claim supported by the results, counting stated inferences whose premises are in the results? | probability | under 0.5 the reply is rewritten (reason first, results only); a rewrite at 0.35+ passes; else the reply goes out with a one-line caveat |
+| 16 | before a destructive call | the exact call and what earlier results say it refers to | (the owner, not Jev): "#N yes" runs that one call, "#N no" leaves it | text | nothing is deleted, cancelled or replaced without it |
 
 Jev's ceiling is about 32k input tokens per request. A judgment state under that goes
 in raw. Over it, code replaces the largest value with a structural digest (kind, size,
