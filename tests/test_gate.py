@@ -1189,3 +1189,26 @@ def test_stale_running_request_does_not_block_the_thread(tmp_path):
         await asyncio.sleep(0.05)
     asyncio.run(go())
     assert m.store.get_request(old.id + 1) is not None and m.executor.ran == [old.id + 1]
+
+
+def test_reply_alongside_a_request_must_be_an_acknowledgement(tmp_path):
+    """The reply writer answered the question itself while a request was created; the
+    run's result then arrived as a second answer. Only a short ack may accompany a run."""
+    m, sent = make_manager(tmp_path)
+    p = _jev_first(m, choice="new")
+    p.action, p.scopes = True, ["contacts"]
+    m.router.next = RouterOutput(reply="I do not have his phone number on file, and I would not share a personal number "
+                                       "without his say-so. If you have it, I can send him a message for you.",
+                                 task="new", task_title="Find a phone number")
+    m.router.next_note = RouterOutput(reply="No number on file, only the email.", task="T1")
+    async def go():
+        await m.get("aaron").handle_inbound("are you able to message his phone number?", "imessage", approver_meta())
+        await asyncio.sleep(0.15)
+    asyncio.run(go())
+    outbound = [t for _, t, *_ in sent]
+    assert outbound == ["No number on file, only the email."]        # one answer, from the run
+
+    from inkbox_claude.gate.manager import _is_acknowledgement
+    assert _is_acknowledgement("On it. I will look up Jonathan Fried's email.")
+    assert not _is_acknowledgement("Did you mean the TAMID one or the SJBA one?")
+    assert not _is_acknowledgement(" ".join(["word"] * 21))

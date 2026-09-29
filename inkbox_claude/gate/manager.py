@@ -354,6 +354,12 @@ class GateSession:
                                         task_memory=memory, found_tasks=found, action=needs_action,
                                         action_task=(peek or {}).get("title") or "")
         out.request = None  # the router never defines the request on this path
+        if needs_action and out.reply and not _is_acknowledgement(out.reply):
+            # A request will run and its result will be delivered. A reply that answers
+            # the question now would make two answers; only a short acknowledgement passes.
+            logger.info("[gate %s] dropped a %d-word reply written alongside a request; result will follow",
+                        self.chat_id, len(out.reply.split()))
+            out.reply = None
         if task_choice is not None:
             out.task = task_choice            # Jev's pick wins; router's stands only when Jev abstained
         elif choice == "none" and not needs_action:
@@ -735,6 +741,16 @@ class GateSession:
         async with self._lock:
             self.m.store.add_message(self.chat_id, "system", note)
             return await self._route_and_act("", system_note=note)
+
+
+ACK_MAX_WORDS = 20
+
+
+def _is_acknowledgement(text: str) -> bool:
+    """Short, forward-looking, no facts: "On it, pulling that now." Anything longer,
+    or containing a question, is an answer and is not sent while a request runs."""
+    t = (text or "").strip()
+    return 0 < len(t.split()) <= ACK_MAX_WORDS and "?" not in t
 
 
 class GateSessionManager:
