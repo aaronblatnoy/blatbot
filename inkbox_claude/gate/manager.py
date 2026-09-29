@@ -476,8 +476,9 @@ class GateSession:
                     # Deterministic FYI to Aaron for every inbound from anyone else.
                     await self.m.notify_inbound(self, body)
                 await self._route_and_act(body)
-            except Exception:
+            except Exception as exc:
                 logger.exception("[gate %s] turn failed", self.chat_id)
+                await self.m.report_outage(exc, self.chat_id)
             finally:
                 if self.m.store.thread_state(self.chat_id) == "routing":
                     self.m.store.set_thread(self.chat_id, "idle")
@@ -864,6 +865,35 @@ class GateSessionManager:
     async def send_to_approver(self, text: str) -> None:
         conv = self.approver_conv
         await self.send_fn(f"imessage:{conv}", text, "imessage", {"conversation_id": conv})
+
+    _outage_notified: Dict[str, float] = {}
+
+    async def report_outage(self, exc: BaseException, chat_id: str) -> None:
+        """A turn died on an infrastructure failure the owner has to fix (an API out
+        of credit, a bad key, a provider down). Say so once per hour per cause on
+        the owner's thread instead of failing silently."""
+        text = str(exc)
+        status = ""
+        m = re.search(r"'(\d{3}) [^']+' for url '(https?://[^/']+)", text)
+        if m:
+            status, host = m.group(1), m.group(2)
+        else:
+            host = ""
+        if status not in ("401", "402", "403", "429", "500", "502", "503") and "Payment" not in text:
+            return
+        key = f"{host}:{status}"
+        now = time.time()
+        if now - self._outage_notified.get(key, 0) < 3600:
+            return
+        self._outage_notified[key] = now
+        what = {"402": "is out of credit (402 Payment Required)", "401": "rejected the API key (401)",
+                "403": "refused the request (403)", "429": "is rate limiting (429)"}.get(status, f"returned {status}")
+        who = "DeepSeek" if "deepseek" in host else ("TypeSafe" if "typesafe" in host else host or "a provider")
+        try:
+            await self.send_to_approver(f"Heads up: {who} {what}. I cannot finish turns until that is fixed. "
+                                        f"Your last message was not answered.")
+        except Exception:
+            logger.exception("[gate] could not deliver the outage notice")
 
     async def notify_inbound(self, session: GateSession, body: str) -> None:
         who = session._sender_name()

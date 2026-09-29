@@ -1337,3 +1337,20 @@ def test_still_ungrounded_reply_falls_back_to_the_raw_result(tmp_path):
     outbound = [t for _, t, *_ in sent]
     assert outbound[-1].startswith("Here is what I found, without interpretation:") and "Cand Idate: Co-President" in outbound[-1]
     assert "Jamie Rivera" not in " ".join(outbound)
+
+
+def test_provider_billing_failure_is_reported_to_the_owner_once(tmp_path):
+    import httpx
+    m, sent = make_manager(tmp_path)
+    async def broke(**kw):
+        req = httpx.Request("POST", "https://api.deepseek.com/chat/completions")
+        raise httpx.HTTPStatusError("Client error '402 Payment Required' for url 'https://api.deepseek.com/chat/completions'",
+                                    request=req, response=httpx.Response(402, request=req))
+    m.router.route = broke
+    async def go():
+        s = m.get("aaron")
+        await s.handle_inbound("is X in stern?", "imessage", approver_meta())
+        await s.handle_inbound("hello?", "imessage", approver_meta())
+    asyncio.run(go())
+    notices = [t for _, t, *_ in sent if "out of credit" in t]
+    assert len(notices) == 1 and "DeepSeek" in notices[0] and "not answered" in notices[0]
