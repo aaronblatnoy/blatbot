@@ -162,7 +162,7 @@ delegates. From the gateway down, the path is identical for all channels.
  │ every inbound is assigned to a task by Jev; every request is written to one   │
  │ events: inbound · outbound · request · approved · rejected · done · failed    │
  │         · expired · call_ended, typed by Jev (asked / provided / confirmed..) │
- │ full-text search over title, summary, people, events; dates; any_of filters  │
+ │ full-text search over title, summary, people, events; dates; any_of filters   │
  │ read by: gateway every turn, judgments, reply writer, agent.                  │
  │ NOT exposed to voice agent                                                    │
  │ except the short recent-task summary at call pickup                           │
