@@ -168,6 +168,10 @@ SCOPES: Dict[str, Dict[str, object]] = {
 }
 
 
+READ_SCOPES = [k for k in SCOPES if k.endswith("_read") or k in ("calendar", "stern_calendar", "inbox_read", "stern_email_read",
+                                                                    "contacts", "web", "browser_read", "host_read")]
+
+
 def tools_for(scopes: List[str]) -> List[str]:
     out: List[str] = []
     for s in scopes:

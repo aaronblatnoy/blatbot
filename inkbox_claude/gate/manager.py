@@ -20,7 +20,7 @@ from .executor import Executor
 from .jevagent import JevAgent, enabled as jev_agent_enabled
 from .taskpick import TaskPicker, enabled as jev_enabled
 from .router import Router, RouterOutput
-from .scopes import SCOPES
+from .scopes import READ_SCOPES, SCOPES
 from .store import Person, Request, Store, TaskRequired, task_key
 
 logger = logging.getLogger(__name__)
@@ -435,13 +435,18 @@ class GateSession:
             prompt=out.request.prompt, summary=out.request.summary,  # prompt is the source-built one by now
             scopes={k: str(v["description"]) for k, v in SCOPES.items()},
             router_scopes=None if strict else list(out.request.scopes))
-        chosen = res.get("scopes")
-        if not chosen and strict:
-            # No router list to fall back on: take the likeliest scopes, else the read-only web scope.
-            probs = res.get("probabilities") or {}
-            top = [k for k, v in sorted(probs.items(), key=lambda kv: -kv[1])[:2] if v >= 0.25]
-            chosen = top or ["web"]
-            logger.info("[gate %s] scope judgment undecided (%s); using %s", self.chat_id, res.get("reason"), chosen)
+        chosen = res.get("scopes") or []
+        probs = res.get("probabilities") or {}
+        if strict:
+            # Generous by design: reads cost nothing (destructive calls need the owner's
+            # yes, sends to the requester are refused), so the owner's requests get every
+            # read scope, and writes are granted on a lower bar than the strict judgment.
+            if self.is_approver():
+                chosen = list(dict.fromkeys(chosen + READ_SCOPES + [k for k, v in probs.items() if v >= 0.35]))
+            elif not chosen:
+                top = [k for k, v in sorted(probs.items(), key=lambda kv: -kv[1])[:2] if v >= 0.25]
+                chosen = top or ["web"]
+            logger.info("[gate %s] scopes granted: %s", self.chat_id, chosen)
         if not chosen:
             logger.info("[gate %s] scope judgment undecided (%s); keeping router scopes %s",
                         self.chat_id, res.get("reason"), out.request.scopes)

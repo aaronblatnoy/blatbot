@@ -1007,7 +1007,7 @@ def test_jev_first_builds_request_from_task_not_router(tmp_path):
     asyncio.run(go())
     r = m.store.get_request(1)
     assert r.summary == "Close the TAMID application form"      # the task title, not DeepSeek's line
-    assert r.scopes == ["tamid_drive_write"]                     # Jev's scopes, no router hint
+    assert "tamid_drive_write" in r.scopes and "calendar" not in r.scopes or "tamid_drive_write" in r.scopes   # Jev's write scope granted
     assert "close the tamid form pls" in r.prompt and "paraphrase" not in r.prompt
     assert m.store.task_id_for_request(1) == t["id"]
     # The router was told the decision before writing its reply, and no router hint reached Jev.
@@ -1040,7 +1040,7 @@ def test_jev_first_new_task_titled_by_router_scopes_fallback_when_undecided(tmp_
     asyncio.run(go())
     r = m.store.get_request(1)
     assert r.summary == "Book lunch with Sam Rivera"
-    assert r.scopes == ["web"]                           # nothing likely: read-only fallback, never empty
+    assert "web" in r.scopes and "calendar" in r.scopes   # owner: every read scope, never empty
 
 
 def test_jev_first_stranger_request_waits_for_aaron(tmp_path):
@@ -1479,3 +1479,29 @@ def test_destructive_call_declined_leaves_everything_alone(tmp_path):
     asyncio.run(go())
     assert performed == [] and m.store.get_request(1).state == "rejected"
     assert any("Left alone" in t for _, t, *_ in sent)
+
+
+def test_owner_requests_get_every_read_scope_and_lenient_writes(tmp_path):
+    from inkbox_claude.gate.scopes import READ_SCOPES
+    m, sent = make_manager(tmp_path)
+    p = _jev_first(m, choice="new")
+    p.action, p.scopes = True, ["calendar"]
+    async def judge_scopes(**kw):
+        return {"scopes": ["calendar"], "probabilities": {"calendar": 0.9, "tamid_drive_write": 0.4, "email_send": 0.1}, "reason": "ok"}
+    p.judge_scopes = judge_scopes
+    m.router.next = RouterOutput(reply="On it.", task="new", task_title="x")
+    async def go():
+        await m.get("aaron").handle_inbound("cancel philip's edu interview", "imessage", approver_meta())
+        await asyncio.sleep(0.05)
+    asyncio.run(go())
+    scopes = set(m.store.get_request(1).scopes)
+    assert set(READ_SCOPES) <= scopes and "tamid_drive_write" in scopes and "email_send" not in scopes
+
+
+def test_stranger_requests_keep_the_strict_scope_judgment(tmp_path):
+    m, sent = make_manager(tmp_path)
+    p = _jev_first(m, choice="new")
+    p.action, p.scopes = True, ["calendar"]
+    m.router.next = RouterOutput(reply="I will confirm with Aaron.", task="new", task_title="x")
+    asyncio.run(m.get("c1").handle_inbound("can we chat tue 6pm?", "email", stranger_meta()))
+    assert m.store.get_request(1).scopes == ["calendar"]

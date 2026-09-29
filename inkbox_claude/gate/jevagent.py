@@ -614,7 +614,8 @@ class JevAgent:
         allowed = tools_for(req.scopes)
         started = time.time()
         steps: List[Dict[str, Any]] = []
-        facts: Dict[str, Any] = {"request": req.original_message, "task_context": context, **_now_facts(),
+        facts: Dict[str, Any] = {"request": req.original_message, "task_context": context,
+                                 "background": req.prompt if req.prompt != req.original_message else "", **_now_facts(),
                                  "accounts": {"org_google": ORG_ACCOUNT, "owner_google": OWNER_ACCOUNT}}
         try:
             async with ToolBox(self.inkbox_server, self.mcp_config) as box:
@@ -630,7 +631,8 @@ class JevAgent:
                 excluded: set = set()   # tools that have nothing new to give this run
 
                 for step in range(self.max_steps):
-                    state = {"goal": req.original_message, "task_context": context, **_now_facts(),
+                    state = {"goal": req.original_message, "task_context": context,
+                             "background": facts.get("background") or "", **_now_facts(),
                              "steps_so_far": [{"tool": s["tool"], "args": s["args"], "ok": s["ok"],
                                                "result": _seen(s)} for s in steps]}
                     state = _fit(state)
