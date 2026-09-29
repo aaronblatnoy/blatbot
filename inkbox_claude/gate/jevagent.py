@@ -611,6 +611,19 @@ class JevAgent:
         self.max_steps = int(max_steps or os.getenv("JEV_AGENT_MAX_STEPS") or 12)
 
     async def run(self, req: Request, context: str = "") -> Dict[str, Any]:
+        """Run one request. The LangGraph engine (jevgraph) is the default: the same
+        judgments and helpers, with the state and the two parallel fan-outs managed
+        by the graph. GATE_AGENT_GRAPH=0 runs the plain loop below instead."""
+        if (os.getenv("GATE_AGENT_GRAPH") or "1").strip().lower() not in ("0", "false", "no"):
+            try:
+                from . import jevgraph
+            except ImportError as exc:
+                logger.warning("jev agent: langgraph unavailable (%s); using the plain loop", exc)
+            else:
+                return await jevgraph.run(self, req, context)
+        return await self.run_loop(req, context)
+
+    async def run_loop(self, req: Request, context: str = "") -> Dict[str, Any]:
         if sha256(req.prompt) != req.prompt_sha256:
             return {"ok": False, "error": "prompt hash mismatch; refused to run", "tool_calls": []}
         judge, prose = Judge(), Prose(self.router)

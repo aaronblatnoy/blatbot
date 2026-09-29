@@ -1,0 +1,343 @@
+"""The Jev agent as a LangGraph state graph.
+
+The loop in jevagent.py is expressed as nodes over one typed state, with the two
+fan-outs (filling arguments for several tools, calling several tools) as parallel
+branches whose results merge back through reducers. Judgments, argument filling,
+reading of large results, guards and the status report are the same functions as
+before; only the control flow and the state live here.
+
+    judge_done ──done──▶ finish
+        │ not done
+        ▼
+      plan ──unsure/give_up──▶ finish
+        │ chosen + extras
+        ▼
+   fill_one ×N (parallel) ──▶ guard ──confirm──▶ finish
+        │ batch                  │ refused/identical ──▶ judge_done
+        ▼                        ▼
+   call_one ×N (parallel) ──▶ record ──▶ judge_done
+
+Runtime objects (ToolBox, Judge, Prose, the request, the agent) are passed in the
+run config, never in the state, so the state stays plain data.
+"""
+
+from __future__ import annotations
+
+import asyncio
+import json
+import logging
+import operator
+import time
+from typing import Annotated, Any, Dict, List, Optional, Tuple, TypedDict
+
+from langchain_core.runnables import RunnableConfig
+from langgraph.graph import END, START, StateGraph
+from langgraph.types import Send
+
+from . import jevagent as ja
+
+logger = logging.getLogger(__name__)
+
+
+def _merge_round(old: List[Dict[str, Any]], new: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """Filled arguments accumulate within a round; a new round replaces them."""
+    if new and new[0].get("__round__") is not None and old and old[0].get("__round__") != new[0].get("__round__"):
+        return list(new)
+    return list(old) + list(new)
+
+
+class AgentState(TypedDict, total=False):
+    goal: str
+    background: str
+    task_context: str
+    facts: Dict[str, Any]
+    steps: Annotated[List[Dict[str, Any]], operator.add]      # every tool call made, in arrival order
+    filled: Annotated[List[Dict[str, Any]], _merge_round]     # this round's (tool, args) after filling
+    round: int
+    step: int
+    p_done: float
+    loop_state: Dict[str, Any]
+    chosen: Optional[str]
+    extras: List[str]
+    probs: Dict[str, float]
+    excluded: List[str]
+    batch: List[Tuple[str, Dict[str, Any]]]
+    outcome: Optional[str]          # "ok" | "fail" | "confirm"
+    error: str
+    confirm: Optional[Dict[str, Any]]
+
+
+def _rt(config: RunnableConfig) -> Dict[str, Any]:
+    return config["configurable"]["rt"]
+
+
+# ----------------------------------------------------------------------------- nodes
+
+
+async def judge_done(state: AgentState, config: RunnableConfig) -> Dict[str, Any]:
+    rt = _rt(config)
+    judge, req, context = rt["judge"], rt["req"], rt["context"]
+    steps = state.get("steps", [])
+    loop_state = {"goal": req.original_message, "task_context": context, "background": state.get("background") or "",
+                  **ja._now_facts(),
+                  "steps_so_far": [{"tool": s["tool"], "args": s["args"], "ok": s["ok"], "result": ja._seen(s)} for s in steps]}
+    loop_state = ja._fit(loop_state)
+    p_done = 0.0
+    if steps:
+        p_done = await judge.yes(loop_state, {
+            "question": "Can `goal` now be answered, or is the action it asks for complete, WITH CONFIDENCE "
+                        "from `steps_so_far` alone: is every fact the answer needs already in the evidence?",
+            "criteria": {"true": "Everything the goal asked for has been done or, for a question, the retrieved "
+                                 "results contain what is needed to answer it. Counting, filtering or comparing rows "
+                                 "that are already retrieved is NOT a further tool call; the answer is written from "
+                                 "the results. An empty result from the right place also answers the question.",
+                         "false": "Something the goal asked for has not happened yet, or the results retrieved so far "
+                                  "do not contain the needed information and a different call is needed."}})
+        logger.info("jev graph step %d: p(done)=%.2f", state.get("step", 0) + 1, p_done)
+    return {"p_done": p_done, "loop_state": loop_state}
+
+
+def after_judge(state: AgentState, config: RunnableConfig) -> str:
+    rt = _rt(config)
+    if state.get("steps") and state["p_done"] >= ja.DONE_MIN:
+        return "finish_ok"
+    if state.get("step", 0) >= rt["agent"].max_steps:
+        return "finish_limit"
+    return "plan"
+
+
+async def plan(state: AgentState, config: RunnableConfig) -> Dict[str, Any]:
+    rt = _rt(config)
+    judge, agent = rt["judge"], rt["agent"]
+    steps, excluded = state.get("steps", []), set(state.get("excluded", []))
+    loop_state, p_done = state["loop_state"], state.get("p_done", 0.0)
+    step = state.get("step", 0)
+    options = {k: v for k, v in rt["tool_options"].items() if k not in excluded} or dict(rt["tool_options"])
+    if len(steps) >= 2 and steps[-1]["tool"] == steps[-2]["tool"] and len(options) > 1:
+        options.pop(steps[-1]["tool"], None)          # two in a row: the next move must differ
+    options[ja.GIVE_UP] = "The goal cannot be achieved with these tools or the information available."
+    useful = await agent._useful_reads(judge, loop_state, options)
+    choice, conf, probs = await judge.choose(
+        loop_state,
+        {"question": "What is the single best next step toward `goal`?",
+         "rules": ["The gateway delivers the findings to the person who asked; never send them the answer.",
+                   "Read before you write. A wrong first pick or an empty lookup means try the next likely one.",
+                   f"Choose {ja.GIVE_UP} only when no tool here can still help."]},
+        options)
+    logger.info("jev graph step %d: %s (conf %.2f)", step + 1, choice, conf)
+    if choice is None and probs:
+        top3 = [k for k, _ in sorted(probs.items(), key=lambda kv: -kv[1]) if k != ja.GIVE_UP][:3]
+        if top3:
+            narrowed = {k: options[k] for k in top3 if k in options}
+            narrowed[ja.GIVE_UP] = "Nothing in this list could possibly move the goal forward."
+            choice, conf, _ = await judge.choose(
+                loop_state, {"question": "The goal is NOT met yet. Of these, which is the most useful next attempt "
+                                         "(a different query, a different tab or record, a different tool)?",
+                             "rules": ["Prefer trying something over giving up whenever a tool here can still help.",
+                                       "A lookup that returned the wrong thing means: try it again differently."]},
+                narrowed, min_p=0.34)
+            logger.info("jev graph step %d (retry): %s (conf %.2f)", step + 1, choice, conf)
+            if choice == ja.GIVE_UP:
+                choice = None
+    if choice is None:
+        logger.info("jev graph: unsure; top options %s", sorted(probs.items(), key=lambda kv: -kv[1])[:5])
+        if steps and steps[-1]["ok"] and not ja.is_write_tool(steps[-1]["tool"]) and p_done >= ja.DONE_MIN:
+            return {"outcome": "ok", "chosen": None, "extras": [], "probs": probs}
+        return {"outcome": "fail", "chosen": None, "extras": [], "probs": probs,
+                "error": f"insufficient evidence to answer with confidence (done {p_done:.2f}); no further useful step found"}
+    if choice == ja.GIVE_UP:
+        if steps and p_done >= ja.DONE_MIN and all(s["ok"] and not ja.is_write_tool(s["tool"]) for s in steps):
+            return {"outcome": "ok", "chosen": None, "extras": [], "probs": probs}
+        return {"outcome": "fail", "chosen": None, "extras": [], "probs": probs,
+                "error": "gave up: goal not achievable with the granted tools"}
+    extras = []
+    if not ja.is_write_tool(choice):
+        extras = [t for t, pu in sorted(useful.items(), key=lambda kv: -kv[1])
+                  if pu >= ja.PARALLEL_MIN and t != choice and not ja.is_write_tool(t) and t not in excluded][:ja.PARALLEL_MAX]
+    return {"outcome": None, "chosen": choice, "extras": extras, "probs": probs, "round": state.get("round", 0) + 1,
+            "filled": [{"__round__": state.get("round", 0) + 1, "tool": "__reset__"}]}
+
+
+def after_plan(state: AgentState, config: RunnableConfig):
+    if state.get("outcome"):
+        return "finish"
+    rnd = state["round"]
+    return [Send("fill_one", {"tool": t, "round": rnd, "primary": t == state["chosen"], **_carry(state)})
+            for t in [state["chosen"]] + list(state.get("extras", []))]
+
+
+def _carry(state: AgentState) -> Dict[str, Any]:
+    return {"facts": state.get("facts", {}), "steps_view": state.get("steps", [])}
+
+
+async def fill_one(item: Dict[str, Any], config: RunnableConfig) -> Dict[str, Any]:
+    rt = _rt(config)
+    args = await rt["agent"]._fill_args(rt["box"], rt["judge"], rt["prose"], item["tool"], item["facts"],
+                                        item["steps_view"], rt["req"])
+    return {"filled": [{"__round__": item["round"], "tool": item["tool"], "args": args, "primary": item["primary"]}]}
+
+
+async def guard(state: AgentState, config: RunnableConfig) -> Dict[str, Any]:
+    rt = _rt(config)
+    agent, judge, prose, req, box = rt["agent"], rt["judge"], rt["prose"], rt["req"], rt["box"]
+    steps, p_done = state.get("steps", []), state.get("p_done", 0.0)
+    filled = [f for f in state.get("filled", []) if f.get("tool") != "__reset__" and f.get("__round__") == state["round"]]
+    primary = next((f for f in filled if f["primary"]), None)
+    if primary is None or primary["args"] is None:
+        return {"outcome": "fail", "batch": [], "error": f"could not determine arguments for {state['chosen']}"}
+    choice, args = primary["tool"], primary["args"]
+    if ja.sends_to_requester(choice, args, agent.protected + [req.sender, req.chat_id]):
+        logger.info("jev graph: refusing %s to the requester; finishing with findings", choice)
+        return {"outcome": "ok", "batch": []}
+    if ja.is_destructive(choice, args):
+        logger.info("jev graph: %s needs the owner's confirmation; pausing", choice.split("__")[-1])
+        return {"outcome": "confirm", "batch": [], "error": "confirmation required",
+                "confirm": {"tool": choice, "args": args, "about": ja._mentions(steps, args)}}
+    identical = lambda a: any(s["ok"] and s["tool"] == choice and s["args"] == a for s in steps)
+    if identical(args) and p_done < ja.DONE_MIN:
+        again = await agent._fill_args(box, judge, prose, choice, state.get("facts", {}), steps, req, avoid=args)
+        if again is not None and again != args:
+            logger.info("jev graph: re-filled %s to avoid a repeat", choice.split("__")[-1])
+            args = again
+    if identical(args):
+        if p_done >= ja.DONE_MIN:
+            logger.info("jev graph: would repeat %s identically; treating as done", choice)
+            return {"outcome": "ok", "batch": []}
+        logger.info("jev graph: would repeat %s identically at p_done %.2f; excluding it and re-picking", choice, p_done)
+        return {"outcome": None, "batch": [], "excluded": list(set(state.get("excluded", [])) | {choice}), "step": state.get("step", 0) + 1}
+    batch: List[Tuple[str, Dict[str, Any]]] = [(choice, args)]
+    for f in filled:
+        if f["primary"] or f["args"] is None:
+            continue
+        if not any(s["ok"] and s["tool"] == f["tool"] and s["args"] == f["args"] for s in steps):
+            batch.append((f["tool"], f["args"]))
+    if len(batch) > 1:
+        logger.info("jev graph step %d: also collecting %s", state.get("step", 0) + 1, [t.split("__")[-1] for t, _ in batch[1:]])
+    return {"outcome": None, "batch": batch}
+
+
+def after_guard(state: AgentState, config: RunnableConfig):
+    if state.get("outcome"):
+        return "finish"
+    if not state.get("batch"):
+        return "judge_done"
+    return [Send("call_one", {"tool": t, "args": a, "primary": i == 0}) for i, (t, a) in enumerate(state["batch"])]
+
+
+async def call_one(item: Dict[str, Any], config: RunnableConfig) -> Dict[str, Any]:
+    rt = _rt(config)
+    ok, result, evidence, err = await rt["agent"]._call(rt["box"], rt["judge"], item["tool"], item["args"], rt["req"])
+    if ok:
+        return {"steps": [{"tool": item["tool"], "args": item["args"], "result": result, "ok": True, "evidence": evidence,
+                           "primary": item["primary"]}]}
+    return {"steps": [{"tool": item["tool"], "args": item["args"], "result": f"ERROR: {err}", "ok": False,
+                       "primary": item["primary"], "error": err}]}
+
+
+async def record(state: AgentState, config: RunnableConfig) -> Dict[str, Any]:
+    """After a round of calls: log, place results in the facts, apply the failure rule."""
+    steps = state.get("steps", [])
+    n = len(state.get("batch", []))
+    new = steps[-n:] if n else []
+    facts = dict(state.get("facts", {}))
+    step_no = state.get("step", 0) + 1
+    for s in new:
+        short = s["tool"].split("__")[-1]
+        shown = json.dumps({k: v for k, v in s["args"].items() if k != "user_google_email"}, ensure_ascii=False)[:300]
+        if s["ok"]:
+            logger.info("jev graph step %d: %s(%s) -> %s", step_no, short, shown, " ".join(ja._text(s["result"]).split())[:300])
+            facts[f"result_of_{short}_{len(steps)}"] = s.get("evidence") or ja._text(s["result"])
+        else:
+            logger.info("jev graph step %d: %s(%s) -> ERROR %s", step_no, short, shown, " ".join(str(s.get("error")).split())[:300])
+    for s in new:
+        if s["ok"] or not s.get("primary"):
+            continue
+        same = sum(1 for x in steps if x["tool"] == s["tool"] and x["args"] == s["args"] and not x["ok"])
+        total = sum(1 for x in steps if x["tool"] == s["tool"] and not x["ok"])
+        if same >= 2 or total >= 3:
+            return {"facts": facts, "step": step_no, "outcome": "fail", "error": f"{s['tool']} keeps failing: {s.get('error')}"}
+    return {"facts": facts, "step": step_no, "outcome": None}
+
+
+def after_record(state: AgentState, config: RunnableConfig) -> str:
+    return "finish" if state.get("outcome") else "judge_done"
+
+
+async def finish(state: AgentState, config: RunnableConfig) -> Dict[str, Any]:
+    return {}
+
+
+# ----------------------------------------------------------------------------- graph
+
+
+def build_graph():
+    g = StateGraph(AgentState)
+    g.add_node("judge_done", judge_done)
+    g.add_node("plan", plan)
+    g.add_node("fill_one", fill_one)
+    g.add_node("guard", guard)
+    g.add_node("call_one", call_one)
+    g.add_node("record", record)
+    g.add_node("finish", finish)
+    g.add_edge(START, "judge_done")
+    g.add_conditional_edges("judge_done", after_judge, {"finish_ok": "finish", "finish_limit": "finish", "plan": "plan"})
+    g.add_conditional_edges("plan", after_plan, ["fill_one", "finish"])
+    g.add_edge("fill_one", "guard")
+    g.add_conditional_edges("guard", after_guard, ["call_one", "finish", "judge_done"])
+    g.add_edge("call_one", "record")
+    g.add_conditional_edges("record", after_record, {"finish": "finish", "judge_done": "judge_done"})
+    g.add_edge("finish", END)
+    return g.compile()
+
+
+_GRAPH = None
+
+
+def graph():
+    global _GRAPH
+    if _GRAPH is None:
+        _GRAPH = build_graph()
+    return _GRAPH
+
+
+async def run(agent: "ja.JevAgent", req: Any, context: str = "") -> Dict[str, Any]:
+    """Run one request through the graph. Same status dict as JevAgent.run."""
+    if ja.sha256(req.prompt) != req.prompt_sha256:
+        return {"ok": False, "error": "prompt hash mismatch; refused to run", "tool_calls": []}
+    judge, prose = ja.Judge(), ja.Prose(agent.router)
+    started = time.time()
+    allowed = ja.tools_for(req.scopes)
+    background = req.prompt if req.prompt != req.original_message else ""
+    facts: Dict[str, Any] = {"request": req.original_message, "task_context": context, "background": background,
+                             **ja._now_facts(), "accounts": {"org_google": ja.ORG_ACCOUNT, "owner_google": ja.OWNER_ACCOUNT}}
+    steps: List[Dict[str, Any]] = []
+    try:
+        async with ja.ToolBox(agent.inkbox_server, agent.mcp_config) as box:
+            tool_options: Dict[str, str] = {}
+            for name in allowed:
+                try:
+                    tool_options[name] = ja.TOOL_PURPOSE.get(name) or (await box.schema(name))["description"] or name
+                except ValueError:
+                    continue
+                except Exception as exc:
+                    logger.warning("jev graph: cannot describe %s: %s", name, exc)
+            rt = {"agent": agent, "judge": judge, "prose": prose, "req": req, "context": context, "box": box,
+                  "tool_options": tool_options}
+            initial: AgentState = {"goal": req.original_message, "background": background, "task_context": context,
+                                   "facts": facts, "steps": [], "filled": [], "round": 0, "step": 0, "p_done": 0.0,
+                                   "excluded": [], "outcome": None, "error": "", "confirm": None}
+            final = await graph().ainvoke(initial, config={"configurable": {"rt": rt}, "recursion_limit": 400})
+            steps = final.get("steps", [])
+            outcome = final.get("outcome")
+            if outcome == "confirm":
+                st = agent._status(False, "confirmation required", steps, judge, prose, started)
+                st["confirm"] = final["confirm"]
+                return st
+            if outcome == "fail":
+                return agent._status(False, final.get("error") or "failed", steps, judge, prose, started, probs=final.get("probs"))
+            if outcome is None and final.get("step", 0) >= agent.max_steps and not (steps and final.get("p_done", 0) >= ja.DONE_MIN):
+                return agent._status(False, "step limit reached", steps, judge, prose, started)
+    except Exception as exc:
+        logger.exception("jev graph failed for request %s", req.id)
+        return agent._status(False, str(exc), steps, judge, prose, started)
+    return agent._status(True, "", steps, judge, prose, started)
