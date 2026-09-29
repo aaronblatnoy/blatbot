@@ -338,6 +338,9 @@ def test_prose_is_told_which_queries_already_failed():
              {"tool": "other", "args": {"query": "x"}, "ok": True, "result": ""}]
     assert _tried_values(steps, "t", "query") == ["acceptance rate", "reviewer"]
     assert _tried_values(steps, "t", "nope") == []
+    multi = [{"tool": "r", "args": {"user_google_email": "x", "spreadsheet_id": "S1"}, "ok": True, "result": ""},
+             {"tool": "r", "args": {"user_google_email": "x", "spreadsheet_id": "S2", "range_name": "Tab!A1"}, "ok": True, "result": ""}]
+    assert _tried_values(multi, "r", "spreadsheet_id", sole=True) == ["S1"]      # S2 was read with a tab: still offerable
 
 
 def test_error_text_results_count_as_failures():
@@ -415,8 +418,9 @@ def test_unsure_after_reads_with_low_done_score_fails_over(agent, monkeypatch):
 
 def test_fit_leaves_states_under_budget_untouched_and_digests_only_when_over():
     from inkbox_claude.gate.jevagent import _fit, _BUDGET
-    mid = {"goal": "g", "steps_so_far": [{"result": "x" * 60000}]}          # big, but under budget
+    mid = {"goal": "g", "steps_so_far": [{"result": "x" * 40000}]}          # big, but under budget
     assert _fit(mid) == mid
+    assert _fit(mid, reserve=50000) != mid                                    # the questions count too
     over = {"goal": "g", "steps_so_far": [{"result": "y" * 90000}, {"result": "z" * 90000}]}
     fitted = _fit(over)
     assert fitted["goal"] == "g" and len(json.dumps(fitted)) <= _BUDGET
@@ -554,3 +558,43 @@ def test_ids_are_found_under_camelcase_and_json_keys():
             ' spreadsheet_id=18FY8UeEMQsKqYUHlrm7 Event ID: evt_abc123def456')
     ids = _candidate_values("response_id", "", "string", {"request": "x"}, [{"result": blob}])
     assert "ACYDBNhX0m9vQ" in ids and "1OGQhnPoO9OzdYqzUgdtBcxYdeEdeLjYGTzE7" in ids and "18FY8UeEMQsKqYUHlrm7" in ids and "evt_abc123def456" in ids
+
+
+def test_sheet_read_learns_the_other_tabs_and_offers_them(agent, monkeypatch):
+    from inkbox_claude.gate.jevagent import _sheet_tabs
+    info = ('Spreadsheet: "Tracker" (ID: 1AAA) | Locale: en_US\nSheets (3):\n'
+            '  - "Form Responses" (ID: 1714329655) | Size: 201x27 | Conditional formats: 1\n'
+            '  - "Chat Tracking" (ID: 1543636823) | Size: 988x27 | Conditional formats: 0\n'
+            '  - "Board Member Tracking" (ID: 398141727) | Size: 1000x26 | Conditional formats: 0\n')
+    assert _sheet_tabs(info) == ["Form Responses", "Chat Tracking", "Board Member Tracking"]
+    read, meta = "mcp__tamid-drive__read_sheet_values", "mcp__tamid-drive__get_spreadsheet_info"
+    schemas = {read: {"description": "read", "schema": {"type": "object", "required": ["spreadsheet_id"],
+                                                        "properties": {"user_google_email": {"type": "string"}, "spreadsheet_id": {"type": "string"},
+                                                                       "range_name": {"type": "string", "description": "range like Sheet1!A1:D10"}}}},
+               meta: {"description": "info", "schema": {"type": "object", "required": ["spreadsheet_id"],
+                                                        "properties": {"user_google_email": {"type": "string"}, "spreadsheet_id": {"type": "string"}}}}}
+    box = FakeBox(schemas, results={read: "Successfully read 101 rows from range 'A1:Z1000': Row 1: ['Timestamp', 'Email']", meta: info})
+    class J(ScriptedJudge):
+        async def ask(self, state, questions):
+            self.calls += 1
+            out = {}
+            for qid, q in questions.items():
+                if q["type"] == "noul":
+                    out[qid] = {"noul": 0.9 if qid == "supply::range_name" and len(box.calls) >= 2 else 0.3}
+                else:
+                    opts = q["criteria"]
+                    want = next((k for k, v in opts.items() if "Board Member Tracking" in json.dumps(v)), None) or next(k for k in opts if k.startswith("c"))
+                    out[qid] = {"choice": want, "probabilities": {want: 0.95}}
+            return out
+        async def yes(self, state, question):
+            if "fully achieved" in str(question):
+                return 0.9 if not self.picks else 0.1
+            return 0.9
+    judge = J([read, read])
+    _patch(monkeypatch, box, judge, ScriptedProse(), [read, meta])
+    st = asyncio.run(agent.run(_req("how many coffee chats did Sam Rivera do? check the board member tracking tab of sheet 1AAAAAAAAAAAAAAAAAAAAAAAA1")))
+    assert st["ok"]
+    calls = [(c[0].split("__")[-1], c[1].get("range_name")) for c in box.calls]
+    assert calls[0][0] == "read_sheet_values" and calls[1][0] == "get_spreadsheet_info"      # tabs learned right after the first read
+    assert calls[2] == ("read_sheet_values", "'Board Member Tracking'!A1:Z1000")             # second read targets the right tab
+    assert "tabs:" in st["raw"] and "Board Member Tracking" in st["raw"]

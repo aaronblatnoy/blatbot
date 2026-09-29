@@ -265,6 +265,7 @@ class Judge:
         the reply model and the owner untouched). Any other failure returns no
         answers, which every caller treats as "unsure"."""
         self.calls += 1
+        state = _fit(state, reserve=len(json.dumps(questions, ensure_ascii=False, default=str)))
         try:
             return await self._post(state, questions)
         except JudgeTooLarge:
@@ -350,29 +351,40 @@ def _looks_like_error(result: Any) -> bool:
     return bool(_ERROR_RE.search(head))
 
 
-def _tried_values(steps: List[Dict[str, Any]], tool: str, arg: str) -> List[Any]:
-    """Values this tool has already been called with for this argument, in order."""
+_FIXED_ARGS = {"user_google_email"}
+
+
+def _tried_values(steps: List[Dict[str, Any]], tool: str, arg: str, sole: bool = False) -> List[Any]:
+    """Values this tool has already been called with for this argument, in order.
+    With sole=True only calls where this argument was the ONLY variable one count:
+    re-reading the same spreadsheet with a different tab is a new attempt, not a
+    repeat, so the spreadsheet id must stay offerable."""
     out: List[Any] = []
     for st in steps:
-        if st["tool"] == tool and arg in (st.get("args") or {}):
-            v = st["args"][arg]
+        a = st.get("args") or {}
+        if st["tool"] == tool and arg in a:
+            if sole and len([k for k in a if k not in _FIXED_ARGS]) != 1:
+                continue
+            v = a[arg]
             if v not in out:
                 out.append(v)
     return out
 
 
-_BUDGET = 100000        # characters per TypeSafe request that stay under its ~32k-token ceiling
+_BUDGET = 70000         # characters per TypeSafe request (state + questions) that stay under its ~32k-token ceiling
 _LARGE = 20000          # a string counts as "large" for digesting purposes only once a state must be shrunk
 _PART = 48000           # largest text one narrowing judgment sees
 _LEAF = 6000            # stop narrowing here: small enough to extract candidates from precisely
 _MAX_CANDIDATES = 250   # a Choice takes at most 255 options
 
 
-def _fit(state: Any) -> Any:
-    """Keep a judgment state under the API budget. Raw results stay raw; only when the
-    whole state would overload Jev is the largest string replaced by its digest,
-    largest first, until it fits. Below the budget nothing is touched."""
-    if len(json.dumps(state, ensure_ascii=False, default=str)) <= _BUDGET:
+def _fit(state: Any, reserve: int = 0) -> Any:
+    """Keep a judgment request under the API budget. Raw results stay raw; only when
+    state + questions (`reserve` chars) would overload Jev is the largest string
+    replaced by its digest, largest first, until it fits. Below the budget nothing
+    is touched."""
+    budget = max(_BUDGET - reserve, 20000)
+    if len(json.dumps(state, ensure_ascii=False, default=str)) <= budget:
         return state
     state = json.loads(json.dumps(state, ensure_ascii=False, default=str))
 
@@ -396,7 +408,7 @@ def _fit(state: Any) -> Any:
         return v
 
     for _ in range(50):
-        if len(json.dumps(state, ensure_ascii=False, default=str)) <= _BUDGET:
+        if len(json.dumps(state, ensure_ascii=False, default=str)) <= budget:
             break
         n, path = biggest(state)
         if n < 2000 or not path:
@@ -433,6 +445,9 @@ def _digest(result: Any, force: bool = False) -> Any:
         d["first_lines"] = [ln[:200] for ln in lines[:5]]
     d["emails_found"] = len(set(_EMAIL_RE.findall(t)))
     d["ids_found"] = len(set(_LABELED_ID_RE.findall(t)))
+    notes = [ln.strip() for ln in lines if ln.strip().startswith("NOTE:")]
+    if notes:
+        d["notes"] = notes                      # what the agent learned about this result (tabs, etc.)
     d["note"] = "large result; its values are offered as candidates after a narrowing search"
     return d
 
@@ -572,6 +587,7 @@ class JevAgent:
                     except Exception as exc:
                         logger.warning("jev agent: cannot describe %s: %s", name, exc)
                 p_done = 0.0
+                excluded: set = set()   # tools that have nothing new to give this run
                 for step in range(self.max_steps):
                     state = {"goal": req.original_message, "task_context": context, **_now_facts(),
                              "steps_so_far": [{"tool": s["tool"], "args": s["args"], "ok": s["ok"], "result": s["result"]} for s in steps]}
@@ -580,14 +596,17 @@ class JevAgent:
                         p_done = await judge.yes(state, {
                             "question": "Is `goal` now fully achieved by `steps_so_far`, so no further tool call is needed?",
                             "criteria": {"true": "Everything the goal asked for has been done or, for a question, "
-                                                 "the right lookup has been made (an empty result from the right "
-                                                 "place still answers the question).",
-                                         "false": "Something the goal asked for has not happened yet, or the lookup "
-                                                  "was aimed at the wrong target and a different call is needed."}})
+                                                 "the retrieved results contain what is needed to answer it. Counting, "
+                                                 "filtering or comparing rows that are already retrieved is NOT a "
+                                                 "further tool call; the answer is written from the results. An empty "
+                                                 "result from the right place also answers the question.",
+                                         "false": "Something the goal asked for has not happened yet, or the results "
+                                                  "retrieved so far do not contain the needed information and a "
+                                                  "different call is needed."}})
                         logger.info("jev agent step %d: p(done)=%.2f", step + 1, p_done)
                         if p_done >= 0.6:
                             break
-                    options = dict(tool_options)
+                    options = {k: v for k, v in tool_options.items() if k not in excluded} or dict(tool_options)
                     if len(steps) >= 2 and steps[-1]["tool"] == steps[-2]["tool"] and len(options) > 1:
                         # Two calls of the same tool in a row: the next move must be a different
                         # one (open a result, read a sheet), not a third search.
@@ -606,7 +625,25 @@ class JevAgent:
                                    f"Choose {GIVE_UP} if a needed tool is missing or a step failed twice."]},
                         options)
                     logger.info("jev agent step %d: %s (conf %.2f)", step + 1, choice, conf)
+                    if choice is None and probs:
+                        # Not done and no clear pick: narrow to the likeliest few and ask
+                        # again, framed as "what do we TRY next". Giving up needs two
+                        # unsure answers in a row, not one.
+                        top3 = [k for k, _ in sorted(probs.items(), key=lambda kv: -kv[1]) if k != GIVE_UP][:3]
+                        if top3:
+                            narrowed = {k: options[k] for k in top3 if k in options}
+                            narrowed[GIVE_UP] = "Nothing in this list could possibly move the goal forward."
+                            choice, conf, probs2 = await judge.choose(
+                                state, {"question": "The goal is NOT met yet. Of these, which is the most useful next attempt "
+                                                    "(a different query, a different tab or record, a different tool)?",
+                                        "rules": ["Prefer trying something over giving up whenever a tool here can still help.",
+                                                  "A lookup that returned the wrong thing means: try it again differently."]},
+                                narrowed, min_p=0.34)
+                            logger.info("jev agent step %d (retry): %s (conf %.2f)", step + 1, choice, conf)
+                            if choice == GIVE_UP:
+                                choice = None
                     if choice is None:
+                        logger.info("jev agent: unsure; top options %s", sorted(probs.items(), key=lambda kv: -kv[1])[:5])
                         if steps and steps[-1]["ok"] and not is_write_tool(steps[-1]["tool"]) and p_done >= 0.3:
                             # Nothing stands out after a read and the goal is plausibly met:
                             # what was gathered is the answer (the gate's reply model phrases it).
@@ -629,10 +666,23 @@ class JevAgent:
                         # The gateway delivers the answer; a send to the requester would duplicate it.
                         logger.info("jev agent: refusing %s to the requester; finishing with findings", choice)
                         break
+                    if any(s["ok"] and s["tool"] == choice and s["args"] == args for s in steps) and p_done < 0.3:
+                        # Same call again: the judge wants this tool but with something different
+                        # (another tab, another record). Refill avoiding the values just used.
+                        again = await self._fill_args(box, judge, prose, choice, facts, steps, req, avoid=args)
+                        if again is not None and again != args:
+                            logger.info("jev agent: re-filled %s to avoid a repeat: %s", choice.split("__")[-1],
+                                        json.dumps({k: v for k, v in again.items() if k != "user_google_email"})[:200])
+                            args = again
                     if any(s["ok"] and s["tool"] == choice and s["args"] == args for s in steps):
-                        # The best next move is one already made: nothing better exists, so the work is done.
-                        logger.info("jev agent: would repeat %s with identical arguments; treating as done", choice)
-                        break
+                        if p_done >= 0.3:
+                            # The best next move is one already made and the goal is plausibly met: done.
+                            logger.info("jev agent: would repeat %s with identical arguments; treating as done", choice)
+                            break
+                        # Not plausibly done and this tool has nothing new to give: try something else.
+                        logger.info("jev agent: would repeat %s identically at p_done %.2f; excluding it and re-picking", choice, p_done)
+                        excluded.add(choice)
+                        continue
                     try:
                         result = await box.call(choice, args)
                         if _looks_like_error(result):
@@ -640,10 +690,17 @@ class JevAgent:
                             # failed step so the loop tries different arguments, and never
                             # "finish with findings" on it.
                             raise RuntimeError(result if isinstance(result, str) else _text(result))
+                        result = await self._enrich(box, choice, args, result, steps)
                         steps.append({"tool": choice, "args": args, "result": result, "ok": True})
+                        logger.info("jev agent step %d: %s(%s) -> %s", step + 1, choice.split("__")[-1],
+                                    json.dumps({k: v for k, v in args.items() if k != "user_google_email"}, ensure_ascii=False)[:300],
+                                    " ".join(_text(result).split())[:300])
                         facts[f"result_of_{choice.split('__')[-1]}_{len(steps)}"] = _text(result)
                     except Exception as exc:
                         steps.append({"tool": choice, "args": args, "result": f"ERROR: {exc}", "ok": False})
+                        logger.info("jev agent step %d: %s(%s) -> ERROR %s", step + 1, choice.split("__")[-1],
+                                    json.dumps({k: v for k, v in args.items() if k != "user_google_email"}, ensure_ascii=False)[:300],
+                                    " ".join(str(exc).split())[:300])
                         if sum(1 for s in steps if s["tool"] == choice and not s["ok"]) >= 2:
                             return self._status(False, f"{choice} failed twice: {exc}", steps, judge, prose, started)
                 else:
@@ -654,7 +711,8 @@ class JevAgent:
         return self._status(True, "", steps, judge, prose, started)
 
     async def _fill_args(self, box: ToolBox, judge: Judge, prose: Prose, tool: str, facts: Dict[str, Any],
-                         steps: List[Dict[str, Any]], req: Request) -> Optional[Dict[str, Any]]:
+                         steps: List[Dict[str, Any]], req: Request,
+                         avoid: Optional[Dict[str, Any]] = None) -> Optional[Dict[str, Any]]:
         """Fill one tool's arguments in ONE TypeSafe request: for each optional
         argument a Noul (supply it?), for each argument with values already in
         play a Choice (which one?), for enums/booleans a Choice. Only arguments
@@ -698,7 +756,9 @@ class JevAgent:
                                                "criteria": opts}
                 continue
             cs = await self._candidates(judge, name, str(spec.get("description") or ""), typ, facts, steps, req)
-            tried = _tried_values(steps, tool, name)
+            if avoid and name in avoid and len(cs) > 1:
+                cs = [c for c in cs if c != avoid[name]]      # the value just used is not offered again
+            tried = _tried_values(steps, tool, name, sole=True)
             if cs and tried and len(cs) > len(tried):
                 # Trial and error: a value this tool already got for this argument is
                 # not offered again, so the next likely document/event/row gets tried.
@@ -742,6 +802,11 @@ class JevAgent:
                 continue
             if name in cands:
                 pick = _top(f"pick::{name}", 0.3)
+                if pick is None and name in required:
+                    # No candidate clears the bar but one is needed: take the likeliest.
+                    # A wrong pick is cheaper than stopping; the loop retries differently.
+                    pick = _top(f"pick::{name}", 0.0)
+                    logger.info("jev agent: %s.%s taken as best guess (%s)", short, name, pick)
                 if pick and pick != "write_new":
                     args[name] = _coerce(cands[name][int(pick[1:])], typ)
                     continue
@@ -774,6 +839,49 @@ class JevAgent:
             logger.warning("jev agent: missing required args %s for %s", missing, tool)
             return None
         return args
+
+    async def _enrich(self, box: ToolBox, tool: str, args: Dict[str, Any], result: Any,
+                      steps: List[Dict[str, Any]]) -> Any:
+        """Things a person would know after a call that the tool does not say.
+        A sheet read names only the tab it read; append the spreadsheet's tab list
+        (once per spreadsheet per run) so the next step can pick another tab."""
+        short = tool.split("__")[-1]
+        if short in ("list_form_responses", "get_form") and isinstance(result, str) and args.get("form_id"):
+            # A Google Form's full response set lives in its "(Responses)" spreadsheet,
+            # often with extra tracking tabs; the form API pages a few responses. Point there.
+            server = split_tool(tool)[0]
+            try:
+                form = result if short == "get_form" else await box.call(
+                    f"mcp__{server}__get_form", {"user_google_email": args.get("user_google_email", ""), "form_id": args["form_id"]})
+                m = re.search(r"Document Title: \"([^\"]+)\"", form) or re.search(r"Title: \"([^\"]+)\"", form)
+                if m:
+                    found = await box.call(f"mcp__{server}__search_drive_files",
+                                           {"user_google_email": args.get("user_google_email", ""),
+                                            "query": f"name contains '{m.group(1)} (Responses)'", "file_type": "spreadsheet"})
+                    ids = re.findall(r"\(ID: ([A-Za-z0-9_-]{20,})", found or "")
+                    if ids:
+                        result += (f"\n\nNOTE: this form's responses are collected in spreadsheet \"{m.group(1)} (Responses)\" "
+                                   f"(ID: {ids[0]}); read it with get_spreadsheet_info / read_sheet_values. It holds ALL "
+                                   "responses and any extra tracking tabs; the form API lists only a page of responses.")
+            except Exception as exc:
+                logger.info("jev agent: could not resolve the form's responses sheet: %s", exc)
+        if short == "read_sheet_values" and isinstance(result, str) and args.get("spreadsheet_id"):
+            server = split_tool(tool)[0]
+            sid = args["spreadsheet_id"]
+            already = any(s["tool"].endswith("get_spreadsheet_info") and (s.get("args") or {}).get("spreadsheet_id") == sid for s in steps)
+            if not already:
+                try:
+                    info = await box.call(f"mcp__{server}__get_spreadsheet_info",
+                                          {"user_google_email": args.get("user_google_email", ""), "spreadsheet_id": sid})
+                    tabs = _sheet_tabs(info)
+                    if tabs:
+                        rng = args.get("range_name") or "(default: the first tab)"
+                        result += ("\n\nNOTE: this read covered range " + str(rng) + ". The spreadsheet has these tabs: "
+                                   + ", ".join(f'"{t}"' for t in tabs) + ". To read another tab, call read_sheet_values "
+                                   "with range_name set to that tab's name.")
+                except Exception as exc:
+                    logger.info("jev agent: could not list tabs for %s: %s", sid, exc)
+        return result
 
     async def _candidates(self, judge: "Judge", name: str, desc: str, typ: str, facts: Dict[str, Any],
                           steps: List[Dict[str, Any]], req: Request) -> List[Any]:
@@ -833,12 +941,28 @@ _EMAIL_RE = re.compile(r"[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}")
 _PHONE_RE = re.compile(r"\+?1?[ (.-]*\d{3}[ ).-]*\d{3}[ .-]*\d{4}")
 
 
+_TAB_RE = re.compile(r'^\s*-\s+"([^"]+)"\s+\(ID:\s*\d+\)\s*\|\s*Size:', re.M)
+
+
+def _sheet_tabs(info_text: str) -> List[str]:
+    """Tab names out of a get_spreadsheet_info result."""
+    return [m for m in _TAB_RE.findall(info_text or "")]
+
+
 def _candidate_values(name: str, desc: str, typ: str, facts: Dict[str, Any], steps: List[Dict[str, Any]]) -> List[Any]:
     """Values already in play that could fill this argument: ids, addresses, phones,
     and short strings from tool results. Jev selects among them."""
     blob = "\n".join(_text(v) for v in facts.values()) + "\n" + "\n".join(_text(s["result"]) for s in steps)
     lname = (name + " " + desc).lower()
     out: List[Any] = []
+    if name in ("range_name", "range", "sheet_name", "tab", "worksheet", "sheet"):
+        tabs = _sheet_tabs(blob)
+        tabs += re.findall(r'tabs: ((?:"[^"]+"(?:, )?)+)', blob) and [t for grp in re.findall(r'tabs: ((?:"[^"]+"(?:, )?)+)', blob) for t in re.findall(r'"([^"]+)"', grp)] or []
+        seen_t: List[str] = []
+        for t in tabs:
+            if t not in seen_t:
+                seen_t.append(t)
+        out += [f"'{t}'!A1:Z1000" for t in seen_t]
     if "email" in lname or name in ("to", "cc", "attendee", "attendees"):
         out += _EMAIL_RE.findall(blob)
     if "phone" in lname or "sms" in lname or "number" in lname or name in ("to", "to_number"):

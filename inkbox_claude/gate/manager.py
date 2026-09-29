@@ -1032,7 +1032,7 @@ class GateSessionManager:
         findings = status.get("raw") or ""
         fallback = await self.executor.run(req, context=context, prior_work=findings)
         fallback["escalated"] = True
-        fallback["jev_attempt"] = {k: status.get(k) for k in ("error", "tool_calls", "jev_calls", "prose_calls", "seconds")}
+        fallback["jev_attempt"] = {k: status.get(k) for k in ("error", "tool_calls", "jev_calls", "prose_calls", "seconds", "steps", "raw")}
         return fallback
 
     async def execute(self, req: Request, notify: bool = True) -> str:
