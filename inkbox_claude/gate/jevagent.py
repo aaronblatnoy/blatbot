@@ -37,7 +37,7 @@ from zoneinfo import ZoneInfo
 
 import httpx
 
-from .scopes import ORG_ACCOUNT, OWNER_ACCOUNT, sends_to_requester, tools_for
+from .scopes import ORG_ACCOUNT, OWNER_ACCOUNT, TOOL_PURPOSE, sends_to_requester, tools_for
 from .store import Request, sha256
 from .taskpick import TYPESAFE_URL
 
@@ -87,6 +87,20 @@ def split_tool(name: str) -> Tuple[str, str]:
     if not m:
         raise ValueError(f"not an mcp tool name: {name}")
     return m.group(1), m.group(2)
+
+
+SEARCH_URL = os.getenv("GATE_SEARCH_URL") or "http://127.0.0.1:8888/search"
+
+VIRTUAL_TOOLS: Dict[str, Dict[str, Any]] = {
+    # A web search done THROUGH the browser: the Playwright server opens the local
+    # SearXNG results page (which queries Google/Bing server-side, so no bot walls)
+    # and reads it. Two browser calls, one tool from the agent's point of view.
+    "mcp__playwright__browser_search": {
+        "description": TOOL_PURPOSE["mcp__playwright__browser_search"],
+        "schema": {"type": "object", "required": ["query"],
+                   "properties": {"query": {"type": "string", "description": "what to search the web for: a name plus a distinguishing word (school, club, company), or a topic"}}},
+    },
+}
 
 
 class ToolBox:
@@ -143,6 +157,8 @@ class ToolBox:
         return out
 
     async def schema(self, name: str) -> Dict[str, Any]:
+        if name in VIRTUAL_TOOLS:
+            return VIRTUAL_TOOLS[name]
         server, short = split_tool(name)
         if server == "inkbox":
             return (await self._inkbox_tools()).get(short, {"description": "", "schema": {}})
@@ -150,6 +166,8 @@ class ToolBox:
         return self._schemas.get(name, {"description": "", "schema": {}})
 
     async def call(self, name: str, args: Dict[str, Any]) -> Any:
+        if name == "mcp__playwright__browser_search":
+            return await self._browser_search(str(args.get("query") or ""))
         server, short = split_tool(name)
         if server == "inkbox":
             from mcp import types as mt
@@ -168,6 +186,51 @@ class ToolBox:
         if getattr(res, "isError", False):
             raise RuntimeError(text)
         return text
+
+
+def _json_results_from_snapshot(snap: str) -> List[Dict[str, Any]]:
+    """The browser renders a JSON response as one text node; the snapshot shows it as
+    a YAML double-quoted scalar ("{\\"query\\": ...}"). Unquote once, then parse."""
+    for line in snap.splitlines():
+        m = re.search(r'\]: ("\{.*\}")\s*$', line)
+        if not m:
+            continue
+        try:
+            inner = json.loads(m.group(1))          # the YAML/JSON-quoted scalar -> raw JSON text
+            data = json.loads(inner)
+            return list(data.get("results") or [])
+        except Exception:
+            continue
+    body = snap[snap.find("{"):snap.rfind("}") + 1] if "{" in snap else ""
+    try:
+        return list(json.loads(body).get("results") or [])
+    except Exception:
+        return []
+
+
+async def _toolbox_browser_search(box: "ToolBox", query: str) -> str:
+    """Search the web through the browser: open the local SearXNG results (JSON
+    view) in Playwright and read them off the page. Titles, links, snippets."""
+    import urllib.parse
+    url = f"{SEARCH_URL}?q={urllib.parse.quote(query)}&format=json&language=en"
+    await box.call("mcp__playwright__browser_navigate", {"url": url})
+    snap = await box.call("mcp__playwright__browser_snapshot", {})
+    results: List[Dict[str, Any]] = _json_results_from_snapshot(snap)
+    if not results:
+        urls = [u for u in re.findall(r"https?://[^\s\"'<>]+", snap) if "127.0.0.1" not in u and "localhost" not in u]
+        if not urls:
+            return f"No results for {query!r}. Try different words."
+        return f"Web search results for {query!r} (links only):\n" + "\n".join(f"{i+1}. {u}" for i, u in enumerate(urls[:12]))
+    out = []
+    for i, r in enumerate(results[:12]):
+        line = f"{i+1}. {r.get('title', '').strip()}\n   url: {r.get('url', '').strip()}"
+        if r.get("content"):
+            line += f"\n   {' '.join(str(r['content']).split())}"
+        out.append(line)
+    return f"Web search results for {query!r}:\n" + "\n".join(out)
+
+
+ToolBox._browser_search = _toolbox_browser_search  # type: ignore[attr-defined]
 
 
 def mcp_config_from_claude_json() -> Dict[str, Dict[str, Any]]:
@@ -235,6 +298,12 @@ class Judge:
         top = a.get("choice") or (max(probs, key=probs.get) if probs else None)
         p = probs.get(top, float(a.get("confidence") or 0.0)) if top else 0.0
         floor = self.min_conf if min_p is None else min_p
+        if top and p < floor and min_p is None and len(probs) >= 6:
+            # Many options spread the mass: a leader with twice the runner-up's
+            # probability is a clear pick even when its absolute probability is low.
+            second = max((v for k, v in probs.items() if k != top), default=0.0)
+            if p >= 0.2 and p >= 2 * second:
+                return top, p, probs
         return (top if top and p >= floor else None), p, probs
 
     async def yes(self, state: Any, question: Any) -> float:
@@ -270,7 +339,8 @@ class Prose:
 
 
 _ERROR_RE = re.compile(r"^\s*(#+\s*)?(error|api error|httperror|traceback|exception|invalid|failed|unauthori[sz]ed|forbidden|not found)\b"
-                       r"|\berror calling tool\b|\bHttpError \d{3}\b|\breturned \"[^\"]*(error|invalid|denied|not found)", re.I)
+                       r"|\berror calling tool\b|\bHttpError \d{3}\b|\breturned \"[^\"]*(error|invalid|denied|not found)"
+                       r"|linkedin\.com/authwall|Page Title: Sign (In|Up)|Page Title: Join LinkedIn|Sign in to (view|continue|see)|Verifying you.?re not a bot", re.I)
 
 
 def _looks_like_error(result: Any) -> bool:
@@ -496,7 +566,7 @@ class JevAgent:
                 tool_options: Dict[str, str] = {}
                 for name in allowed:
                     try:
-                        tool_options[name] = (await box.schema(name))["description"] or name
+                        tool_options[name] = TOOL_PURPOSE.get(name) or (await box.schema(name))["description"] or name
                     except ValueError:
                         continue  # a Claude built-in (WebSearch, WebFetch): not callable here
                     except Exception as exc:
@@ -757,7 +827,7 @@ def is_write_tool(name: str) -> bool:
     return bool(_WRITE_RE.search(name.split("__")[-1]))
 
 
-_LABELED_ID_RE = re.compile(r"\b(?:ID|id|Id)\s*[:=]\s*\"?([^\s\"'|,)>]+)")
+_LABELED_ID_RE = re.compile(r"(?:\b(?:ID|id|Id)|[A-Za-z_]+(?:Id|ID|_id))\"?\s*[:=]\s*\"?([^\s\"'|,)>}\]]+)")
 _ID_RE = re.compile(r"\b(?=[A-Za-z0-9_-]*\d)[A-Za-z0-9_-]{16,}\b")
 _EMAIL_RE = re.compile(r"[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}")
 _PHONE_RE = re.compile(r"\+?1?[ (.-]*\d{3}[ ).-]*\d{3}[ .-]*\d{4}")

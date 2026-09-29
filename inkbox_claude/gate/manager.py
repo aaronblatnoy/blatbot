@@ -1029,7 +1029,8 @@ class GateSessionManager:
             logger.info("[gate] jev agent #%s failed after a write; not falling back", req.id)
             return status
         logger.info("[gate] jev agent gave up on #%s (%s); falling back to claude code", req.id, status.get("error"))
-        fallback = await self.executor.run(req, context=context)
+        findings = status.get("raw") or ""
+        fallback = await self.executor.run(req, context=context, prior_work=findings)
         fallback["escalated"] = True
         fallback["jev_attempt"] = {k: status.get(k) for k in ("error", "tool_calls", "jev_calls", "prose_calls", "seconds")}
         return fallback

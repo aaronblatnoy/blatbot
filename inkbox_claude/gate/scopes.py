@@ -139,19 +139,20 @@ SCOPES: Dict[str, Dict[str, object]] = {
         "tools": ['mcp__tamid-admin__tamid_list_board_members', 'mcp__tamid-admin__tamid_get_board_member', 'mcp__tamid-admin__tamid_list_events', 'mcp__tamid-admin__tamid_list_upcoming_events', 'mcp__tamid-admin__tamid_get_event', 'mcp__tamid-admin__tamid_list_members', 'mcp__tamid-admin__tamid_list_semesters', 'mcp__tamid-admin__tamid_list_site_config', 'mcp__tamid-admin__tamid_get_site_config', 'mcp__tamid-admin__tamid_list_contact_requests', 'mcp__tamid-admin__tamid_get_contact_request', 'mcp__tamid-admin__tamid_list_newsletter_signups', 'mcp__tamid-admin__tamid_get_newsletter_signup', 'mcp__tamid-admin__tamid_create_board_member', 'mcp__tamid-admin__tamid_update_board_member', 'mcp__tamid-admin__tamid_delete_board_member', 'mcp__tamid-admin__tamid_replace_board_member_headshot', 'mcp__tamid-admin__tamid_create_event', 'mcp__tamid-admin__tamid_update_event', 'mcp__tamid-admin__tamid_delete_event', 'mcp__tamid-admin__tamid_replace_event_flyer', 'mcp__tamid-admin__tamid_create_member', 'mcp__tamid-admin__tamid_update_member', 'mcp__tamid-admin__tamid_delete_member', 'mcp__tamid-admin__tamid_create_semester', 'mcp__tamid-admin__tamid_update_semester', 'mcp__tamid-admin__tamid_delete_semester', 'mcp__tamid-admin__tamid_create_site_config', 'mcp__tamid-admin__tamid_update_site_config', 'mcp__tamid-admin__tamid_delete_site_config', 'mcp__tamid-admin__tamid_update_contact_request', 'mcp__tamid-admin__tamid_delete_contact_request', 'mcp__tamid-admin__tamid_create_newsletter_signup', 'mcp__tamid-admin__tamid_update_newsletter_signup', 'mcp__tamid-admin__tamid_delete_newsletter_signup'],
     },
     "web": {
-        "description": "search the web",
-        "tools": ["WebSearch"],
+        "description": "search the web and open web pages: find a person, company, article, LinkedIn profile, or any public page, then read it in the headless browser",
+        "tools": ["WebSearch", "mcp__playwright__browser_search", "mcp__playwright__browser_navigate", "mcp__playwright__browser_snapshot",
+                  "mcp__playwright__browser_find", "mcp__playwright__browser_wait_for", "mcp__playwright__browser_navigate_back"],
     },
     "browser_read": {
         "description": "open web pages in a headless browser and read them: navigate, take a snapshot of the page, find elements, scroll, wait, screenshot. Read-only: no clicking, typing or form filling. For pages that need a real browser (JavaScript sites, portals) rather than a plain web search.",
-        "tools": ["mcp__playwright__browser_navigate", "mcp__playwright__browser_navigate_back", "mcp__playwright__browser_snapshot",
+        "tools": ["mcp__playwright__browser_search", "mcp__playwright__browser_navigate", "mcp__playwright__browser_navigate_back", "mcp__playwright__browser_snapshot",
                   "mcp__playwright__browser_find", "mcp__playwright__browser_take_screenshot", "mcp__playwright__browser_wait_for",
                   "mcp__playwright__browser_tabs", "mcp__playwright__browser_resize", "mcp__playwright__browser_console_messages",
                   "mcp__playwright__browser_network_requests", "mcp__playwright__browser_close"],
     },
     "browser_act": {
         "description": "operate a headless browser like a person: click, type, fill and submit forms, select options, press keys, hover, drag, upload files, handle dialogs, on any website. Use for tasks that must be done through a website's UI (sign-ups, portals, checkouts, admin pages with no API). Includes browser_read.",
-        "tools": ["mcp__playwright__browser_navigate", "mcp__playwright__browser_navigate_back", "mcp__playwright__browser_snapshot",
+        "tools": ["mcp__playwright__browser_search", "mcp__playwright__browser_navigate", "mcp__playwright__browser_navigate_back", "mcp__playwright__browser_snapshot",
                   "mcp__playwright__browser_find", "mcp__playwright__browser_take_screenshot", "mcp__playwright__browser_wait_for",
                   "mcp__playwright__browser_tabs", "mcp__playwright__browser_resize", "mcp__playwright__browser_console_messages",
                   "mcp__playwright__browser_network_requests", "mcp__playwright__browser_close",
@@ -195,3 +196,61 @@ def sends_to_requester(tool_name: str, args: dict, protected: list) -> bool:
     if args.get("conversation_id"):
         targets.append(args["conversation_id"])
     return any(_norm(str(t)) in keys for t in targets)
+
+
+# What each tool is FOR, in the words a task uses. Shown to the judgment that picks
+# the next tool instead of the servers' own (often long, implementation-flavoured)
+# descriptions. Tools not listed fall back to the server's description.
+TOOL_PURPOSE: Dict[str, str] = {
+    # web
+    "mcp__playwright__browser_search": "SEARCH THE WEB: type a query, get result titles, links and snippets. First step for any 'look up', 'find online', LinkedIn, company, person, or news question.",
+    "mcp__playwright__browser_navigate": "OPEN A WEB PAGE by URL in the browser (a search result, a profile, an article). Follow with browser_snapshot or browser_find to read it.",
+    "mcp__playwright__browser_snapshot": "READ THE CURRENT PAGE: the full text and links of the page that is open.",
+    "mcp__playwright__browser_find": "FIND TEXT ON THE CURRENT PAGE: locate a name, number or phrase on the open page and read around it.",
+    "mcp__playwright__browser_wait_for": "WAIT for the page to finish loading or for text to appear (only after a page opened blank).",
+    "mcp__playwright__browser_navigate_back": "GO BACK to the previous page.",
+    "mcp__playwright__browser_click": "CLICK a button or link on the open page.",
+    "mcp__playwright__browser_type": "TYPE into a field on the open page.",
+    "mcp__playwright__browser_fill_form": "FILL a form's fields on the open page.",
+    # Google Drive / Sheets / Docs / Forms (TAMID account)
+    "mcp__tamid-drive__search_drive_files": "FIND A FILE in TAMID Drive by name or words: sheets, docs, forms, folders. Returns names and ids. Use before opening anything whose id is unknown.",
+    "mcp__tamid-drive__list_drive_items": "LIST the files inside one Drive folder by folder id.",
+    "mcp__tamid-drive__list_spreadsheets": "LIST recent spreadsheets in TAMID Drive with their ids.",
+    "mcp__tamid-drive__get_spreadsheet_info": "SHEET STRUCTURE: the tabs of a spreadsheet, their names and row/column counts, by spreadsheet id. Answers 'how many rows'.",
+    "mcp__tamid-drive__read_sheet_values": "READ A SHEET'S CELLS: the rows of a spreadsheet tab (a roster, responses, a tracker) by spreadsheet id and range.",
+    "mcp__tamid-drive__get_drive_file_content": "READ A WHOLE FILE'S text by file id (a doc, a sheet export). Large; prefer read_sheet_values for sheets.",
+    "mcp__tamid-drive__get_doc_content": "READ A GOOGLE DOC's text by document id.",
+    "mcp__tamid-drive__search_docs": "FIND A GOOGLE DOC by words in its name.",
+    "mcp__tamid-drive__get_form": "FORM DEFINITION: a Google Form's title, questions and settings, by form id.",
+    "mcp__tamid-drive__list_form_responses": "WHO ANSWERED A FORM: every response to a Google Form (respondent email, answers, time), by form id. Answers 'who filled it out', 'who has not responded'.",
+    "mcp__tamid-drive__get_form_response": "ONE FORM RESPONSE in full, by form id and response id.",
+    "mcp__tamid-drive__get_events": "TAMID CALENDAR EVENTS: list or search events on the TAMID calendar (a query word, a date range, or an event id). Returns titles, times, attendees, ids.",
+    "mcp__tamid-drive__list_calendars": "WHICH CALENDARS the TAMID account has and their ids (needed before get_events on a non-primary calendar).",
+    "mcp__tamid-drive__manage_event": "CREATE, UPDATE or DELETE an event on the TAMID calendar.",
+    "mcp__tamid-drive__search_gmail_messages": "SEARCH THE TAMID INBOX: find emails by sender, words, or date (Gmail search syntax). Returns message ids and headers. Use to find someone's email address or what they sent.",
+    "mcp__tamid-drive__get_gmail_message_content": "READ ONE EMAIL in the TAMID inbox in full, by message id.",
+    "mcp__tamid-drive__get_gmail_thread_content": "READ A WHOLE EMAIL THREAD in the TAMID inbox, by thread id.",
+    "mcp__tamid-drive__send_gmail_message": "SEND AN EMAIL from the TAMID account to someone else.",
+    # Stern account
+    "mcp__stern-drive__get_events": "AARON'S STERN CALENDAR: list or search his events (a query word, a date range). Returns titles, times, ids.",
+    "mcp__stern-drive__list_calendars": "WHICH CALENDARS Aaron's Stern account has and their ids.",
+    "mcp__stern-drive__manage_event": "CREATE, UPDATE or DELETE an event on Aaron's Stern calendar.",
+    "mcp__stern-drive__search_gmail_messages": "SEARCH AARON'S STERN INBOX: find emails by sender, words, or date. Returns message ids and headers.",
+    "mcp__stern-drive__get_gmail_message_content": "READ ONE EMAIL in Aaron's Stern inbox in full, by message id.",
+    "mcp__stern-drive__send_gmail_message": "SEND AN EMAIL from Aaron's Stern account to someone else.",
+    # Inkbox (Blatbot's own mailbox, phone, contacts)
+    "mcp__inkbox__inkbox_get_contact": "LOOK UP A CONTACT in Blatbot's address book by name, email or phone: returns their email, phone and notes. First stop for 'what is X's email / number'.",
+    "mcp__inkbox__inkbox_list_contacts": "LIST Blatbot's contacts (names, emails, phones).",
+    "mcp__inkbox__inkbox_list_emails": "LIST recent emails in Blatbot's own mailbox.",
+    "mcp__inkbox__inkbox_send_email": "SEND AN EMAIL from Blatbot's mailbox to someone else.",
+    "mcp__inkbox__inkbox_send_sms": "SEND A TEXT (SMS) from Blatbot's number to someone else.",
+    "mcp__inkbox__inkbox_send_imessage": "SEND AN IMESSAGE from Blatbot's line to someone else.",
+    # site admin
+    "mcp__tamid-admin__tamid_list_board_members": "TAMID BOARD ROSTER from the website: every board member with name, title, email, bio.",
+    "mcp__tamid-admin__tamid_list_members": "TAMID MEMBER ROSTER from the website: club members with names and emails.",
+    "mcp__tamid-admin__tamid_list_events": "TAMID EVENTS listed on the website.",
+    "mcp__tamid-admin__tamid_list_site_config": "TAMID WEBSITE SETTINGS: application open/closed, deadlines, labels.",
+    "mcp__sjba-admin__sjba_list_board_members": "SJBA BOARD ROSTER from the website: every board member with name, title, email, bio.",
+    "mcp__sjba-admin__sjba_list_events": "SJBA EVENTS listed on the website.",
+    "mcp__sjba-admin__sjba_list_upcoming_events": "SJBA UPCOMING EVENTS on the website.",
+}

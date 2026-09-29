@@ -305,6 +305,26 @@ runs, runs inside that call as an escalation (status carries `escalated: true` a
 the Jev attempt as metadata) and nothing is delivered, noted, or phrased for the
 Jev attempt. Both executors refuse sends to the requester at the tool call.
 
+### Web search through the browser
+
+`browser_search` is a tool the agent sees like any other, implemented as two
+Playwright calls: open the local SearXNG results page in JSON view
+(`GATE_SEARCH_URL`, default `http://127.0.0.1:8888/search`) and read it off the
+page. SearXNG runs as a Docker container on the same box (`~/searxng`, restart
+unless-stopped, bound to loopback) and queries Google, Bing, Yahoo and others
+server-side, so the headless browser never meets a search engine's bot wall.
+Result URLs become candidates for `browser_navigate`; a page that turns out to be
+a sign-in wall (LinkedIn authwall, "Sign in to view") counts as a failed step so
+the agent tries something else instead of stalling. The Playwright server version
+is pinned (`@playwright/mcp@0.0.83`): `@latest` moved to a new Chromium build once
+and the browser "disappeared" until reinstalled.
+
+The tool-choice judgment sees `TOOL_PURPOSE` descriptions (what each tool is FOR,
+in a task's words) rather than the servers' own, and accepts a clear leader by
+margin (top at least 0.2 and twice the runner-up) when many tools split the
+probability. When the agent still escalates, Claude Code receives the agent's
+steps and full results as work already done, and continues from them.
+
 ### Browser
 
 `browser_read` (navigate, snapshot, find, screenshot, wait, tabs) and `browser_act`

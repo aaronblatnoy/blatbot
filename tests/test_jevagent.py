@@ -187,7 +187,7 @@ def test_manager_fallback_rules(monkeypatch):
         def __init__(self, jev_status, fallback=True):
             self.jev_fallback = fallback
             self.jev_agent = type("A", (), {"run": staticmethod(lambda req, context: _aw(jev_status))})()
-            self.executor = type("E", (), {"run": staticmethod(lambda req, context: _aw({"ok": True, "summary": "claude did it"}))})()
+            self.executor = type("E", (), {"run": staticmethod(lambda req, context, prior_work="": _aw({"ok": True, "summary": "claude did it"}))})()
 
     async def _aw(v): return v
     req = _req()
@@ -348,6 +348,8 @@ def test_error_text_results_count_as_failures():
     assert not _looks_like_error("Successfully listed 5 calendars")
     assert not _looks_like_error('{"success": true, "count": 0, "data": []}')
     assert not _looks_like_error("Found 10 messages matching 'error report'")
+    assert _looks_like_error("### Page\n- Page URL: https://www.linkedin.com/authwall?trk=x\n- Page Title: Sign Up | LinkedIn")
+    assert not _looks_like_error("### Page\n- Page URL: https://www.nyutamid.org/our-board\n- Page Title: Executive Board")
 
 
 def test_error_result_makes_agent_retry_with_other_args(agent, monkeypatch):
@@ -512,3 +514,43 @@ def _strings(v):
     if isinstance(v, dict): return [s for x in v.values() for s in _strings(x)]
     if isinstance(v, list): return [s for x in v for s in _strings(x)]
     return []
+
+
+def test_browser_search_reads_results_off_the_search_page():
+    from inkbox_claude.gate.jevagent import ToolBox
+    snap = ('### Page\n- Page URL: http://127.0.0.1:8888/search?q=x&format=json\n### Snapshot\n```yaml\n- generic [active] [ref=e1]: ' + json.dumps(json.dumps({"results": [
+        {"title": "Sean Parnell - Student at New York University | LinkedIn", "url": "https://www.linkedin.com/in/seanparnelll",
+         "content": "Sean Parnell. Student at New York University.  TAMID at NYU Co-President."},
+        {"title": "Executive Board - TAMID Group at NYU", "url": "https://www.nyutamid.org/our-board", "content": ""}]})) + '\n```')
+    class Box(ToolBox):
+        def __init__(self): self.calls = []
+        async def call(self, name, args):
+            self.calls.append((name, args))
+            return "" if name.endswith("navigate") else snap
+    b = Box()
+    out = asyncio.run(b._browser_search("Sean Parnell TAMID NYU"))
+    assert b.calls[0][0].endswith("browser_navigate") and "q=Sean%20Parnell%20TAMID%20NYU" in b.calls[0][1]["url"]
+    assert "1. Sean Parnell - Student at New York University | LinkedIn" in out and "url: https://www.linkedin.com/in/seanparnelll" in out
+    assert "Co-President" in out and "127.0.0.1" not in out and "2. Executive Board" in out
+
+
+def test_choose_accepts_a_clear_leader_among_many_options():
+    from inkbox_claude.gate.jevagent import Judge
+    j = Judge()
+    async def ask(state, questions):
+        return {"q": {"choice": "a", "probabilities": {"a": 0.3, "b": 0.12, "c": 0.1, "d": 0.1, "e": 0.1, "f": 0.1}}}
+    j.ask = ask
+    pick, p, _ = asyncio.run(j.choose({}, "?", {k: k for k in "abcdef"}))
+    assert pick == "a" and p == 0.3                      # under the 0.45 floor, but 2.5x the runner-up
+    async def ask2(state, questions):
+        return {"q": {"choice": "a", "probabilities": {"a": 0.3, "b": 0.25, "c": 0.1, "d": 0.1, "e": 0.1, "f": 0.1}}}
+    j.ask = ask2
+    assert asyncio.run(j.choose({}, "?", {k: k for k in "abcdef"}))[0] is None   # no clear leader
+
+
+def test_ids_are_found_under_camelcase_and_json_keys():
+    from inkbox_claude.gate.jevagent import _candidate_values
+    blob = ('{"formId": "1OGQhnPoO9OzdYqzUgdtBcxYdeEdeLjYGTzE7", "responses": [{"responseId": "ACYDBNhX0m9vQ", "respondentEmail": "a@nyu.edu"}]}'
+            ' spreadsheet_id=18FY8UeEMQsKqYUHlrm7 Event ID: evt_abc123def456')
+    ids = _candidate_values("response_id", "", "string", {"request": "x"}, [{"result": blob}])
+    assert "ACYDBNhX0m9vQ" in ids and "1OGQhnPoO9OzdYqzUgdtBcxYdeEdeLjYGTzE7" in ids and "18FY8UeEMQsKqYUHlrm7" in ids and "evt_abc123def456" in ids

@@ -299,6 +299,7 @@ DEEPSEEK_API_KEY=
 TYPESAFE_API_KEY=
 GATE_EXECUTOR=jev              # jev (default when the key is set) or claude
 GATE_EXECUTOR_FALLBACK=claude  # or none
+GATE_SEARCH_URL=http://127.0.0.1:8888/search   # a local SearXNG; web search runs through the browser against it
 
 # Who the owner is. These two values are the entire trust boundary.
 INKBOX_APPROVER_PHONE=+15550100001

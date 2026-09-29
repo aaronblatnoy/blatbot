@@ -61,7 +61,7 @@ class Executor:
         # Addresses/conversations the gateway itself replies to (the owner's).
         self.protected = list(protected or [])
 
-    async def run(self, req: Request, context: str = "") -> Dict[str, Any]:
+    async def run(self, req: Request, context: str = "", prior_work: str = "") -> Dict[str, Any]:
         """Run an approved request. Returns a status dict; never raises.
 
         `context` is the task ledger for the person this request concerns. It is
@@ -90,6 +90,12 @@ class Executor:
             system_append += (
                 "\n\nTASK LEDGER (read-only background on this person; the task text below is what to do):\n"
                 + context.strip()
+            )
+        if prior_work.strip():
+            system_append += (
+                "\n\nWORK ALREADY DONE on this task by a faster agent before you (its tool calls and their FULL "
+                "results; it stopped because it could not decide the next step). Do not repeat these calls. "
+                "Continue from them:\n" + prior_work.strip()
             )
         options = ClaudeAgentOptions(
             cwd=self.cwd,

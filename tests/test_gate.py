@@ -43,9 +43,10 @@ class FakeExecutor:
         self.ran = []
         self.result = {"ok": True, "summary": "did it", "tool_calls": ["mcp__tamid-drive__manage_event"], "raw": "did it"}
 
-    async def run(self, req, context=""):
+    async def run(self, req, context="", prior_work=""):
         self.ran.append(req.id)
         self.context = context
+        self.prior_work = prior_work
         if sha256(req.prompt) != req.prompt_sha256:
             return {"ok": False, "error": "prompt hash mismatch; refused to run", "tool_calls": []}
         return self.result
@@ -1261,3 +1262,24 @@ def test_second_answer_for_the_same_inbound_is_refused(tmp_path):
     # and a result phrasing for that inbound is refused too, reported as handled
     assert asyncio.run(s.notify_after_request("Task #9 done: x\nResult:\ny", inbound_id=s.inbound_id)) is True
     assert [t for _, t, *_ in sent] == ["First answer.", "Late ack."]
+
+
+def test_escalation_hands_claude_the_agents_findings(tmp_path):
+    m, sent = make_manager(tmp_path)
+    class FakeJev:
+        async def run(self, req, context=""):
+            return {"ok": False, "error": "unsure", "raw": "- search_drive_files:\nFound: X (ID: 1ABC)\nSTATUS: FAILED",
+                    "tool_calls": ["mcp__tamid-drive__search_drive_files"], "wrote": False, "engine": "jev"}
+    class Ex(FakeExecutor):
+        async def run(self, req, context="", prior_work=""):
+            self.prior = prior_work
+            return await super().run(req, context)
+    m.jev_agent, m.jev_fallback, m.executor = FakeJev(), True, Ex()
+    m.router.next = RouterOutput(reply="On it.", task="new", task_title="Find X",
+                                 request=RouterRequest(prompt="find x", scopes=["tamid_drive_read"], summary="Find X"))
+    m.router.next_note = RouterOutput(reply="Found it.", task="T1")
+    async def go():
+        await m.get("aaron").handle_inbound("find x", "imessage", approver_meta())
+        await asyncio.sleep(0.15)
+    asyncio.run(go())
+    assert "Found: X (ID: 1ABC)" in m.executor.prior
