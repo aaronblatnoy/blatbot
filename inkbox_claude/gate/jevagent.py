@@ -46,6 +46,9 @@ logger = logging.getLogger(__name__)
 
 TZ = ZoneInfo("America/New_York")
 DONE, GIVE_UP = "done", "give_up"
+DONE_MIN = float(os.getenv("JEV_AGENT_DONE_MIN") or 0.7)
+PARALLEL_MIN = float(os.getenv("JEV_AGENT_PARALLEL_MIN") or 0.7)   # extra read tools worth calling alongside the pick
+PARALLEL_MAX = int(os.getenv("JEV_AGENT_PARALLEL_MAX") or 3)
 
 
 def enabled() -> bool:
@@ -638,7 +641,8 @@ class JevAgent:
                     state = _fit(state)
                     if steps:
                         p_done = await judge.yes(state, {
-                            "question": "Is `goal` now fully achieved by `steps_so_far`, so no further tool call is needed?",
+                            "question": "Can `goal` now be answered, or is the action it asks for complete, WITH CONFIDENCE "
+                                        "from `steps_so_far` alone: is every fact the answer needs already in the evidence?",
                             "criteria": {"true": "Everything the goal asked for has been done or, for a question, "
                                                  "the retrieved results contain what is needed to answer it. Counting, "
                                                  "filtering or comparing rows that are already retrieved is NOT a "
@@ -648,7 +652,7 @@ class JevAgent:
                                                   "retrieved so far do not contain the needed information and a "
                                                   "different call is needed."}})
                         logger.info("jev agent step %d: p(done)=%.2f", step + 1, p_done)
-                        if p_done >= 0.6:
+                        if p_done >= DONE_MIN:
                             break
                     options = {k: v for k, v in tool_options.items() if k not in excluded} or dict(tool_options)
                     if len(steps) >= 2 and steps[-1]["tool"] == steps[-2]["tool"] and len(options) > 1:
@@ -656,6 +660,7 @@ class JevAgent:
                         # one (open a result, read a sheet), not a third search.
                         options.pop(steps[-1]["tool"], None)
                     options[GIVE_UP] = "The goal cannot be achieved with these tools or the information available."
+                    useful = await self._useful_reads(judge, state, options)
                     choice, conf, probs = await judge.choose(
                         state,
                         {"question": "What is the single best next step toward `goal`?",
@@ -683,15 +688,15 @@ class JevAgent:
                                 choice = None
                     if choice is None:
                         logger.info("jev agent: unsure; top options %s", sorted(probs.items(), key=lambda kv: -kv[1])[:5])
-                        if steps and steps[-1]["ok"] and not is_write_tool(steps[-1]["tool"]) and p_done >= 0.3:
+                        if steps and steps[-1]["ok"] and not is_write_tool(steps[-1]["tool"]) and p_done >= DONE_MIN:
                             # Nothing stands out after a read and the goal is plausibly met:
                             # what was gathered is the answer (the gate's reply model phrases it).
                             logger.info("jev agent: no clear next step after reads (p_done %.2f); finishing", p_done)
                             break
-                        return self._status(False, "unsure which step to take next", steps, judge, prose, started,
-                                            probs=probs)
+                        return self._status(False, f"insufficient evidence to answer with confidence (done {p_done:.2f}); "
+                                                   "no further useful step found", steps, judge, prose, started, probs=probs)
                     if choice == GIVE_UP:
-                        if steps and p_done >= 0.3 and all(s["ok"] and not is_write_tool(s["tool"]) for s in steps):
+                        if steps and p_done >= DONE_MIN and all(s["ok"] and not is_write_tool(s["tool"]) for s in steps):
                             # Everything so far was a successful read and the goal is plausibly met:
                             # what was found IS the answer.
                             # The gateway delivers it to the requester; nothing needs sending.
@@ -713,7 +718,7 @@ class JevAgent:
                         st["confirm"] = {"tool": choice, "args": args, "about": _mentions(steps, args)}
                         logger.info("jev agent: %s needs the owner's confirmation; pausing", choice.split("__")[-1])
                         return st
-                    if any(s["ok"] and s["tool"] == choice and s["args"] == args for s in steps) and p_done < 0.3:
+                    if any(s["ok"] and s["tool"] == choice and s["args"] == args for s in steps) and p_done < DONE_MIN:
                         # Same call again: the judge wants this tool but with something different
                         # (another tab, another record). Refill avoiding the values just used.
                         again = await self._fill_args(box, judge, prose, choice, facts, steps, req, avoid=args)
@@ -722,7 +727,7 @@ class JevAgent:
                                         json.dumps({k: v for k, v in again.items() if k != "user_google_email"})[:200])
                             args = again
                     if any(s["ok"] and s["tool"] == choice and s["args"] == args for s in steps):
-                        if p_done >= 0.3:
+                        if p_done >= DONE_MIN:
                             # The best next move is one already made and the goal is plausibly met: done.
                             logger.info("jev agent: would repeat %s with identical arguments; treating as done", choice)
                             break
@@ -730,36 +735,32 @@ class JevAgent:
                         logger.info("jev agent: would repeat %s identically at p_done %.2f; excluding it and re-picking", choice, p_done)
                         excluded.add(choice)
                         continue
-                    try:
-                        result = await box.call(choice, args)
-                        if _looks_like_error(result):
-                            # Many MCP tools report failures as ordinary text. Count it as a
-                            # failed step so the loop tries different arguments, and never
-                            # "finish with findings" on it.
-                            raise RuntimeError(result if isinstance(result, str) else _text(result))
-                        text = _text(result)
-                        evidence = None
-                        if len(text) > _LARGE:
-                            # Read the result: reduce it to the part that bears on the goal, once,
-                            # so every later judgment sees rows and facts instead of a size digest.
-                            leaf, best_p = await narrow(judge, text, "the information `goal` asks for", req.original_message, with_score=True)
-                            if best_p < 0.3:
-                                evidence = (f"(This result does not appear to contain what the goal needs: the most relevant "
-                                            f"part scored {best_p:.2f}.) Closest part:\n{leaf}")
-                            else:
-                                evidence = leaf
-                        steps.append({"tool": choice, "args": args, "result": result, "ok": True, "evidence": evidence})
-                        logger.info("jev agent step %d: %s(%s) -> %s", step + 1, choice.split("__")[-1],
-                                    json.dumps({k: v for k, v in args.items() if k != "user_google_email"}, ensure_ascii=False)[:300],
-                                    " ".join(_text(result).split())[:300])
-                        facts[f"result_of_{choice.split('__')[-1]}_{len(steps)}"] = evidence or text
-                    except Exception as exc:
-                        steps.append({"tool": choice, "args": args, "result": f"ERROR: {exc}", "ok": False})
-                        logger.info("jev agent step %d: %s(%s) -> ERROR %s", step + 1, choice.split("__")[-1],
-                                    json.dumps({k: v for k, v in args.items() if k != "user_google_email"}, ensure_ascii=False)[:300],
-                                    " ".join(str(exc).split())[:300])
-                        if sum(1 for s in steps if s["tool"] == choice and not s["ok"]) >= 2:
-                            return self._status(False, f"{choice} failed twice: {exc}", steps, judge, prose, started)
+                    # Collect in parallel: the pick plus any other read tool Jev rated useful now.
+                    batch: List[Tuple[str, Dict[str, Any]]] = [(choice, args)]
+                    extras = [t for t, pu in sorted(useful.items(), key=lambda kv: -kv[1])
+                              if pu >= PARALLEL_MIN and t != choice and not is_write_tool(t) and t not in excluded][:PARALLEL_MAX]
+                    if extras and not is_write_tool(choice):
+                        extra_args = await asyncio.gather(*[self._fill_args(box, judge, prose, t, facts, steps, req) for t in extras])
+                        for t, a in zip(extras, extra_args):
+                            if a is not None and not any(s["ok"] and s["tool"] == t and s["args"] == a for s in steps):
+                                batch.append((t, a))
+                        if len(batch) > 1:
+                            logger.info("jev agent step %d: also collecting %s", step + 1, [t.split("__")[-1] for t, _ in batch[1:]])
+                    outcomes = await asyncio.gather(*[self._call(box, judge, t, a, req) for t, a in batch])
+                    for (t, a), (ok_call, result, evidence, err) in zip(batch, outcomes):
+                        if ok_call:
+                            steps.append({"tool": t, "args": a, "result": result, "ok": True, "evidence": evidence})
+                            logger.info("jev agent step %d: %s(%s) -> %s", step + 1, t.split("__")[-1],
+                                        json.dumps({k: v for k, v in a.items() if k != "user_google_email"}, ensure_ascii=False)[:300],
+                                        " ".join(_text(result).split())[:300])
+                            facts[f"result_of_{t.split('__')[-1]}_{len(steps)}"] = evidence or _text(result)
+                        else:
+                            steps.append({"tool": t, "args": a, "result": f"ERROR: {err}", "ok": False})
+                            logger.info("jev agent step %d: %s(%s) -> ERROR %s", step + 1, t.split("__")[-1],
+                                        json.dumps({k: v for k, v in a.items() if k != "user_google_email"}, ensure_ascii=False)[:300],
+                                        " ".join(str(err).split())[:300])
+                            if t == choice and sum(1 for s in steps if s["tool"] == choice and not s["ok"]) >= 2:
+                                return self._status(False, f"{choice} failed twice: {err}", steps, judge, prose, started)
                 else:
                     return self._status(False, "step limit reached", steps, judge, prose, started)
         except Exception as exc:
@@ -901,6 +902,41 @@ class JevAgent:
             logger.warning("jev agent: missing required args %s for %s", missing, tool)
             return None
         return args
+
+    async def _useful_reads(self, judge: "Judge", state: Any, options: Dict[str, str]) -> Dict[str, float]:
+        """One request: for every allowed read tool, would calling it NOW add information
+        the goal needs? Lets the agent collect from several sources at once."""
+        reads = {t: d for t, d in options.items() if t != GIVE_UP and not is_write_tool(t)}
+        if len(reads) < 2:
+            return {}
+        questions = {f"use::{t}": {"type": "noul", "instructions": {
+            "tool": d, "question": "Would calling this tool now add information that `goal` needs and that "
+                                   "`steps_so_far` does not already contain?"},
+            "criteria": {"true": "It would add needed, not-yet-gathered information.",
+                         "false": "It is irrelevant to the goal, or its information is already gathered."}}
+            for t, d in reads.items()}
+        answers = await judge.ask(state, questions)
+        return {t: float((answers.get(f"use::{t}") or {}).get("noul") or 0.0) for t in reads}
+
+    async def _call(self, box: ToolBox, judge: "Judge", tool: str, args: Dict[str, Any], req: Request) -> Tuple[bool, Any, Optional[str], str]:
+        """One tool call plus its reading: (ok, result, evidence, error)."""
+        try:
+            result = await box.call(tool, args)
+            if _looks_like_error(result):
+                # Many MCP tools report failures as ordinary text. Count it as a failed step.
+                return False, None, None, (result if isinstance(result, str) else _text(result))
+            text = _text(result)
+            evidence = None
+            if len(text) > _LARGE:
+                # Read the result: reduce it to the part that bears on the goal, once, so every
+                # later judgment sees rows and facts instead of a size digest.
+                leaf, best_p = await narrow(judge, text, "the information `goal` asks for", req.original_message, with_score=True)
+                evidence = leaf if best_p >= 0.3 else (
+                    f"(This result does not appear to contain what the goal needs: the most relevant part scored {best_p:.2f}.) "
+                    f"Closest part:\n{leaf}")
+            return True, result, evidence, ""
+        except Exception as exc:
+            return False, None, None, str(exc)
 
     async def perform(self, tool: str, args: Dict[str, Any]) -> Dict[str, Any]:
         """Run one confirmed call and nothing else."""

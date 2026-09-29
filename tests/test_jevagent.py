@@ -49,7 +49,7 @@ class ScriptedJudge:
 
     async def yes(self, state, question):
         self.calls += 1
-        if "fully achieved" in str(question):
+        if "WITH CONFIDENCE" in str(question):
             return 0.9 if not self.picks else 0.1
         return self.yes_p
 
@@ -59,7 +59,7 @@ class ScriptedJudge:
         out = {}
         for qid, q in questions.items():
             if q["type"] == "noul":
-                out[qid] = {"noul": self.yes_p}
+                out[qid] = {"noul": 0.0 if qid.startswith("use::") else self.yes_p}   # no parallel extras unless a test asks
             elif (not self.picks or self.picks[0] not in q["criteria"]) and "write_new" in q["criteria"]:
                 # a span/candidate question this script did not plan for: let prose write it
                 out[qid] = {"choice": "write_new", "probabilities": {"write_new": 0.95}}
@@ -156,7 +156,7 @@ def test_give_up_and_unsure_fail_without_side_effects(agent, monkeypatch):
             return None, 0.3, {}
     _patch(monkeypatch, box, Unsure([]), ScriptedProse(), [t])
     st = asyncio.run(agent.run(_req("do a thing")))
-    assert not st["ok"] and "unsure" in st["error"]
+    assert not st["ok"] and "insufficient evidence" in st["error"]
 
 
 def test_tool_failing_twice_stops(agent, monkeypatch):
@@ -207,9 +207,9 @@ def test_give_up_after_reads_finishes_with_findings(agent, monkeypatch):
     box = FakeBox({lst: {"description": "list", "schema": {"type": "object", "properties": {}, "required": []}}},
                   results={lst: "6 events"})
     j = ScriptedJudge([lst, "give_up"])
-    async def never_done(state, question):
-        return 0.4
-    j.yes = never_done
+    async def confident(state, question):
+        return 0.8 if "WITH CONFIDENCE" in str(question) else 0.0
+    j.yes = confident
     _patch(monkeypatch, box, j, ScriptedProse(), [lst, "mcp__inkbox__inkbox_send_imessage"])
     st = asyncio.run(agent.run(_req("list my coffee chats last week")))
     assert st["ok"] and st["tool_calls"] == [lst] and "6 events" in st["raw"]
@@ -322,7 +322,7 @@ def test_wrong_first_document_leads_to_the_next_candidate(agent, monkeypatch):
     judge = ScriptedJudge([search, info, "c0", info, "c0"])
     class Never(ScriptedJudge):
         async def yes(self, state, question):
-            if "fully achieved" in str(question):
+            if "WITH CONFIDENCE" in str(question):
                 return 0.9 if not self.picks else 0.1
             return 0.9
     judge = Never([search, info, "c0", info, "c0"])
@@ -390,7 +390,7 @@ def test_third_consecutive_same_tool_is_not_offered(agent, monkeypatch):
             seen_options.append(sorted(options))
             return await super().choose(state, question, options, min_p)
         async def yes(self, state, question):
-            if "fully achieved" in str(question):
+            if "WITH CONFIDENCE" in str(question):
                 return 0.9 if not self.picks else 0.1
             return 0.9
     class P(ScriptedProse):
@@ -416,7 +416,7 @@ def test_unsure_after_reads_with_low_done_score_fails_over(agent, monkeypatch):
             return 0.05
     _patch(monkeypatch, box, Unsure([lst]), ScriptedProse(), [lst])
     st = asyncio.run(agent.run(_req("book the thing")))
-    assert not st["ok"] and "unsure" in st["error"]
+    assert not st["ok"] and "insufficient evidence" in st["error"]
 
 
 def test_fit_leaves_states_under_budget_untouched_and_digests_only_when_over():
@@ -490,7 +490,7 @@ def test_agent_selects_from_a_narrowed_large_result_and_never_judges_raw_text(ag
             return await super().choose(state, question, options, min_p)
         async def yes(self, state, question):
             seen_states.append(state)
-            if "fully achieved" in str(question):
+            if "WITH CONFIDENCE" in str(question):
                 return 0.9 if not self.picks else 0.1
             return 0.9
         async def ask(self, state, questions):  # batched argument questions: pick the candidate holding the needle
@@ -502,7 +502,7 @@ def test_agent_selects_from_a_narrowed_large_result_and_never_judges_raw_text(ag
                 if q["type"] == "noul":
                     out[qid] = {"noul": 0.9}
                 else:
-                    hit = [k for k, v in q["criteria"].items() if "NEEDLE" in json.dumps(v)]
+                    hit = [k for k, v in q["criteria"].items() if "NEEDLE" in json.dumps(v)] or ["write_new"]
                     out[qid] = {"choice": hit[0], "probabilities": {hit[0]: 0.97}}
             return out
     judge = J([lst, get])
@@ -586,7 +586,7 @@ def test_multi_argument_tools_keep_offering_a_value_read_once(agent, monkeypatch
                     out[qid] = {"choice": want, "probabilities": {want: 0.95}}
             return out
         async def yes(self, state, question):
-            if "fully achieved" in str(question):
+            if "WITH CONFIDENCE" in str(question):
                 return 0.9 if not self.picks else 0.1
             return 0.9
     class P(ScriptedProse):
@@ -619,7 +619,7 @@ def test_large_result_is_read_into_evidence_before_judging(agent, monkeypatch):
             return await super().ask(state, questions)
         async def yes(self, state, question):
             seen.append(state)
-            if "fully achieved" in str(question):
+            if "WITH CONFIDENCE" in str(question):
                 return 0.9 if any("NEEDLE" in json.dumps(st) for st in [state]) else 0.1
             return 0.9
     _patch(monkeypatch, box, J([read]), ScriptedProse(), [read])
@@ -669,9 +669,47 @@ def test_agent_pauses_before_a_destructive_call(agent, monkeypatch):
     box = FakeBox(schemas, results={find: '- "Sam Rivera and TAMID at NYU (Quant)" (Starts: 2026-10-02T15:00) ID: evt_QUANT000000000001', change: "deleted"})
     class J(ScriptedJudge):
         async def yes(self, state, question):
-            return 0.1 if "fully achieved" in str(question) else 0.9
+            return 0.1 if "WITH CONFIDENCE" in str(question) else 0.9
     _patch(monkeypatch, box, J([find, change, "delete", "c0"]), ScriptedProse(), [find, change])
     st = asyncio.run(agent.run(_req("cancel sam rivera's quant interview")))
     assert not st["ok"] and st["confirm"]["tool"] == change and st["confirm"]["args"]["event_id"] == "evt_QUANT000000000001"
     assert "Sam Rivera and TAMID at NYU (Quant)" in st["confirm"]["about"][0]
     assert [c[0] for c in box.calls] == [find] and "WRITES PERFORMED: none" in st["raw"]
+
+
+def test_useful_reads_are_collected_in_parallel_and_land_in_the_state(agent, monkeypatch):
+    """Two read tools rated useful run together with the pick; the next judgment sees all three results."""
+    a, b, c = "mcp__tamid-drive__get_events", "mcp__tamid-drive__search_gmail_messages", "mcp__tamid-admin__tamid_list_board_members"
+    schemas = {t: {"description": t, "schema": {"type": "object", "properties": {}, "required": []}} for t in (a, b, c)}
+    box = FakeBox(schemas, results={a: "EVENTS", b: "MAILS", c: "ROSTER"})
+    seen = []
+    class J(ScriptedJudge):
+        async def ask(self, state, questions):
+            if any(q.startswith("use::") for q in questions):
+                return {q: {"noul": 0.9} for q in questions}          # everything is useful now
+            return await super().ask(state, questions)
+        async def yes(self, state, question):
+            seen.append(state)
+            if "WITH CONFIDENCE" in str(question):
+                return 0.9 if len([s for s in state.get("steps_so_far", [])]) >= 3 else 0.1
+            return 0.9
+    _patch(monkeypatch, box, J([a]), ScriptedProse(), [a, b, c])
+    st = asyncio.run(agent.run(_req("were they sent interviews and did they book?")))
+    assert st["ok"] and sorted(c0 for c0, _ in box.calls) == sorted([a, b, c])
+    done_state = [x for x in seen if "steps_so_far" in x][-1]
+    assert {s["tool"] for s in done_state["steps_so_far"]} == {a, b, c}
+
+
+def test_run_ends_only_with_confidence(agent, monkeypatch):
+    lst = "mcp__stern-drive__get_events"
+    box = FakeBox({lst: {"description": "list", "schema": {"type": "object", "properties": {}, "required": []}}}, results={lst: "6 events"})
+    class J(ScriptedJudge):
+        async def choose(self, state, question, options, min_p=None):
+            if self.picks:
+                return await super().choose(state, question, options, min_p)
+            return None, 0.2, {}
+        async def yes(self, state, question):
+            return 0.5 if "WITH CONFIDENCE" in str(question) else 0.0     # plausible is not enough
+    _patch(monkeypatch, box, J([lst]), ScriptedProse(), [lst])
+    st = asyncio.run(agent.run(_req("what's on my calendar")))
+    assert not st["ok"] and "insufficient evidence" in st["error"] and "0.50" in st["error"]
