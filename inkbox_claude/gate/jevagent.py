@@ -379,7 +379,7 @@ def _tried_values(steps: List[Dict[str, Any]], tool: str, arg: str, sole: bool =
 
 
 _BUDGET = 70000         # characters per TypeSafe request (state + questions) that stay under its ~32k-token ceiling
-_LARGE = 20000          # a string counts as "large" for digesting purposes only once a state must be shrunk
+_LARGE = 60000          # a single result is read into evidence only when it nears the request budget
 _PART = 48000           # largest text one narrowing judgment sees
 _LEAF = 6000            # stop narrowing here: small enough to extract candidates from precisely
 _MAX_CANDIDATES = 250   # a Choice takes at most 255 options
@@ -759,8 +759,12 @@ class JevAgent:
                             logger.info("jev agent step %d: %s(%s) -> ERROR %s", step + 1, t.split("__")[-1],
                                         json.dumps({k: v for k, v in a.items() if k != "user_google_email"}, ensure_ascii=False)[:300],
                                         " ".join(str(err).split())[:300])
-                            if t == choice and sum(1 for s in steps if s["tool"] == choice and not s["ok"]) >= 2:
-                                return self._status(False, f"{choice} failed twice: {err}", steps, judge, prose, started)
+                            same_call_failed = sum(1 for s in steps if s["tool"] == t and s["args"] == a and not s["ok"])
+                            total_failed = sum(1 for s in steps if s["tool"] == t and not s["ok"])
+                            if t == choice and (same_call_failed >= 2 or total_failed >= 3):
+                                # Different arguments are trial and error; the same call failing
+                                # twice, or three failures of one tool, means the tool is not the way.
+                                return self._status(False, f"{choice} keeps failing: {err}", steps, judge, prose, started)
                 else:
                     return self._status(False, "step limit reached", steps, judge, prose, started)
         except Exception as exc:

@@ -164,7 +164,7 @@ def test_tool_failing_twice_stops(agent, monkeypatch):
     box = FakeBox({t: {"description": "list", "schema": {"type": "object", "properties": {}, "required": []}}}, fail=[t])
     _patch(monkeypatch, box, ScriptedJudge([t, t]), ScriptedProse(), [t])
     st = asyncio.run(agent.run(_req("what's on")))
-    assert not st["ok"] and "failed twice" in st["error"] and len(box.calls) == 2
+    assert not st["ok"] and "keeps failing" in st["error"] and len(box.calls) == 2
 
 
 def test_hash_mismatch_refused(agent):
