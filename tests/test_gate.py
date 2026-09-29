@@ -1522,7 +1522,8 @@ def test_jev_plans_the_lookup_and_the_chat_model_does_not(tmp_path):
     m, sent = make_manager(tmp_path)
     m.store.create_task("Update Jared's SJBA bio", [])
     hidden = m.store.create_task("Private errand for Sam Rivera", [])
-    m.store.set_task_state(hidden["id"], "done") if hasattr(m.store, "set_task_state") else None
+    m.store.task_event(hidden["id"], "done", "ok", state="done")   # old and finished: outside the default view
+    m.store._db.execute("UPDATE tasks SET updated_at=updated_at-40*86400 WHERE id=?", (hidden["id"],)); m.store._db.commit()
     m.task_picker = LookupPicker({"lookup": "any", "text": "Sam Rivera", "confidence": 0.9, "reason": "ok"},
                                  choice="none")
     m.router.next = RouterOutput(reply="checking", request=None)
@@ -1531,6 +1532,7 @@ def test_jev_plans_the_lookup_and_the_chat_model_does_not(tmp_path):
     call = m.task_picker.lookup_calls[-1]
     assert "Sam Rivera" in call["candidates"]
     assert any("Update Jared's SJBA bio" in t for t in call["in_view_titles"])
+    assert "Private errand for Sam Rivera" not in m.router.calls[-1]["task_memory"]
     assert "Private errand for Sam Rivera" in m.router.calls[-1]["found_tasks"]
 
 
