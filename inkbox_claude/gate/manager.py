@@ -683,6 +683,7 @@ class GateSession:
                 task_memory=memory, found_tasks=found, action=False,
             )
             out.request = None
+            out.reply = await self.ground_reply(out.reply, system_note, prior, memory, found, approver)
         else:
             out, task = await self.decide(body=body, message=message, prior=prior, mode=self.mode,
                                           memory=memory, found=found)
@@ -740,6 +741,40 @@ class GateSession:
         if t is not None:
             self.m.store.task_event(t["id"], "outbound", text, chat_id=self.chat_id)
         return True
+
+    async def ground_reply(self, reply: Optional[str], note: str, prior: List[Dict[str, Any]], memory: str,
+                           found: str, approver: bool) -> Optional[str]:
+        """A result reply may only state what the results support. Jev checks the
+        draft against the tool output; an unsupported draft is rewritten once with
+        the results as the only source, and if still unsupported, replaced by a
+        plain statement of what was and was not found. Never a confident guess."""
+        picker = self.m.task_picker
+        if not reply or picker is None or "Result:" not in note:
+            return reply
+        results = note.split("Result:", 1)[1].strip()
+        question = ""
+        for m in reversed(prior):
+            if m.get("kind") == "inbound":
+                question = str(m.get("text") or "")
+                break
+        res = await picker.judge_grounded(reply=reply, results=results, question=question)
+        if res.get("grounded") is not False:
+            return reply
+        logger.info("[gate %s] reply not grounded (p=%.2f); rewriting from the results only", self.chat_id, res["p"])
+        strict = ("(GROUNDING: your previous draft made claims the task result does not support. Write the reply again "
+                  "using ONLY the task result above as the source of facts. Name only what it contains. If the result "
+                  "is a search snippet or partial, say the answer is unconfirmed and offer to open the source. State "
+                  "plainly what was not found. Do not create a request.)")
+        out2 = await self.m.router.route(
+            history=prior + [{"kind": "system", "text": strict}], message=strict, mode=self.mode, sender=self._sender(),
+            contact_notes=self._contact_notes(), is_approver=approver, task_memory=memory, found_tasks=found, action=False)
+        reply2 = out2.reply or reply
+        res2 = await picker.judge_grounded(reply=reply2, results=results, question=question)
+        if res2.get("grounded") is not False:
+            return reply2
+        logger.warning("[gate %s] rewrite still not grounded (p=%.2f); sending the result itself", self.chat_id, res2["p"])
+        head = results.strip().splitlines()
+        return "Here is what I found, without interpretation:\n" + "\n".join(head[:40])
 
     async def handle_followup(self, body: str, inbound_id: Optional[int] = None) -> bool:
         """Re-decide a message that was received while a request was running. The

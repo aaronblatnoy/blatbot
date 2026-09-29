@@ -588,6 +588,13 @@ class JevAgent:
                         logger.warning("jev agent: cannot describe %s: %s", name, exc)
                 p_done = 0.0
                 excluded: set = set()   # tools that have nothing new to give this run
+
+                def only_searched() -> bool:
+                    """True when every successful step so far is a web search: snippets are
+                    leads, not answers, so the run may not end on them alone."""
+                    ok_steps = [s for s in steps if s["ok"]]
+                    return bool(ok_steps) and all(s["tool"].endswith("browser_search") for s in ok_steps)
+
                 for step in range(self.max_steps):
                     state = {"goal": req.original_message, "task_context": context, **_now_facts(),
                              "steps_so_far": [{"tool": s["tool"], "args": s["args"], "ok": s["ok"], "result": s["result"]} for s in steps]}
@@ -604,8 +611,10 @@ class JevAgent:
                                                   "retrieved so far do not contain the needed information and a "
                                                   "different call is needed."}})
                         logger.info("jev agent step %d: p(done)=%.2f", step + 1, p_done)
-                        if p_done >= 0.6:
+                        if p_done >= 0.6 and not (only_searched() and p_done < 0.9):
                             break
+                        if p_done >= 0.6:
+                            logger.info("jev agent: only search snippets so far; opening a source before finishing")
                     options = {k: v for k, v in tool_options.items() if k not in excluded} or dict(tool_options)
                     if len(steps) >= 2 and steps[-1]["tool"] == steps[-2]["tool"] and len(options) > 1:
                         # Two calls of the same tool in a row: the next move must be a different
@@ -618,6 +627,8 @@ class JevAgent:
                          "rules": ["The gateway delivers whatever is found to the person who asked; never send or text the "
                                    "answer to the requester. Sending tools are only for messaging OTHER people the goal names.",
                                    "Read before you write: look things up before booking, sending, or changing.",
+                                   "A web search result is a lead, not an answer: open the page it points to (browser_navigate, "
+                                   "then browser_find or browser_snapshot) before the goal counts as met. Search snippets can be stale.",
                                    "When something must be found in a document, sheet, calendar or inbox: search, open the "
                                    "most likely result, and if it is not the right one open the next likely one, or search "
                                    "again with different words. A wrong first pick or an empty search is not a reason to give up.",
@@ -644,7 +655,7 @@ class JevAgent:
                                 choice = None
                     if choice is None:
                         logger.info("jev agent: unsure; top options %s", sorted(probs.items(), key=lambda kv: -kv[1])[:5])
-                        if steps and steps[-1]["ok"] and not is_write_tool(steps[-1]["tool"]) and p_done >= 0.3:
+                        if steps and steps[-1]["ok"] and not is_write_tool(steps[-1]["tool"]) and p_done >= 0.3 and not only_searched():
                             # Nothing stands out after a read and the goal is plausibly met:
                             # what was gathered is the answer (the gate's reply model phrases it).
                             logger.info("jev agent: no clear next step after reads (p_done %.2f); finishing", p_done)
@@ -652,7 +663,7 @@ class JevAgent:
                         return self._status(False, "unsure which step to take next", steps, judge, prose, started,
                                             probs=probs)
                     if choice == GIVE_UP:
-                        if steps and p_done >= 0.3 and all(s["ok"] and not is_write_tool(s["tool"]) for s in steps):
+                        if steps and p_done >= 0.3 and not only_searched() and all(s["ok"] and not is_write_tool(s["tool"]) for s in steps):
                             # Everything so far was a successful read and the goal is plausibly met:
                             # what was found IS the answer.
                             # The gateway delivers it to the requester; nothing needs sending.

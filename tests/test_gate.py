@@ -773,6 +773,9 @@ class FakePicker:
         self.scope_calls = getattr(self, "scope_calls", []) + [kw]
         return {"scopes": self.scopes, "probabilities": {}, "reason": "ok" if self.scopes else "disabled"}
 
+    async def judge_grounded(self, **kw):
+        return {"grounded": None, "p": 0.0, "reason": "undecided"}   # tests override when they care
+
 
 def test_jev_pick_overrides_router_when_confident(tmp_path):
     m, sent = make_manager(tmp_path)
@@ -1283,3 +1286,54 @@ def test_escalation_hands_claude_the_agents_findings(tmp_path):
         await asyncio.sleep(0.15)
     asyncio.run(go())
     assert "Found: X (ID: 1ABC)" in m.executor.prior
+
+
+def test_ungrounded_result_reply_is_rewritten_or_replaced(tmp_path):
+    """The reply writer embellished a result with names the result does not contain."""
+    m, sent = make_manager(tmp_path)
+    p = _jev_first(m, choice="new")
+    p.action, p.scopes = True, ["web"]
+    p.grounded = [False, True]          # first draft unsupported, rewrite supported
+    async def judge_grounded(**kw):
+        p.ground_calls = getattr(p, "ground_calls", []) + [kw]
+        g = p.grounded.pop(0)
+        return {"grounded": g, "p": 0.9 if g else 0.1, "reason": "ok"}
+    p.judge_grounded = judge_grounded
+    m.executor.result = {"ok": True, "summary": "Web search results: 1. Leadership - Stern Real Estate Group\n   co-presidents: Cand Idate and Sam Rivera",
+                         "tool_calls": [], "raw": "x"}
+    m.router.next = RouterOutput(reply="On it.", task="new", task_title="Find the SREG president")
+    drafts = [RouterOutput(reply="The president is Jamie Rivera, elected last spring.", task="T1"),
+              RouterOutput(reply="The search lists Cand Idate and Sam Rivera as co-presidents; not yet confirmed on the site.", task="T1")]
+    async def route(**kw):
+        m.router.calls.append(kw)
+        if kw.get("action") is False:
+            return drafts.pop(0).model_copy(deep=True)
+        return m.router.next.model_copy(deep=True)
+    m.router.route = route
+    async def go():
+        await m.get("aaron").handle_inbound("who is the SREG president?", "imessage", approver_meta())
+        await asyncio.sleep(0.2)
+    asyncio.run(go())
+    outbound = [t for _, t, *_ in sent]
+    assert outbound[-1].startswith("The search lists Cand Idate and Sam Rivera")
+    assert "Jamie Rivera" not in " ".join(outbound)
+    assert len(p.ground_calls) == 2 and "GROUNDING" in m.router.calls[-1]["message"]
+
+
+def test_still_ungrounded_reply_falls_back_to_the_raw_result(tmp_path):
+    m, sent = make_manager(tmp_path)
+    p = _jev_first(m, choice="new")
+    p.action, p.scopes = True, ["web"]
+    async def judge_grounded(**kw):
+        return {"grounded": False, "p": 0.1, "reason": "ok"}
+    p.judge_grounded = judge_grounded
+    m.executor.result = {"ok": True, "summary": "Found 2 matches for President:\n- Cand Idate: Co-President", "tool_calls": [], "raw": "x"}
+    m.router.next = RouterOutput(reply="On it.", task="new", task_title="x")
+    m.router.next_note = RouterOutput(reply="The president is Jamie Rivera.", task="T1")
+    async def go():
+        await m.get("aaron").handle_inbound("who is the president?", "imessage", approver_meta())
+        await asyncio.sleep(0.2)
+    asyncio.run(go())
+    outbound = [t for _, t, *_ in sent]
+    assert outbound[-1].startswith("Here is what I found, without interpretation:") and "Cand Idate: Co-President" in outbound[-1]
+    assert "Jamie Rivera" not in " ".join(outbound)

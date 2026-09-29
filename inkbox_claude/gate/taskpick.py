@@ -83,6 +83,45 @@ class TaskPicker:
                                     else (os.getenv("TYPESAFE_TASK_MIN_CONF") or 0.55))
         self.timeout = timeout
 
+    async def judge_grounded(self, *, reply: str, results: str, question: str) -> Dict[str, Any]:
+        """Before a result is delivered: is every factual claim in `reply` supported
+        by `results` (the tool output it was written from)? Returns {"grounded":
+        bool|None, "p": float}. Names, titles, numbers, dates and 'current'/'former'
+        claims that the results do not contain count as unsupported."""
+        if not self.api_key:
+            return {"grounded": None, "p": 0.0, "reason": "disabled"}
+        state = {"question_asked": question, "results_retrieved": results, "draft_reply": reply}
+        body = {"state": state, "model": self.model, "questions": {"grounded": {
+            "type": "noul",
+            "instructions": {
+                "question": "Is every factual claim in `draft_reply` directly supported by `results_retrieved`?",
+                "count_as_no": [
+                    "A name, title, number, date, email, or 'current'/'former' status in the reply that does not "
+                    "appear in the results.",
+                    "The reply states as fact something the results only suggest (a search snippet, a stale page, "
+                    "a partial list).",
+                    "The reply claims a lookup was done or a source was read that the results do not show.",
+                ],
+                "count_as_yes": [
+                    "Every specific claim can be pointed to in the results.",
+                    "The reply says plainly what was NOT found or not confirmed.",
+                    "Summaries, counts and comparisons computed from the results themselves.",
+                ],
+            },
+            "criteria": {"true": "All claims are supported by the results.",
+                         "false": "At least one claim is not supported by the results."},
+        }}}
+        try:
+            async with httpx.AsyncClient(timeout=self.timeout) as client:
+                r = await client.post(TYPESAFE_URL, headers={"Authorization": f"Bearer {self.api_key}"}, json=body)
+                r.raise_for_status()
+                p = float(r.json()["answers"]["grounded"].get("noul") or 0.0)
+        except Exception as exc:
+            logger.warning("grounding judgment via TypeSafe failed: %s", exc)
+            return {"grounded": None, "p": 0.0, "reason": f"error: {exc}"}
+        logger.info("grounding judgment: p(supported)=%.2f", p)
+        return {"grounded": p >= 0.5, "p": p, "reason": "ok"}
+
     async def judge_action(self, *, message: str, sender_label: str, history: List[Dict[str, Any]],
                            task: Optional[Dict[str, Any]], router_said_action: Optional[bool] = None) -> Dict[str, Any]:
         """Does this message call for the assistant to DO something with its tools

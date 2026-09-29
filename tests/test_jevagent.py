@@ -598,3 +598,17 @@ def test_sheet_read_learns_the_other_tabs_and_offers_them(agent, monkeypatch):
     assert calls[0][0] == "read_sheet_values" and calls[1][0] == "get_spreadsheet_info"      # tabs learned right after the first read
     assert calls[2] == ("read_sheet_values", "'Board Member Tracking'!A1:Z1000")             # second read targets the right tab
     assert "tabs:" in st["raw"] and "Board Member Tracking" in st["raw"]
+
+
+def test_search_snippets_alone_do_not_finish_a_run(agent, monkeypatch):
+    search, nav = "mcp__playwright__browser_search", "mcp__playwright__browser_navigate"
+    schemas = {search: {"description": "search", "schema": {"type": "object", "required": ["query"], "properties": {"query": {"type": "string"}}}},
+               nav: {"description": "open", "schema": {"type": "object", "required": ["url"], "properties": {"url": {"type": "string", "description": "the url"}}}}}
+    box = FakeBox(schemas, results={search: "1. Leadership\n   url: https://example.org/board\n   co-presidents: A and B", nav: "Page Title: Board\nCo-President: A"})
+    class J(ScriptedJudge):
+        async def yes(self, state, question):
+            return 0.7 if "fully achieved" in str(question) else 0.9   # "done" right after the search
+    judge = J([search, nav, "c0"])
+    _patch(monkeypatch, box, judge, ScriptedProse(), [search, nav])
+    st = asyncio.run(agent.run(_req("who is the president of the example board?")))
+    assert st["ok"] and [c[0] for c in box.calls] == [search, nav]      # it opened the page before finishing
