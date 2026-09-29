@@ -9,6 +9,7 @@ Interface the gateway uses:
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import os
 import re
@@ -1071,6 +1072,41 @@ class GateSessionManager:
             await self.send_to_approver(f"T{tid} reopened: {task['title']}")
         return True
 
+    async def ask_confirmation(self, req: Request, status: Dict[str, Any]) -> None:
+        """A destructive call is waiting. Park the request as pending with the exact call
+        stored, and text the owner what it is. '#N yes' performs that one call."""
+        c = status["confirm"]
+        self.store.set_state(req.id, "pending", status=status, raw_output=status.get("raw"))
+        self.store.set_thread(req.chat_id, "awaiting_aaron")
+        short = c["tool"].split("__")[-1]
+        shown = {k: v for k, v in c["args"].items() if k != "user_google_email"}
+        about = "\n".join(f"  {ln}" for ln in c.get("about") or []) or "  (no further detail found)"
+        self.task_note(req, "request", f"Waiting on Aaron to confirm: {short} {json.dumps(shown, ensure_ascii=False)}", state="waiting_aaron")
+        await self.send_to_approver(
+            f"[Blatbot #{req.id}] Before I do this, I need your yes.\n"
+            f"Action: {short} {json.dumps(shown, ensure_ascii=False)}\n"
+            f"It refers to:\n{about}\n"
+            f"Reply \"#{req.id} yes\" to do it or \"#{req.id} no\" to leave it alone. Nothing has been changed yet.")
+
+    async def perform_confirmed(self, req: Request) -> None:
+        """The owner said yes: run exactly the stored call, then finish the request."""
+        c = (req.status or {}).get("confirm") or {}
+        self.store.set_state(req.id, "running")
+        if self.jev_agent is None or not c:
+            status = {"ok": False, "error": "no confirmed call on record", "summary": "no confirmed call on record", "raw": "", "tool_calls": []}
+        else:
+            status = await self.jev_agent.perform(c["tool"], c["args"])
+        ok = bool(status.get("ok"))
+        self.store.set_state(req.id, "done" if ok else "failed", status=status, raw_output=status.get("raw"))
+        self.store.set_thread(req.chat_id, "idle")
+        result = _clean_result(status.get("summary") or status.get("error") or "")
+        self.task_note(req, "done" if ok else "failed", f"{req.summary} -> {result}", state="done" if ok else "failed")
+        session = self.get(req.chat_id)
+        note = f"Task #{req.id} {'done' if ok else 'FAILED'}: {req.summary}\nResult:\n{result}"
+        replied = await session.notify_after_request(note, inbound_id=req.inbound_id)
+        if not replied:
+            await self.send_to_approver(f"{'Done' if ok else 'Failed'}: {req.summary}\n{result}")
+
     async def handle_approver_command(self, session: GateSession, text: str) -> bool:
         """Parse Aaron's reply as a gate command. Returns True if consumed."""
         if await self.handle_task_command(session, text):
@@ -1090,6 +1126,16 @@ class GateSessionManager:
         if req is None:
             return False
         low = rest.lower()
+        if low in _YES and (req.status or {}).get("confirm"):
+            self.store.add_message(session.chat_id, "system", f"Aaron confirmed the pending change on request #{req.id}.")
+            asyncio.create_task(self.perform_confirmed(req))
+            return True
+        if low in _NO and (req.status or {}).get("confirm"):
+            self.store.set_state(req.id, "rejected")
+            self.store.set_thread(req.chat_id, "idle")
+            self.task_note(req, "rejected", f"Aaron declined the change: {req.summary}", state="open")
+            await self.send_to_approver(f"Left alone. Nothing was changed for #{req.id}.")
+            return True
         if low in _YES:
             self.store.set_state(req.id, "approved")
             self.store.add_message(session.chat_id, "system", f"Approved request #{req.id}.")
@@ -1126,7 +1172,7 @@ class GateSessionManager:
         logger.info("[gate] jev agent #%s: ok=%s steps=%s jev=%s prose=%s %ss",
                     req.id, status.get("ok"), status.get("tool_calls"), status.get("jev_calls"),
                     status.get("prose_calls"), status.get("seconds"))
-        if status.get("ok") or not self.jev_fallback:
+        if status.get("ok") or status.get("confirm") or not self.jev_fallback:
             return status
         if status.get("wrote"):
             logger.info("[gate] jev agent #%s failed after a write; not falling back", req.id)
@@ -1146,6 +1192,9 @@ class GateSessionManager:
         context = self.store.task_memory_for_task(tid) if tid else ""
         logger.info("[gate] executing #%s with ledger T%s (%d chars)", req.id, tid, len(context))
         status = await self._run_executor(req, context)
+        if status.get("confirm"):
+            await self.ask_confirmation(req, status)
+            return "I need your yes before I change anything; I have texted you what it is."
         ok = bool(status.get("ok"))
         self.store.set_state(req.id, "done" if ok else "failed",
                              status=status, raw_output=status.get("raw"))

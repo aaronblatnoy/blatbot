@@ -139,9 +139,9 @@ def test_candidate_id_is_selected_not_written(agent, monkeypatch):
     prose = ScriptedProse()
     _patch(monkeypatch, box, judge, prose, [lst, get])
     st = asyncio.run(agent.run(_req("cancel the dentist")))
-    assert st["ok"]
-    assert box.calls[1][1]["event_id"] == "evt_ZZZZZZZZZZZZZZZZ999"
-    assert prose.calls == 0
+    # a delete pauses for the owner's yes; the selected id is in the pending call
+    assert not st["ok"] and st["confirm"]["args"]["event_id"] == "evt_ZZZZZZZZZZZZZZZZ999"
+    assert [c[0] for c in box.calls] == [lst] and prose.calls == 0
 
 
 def test_give_up_and_unsure_fail_without_side_effects(agent, monkeypatch):
@@ -655,3 +655,23 @@ def test_text_arguments_are_selected_from_spans_before_being_written(agent, monk
     _patch(monkeypatch, box, J([search]), prose, [search])
     st = asyncio.run(agent.run(_req("check tamid coffee chat tracking form for fall 2026 and see how many coffee chats Max Levy did.")))
     assert st["ok"] and box.calls[0][1]["query"] == "coffee chat tracking form" and prose.calls == 0
+
+
+def test_agent_pauses_before_a_destructive_call(agent, monkeypatch):
+    from inkbox_claude.gate.jevagent import is_destructive
+    assert is_destructive("mcp__tamid-drive__manage_event", {"action": "delete"}) and is_destructive("mcp__sjba-admin__sjba_delete_event", {})
+    assert not is_destructive("mcp__tamid-drive__manage_event", {"action": "create"}) and not is_destructive("mcp__tamid-drive__get_events", {})
+    find, change = "mcp__tamid-drive__get_events", "mcp__tamid-drive__manage_event"
+    schemas = {find: {"description": "events", "schema": {"type": "object", "properties": {"query": {"type": "string"}}, "required": []}},
+               change: {"description": "change", "schema": {"type": "object", "required": ["action", "event_id"],
+                                                            "properties": {"action": {"type": "string", "enum": ["create", "update", "delete"]},
+                                                                           "event_id": {"type": "string"}}}}}
+    box = FakeBox(schemas, results={find: '- "Sam Rivera and TAMID at NYU (Quant)" (Starts: 2026-10-02T15:00) ID: evt_QUANT000000000001', change: "deleted"})
+    class J(ScriptedJudge):
+        async def yes(self, state, question):
+            return 0.1 if "fully achieved" in str(question) else 0.9
+    _patch(monkeypatch, box, J([find, change, "delete", "c0"]), ScriptedProse(), [find, change])
+    st = asyncio.run(agent.run(_req("cancel sam rivera's quant interview")))
+    assert not st["ok"] and st["confirm"]["tool"] == change and st["confirm"]["args"]["event_id"] == "evt_QUANT000000000001"
+    assert "Sam Rivera and TAMID at NYU (Quant)" in st["confirm"]["about"][0]
+    assert [c[0] for c in box.calls] == [find] and "WRITES PERFORMED: none" in st["raw"]

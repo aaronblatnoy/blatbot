@@ -325,6 +325,23 @@ margin (top at least 0.2 and twice the runner-up) when many tools split the
 probability. When the agent still escalates, Claude Code receives the agent's
 steps and full results as work already done, and continues from them.
 
+### Confirmation before destructive calls
+
+`is_destructive` (tool name or `action` matching delete, remove, trash, cancel,
+replace, clear, purge; `GATE_CONFIRM_TOOLS` overrides the pattern) stops the agent
+before the call. The run returns a `confirm` record: the tool, its arguments, and
+the earlier result lines that mention those argument values (the event title and
+time, the row). `GateSessionManager.ask_confirmation` parks the request as pending
+with that record and texts the owner the exact action. `#N yes` runs
+`JevAgent.perform` on that one call and finishes the request; `#N no` marks it
+rejected and changes nothing. Claude Code is denied destructive calls outright and
+told to report what it would change. Every agent report opens with
+`WRITES PERFORMED:` listing each write's tool and arguments, or "none".
+
+Background: on 2026-09-29 a request to cancel one interview deleted a different
+interview of the same person (the only match found) and the reply said nothing had
+been cancelled. The event was restored in place through the Calendar API.
+
 ### Grounded delivery
 
 `GateSession.ground_reply` runs before any result reply goes out. Jev

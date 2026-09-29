@@ -81,6 +81,11 @@ class Executor:
         async def can_use(tool_name: str, input_data: Dict[str, Any], context: Any):
             if tool_name not in allowed_set:
                 return PermissionResultDeny(message=f"{tool_name} is outside this task's scope; do not retry it.")
+            from .jevagent import is_destructive
+            if is_destructive(tool_name, input_data or {}):
+                return PermissionResultDeny(message="Deleting, cancelling or replacing anything requires Aaron's "
+                                                    "confirmation, which only the gateway can ask for. Report exactly "
+                                                    "what you would change (name, time, id) in your status and stop.")
             if sends_to_requester(tool_name, input_data or {}, protected):
                 # Enforced, not just prompted: the gateway delivers the result to whoever asked.
                 return PermissionResultDeny(message="Do not message the requester; the gateway delivers your "

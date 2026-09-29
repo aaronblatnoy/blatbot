@@ -1421,3 +1421,61 @@ def test_host_read_scope_maps_to_the_status_tool():
     assert tools_for(["host_read"]) == ["mcp__host__host_status"]
     out = asyncio.run(hosttools.host_status({"parts": ["uptime_load", "nope"]}))
     assert out.startswith("## uptime_load") and "nope" not in out
+
+
+def test_destructive_call_asks_the_owner_and_runs_only_on_yes(tmp_path):
+    """Deleting is never done on the owner's first message: the exact call is texted,
+    '#N yes' performs that one call, '#N no' leaves everything alone."""
+    m, sent = make_manager(tmp_path)
+    p = _jev_first(m, choice="new")
+    p.action, p.scopes = True, ["calendar"]
+    performed = []
+    class FakeJev:
+        async def run(self, req, context=""):
+            return {"ok": False, "error": "confirmation required", "summary": "", "raw": "WRITES PERFORMED: none",
+                    "tool_calls": ["mcp__tamid-drive__get_events"], "wrote": False, "engine": "jev",
+                    "confirm": {"tool": "mcp__tamid-drive__manage_event", "args": {"action": "delete", "event_id": "evt_QUANT01"},
+                                "about": ['"Sam Rivera and TAMID at NYU (Quant)" Fri 10/2 3:00 PM ID: evt_QUANT01']}}
+        async def perform(self, tool, args):
+            performed.append((tool, args))
+            return {"ok": True, "summary": "WRITES PERFORMED: manage_event\ndeleted evt_QUANT01\nSTATUS: OK", "raw": "deleted", "tool_calls": [tool], "wrote": True, "engine": "jev"}
+    m.jev_agent, m.jev_fallback = FakeJev(), True
+    m.router.next = RouterOutput(reply="On it.", task="new", task_title="Cancel Sam's interview")
+    m.router.next_note = RouterOutput(reply="Done, the Quant interview is cancelled.", task="T1")
+    async def go():
+        s = m.get("aaron")
+        await s.handle_inbound("cancel sam rivera's quant interview", "imessage", approver_meta())
+        await asyncio.sleep(0.15)
+        assert performed == []                                                   # nothing changed yet
+        ask = [t for _, t, *_ in sent if "Before I do this" in t]
+        assert len(ask) == 1 and "delete" in ask[0] and "Sam Rivera and TAMID at NYU (Quant)" in ask[0]
+        assert m.store.get_request(1).state == "pending"
+        await s.handle_inbound("#1 yes", "imessage", approver_meta())
+        await asyncio.sleep(0.15)
+    asyncio.run(go())
+    assert performed == [("mcp__tamid-drive__manage_event", {"action": "delete", "event_id": "evt_QUANT01"})]
+    assert m.store.get_request(1).state == "done"
+    assert [t for _, t, *_ in sent][-1] == "Done, the Quant interview is cancelled."
+
+
+def test_destructive_call_declined_leaves_everything_alone(tmp_path):
+    m, sent = make_manager(tmp_path)
+    p = _jev_first(m, choice="new")
+    p.action, p.scopes = True, ["calendar"]
+    performed = []
+    class FakeJev:
+        async def run(self, req, context=""):
+            return {"ok": False, "error": "confirmation required", "summary": "", "raw": "", "tool_calls": [], "wrote": False, "engine": "jev",
+                    "confirm": {"tool": "mcp__tamid-drive__manage_event", "args": {"action": "delete", "event_id": "evt_X"}, "about": []}}
+        async def perform(self, tool, args):
+            performed.append(tool); return {"ok": True}
+    m.jev_agent = FakeJev()
+    m.router.next = RouterOutput(reply="On it.", task="new", task_title="x")
+    async def go():
+        s = m.get("aaron")
+        await s.handle_inbound("delete that event", "imessage", approver_meta())
+        await asyncio.sleep(0.1)
+        await s.handle_inbound("#1 no", "imessage", approver_meta())
+    asyncio.run(go())
+    assert performed == [] and m.store.get_request(1).state == "rejected"
+    assert any("Left alone" in t for _, t, *_ in sent)

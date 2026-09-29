@@ -703,6 +703,14 @@ class JevAgent:
                         # The gateway delivers the answer; a send to the requester would duplicate it.
                         logger.info("jev agent: refusing %s to the requester; finishing with findings", choice)
                         break
+                    if is_destructive(choice, args):
+                        # Nothing is deleted, cancelled or replaced without the owner's yes. The run
+                        # stops here with the exact call and what it refers to; the gate asks Aaron
+                        # and performs this one call on "yes".
+                        st = self._status(False, "confirmation required", steps, judge, prose, started)
+                        st["confirm"] = {"tool": choice, "args": args, "about": _mentions(steps, args)}
+                        logger.info("jev agent: %s needs the owner's confirmation; pausing", choice.split("__")[-1])
+                        return st
                     if any(s["ok"] and s["tool"] == choice and s["args"] == args for s in steps) and p_done < 0.3:
                         # Same call again: the judge wants this tool but with something different
                         # (another tab, another record). Refill avoiding the values just used.
@@ -892,6 +900,21 @@ class JevAgent:
             return None
         return args
 
+    async def perform(self, tool: str, args: Dict[str, Any]) -> Dict[str, Any]:
+        """Run one confirmed call and nothing else."""
+        try:
+            async with ToolBox(self.inkbox_server, self.mcp_config) as box:
+                result = await box.call(tool, args)
+            if _looks_like_error(result):
+                return {"ok": False, "error": _text(result), "summary": _text(result), "raw": _text(result), "tool_calls": [tool], "wrote": False, "engine": "jev"}
+            short = tool.split("__")[-1]
+            raw = (f"WRITES PERFORMED: {short}({json.dumps({k: v for k, v in args.items() if k not in _FIXED_ARGS}, ensure_ascii=False)})\n"
+                   f"- {short}:\n{_text(result)}\nSTATUS: OK")
+            return {"ok": True, "summary": raw, "raw": raw, "tool_calls": [tool], "wrote": True, "engine": "jev"}
+        except Exception as exc:
+            logger.exception("jev agent: confirmed call %s failed", tool)
+            return {"ok": False, "error": str(exc), "summary": str(exc), "raw": str(exc), "tool_calls": [tool], "wrote": False, "engine": "jev"}
+
     async def _candidates(self, judge: "Judge", name: str, desc: str, typ: str, facts: Dict[str, Any],
                           steps: List[Dict[str, Any]], req: Request) -> List[Any]:
         """Candidate values for one argument. Small sources are scanned whole; a large
@@ -922,6 +945,14 @@ class JevAgent:
                 started: float, probs: Optional[Dict[str, float]] = None) -> Dict[str, Any]:
         lines = [f"{'Done' if ok else 'Failed'} via Jev agent in {time.time() - started:.1f}s "
                  f"({len(steps)} tool call(s), {judge.calls} Jev judgment(s), {prose.calls} prose call(s))."]
+        writes = [s for s in steps if s["ok"] and is_write_tool(s["tool"])]
+        lines.append("WRITES PERFORMED: " + ("; ".join(
+            f"{s['tool'].split('__')[-1]}({json.dumps({k: v for k, v in s['args'].items() if k not in _FIXED_ARGS}, ensure_ascii=False)})"
+            for s in writes) if writes else "none. Nothing was sent, created, changed or deleted."))
+        writes = [s for s in steps if s["ok"] and is_write_tool(s["tool"])]
+        lines.append("WRITES PERFORMED: " + ("; ".join(
+            f"{s['tool'].split('__')[-1]}({json.dumps({k: v for k, v in s['args'].items() if k not in _FIXED_ARGS}, ensure_ascii=False)})"
+            for s in writes) if writes else "none. Nothing was sent, created, changed or deleted."))
         # Full results, never truncated: the reply model answers from this text.
         for s in steps:
             r = s["result"] if isinstance(s["result"], str) else json.dumps(s["result"], ensure_ascii=False, default=str)
@@ -939,6 +970,33 @@ class JevAgent:
 
 _WRITE_RE = re.compile(r"(send|create|update|modify|delete|manage|append|publish|place_call|move|set_|replace|import|insert|format|resize|run_script|reply|complete|fail"
                        r"|browser_click|browser_type|browser_fill_form|browser_select_option|browser_press_key|browser_drag|browser_drop|browser_file_upload|browser_handle_dialog)", re.I)
+
+
+_DESTRUCTIVE_RE = re.compile(os.getenv("GATE_CONFIRM_TOOLS") or r"(delete|remove|trash|cancel|replace|clear|purge)", re.I)
+
+
+def _mentions(steps: List[Dict[str, Any]], args: Dict[str, Any]) -> List[str]:
+    """Earlier result lines that mention one of the argument values: what the call
+    is about, in the words the tools used (the event title and time, the row)."""
+    vals = [str(v) for k, v in args.items() if k not in _FIXED_ARGS and isinstance(v, (str, int)) and len(str(v)) >= 6]
+    out: List[str] = []
+    for st in steps:
+        t = st.get("evidence") or st["result"]
+        t = t if isinstance(t, str) else _text(t)
+        for ln in t.splitlines():
+            if any(v in ln for v in vals) and ln.strip() not in out:
+                out.append(ln.strip())
+    return out[:10]
+
+
+def is_destructive(name: str, args: Dict[str, Any]) -> bool:
+    """A write the owner must confirm first: deleting, removing, cancelling, replacing.
+    Also manage_event/update with a delete-like action argument."""
+    short = name.split("__")[-1]
+    if _DESTRUCTIVE_RE.search(short):
+        return True
+    act = str(args.get("action") or "").lower()
+    return bool(act) and bool(_DESTRUCTIVE_RE.search(act))
 
 
 def is_write_tool(name: str) -> bool:
