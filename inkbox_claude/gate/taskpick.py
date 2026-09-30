@@ -71,6 +71,20 @@ EVENT_KINDS = {
 }
 
 
+def _last_request_outcome(task: Optional[Dict[str, Any]]) -> str:
+    """What the task's most recent request did, for the action judgment: a
+    correction after a run means run again; before any run it is just detail."""
+    if not task:
+        return "none"
+    for e in reversed(task.get("events") or []):
+        k = e.get("kind")
+        if k in ("done", "failed"):
+            return f"{k}: {str(e.get('text') or '')[:200]}"
+        if k in ("request", "approved"):
+            return f"requested, not finished: {str(e.get('text') or '')[:160]}"
+    return "nothing has run on this task yet"
+
+
 SCOPE_MIN_YES = float(os.getenv("TYPESAFE_SCOPE_MIN_YES") or 0.6)
 
 
@@ -137,27 +151,62 @@ class TaskPicker:
             "conversation_so_far": [f"[{m.get('kind')}] {str(m.get('text') or '')[:300]}" for m in history[-6:]],
             "new_message": message,
             "task_it_belongs_to": candidate_view(task) if task else "none",
+            "last_action_on_that_task": _last_request_outcome(task),
             "another_model_said_action_needed": router_said_action,
         }
         body = {"state": state, "model": self.model, "questions": {"needs_action": {
             "type": "noul",
             "instructions": {
                 "question": "Should the assistant now go and DO something for this message, using its tools?",
-                "the_assistant_can": "read and change calendars, inboxes, contacts, documents, spreadsheets, forms "
-                                     "and website admin pages; search the web; send email and texts.",
+                "the_assistant_can": [
+                    "TAMID Google Calendar and Aaron's Stern calendar: list events for a day or range, free/busy, "
+                    "create, move, shorten, cancel events.",
+                    "TAMID Google Drive: find sheets, docs, forms and folders; read a sheet tab's rows (rosters, "
+                    "schedules, trackers, form responses); read docs; write cells, append rows, create sheets, "
+                    "docs and folders; read a form's questions and every response.",
+                    "TAMID Gmail and Aaron's Stern Gmail: search messages and threads, read one in full.",
+                    "Blatbot's own Inkbox mailbox, texts and iMessages: list and read threads, send email, "
+                    "SMS or iMessage to a third party; look up, create and update contacts and their notes.",
+                    "TAMID and SJBA website admin: list and read board members and bios, events, members, "
+                    "semesters, site settings, contact-form submissions, newsletter signups; create, update "
+                    "and delete any of those; replace headshots and flyers.",
+                    "Public web: search, open a page, read and find text on it, click, type and fill forms.",
+                    "The black-sky server: what is running (containers, services, uptime, disk, memory, GPUs).",
+                ],
                 "count_as_yes": [
                     "The sender asks for anything to be booked, moved, cancelled, sent, looked up, checked, "
-                    "changed, added, closed, or found out.",
+                    "changed, added, closed, counted, or found out.",
                     "The sender asks a question whose answer must be looked up (a calendar, an inbox, a sheet, "
-                    "a website), even if phrased casually.",
+                    "a website), even if phrased casually or as a fragment.",
+                    "Calendar: 'when is X's interview', 'what's on Friday', 'is 2:30 free', 'move X to 9', "
+                    "'make it 30 minutes', 'cancel X's slot but keep the other one', 'add a room to the event'.",
+                    "Sheets and forms: 'how many people applied', 'who hasn't responded', 'what school is X in', "
+                    "'find X's email', 'which slots are open', 'mark X as interviewed', 'add a row for X', "
+                    "'what's the link to that sheet', 'what's the exact title of the form'.",
+                    "Mail: 'did we email X', 'what did X say', 'has X replied', 'forward me the thread', "
+                    "'find the invitation we sent'.",
+                    "Websites: 'who is on the board', 'update X's bio', 'add the event', 'who contacted us "
+                    "through the site', 'take X off the board page', 'swap the headshot'.",
+                    "Contacts and messaging: 'text X that ...', 'email X the list', 'what's X's number', "
+                    "'add a note to X's contact'.",
+                    "Public web: 'look up X', 'who is the president of Y', 'find Z's LinkedIn', 'confirm that "
+                    "roster on their site'.",
+                    "Server: 'what's running on black sky', 'is the gateway up', 'how much disk is left'.",
                     "The sender supplies information that `task_it_belongs_to` was waiting for, so its pending "
-                    "step can now be carried out (e.g. an application, availability, a confirmation, details).",
+                    "step can now be carried out (an application, availability, a confirmation, details).",
                     "The sender wants to schedule or set up something (a chat, a meeting, a call).",
+                    "A correction, addition or 'try again' on a task whose `last_action_on_that_task` already "
+                    "ran (done or failed): the sender wants it done again with the change ('should be 30 minutes', "
+                    "'the other one', 'give it those scopes', 'no, Friday', 'yes, resubmit').",
+                    "A follow-up question whose answer is not in the conversation and must come from the same "
+                    "source again ('what was the document called', 'give me the link', 'and their emails?').",
                 ],
                 "count_as_no": [
                     "Thanks, greetings, acknowledgements, small talk.",
                     "A question about the assistant itself or about what it will do, answerable in words.",
-                    "A clarification that adds nothing actionable yet.",
+                    "A question already answered by facts in `conversation_so_far`: rephrasing, filtering or "
+                    "reformatting what was just delivered ('without Dylan and Sean', 'same thing but shorter').",
+                    "A clarification on a task whose next step has NOT run yet and still cannot run.",
                 ],
             },
             "criteria": {
