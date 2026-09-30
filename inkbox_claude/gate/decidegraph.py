@@ -102,6 +102,11 @@ async def check_reply(state: DecideState, config: RunnableConfig) -> Dict[str, A
                                                   "message; do not say you are doing, submitting or checking anything. "
                                                   "Answer from what is known, or ask what is needed.)")
         out.reply = out2.reply if out2.reply and not gm._promises_action(out2.reply) else None
+    if state["needs_action"] and out.reply and state["mode"] == "voice":
+        # On a call the voice model holds the line itself; a written "on it" becomes
+        # filler read aloud, then the result arrives as a second turn.
+        logger.info("[gate %s] voice: no acknowledgement alongside a request; the result will be spoken", s.chat_id)
+        out.reply = None
     if state["needs_action"] and out.reply and not gm._is_acknowledgement(out.reply):
         logger.info("[gate %s] dropped a %d-word reply written alongside a request; result will follow",
                     s.chat_id, len(out.reply.split()))

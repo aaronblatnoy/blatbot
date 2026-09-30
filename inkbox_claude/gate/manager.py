@@ -355,7 +355,7 @@ class GateSession:
             await self.jev_action(message, prior, out, self._peek_task(out))
             task = None
             if out.request is not None or _names_a_task(out.task):
-                task = self.m.resolve_task(self, out)
+                task = self.m.resolve_task(self, out, message=body)
                 self._ensure_inbound_on_task(task, body if mode != "voice" else f"(phone) {body}")
                 if out.request is not None:
                     out.request.prompt = self.build_task_prompt(body, prior, task)
@@ -412,7 +412,7 @@ class GateSession:
             out.task = None
         task = None
         if needs_action or _names_a_task(out.task):
-            task = self.m.resolve_task(self, out)
+            task = self.m.resolve_task(self, out, message=body)
             self._ensure_inbound_on_task(task, body if mode != "voice" else f"(phone) {body}")
             if needs_action:
                 from .router import RouterRequest
@@ -592,19 +592,35 @@ class GateSession:
                 if trusted:
                     import time as _t
                     now = _t.time()
-                    rows = self.m.store.recent_tasks(limit=20)
+                    rows = self.m.store.recent_tasks(limit=14)
                     out = []
                     for r in rows:
                         title = str(r["title"] or "")
-                        if title.startswith("Thread with") or r["state"] == "closed":
+                        if title.startswith("Thread with") or title == "Untitled task" or r["state"] == "closed":
                             continue  # a bare conversation, not a task
                         hrs = (now - r["updated_at"]) / 3600
                         age = f"{int(hrs * 60)} min ago" if hrs < 1 else (f"{int(hrs)} hours ago" if hrs < 48 else f"{int(hrs / 24)} days ago")
                         state = {"open": "in progress", "waiting_aaron": "waiting on Aaron's okay",
                                  "running": "running now", "done": "done", "failed": "didn't work"}.get(r["state"], r["state"])
-                        out.append(f"- {title} ({state}, {age})")
-                    notes = ("Recent things you've been working on, newest first. This is background, not a "
-                             "menu and not a limit on what you can do:\n" + "\n".join(out))
+                        line = f"- {title} ({state}, {age})"
+                        stands = " ".join(str(r.get("summary") or "").split())
+                        if stands and not stands.startswith("Latest: Aaron asked for something"):
+                            line += f"\n    where it stands: {stands[:280]}"
+                        # The last result on the task, so facts already found can be said without a hand-off.
+                        full = self.m.store.task_with_events(int(r["id"]), limit=8) or {}
+                        for e in reversed(full.get("events") or []):
+                            if e.get("kind") == "done":
+                                res = " ".join(str(e.get("text") or "").split(" -> ", 1)[-1].split())
+                                res = res.split("WRITES PERFORMED", 1)[0].split("Done via Jev agent", 1)[0].strip()
+                                if res:
+                                    # Conclusions come last in a result; the head is narration.
+                                    line += f"\n    last result: {('... ' + res[-320:]) if len(res) > 320 else res}"
+                                break
+                        out.append(line)
+                    notes = ("Recent things you've been working on, newest first, with what was found. Answer from "
+                             "these directly when they already hold the answer; hand off only for something newer "
+                             "or not here. This is background, not a menu and not a limit on what you can do:\n"
+                             + "\n".join(out))
                 else:
                     notes = "What's on record with this caller:\n" + self.task_memory()[-1500:]
             finally:
@@ -1012,7 +1028,7 @@ class GateSessionManager:
             "A bare yes/no works when this is the only one pending."
         )
 
-    def resolve_task(self, session: GateSession, out: RouterOutput) -> Dict[str, Any]:
+    def resolve_task(self, session: GateSession, out: RouterOutput, message: str = "") -> Dict[str, Any]:
         """Decide which task a request belongs to. Always returns a task.
 
         The router proposes: an existing id ("T12"), "new" with a title, or nothing.
@@ -1021,7 +1037,10 @@ class GateSessionManager:
         (for a non-owner) or to a new task titled from the request summary. Whatever
         happens, the request ends up on exactly one task. This cannot be skipped."""
         req = out.request
-        summary = (req.summary if req else "") or "Untitled task"
+        # A task is titled by the router, else by its request summary, else by the message
+        # that started it. Never a placeholder: the title is what every later pick compares.
+        fallback = " ".join((message or "").split())[:90]
+        summary = (req.summary if req else "") or fallback or "Untitled task"
         sender = session._sender()
         sender_name = session._sender_name() or sender
         approver = session.is_approver()
@@ -1048,6 +1067,8 @@ class GateSessionManager:
                 chosen = found[0]
         if chosen is None:
             title = (out.task_title or "").strip() or summary
+            if title == "Untitled task" and fallback:
+                title = fallback
             chosen = self.store.create_task(title)
             logger.info("[gate] new task T%s: %s", chosen["id"], title)
 
