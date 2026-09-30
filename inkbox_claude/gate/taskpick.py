@@ -91,7 +91,8 @@ def _last_request_outcome(task: Optional[Dict[str, Any]]) -> str:
 SCOPE_TREE_SYSTEMS: Dict[str, str] = {
     "tamid_workspace": "TAMID's Google Drive, Sheets, Docs, Forms or the TAMID Gmail inbox (nyu@tamidgroup.org): "
                        "rosters, schedules, trackers, applications, form responses, emails TAMID sent or received.",
-    "tamid_calendar": "The TAMID Google Calendar (the club's, not Aaron's own): interview and event times, free/busy, "
+    "tamid_calendar": "The TAMID club Google Calendar (nyu@tamidgroup.org; where TAMID interviews and club events "
+                      "live; NOT Aaron's own calendar, which is his Stern account): event times, free/busy, "
                       "creating, moving or cancelling events.",
     "aaron_stern": "Aaron's own NYU Stern account: his personal calendar ('my calendar') or his Stern Gmail ('my email').",
     "blatbot_inkbox": "Blatbot's own mailbox, phone line and address book: its email, SMS and iMessage threads, "

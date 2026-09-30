@@ -14,7 +14,7 @@ OWNER_ACCOUNT = os.getenv("GATE_OWNER_GOOGLE_ACCOUNT") or "owner@example.edu"
 
 SCOPES: Dict[str, Dict[str, object]] = {
     "calendar": {
-        "description": f"read and write the {ORG_ACCOUNT} Google Calendar (list, free/busy, create/update events)",
+        "description": f"TAMID calendar: read and write the club's Google Calendar ({ORG_ACCOUNT}; interviews, club events; NOT Aaron's own calendar): list, free/busy, create/update events",
         "tools": [
             "mcp__tamid-drive__list_calendars",
             "mcp__tamid-drive__get_events",
