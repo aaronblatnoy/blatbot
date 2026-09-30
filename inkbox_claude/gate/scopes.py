@@ -38,11 +38,25 @@ def load_registry() -> Dict[str, object]:
 
 def load_resolved() -> Dict[str, List[str]]:
     """Server -> full tool names, as last synced. Empty when never synced."""
+    return {k: list(v) for k, v in _load_resolved_raw().items()}
+
+
+def _load_resolved_raw() -> Dict[str, Dict[str, str]]:
+    """Server -> {tool name: description}. Accepts the older list-only format."""
     try:
         with open(RESOLVED_PATH, encoding="utf-8") as fh:
-            return {k: list(v) for k, v in (json.load(fh) or {}).items()}
+            raw = json.load(fh) or {}
     except FileNotFoundError:
         return {}
+    out: Dict[str, Dict[str, str]] = {}
+    for server, v in raw.items():
+        out[server] = {t: "" for t in v} if isinstance(v, list) else {str(t): str(d or "") for t, d in v.items()}
+    return out
+
+
+# Tool descriptions captured at sync time, so a run can describe its tools to the
+# planner without launching a single MCP server. Empty string = not captured.
+TOOL_DESCRIPTIONS: Dict[str, str] = {t: d for srv in _load_resolved_raw().values() for t, d in srv.items() if d}
 
 
 def match_tools(server: str, available: List[str], include: List[str], exclude: List[str]) -> List[str]:
@@ -88,6 +102,32 @@ SCOPE_TREE_LEAVES: Dict[str, Dict[str, object]] = {
 }
 
 
+def _scope_system() -> Dict[str, str]:
+    m: Dict[str, str] = {}
+    for sysname in SCOPE_TREE_SYSTEMS:
+        for sc in SCOPE_TREE_ALWAYS.get(sysname, []):
+            m.setdefault(sc, sysname)
+        for _, (_, grants) in SCOPE_TREE_LEAVES.get(sysname, {}).items():
+            for sc in grants:
+                m.setdefault(sc, sysname)
+    return m
+
+
+SCOPE_SYSTEM: Dict[str, str] = _scope_system()
+TOOL_SYSTEM: Dict[str, str] = {}
+for _sc, _v in SCOPES.items():
+    for _t in _v["tools"]:  # type: ignore[union-attr]
+        TOOL_SYSTEM.setdefault(_t, SCOPE_SYSTEM.get(_sc, "other"))
+
+
+def tools_by_system(tools: List[str]) -> Dict[str, List[str]]:
+    """Group tool names by the registry system they belong to (order preserved)."""
+    out: Dict[str, List[str]] = {}
+    for t in tools:
+        out.setdefault(TOOL_SYSTEM.get(t, "other"), []).append(t)
+    return out
+
+
 def registry_problems() -> List[str]:
     """Consistency checks: every granted scope exists, every scope has tools."""
     problems: List[str] = []
@@ -99,6 +139,9 @@ def registry_problems() -> List[str]:
         for g in SCOPE_TREE_ALWAYS.get(sysname, []):
             if g not in SCOPES:
                 problems.append(f"system {sysname} always-grants unknown scope {g}")
+    for name in SCOPES:
+        if name not in SCOPE_SYSTEM:
+            problems.append(f"scope {name} belongs to no system in the tree")
     for name, v in SCOPES.items():
         if not v["tools"]:
             problems.append(f"scope {name} has no tools" + (" (run `inkbox-claude scopes sync`)" if v.get("server") else ""))

@@ -34,7 +34,10 @@ from langchain_core.runnables import RunnableConfig
 from langgraph.graph import END, START, StateGraph
 from langgraph.types import Send
 
+import os
+
 from . import jevagent as ja
+from .scopes import SCOPE_TREE_SYSTEMS, TOOL_DESCRIPTIONS, TOOL_SYSTEM, tools_by_system
 
 logger = logging.getLogger(__name__)
 
@@ -107,6 +110,64 @@ def after_judge(state: AgentState, config: RunnableConfig) -> str:
     return "plan"
 
 
+NONE_HERE = "none_of_these"
+SYSTEM_MIN = float(os.getenv("JEV_AGENT_SYSTEM_MIN") or 0.25)
+
+
+def _narrow_reads(options: Dict[str, str], choice: Optional[str], sys_p: Dict[str, float]) -> Dict[str, str]:
+    """Read tools worth asking about alongside the pick: those in systems the step
+    judged relevant (all of them when only one system is granted)."""
+    if not choice or choice == ja.GIVE_UP:
+        return {}
+    if not sys_p:
+        return {t: d for t, d in options.items() if t != ja.GIVE_UP}
+    keep = {s for s, p in sys_p.items() if p >= SYSTEM_MIN} | {TOOL_SYSTEM.get(choice, "other")}
+    return {t: d for t, d in options.items() if t != ja.GIVE_UP and TOOL_SYSTEM.get(t, "other") in keep}
+
+
+async def choose_tool(judge: "ja.Judge", loop_state: Any, options: Dict[str, str], step: int
+                      ) -> Tuple[Optional[str], float, Dict[str, float], Dict[str, float]]:
+    """The next tool, chosen as a tree: first which SYSTEM the next step uses (a yes/no per
+    system the task was granted), then which tool within that system (a choice over a
+    handful plus none_of_these). One system granted: a flat choice, as before."""
+    tools = {t: d for t, d in options.items() if t != ja.GIVE_UP}
+    groups = tools_by_system(list(tools))
+    rules = ["The gateway delivers the findings to the person who asked; never send them the answer.",
+             "Read before you write. A wrong first pick or an empty lookup means try the next likely one.",
+             f"Choose {NONE_HERE} only when no tool here is the right next step."]
+    if len(groups) <= 1:
+        opts = dict(tools)
+        opts[ja.GIVE_UP] = options[ja.GIVE_UP]
+        rules[-1] = f"Choose {ja.GIVE_UP} only when no tool here can still help."
+        ch, cf, pr = await judge.choose(loop_state, {"question": "What is the single best next step toward `goal`?", "rules": rules}, opts)
+        return ch, cf, pr, {}
+    questions = {f"sys::{s}": {"type": "noul", "instructions": {
+        "system": SCOPE_TREE_SYSTEMS.get(s, s),
+        "tools_here": [t.split("__")[-1] for t in ts][:12],
+        "question": "Does the single best NEXT step toward `goal`, given `steps_so_far`, use this system?"},
+        "criteria": {"true": "The next call belongs here.", "false": "The next call is elsewhere, or nothing here helps now."}}
+        for s, ts in groups.items()}
+    answers = await judge.ask(loop_state, questions)
+    sys_p = {s: float((answers.get(f"sys::{s}") or {}).get("noul") or 0.0) for s in groups}
+    ordered = [s for s, p in sorted(sys_p.items(), key=lambda kv: -kv[1]) if p >= SYSTEM_MIN]
+    logger.info("jev graph step %d: systems %s", step + 1, [(s, round(sys_p[s], 2)) for s in sorted(sys_p, key=lambda k: -sys_p[k])][:4])
+    all_probs: Dict[str, float] = {}
+    for s in ordered[:2]:
+        opts = {t: tools[t] for t in groups[s]}
+        opts[NONE_HERE] = "None of these is the right next step."
+        choice, conf, probs = await judge.choose(
+            loop_state, {"question": f"Within this system, what is the single best next step toward `goal`?",
+                         "rules": rules}, opts)
+        for t, p in probs.items():
+            if t != NONE_HERE:
+                all_probs[t] = max(all_probs.get(t, 0.0), p * sys_p[s])
+        if choice and choice != NONE_HERE:
+            return choice, conf, all_probs, sys_p
+    if not ordered:
+        return ja.GIVE_UP, 1.0 - max(sys_p.values(), default=0.0), all_probs, sys_p
+    return None, 0.0, all_probs, sys_p
+
+
 async def plan(state: AgentState, config: RunnableConfig) -> Dict[str, Any]:
     rt = _rt(config)
     judge, agent = rt["judge"], rt["agent"]
@@ -117,29 +178,8 @@ async def plan(state: AgentState, config: RunnableConfig) -> Dict[str, Any]:
     if len(steps) >= 2 and steps[-1]["tool"] == steps[-2]["tool"] and len(options) > 1:
         options.pop(steps[-1]["tool"], None)          # two in a row: the next move must differ
     options[ja.GIVE_UP] = "The goal cannot be achieved with these tools or the information available."
-    useful = await agent._useful_reads(judge, loop_state, options)
-    choice, conf, probs = await judge.choose(
-        loop_state,
-        {"question": "What is the single best next step toward `goal`?",
-         "rules": ["The gateway delivers the findings to the person who asked; never send them the answer.",
-                   "Read before you write. A wrong first pick or an empty lookup means try the next likely one.",
-                   f"Choose {ja.GIVE_UP} only when no tool here can still help."]},
-        options)
-    logger.info("jev graph step %d: %s (conf %.2f)", step + 1, choice, conf)
-    if choice is None and probs:
-        top3 = [k for k, _ in sorted(probs.items(), key=lambda kv: -kv[1]) if k != ja.GIVE_UP][:3]
-        if top3:
-            narrowed = {k: options[k] for k in top3 if k in options}
-            narrowed[ja.GIVE_UP] = "Nothing in this list could possibly move the goal forward."
-            choice, conf, _ = await judge.choose(
-                loop_state, {"question": "The goal is NOT met yet. Of these, which is the most useful next attempt "
-                                         "(a different query, a different tab or record, a different tool)?",
-                             "rules": ["Prefer trying something over giving up whenever a tool here can still help.",
-                                       "A lookup that returned the wrong thing means: try it again differently."]},
-                narrowed, min_p=0.34)
-            logger.info("jev graph step %d (retry): %s (conf %.2f)", step + 1, choice, conf)
-            if choice == ja.GIVE_UP:
-                choice = None
+    choice, conf, probs, sys_p = await choose_tool(judge, loop_state, options, step)
+    useful = await agent._useful_reads(judge, loop_state, _narrow_reads(options, choice, sys_p))
     reads_only = bool(steps) and any(s["ok"] for s in steps) and all(not ja.is_write_tool(s["tool"]) for s in steps if s["ok"])
     if choice is None:
         logger.info("jev graph: unsure; top options %s", sorted(probs.items(), key=lambda kv: -kv[1])[:5])
@@ -338,7 +378,8 @@ async def run(agent: "ja.JevAgent", req: Any, context: str = "") -> Dict[str, An
             tool_options: Dict[str, str] = {}
             for name in allowed:
                 try:
-                    tool_options[name] = ja.TOOL_PURPOSE.get(name) or (await box.schema(name))["description"] or name
+                    tool_options[name] = ja.TOOL_PURPOSE.get(name) or TOOL_DESCRIPTIONS.get(name) \
+                        or (await box.schema(name))["description"] or name
                 except ValueError:
                     continue
                 except Exception as exc:

@@ -37,7 +37,7 @@ from zoneinfo import ZoneInfo
 
 import httpx
 
-from .scopes import ORG_ACCOUNT, OWNER_ACCOUNT, TOOL_PURPOSE, sends_to_requester, tools_for
+from .scopes import ORG_ACCOUNT, OWNER_ACCOUNT, TOOL_DESCRIPTIONS, TOOL_PURPOSE, sends_to_requester, tools_for
 from . import hosttools
 from .store import Request, sha256
 from .taskpick import TYPESAFE_URL
@@ -638,7 +638,7 @@ class JevAgent:
                 tool_options: Dict[str, str] = {}
                 for name in allowed:
                     try:
-                        tool_options[name] = TOOL_PURPOSE.get(name) or (await box.schema(name))["description"] or name
+                        tool_options[name] = TOOL_PURPOSE.get(name) or TOOL_DESCRIPTIONS.get(name) or (await box.schema(name))["description"] or name
                     except ValueError:
                         continue  # a Claude built-in (WebSearch, WebFetch): not callable here
                     except Exception as exc:

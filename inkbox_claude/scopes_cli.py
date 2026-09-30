@@ -33,10 +33,10 @@ def _print_check() -> int:
     return 1 if problems else 0
 
 
-async def _sync(servers: List[str]) -> Dict[str, List[str]]:
+async def _sync(servers: List[str]) -> Dict[str, Dict[str, str]]:
     from .gate.jevagent import ToolBox, mcp_config_from_claude_json
     cfg = mcp_config_from_claude_json()
-    resolved: Dict[str, List[str]] = {}
+    resolved: Dict[str, Dict[str, str]] = {}
     async with ToolBox(None, cfg) as box:
         for name in servers:
             if name not in cfg:
@@ -48,7 +48,7 @@ async def _sync(servers: List[str]) -> Dict[str, List[str]]:
             try:
                 s = await asyncio.wait_for(box._session(name), 60)
                 r = await asyncio.wait_for(s.list_tools(), 30)
-                resolved[name] = [f"mcp__{name}__{t.name}" for t in r.tools]
+                resolved[name] = {f"mcp__{name}__{t.name}": " ".join((t.description or "").split())[:400] for t in r.tools}
                 print(f"OK   {name}: {len(resolved[name])} tools")
             except Exception as exc:  # noqa: BLE001
                 print(f"FAIL {name}: {type(exc).__name__}: {str(exc)[:160]}", file=sys.stderr)
@@ -58,16 +58,18 @@ async def _sync(servers: List[str]) -> Dict[str, List[str]]:
 def _do_sync() -> int:
     from .gate import scopes as sc
     reg = sc.load_registry()
-    servers = sorted({str(v["server"]) for v in (reg.get("scopes") or {}).values() if v.get("server") and not v.get("tools")})
+    servers = sorted({str(v["server"]) for v in (reg.get("scopes") or {}).values() if v.get("server") and not v.get("tools")}
+                     | {t.split("__")[1] for v in (reg.get("scopes") or {}).values() for t in (v.get("tools") or [])
+                        if t.startswith("mcp__") and t.split("__")[1] not in ("inkbox", "host")})
     print("resolving", ", ".join(servers))
     fresh = asyncio.run(_sync(servers))
-    resolved = sc.load_resolved()
+    resolved: Dict[str, Any] = dict(sc._load_resolved_raw())
     resolved.update(fresh)
     with open(sc.RESOLVED_PATH, "w", encoding="utf-8") as fh:
         json.dump(resolved, fh, indent=1, sort_keys=True)
         fh.write("\n")
     print(f"wrote {sc.RESOLVED_PATH}")
-    scopes = sc.build_scopes(reg, resolved)
+    scopes = sc.build_scopes(reg, {k: list(v) for k, v in resolved.items()})
     rc = 0
     for name, v in scopes.items():
         if v.get("server") and not v["tools"]:

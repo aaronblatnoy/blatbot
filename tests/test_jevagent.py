@@ -58,7 +58,12 @@ class ScriptedJudge:
         self.calls += 1
         out = {}
         for qid, q in questions.items():
-            if q["type"] == "noul":
+            if q["type"] == "noul" and qid.startswith("sys::"):
+                # the tool tree: a system is the next step iff the next scripted pick lives in it
+                here = set(q["instructions"].get("tools_here") or [])
+                want = self.picks[0].split("__")[-1] if self.picks else ""
+                out[qid] = {"noul": 0.95 if want in here else 0.05}
+            elif q["type"] == "noul":
                 out[qid] = {"noul": 0.0 if qid.startswith("use::") else self.yes_p}   # no parallel extras unless a test asks
             elif (not self.picks or self.picks[0] not in q["criteria"]) and "write_new" in q["criteria"]:
                 # a span/candidate question this script did not plan for: let prose write it
