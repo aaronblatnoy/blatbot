@@ -1576,3 +1576,16 @@ def test_decide_graph_runs_the_jev_first_flow(tmp_path, monkeypatch):
     assert "calendar" in req.scopes
     assert req.original_message == "book T306 for friday 9am"
     assert sent[0][1] == "On it."
+
+
+def test_voice_result_is_phrased_for_speech_not_raw(tmp_path):
+    m, sent = phone_manager(tmp_path, trust=True)
+    m.executor.result = {"ok": True, "summary": "Done via Jev agent in 9.1s (3 tool call(s)).\n- get_events:\nSuccessfully retrieved 2 events", "tool_calls": [], "raw": "x"}
+    m.router.next = RouterOutput(reply=None, task="new", task_title="Tomorrow's chats",
+                                 request=RouterRequest(prompt="List tomorrow", scopes=["stern_calendar"], summary="Tomorrow's chats"))
+    m.router.next_note = RouterOutput(reply="Two chats tomorrow: Owen at five and Philip at six.", request=None)
+    out = asyncio.run(m.get("p1").voice_consult("what chats do I have tomorrow", voice_meta()))
+    assert out == "Two chats tomorrow: Owen at five and Philip at six."
+    assert "Done via Jev agent" not in out
+    spoken = [r for r in m.store.history("p1", limit=20) if r["kind"] == "outbound" and r["mode"] == "voice"]
+    assert spoken and spoken[-1]["text"] == out

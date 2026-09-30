@@ -697,8 +697,44 @@ class GateSession:
         except asyncio.TimeoutError:
             return "That is still running. I will text you the result as soon as it finishes."
 
+    async def phrase_result_for_call(self, req: Request, text: str) -> str:
+        """Turn a finished request's raw status into what the voice model says: the same
+        reply writer and grounding check a texted result gets, told it is for a call."""
+        note = f"Task #{req.id} {'done' if text.startswith('Done') else 'FAILED'}: {req.summary}\nResult:\n{text}"
+        async with self._lock:
+            prev = (self.mode, self.reply_meta)
+            self.mode = "voice"
+            try:
+                approver = self.is_approver()
+                history = self.m.store.history(self.chat_id, limit=20)
+                memory = self.task_memory()
+                out = await self.m.router.route(
+                    history=history, mode="voice", sender=self._sender(), contact_notes=self._contact_notes(),
+                    is_approver=approver, task_memory=memory, found_tasks="", action=False,
+                    message=("(No new message. The task result above just arrived DURING A PHONE CALL. Write what "
+                             "the voice assistant should now say to the caller: one to three short spoken sentences, "
+                             "the answer or outcome first, names and times as words, no lists, no links, no symbols, "
+                             "no internal details. If the result is only partial, say plainly what was and was not "
+                             "found. Do not create a request.)"),
+                    action_task=req.summary)
+                out.request = None
+                reply = await self.ground_reply(out.reply, note, history, memory, "", approver)
+            except Exception:
+                logger.exception("[gate %s] phrasing a call result failed", self.chat_id)
+                reply = None
+            finally:
+                self.mode, self.reply_meta = prev
+        reply = " ".join((reply or "").split())
+        if reply and not reply.startswith(("Done via", "Failed via")):
+            self.m.store.add_message(self.chat_id, "outbound", reply, "voice")
+            return reply
+        # Fallback: the tool bodies only, never the agent's header.
+        body = _result_bodies(text.split("Result:", 1)[-1] if "Result:" in text else text)
+        return " ".join(body.split())[:700] or text
+
     async def _run_for_call(self, req: Request, aaron_call: bool, caller: str) -> str:
         text = await self.m.execute(req, notify=False)
+        text = await self.phrase_result_for_call(req, text)
         if not self.m.call_active(self.chat_id):
             # They hung up first: deliver by text, without touching the thread's channel.
             if aaron_call:
