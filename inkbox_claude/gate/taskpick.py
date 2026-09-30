@@ -158,7 +158,14 @@ class TaskPicker:
             "type": "noul",
             "instructions": {
                 "question": "Should the assistant now go and DO something for this message, using its tools?",
+                "principle": "The assistant is a general-purpose executive assistant with a computer, a browser, "
+                             "Aaron's accounts, and a coding agent behind it. It is NOT limited to scheduling. Any "
+                             "message that can only be satisfied by doing something or by fetching a fact from "
+                             "outside this conversation is a yes. The lists below are illustrations, not the "
+                             "boundary: if a capable human assistant at a laptop could act on it, count it as yes.",
                 "the_assistant_can": [
+                    "Anything a person can do at a computer: read and write files and documents, run scripts and "
+                    "commands, research, compute, compare, draft, format, convert, summarize a source it fetches.",
                     "TAMID Google Calendar and Aaron's Stern calendar: list events for a day or range, free/busy, "
                     "create, move, shorten, cancel events.",
                     "TAMID Google Drive: find sheets, docs, forms and folders; read a sheet tab's rows (rosters, "
@@ -174,8 +181,11 @@ class TaskPicker:
                     "The black-sky server: what is running (containers, services, uptime, disk, memory, GPUs).",
                 ],
                 "count_as_yes": [
-                    "The sender asks for anything to be booked, moved, cancelled, sent, looked up, checked, "
-                    "changed, added, closed, counted, or found out.",
+                    "The sender asks for anything to be done, made, fetched, booked, moved, cancelled, sent, "
+                    "looked up, checked, changed, added, closed, counted, computed, drafted or found out.",
+                    "Any task with a concrete deliverable that does not yet exist in the conversation: a document, "
+                    "a list, a summary of a source, a comparison, a draft, a file, a number, a status.",
+                    "A request outside the examples below but within reach of a computer and Aaron's accounts.",
                     "The sender asks a question whose answer must be looked up (a calendar, an inbox, a sheet, "
                     "a website), even if phrased casually or as a fragment.",
                     "Calendar: 'when is X's interview', 'what's on Friday', 'is 2:30 free', 'move X to 9', "
