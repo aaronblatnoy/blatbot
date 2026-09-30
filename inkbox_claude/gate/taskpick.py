@@ -184,7 +184,9 @@ class TaskPicker:
                     "The sender asks for anything to be done, made, fetched, booked, moved, cancelled, sent, "
                     "looked up, checked, changed, added, closed, counted, computed, drafted or found out.",
                     "Any task with a concrete deliverable that does not yet exist in the conversation: a document, "
-                    "a list, a summary of a source, a comparison, a draft, a file, a number, a status.",
+                    "a list, a summary of a source, a comparison, a file, a number, a status.",
+                    "Writing on request is a deliverable and a yes: draft an email, a bio, an announcement, a "
+                    "message to send, a post, a script, a report. The assistant produces it as a task result.",
                     "A request outside the examples below but within reach of a computer and Aaron's accounts.",
                     "The sender asks a question whose answer must be looked up (a calendar, an inbox, a sheet, "
                     "a website), even if phrased casually or as a fragment.",

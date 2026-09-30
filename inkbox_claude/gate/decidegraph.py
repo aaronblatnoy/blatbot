@@ -67,7 +67,9 @@ async def judge_action(state: DecideState, config: RunnableConfig) -> Dict[str, 
     needs = act.get("needs_action")
     p = float(act.get("p") or 0.0)
     if needs is None:
-        needs = p >= 0.5
+        # Grey band. For the owner, acting costs seconds and not acting costs a re-ask,
+        # so lean to action; for anyone else a request means an approval text to Aaron.
+        needs = p >= (0.4 if s.is_approver() else 0.5)
     logger.info("[gate %s] jev-first: task=%s action=%s (p=%.2f)", s.chat_id,
                 state["task_choice"] or ("new" if state["pick"] == "new" else None), needs, p)
     return {"needs_action": bool(needs), "p_action": p}
