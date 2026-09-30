@@ -364,6 +364,14 @@ class GateSession:
             return out, task
 
         # --- Jev first ---
+        if (os.getenv("GATE_DECIDE_GRAPH") or "1").strip().lower() not in ("0", "false", "no"):
+            try:
+                from . import decidegraph
+            except ImportError as exc:
+                logger.warning("[gate %s] langgraph unavailable (%s); deciding in sequence", self.chat_id, exc)
+            else:
+                return await decidegraph.decide(self, body=body, message=message, prior=prior, mode=mode,
+                                                memory=memory, found=found)
         label = "Aaron, the owner" if approver else (self._sender_name() or self._sender())
         pick = await picker.pick(message=message, history=prior, candidates=self.candidate_tasks(),
                                  sender_label=label, router_hint=None, proposed_title="")

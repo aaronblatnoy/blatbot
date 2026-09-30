@@ -1549,3 +1549,30 @@ def test_jev_undecided_lookup_falls_back_to_the_chat_planner(tmp_path):
     m.task_picker = LookupPicker({"lookup": None, "text": "", "confidence": 0.2, "reason": "low confidence"}, choice="none")
     asyncio.run(m.get(APPROVER_CONV).handle_inbound("hm", "imessage", approver_meta()))
     assert len(m.router.query_calls) == 1
+
+
+def test_decide_graph_nodes_and_edges():
+    from inkbox_claude.gate import decidegraph
+    g = decidegraph.build_graph().get_graph()
+    nodes = set(g.nodes) - {"__start__", "__end__"}
+    assert nodes == {"pick_task", "judge_action", "write_reply", "check_reply", "attach_task",
+                     "build_request", "judge_scopes", "inherit_scopes", "record_event"}
+    edges = {(e.source, e.target) for e in g.edges}
+    assert ("__start__", "pick_task") in edges
+    assert ("pick_task", "judge_action") in edges
+    assert ("build_request", "judge_scopes") in edges and ("judge_scopes", "inherit_scopes") in edges
+
+
+def test_decide_graph_runs_the_jev_first_flow(tmp_path, monkeypatch):
+    monkeypatch.setenv("GATE_DECIDE_GRAPH", "1")
+    m, sent = make_manager(tmp_path)
+    m.task_picker = FakePicker(choice="new")
+    m.task_picker.action = True
+    m.task_picker.scopes = ["calendar"]
+    m.router.next = RouterOutput(reply="On it.", task_title="Book the room", request=None)
+    asyncio.run(m.get(APPROVER_CONV).handle_inbound("book T306 for friday 9am", "imessage", approver_meta()))
+    req = m.store.get_request(1)
+    assert req.state in ("approved", "running", "done")
+    assert "calendar" in req.scopes
+    assert req.original_message == "book T306 for friday 9am"
+    assert sent[0][1] == "On it."
