@@ -85,6 +85,63 @@ def _last_request_outcome(task: Optional[Dict[str, Any]]) -> str:
     return "nothing has run on this task yet"
 
 
+# The scope tree. Level 1 is a system; level 2 is what is done inside it. Each leaf
+# names the scopes granted when it is chosen; SCOPE_TREE_ALWAYS are granted with the
+# system itself (a single read/write scope, or the read half every write needs).
+SCOPE_TREE_SYSTEMS: Dict[str, str] = {
+    "tamid_workspace": "TAMID's Google Drive, Sheets, Docs, Forms or the TAMID Gmail inbox (nyu@tamidgroup.org): "
+                       "rosters, schedules, trackers, applications, form responses, emails TAMID sent or received.",
+    "tamid_calendar": "The TAMID Google Calendar (the club's, not Aaron's own): interview and event times, free/busy, "
+                      "creating, moving or cancelling events.",
+    "aaron_stern": "Aaron's own NYU Stern account: his personal calendar ('my calendar') or his Stern Gmail ('my email').",
+    "blatbot_inkbox": "Blatbot's own mailbox, phone line and address book: its email, SMS and iMessage threads, "
+                      "sending a message to a third party, contact records and notes.",
+    "club_websites": "The TAMID at NYU or SJBA website admin: board members and bios, events, members, site settings, "
+                     "contact-form submissions, newsletter signups.",
+    "public_web": "The public internet, for facts that live OUTSIDE Aaron's own systems: another organization's "
+                  "site, a person's public profile, an article, a general fact. Not for anything in TAMID or SJBA "
+                  "sheets, forms, calendars, inboxes or website admin.",
+    "server": "The black-sky server Blatbot runs on ('black sky', 'the server', 'the box'): what is running, "
+              "containers, services, the gateway, uptime, disk, memory, GPUs.",
+}
+SCOPE_TREE_ALWAYS: Dict[str, List[str]] = {
+    "tamid_workspace": ["tamid_drive_read"],
+    "tamid_calendar": ["calendar"],
+    "public_web": ["web"],
+    "server": ["host_read"],
+    "club_websites": [],
+    "aaron_stern": [],
+    "blatbot_inkbox": [],
+}
+SCOPE_TREE_LEAVES: Dict[str, Dict[str, Any]] = {
+    "tamid_workspace": {
+        "tamid_write": ("Change something in TAMID Drive: write cells, append rows, create a sheet, doc, form or folder.",
+                        ["tamid_drive_write"]),
+    },
+    "aaron_stern": {
+        "stern_calendar": ("Aaron's Stern calendar: his events, free/busy, creating or changing his events.", ["stern_calendar"]),
+        "stern_email": ("Aaron's Stern Gmail: search or read his messages.", ["stern_email_read"]),
+    },
+    "blatbot_inkbox": {
+        "inkbox_read": ("Read Blatbot's own email, text or iMessage threads.", ["inbox_read"]),
+        "contacts": ("Look up, create or update a contact or its notes in Blatbot's address book.", ["contacts"]),
+        "send_email": ("Send an email to someone other than the requester.", ["email_send"]),
+        "send_sms": ("Send an SMS text to someone other than the requester.", ["sms_send"]),
+        "send_imessage": ("Send an iMessage to someone other than the requester.", ["imessage_send"]),
+    },
+    "club_websites": {
+        "tamid_site_read": ("Read the TAMID at NYU website admin.", ["tamid_site_read"]),
+        "tamid_site_write": ("Change the TAMID at NYU website: create, update, delete, replace an image.", ["tamid_site_write", "tamid_site_read"]),
+        "sjba_site_read": ("Read the SJBA website admin.", ["sjba_site_read"]),
+        "sjba_site_write": ("Change the SJBA website: create, update, delete, replace an image.", ["sjba_site_write", "sjba_site_read"]),
+    },
+    "public_web": {
+        "browser_read": ("Open and read a specific web page in a browser (beyond a search result list).", ["browser_read"]),
+        "browser_act": ("Operate a web page like a person: click, type, fill or submit a form, log in.", ["browser_act", "browser_read"]),
+    },
+}
+
+
 SCOPE_MIN_YES = float(os.getenv("TYPESAFE_SCOPE_MIN_YES") or 0.6)
 
 
@@ -284,6 +341,91 @@ class TaskPicker:
         chosen = [k for k, v in probs.items() if v >= SCOPE_MIN_YES]
         logger.info("scope judgment: %s | top=%s", chosen, sorted(probs.items(), key=lambda kv: -kv[1])[:5])
         return {"scopes": chosen, "probabilities": probs, "reason": "ok"}
+
+    async def judge_scopes_tree(self, *, prompt: str, summary: str) -> Dict[str, Any]:
+        """Scopes as a two-level tree. Level 1: which SYSTEMS the task touches (a yes/no
+        per system, seven at most). Level 2, only for the systems chosen: read or write,
+        and which channel. Each judgment is a small question over a few options; the
+        scope names are assembled by code from the answers. Returns the same shape as
+        judge_scopes: {"scopes": [...], "probabilities": {...}, "reason": str}."""
+        if not self.api_key:
+            return {"scopes": None, "probabilities": {}, "reason": "disabled"}
+        state = {
+            "task_summary": summary,
+            "task_prompt": prompt,
+            "delivery": "The gateway itself delivers the task's answer to whoever asked. Messaging is needed only "
+                        "when the task must contact SOMEONE ELSE, never to report back to the requester.",
+            "where_things_live": [
+                "TAMID applicants, interviews, interview schedules, coffee chats, rosters, forms, board availability: "
+                "the TAMID workspace (sheets, forms, Gmail) and the TAMID calendar. Never the public web.",
+                "TAMID and SJBA board members, bios, headshots, club events, contact-form submissions: the club "
+                "website admin. Never the public web, never a browser.",
+                "Aaron's own schedule and his own mail: his Stern account, not the TAMID calendar.",
+                "The public web is only for things outside Aaron's systems: other organizations, people's public "
+                "profiles, articles, general facts.",
+                "A task that only reads never needs a write capability; a task that changes something needs the "
+                "write capability of that system, not a browser.",
+                "'black sky' / 'black-sky' is the server: containers, services, uptime. Not the web.",
+            ],
+        }
+
+        def noul(capability: str) -> Dict[str, Any]:
+            return {"type": "noul",
+                    "instructions": {"capability": capability,
+                                     "question": "Does carrying out `task_prompt` require this? Judge by what the task "
+                                                 "must actually do, not by what is merely mentioned."},
+                    "criteria": {"true": "At least one step of the task cannot be done without it.",
+                                 "false": "The task can be done fully without it."}}
+
+        async def ask(questions: Dict[str, Any]) -> Dict[str, float]:
+            async with httpx.AsyncClient(timeout=self.timeout) as client:
+                r = await client.post(TYPESAFE_URL, headers={"Authorization": f"Bearer {self.api_key}"},
+                                      json={"state": state, "model": self.model, "questions": questions})
+                r.raise_for_status()
+                answers = r.json()["answers"]
+            return {k: float((answers.get(k) or {}).get("noul") or 0.0) for k in questions}
+
+        try:
+            systems = await ask({k: noul(v) for k, v in SCOPE_TREE_SYSTEMS.items()})
+        except Exception as exc:
+            logger.warning("scope tree (systems) via TypeSafe failed: %s", exc)
+            return {"scopes": None, "probabilities": {}, "reason": f"error: {exc}"}
+        chosen_systems = [k for k, v in systems.items() if v >= SCOPE_MIN_YES]
+        if not chosen_systems:
+            # A request exists, so something is needed: take the likeliest system when it is
+            # not implausible, rather than granting nothing and failing the run for want of a tool.
+            top, p = max(systems.items(), key=lambda kv: kv[1])
+            if p >= 0.4:
+                chosen_systems = [top]
+        logger.info("scope tree: systems %s | top=%s", chosen_systems, sorted(systems.items(), key=lambda kv: -kv[1])[:4])
+        probs: Dict[str, float] = {}
+        scopes: List[str] = []
+        level2: Dict[str, Any] = {}
+        for sysname in chosen_systems:
+            for leaf, (capability, _) in SCOPE_TREE_LEAVES.get(sysname, {}).items():
+                level2[leaf] = noul(capability)
+            for sc in SCOPE_TREE_ALWAYS.get(sysname, []):
+                if sc not in scopes:
+                    scopes.append(sc)
+                probs[sc] = systems[sysname]
+        if level2:
+            try:
+                leaves = await ask(level2)
+            except Exception as exc:
+                logger.warning("scope tree (leaves) via TypeSafe failed: %s", exc)
+                return {"scopes": None, "probabilities": {}, "reason": f"error: {exc}"}
+            for sysname in chosen_systems:
+                for leaf, (_, granted) in SCOPE_TREE_LEAVES.get(sysname, {}).items():
+                    p = leaves.get(leaf, 0.0)
+                    for sc in granted:
+                        probs[sc] = max(probs.get(sc, 0.0), p)
+                    if p >= SCOPE_MIN_YES:
+                        for sc in granted:
+                            if sc not in scopes:
+                                scopes.append(sc)
+            logger.info("scope tree: leaves %s", sorted(((k, round(v, 2)) for k, v in leaves.items()), key=lambda kv: -kv[1]))
+        logger.info("scope judgment (tree): %s", scopes)
+        return {"scopes": scopes, "probabilities": probs, "reason": "ok"}
 
     async def judge_event(self, *, message: str, sender_label: str, task: Dict[str, Any],
                           history: List[Dict[str, Any]]) -> Dict[str, Any]:

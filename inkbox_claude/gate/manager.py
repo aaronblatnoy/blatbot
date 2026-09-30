@@ -466,10 +466,15 @@ class GateSession:
         picker = self.m.task_picker
         if picker is None or out.request is None:
             return
-        res = await picker.judge_scopes(
-            prompt=out.request.prompt, summary=out.request.summary,  # prompt is the source-built one by now
-            scopes={k: str(v["description"]) for k, v in SCOPES.items()},
-            router_scopes=None if strict else list(out.request.scopes))
+        res = {"scopes": None}
+        if strict and hasattr(picker, "judge_scopes_tree"):
+            # Systems first, then read/write and channel within each: a few options per question.
+            res = await picker.judge_scopes_tree(prompt=out.request.prompt, summary=out.request.summary)
+        if res.get("scopes") is None:
+            res = await picker.judge_scopes(
+                prompt=out.request.prompt, summary=out.request.summary,  # prompt is the source-built one by now
+                scopes={k: str(v["description"]) for k, v in SCOPES.items()},
+                router_scopes=None if strict else list(out.request.scopes))
         chosen = res.get("scopes") or []
         probs = res.get("probabilities") or {}
         if strict:
