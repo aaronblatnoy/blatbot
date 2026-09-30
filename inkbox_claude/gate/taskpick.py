@@ -85,62 +85,7 @@ def _last_request_outcome(task: Optional[Dict[str, Any]]) -> str:
     return "nothing has run on this task yet"
 
 
-# The scope tree. Level 1 is a system; level 2 is what is done inside it. Each leaf
-# names the scopes granted when it is chosen; SCOPE_TREE_ALWAYS are granted with the
-# system itself (a single read/write scope, or the read half every write needs).
-SCOPE_TREE_SYSTEMS: Dict[str, str] = {
-    "tamid_workspace": "TAMID's Google Drive, Sheets, Docs, Forms or the TAMID Gmail inbox (nyu@tamidgroup.org): "
-                       "rosters, schedules, trackers, applications, form responses, emails TAMID sent or received.",
-    "tamid_calendar": "The TAMID club Google Calendar (nyu@tamidgroup.org; where TAMID interviews and club events "
-                      "live; NOT Aaron's own calendar, which is his Stern account): event times, free/busy, "
-                      "creating, moving or cancelling events.",
-    "aaron_stern": "Aaron's own NYU Stern account: his personal calendar ('my calendar') or his Stern Gmail ('my email').",
-    "blatbot_inkbox": "Blatbot's own mailbox, phone line and address book: its email, SMS and iMessage threads, "
-                      "sending a message to a third party, contact records and notes.",
-    "club_websites": "The TAMID at NYU or SJBA website admin: board members and bios, events, members, site settings, "
-                     "contact-form submissions, newsletter signups.",
-    "public_web": "The public internet, for facts that live OUTSIDE Aaron's own systems: another organization's "
-                  "site, a person's public profile, an article, a general fact. Not for anything in TAMID or SJBA "
-                  "sheets, forms, calendars, inboxes or website admin.",
-    "server": "The black-sky server Blatbot runs on ('black sky', 'the server', 'the box'): what is running, "
-              "containers, services, the gateway, uptime, disk, memory, GPUs.",
-}
-SCOPE_TREE_ALWAYS: Dict[str, List[str]] = {
-    "tamid_workspace": ["tamid_drive_read"],
-    "tamid_calendar": ["calendar"],
-    "public_web": ["web"],
-    "server": ["host_read"],
-    "club_websites": [],
-    "aaron_stern": [],
-    "blatbot_inkbox": [],
-}
-SCOPE_TREE_LEAVES: Dict[str, Dict[str, Any]] = {
-    "tamid_workspace": {
-        "tamid_write": ("Change something in TAMID Drive: write cells, append rows, create a sheet, doc, form or folder.",
-                        ["tamid_drive_write"]),
-    },
-    "aaron_stern": {
-        "stern_calendar": ("Aaron's Stern calendar: his events, free/busy, creating or changing his events.", ["stern_calendar"]),
-        "stern_email": ("Aaron's Stern Gmail: search or read his messages.", ["stern_email_read"]),
-    },
-    "blatbot_inkbox": {
-        "inkbox_read": ("Read Blatbot's own email, text or iMessage threads.", ["inbox_read"]),
-        "contacts": ("Look up, create or update a contact or its notes in Blatbot's address book.", ["contacts"]),
-        "send_email": ("Send an email to someone other than the requester.", ["email_send"]),
-        "send_sms": ("Send an SMS text to someone other than the requester.", ["sms_send"]),
-        "send_imessage": ("Send an iMessage to someone other than the requester.", ["imessage_send"]),
-    },
-    "club_websites": {
-        "tamid_site_read": ("Read the TAMID at NYU website admin.", ["tamid_site_read"]),
-        "tamid_site_write": ("Change the TAMID at NYU website: create, update, delete, replace an image.", ["tamid_site_write", "tamid_site_read"]),
-        "sjba_site_read": ("Read the SJBA website admin.", ["sjba_site_read"]),
-        "sjba_site_write": ("Change the SJBA website: create, update, delete, replace an image.", ["sjba_site_write", "sjba_site_read"]),
-    },
-    "public_web": {
-        "browser_read": ("Open and read a specific web page in a browser (beyond a search result list).", ["browser_read"]),
-        "browser_act": ("Operate a web page like a person: click, type, fill or submit a form, log in.", ["browser_act", "browser_read"]),
-    },
-}
+from .scopes import SCOPE_TREE_ALWAYS, SCOPE_TREE_LEAVES, SCOPE_TREE_SYSTEMS, WHERE_THINGS_LIVE  # the registry
 
 
 SCOPE_MIN_YES = float(os.getenv("TYPESAFE_SCOPE_MIN_YES") or 0.6)
@@ -237,6 +182,12 @@ class TaskPicker:
                     "and delete any of those; replace headshots and flyers.",
                     "Public web: search, open a page, read and find text on it, click, type and fill forms.",
                     "The black-sky server: what is running (containers, services, uptime, disk, memory, GPUs).",
+                    "TAMID's Instagram and LinkedIn: account, recent posts, insights, audience; stage and publish posts.",
+                    "TAMID's Google Analytics property: dimensions, metrics, key events, streams, access; change them.",
+                    "Aaron's NYU Brightspace: courses, assignments, due dates, grades, announcements, discussions, "
+                    "content; submit, post, mark complete.",
+                    "Coolify (black-sky and Vox): apps, services, databases, deployments, logs, env vars; deploy, "
+                    "restart, stop.",
                 ],
                 "count_as_yes": [
                     "The sender asks for anything to be done, made, fetched, booked, moved, cancelled, sent, "
@@ -262,6 +213,12 @@ class TaskPicker:
                     "Public web: 'look up X', 'who is the president of Y', 'find Z's LinkedIn', 'confirm that "
                     "roster on their site'.",
                     "Server: 'what's running on black sky', 'is the gateway up', 'how much disk is left'.",
+                    "Social: 'what did we post last', 'how did the recruitment post do', 'how many followers', "
+                    "'post this to instagram', 'draft a linkedin post about X'.",
+                    "School: 'what's due this week', 'did I get a grade on X', 'any new announcements in Y', "
+                    "'submit the memo', 'when is the quiz'.",
+                    "Deployments: 'is the billing frontend up', 'redeploy the validator', 'show me the last "
+                    "deploy log', 'what env vars does X have', 'restart the gateway app'.",
                     "The sender supplies information that `task_it_belongs_to` was waiting for, so its pending "
                     "step can now be carried out (an application, availability, a confirmation, details).",
                     "The sender wants to schedule or set up something (a chat, a meeting, a call).",
@@ -356,18 +313,7 @@ class TaskPicker:
             "task_prompt": prompt,
             "delivery": "The gateway itself delivers the task's answer to whoever asked. Messaging is needed only "
                         "when the task must contact SOMEONE ELSE, never to report back to the requester.",
-            "where_things_live": [
-                "TAMID applicants, interviews, interview schedules, coffee chats, rosters, forms, board availability: "
-                "the TAMID workspace (sheets, forms, Gmail) and the TAMID calendar. Never the public web.",
-                "TAMID and SJBA board members, bios, headshots, club events, contact-form submissions: the club "
-                "website admin. Never the public web, never a browser.",
-                "Aaron's own schedule and his own mail: his Stern account, not the TAMID calendar.",
-                "The public web is only for things outside Aaron's systems: other organizations, people's public "
-                "profiles, articles, general facts.",
-                "A task that only reads never needs a write capability; a task that changes something needs the "
-                "write capability of that system, not a browser.",
-                "'black sky' / 'black-sky' is the server: containers, services, uptime. Not the web.",
-            ],
+            "where_things_live": WHERE_THINGS_LIVE,
         }
 
         def noul(capability: str) -> Dict[str, Any]:

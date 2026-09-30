@@ -1,0 +1,642 @@
+version: 1
+where_things_live:
+- 'TAMID applicants, interviews, interview schedules, coffee chats, rosters, forms, board availability: the TAMID
+  workspace (sheets, forms, Gmail) and the TAMID calendar. Never the public web.'
+- 'TAMID and SJBA board members, bios, headshots, club events, contact-form submissions: the club website admin.
+  Never the public web, never a browser.'
+- 'Aaron''s own schedule and his own mail: his Stern account, not the TAMID calendar.'
+- 'Aaron''s classes, assignments, grades, due dates: NYU Brightspace.'
+- 'TAMID''s posts, followers, post performance: TAMID social (Instagram, LinkedIn). Website traffic configuration:
+  TAMID analytics.'
+- 'Deployed apps, containers managed by Coolify, deployments and their logs: Coolify. What is running on the box
+  itself at the OS level: the server.'
+- 'The public web is only for things outside Aaron''s systems: other organizations, people''s public profiles, articles,
+  general facts.'
+- A task that only reads never needs a write capability; a task that changes something needs the write capability
+  of that system, not a browser.
+- '''black sky'' / ''black-sky'' is the server: containers, services, uptime. Not the web.'
+systems:
+  tamid_workspace:
+    description: 'TAMID''s Google Drive, Sheets, Docs, Forms or the TAMID Gmail inbox ({ORG_ACCOUNT}): rosters,
+      schedules, trackers, applications, form responses, emails TAMID sent or received.'
+    always:
+    - tamid_drive_read
+    leaves:
+      tamid_write:
+        question: 'Change something in TAMID Drive: write cells, append rows, create a sheet, doc, form or folder.'
+        grants:
+        - tamid_drive_write
+  tamid_calendar:
+    description: 'The TAMID club Google Calendar ({ORG_ACCOUNT}; where TAMID interviews and club events live;
+      NOT Aaron''s own calendar, which is his Stern account): event times, free/busy, creating, moving or cancelling
+      events.'
+    always:
+    - calendar
+    leaves: {}
+  aaron_stern:
+    description: 'Aaron''s own NYU Stern account: his personal calendar (''my calendar'') or his Stern Gmail (''my
+      email'').'
+    always: []
+    leaves:
+      stern_calendar:
+        question: 'Aaron''s Stern calendar: his events, free/busy, creating or changing his events.'
+        grants:
+        - stern_calendar
+      stern_email:
+        question: 'Aaron''s Stern Gmail: search or read his messages.'
+        grants:
+        - stern_email_read
+  blatbot_inkbox:
+    description: 'Blatbot''s own mailbox, phone line and address book: its email, SMS and iMessage threads, sending
+      a message to a third party, contact records and notes.'
+    always: []
+    leaves:
+      inkbox_read:
+        question: Read Blatbot's own email, text or iMessage threads.
+        grants:
+        - inbox_read
+      contacts:
+        question: Look up, create or update a contact or its notes in Blatbot's address book.
+        grants:
+        - contacts
+      send_email:
+        question: Send an email to someone other than the requester.
+        grants:
+        - email_send
+      send_sms:
+        question: Send an SMS text to someone other than the requester.
+        grants:
+        - sms_send
+      send_imessage:
+        question: Send an iMessage to someone other than the requester.
+        grants:
+        - imessage_send
+  club_websites:
+    description: 'The TAMID at NYU or SJBA website admin: board members and bios, events, members, site settings,
+      contact-form submissions, newsletter signups.'
+    always: []
+    leaves:
+      tamid_site_read:
+        question: Read the TAMID at NYU website admin.
+        grants:
+        - tamid_site_read
+      tamid_site_write:
+        question: 'Change the TAMID at NYU website: create, update, delete, replace an image.'
+        grants:
+        - tamid_site_write
+        - tamid_site_read
+      sjba_site_read:
+        question: Read the SJBA website admin.
+        grants:
+        - sjba_site_read
+      sjba_site_write:
+        question: 'Change the SJBA website: create, update, delete, replace an image.'
+        grants:
+        - sjba_site_write
+        - sjba_site_read
+  public_web:
+    description: 'The public internet, for facts that live OUTSIDE Aaron''s own systems: another organization''s
+      site, a person''s public profile, an article, a general fact. Not for anything in TAMID or SJBA sheets, forms,
+      calendars, inboxes or website admin.'
+    always:
+    - web
+    leaves:
+      browser_read:
+        question: Open and read a specific web page in a browser (beyond a search result list).
+        grants:
+        - browser_read
+      browser_act:
+        question: 'Operate a web page like a person: click, type, fill or submit a form, log in.'
+        grants:
+        - browser_act
+        - browser_read
+  server:
+    description: 'The black-sky server Blatbot runs on (''black sky'', ''the server'', ''the box''): what is running,
+      containers, services, the gateway, uptime, disk, memory, GPUs.'
+    always:
+    - host_read
+    leaves: {}
+  tamid_social:
+    description: 'TAMID''s Instagram or LinkedIn accounts: what was posted, how posts performed, followers, drafting
+      or publishing a post.'
+    always: []
+    leaves:
+      instagram_read:
+        question: 'Read TAMID''s Instagram: account, recent posts, insights, audience, or check a caption.'
+        grants:
+        - tamid_instagram_read
+      instagram_post:
+        question: Stage or publish a post on TAMID's Instagram.
+        grants:
+        - tamid_instagram_post
+        - tamid_instagram_read
+      linkedin_read:
+        question: Read TAMID's LinkedIn account or check post text.
+        grants:
+        - tamid_linkedin_read
+      linkedin_post:
+        question: Stage, publish or delete a post on TAMID's LinkedIn.
+        grants:
+        - tamid_linkedin_post
+        - tamid_linkedin_read
+  tamid_analytics:
+    description: 'TAMID''s Google Analytics property (the website''s traffic analytics configuration): custom dimensions
+      and metrics, key events, data streams, retention, user access.'
+    always:
+    - tamid_analytics_read
+    leaves:
+      analytics_write:
+        question: 'Change the Analytics property: create, update, archive or delete a dimension, metric, key event,
+          stream, or user access.'
+        grants:
+        - tamid_analytics_write
+  nyu_brightspace:
+    description: 'Aaron''s NYU Brightspace (the university''s course site): his courses, assignments, due dates,
+      grades, announcements, quizzes, discussions, course content.'
+    always:
+    - brightspace_read
+    leaves:
+      brightspace_act:
+        question: 'Act inside Brightspace: submit an assignment, post or reply in a discussion, mark content complete,
+          create a calendar event, pin a course.'
+        grants:
+        - brightspace_act
+  coolify:
+    description: 'Aaron''s Coolify deployments (self-hosted PaaS): the apps, databases and services running on the
+      black-sky Coolify and the Vox Coolify, their deployments, logs, env vars, health.'
+    always: []
+    leaves:
+      coolify_read:
+        question: 'Read the black-sky Coolify: apps, services, databases, deployments, logs, health.'
+        grants:
+        - coolify_read
+      coolify_control:
+        question: 'Change the black-sky Coolify: deploy, restart, stop, start, edit env vars.'
+        grants:
+        - coolify_control
+        - coolify_read
+      vox_read:
+        question: Read the Vox Coolify instance.
+        grants:
+        - coolify_vox_read
+      vox_control:
+        question: 'Change the Vox Coolify instance: deploy, restart, stop, env vars.'
+        grants:
+        - coolify_vox_control
+        - coolify_vox_read
+scopes:
+  calendar:
+    description: 'TAMID calendar: read and write the club''s Google Calendar (org@example.org; interviews, club
+      events; NOT Aaron''s own calendar): list, free/busy, create/update events'
+    read: true
+    tools:
+    - mcp__tamid-drive__list_calendars
+    - mcp__tamid-drive__get_events
+    - mcp__tamid-drive__query_freebusy
+    - mcp__tamid-drive__manage_event
+  inbox_read:
+    description: read Blatbot's own Inkbox mailbox blatbot@inkboxmail.com (list recent inbound/outbound emails,
+      read one by id) and its SMS/iMessage threads
+    read: true
+    tools:
+    - mcp__inkbox__inkbox_list_emails
+    - mcp__inkbox__inkbox_get_email
+    - mcp__inkbox__inkbox_list_text_conversations
+    - mcp__inkbox__inkbox_get_text_conversation
+    - mcp__inkbox__inkbox_list_imessage_conversations
+    - mcp__inkbox__inkbox_get_imessage_conversation
+  email_send:
+    description: send email from the Inkbox mailbox blatbot@inkboxmail.com and read that mailbox
+    read: false
+    tools:
+    - mcp__inkbox__inkbox_send_email
+    - mcp__inkbox__inkbox_list_emails
+    - mcp__inkbox__inkbox_get_email
+  imessage_send:
+    description: send iMessages from Blatbot's line and read its iMessage threads
+    read: false
+    tools:
+    - mcp__inkbox__inkbox_send_imessage
+    - mcp__inkbox__inkbox_list_imessage_conversations
+    - mcp__inkbox__inkbox_get_imessage_conversation
+  sms_send:
+    description: send SMS from Blatbot's number and read its text threads
+    read: false
+    tools:
+    - mcp__inkbox__inkbox_send_sms
+    - mcp__inkbox__inkbox_list_text_conversations
+    - mcp__inkbox__inkbox_get_text_conversation
+  contacts:
+    description: look up, create, or update Inkbox address-book contacts and their notes
+    read: true
+    tools:
+    - mcp__inkbox__inkbox_lookup_contact
+    - mcp__inkbox__inkbox_list_contacts
+    - mcp__inkbox__inkbox_get_contact
+    - mcp__inkbox__inkbox_create_contact
+    - mcp__inkbox__inkbox_update_contact
+  tamid_drive_read:
+    description: read TAMID Google Drive, Sheets, Docs, Forms, and Gmail (org@example.org)
+    read: true
+    tools:
+    - mcp__tamid-drive__search_drive_files
+    - mcp__tamid-drive__list_drive_items
+    - mcp__tamid-drive__get_drive_file_content
+    - mcp__tamid-drive__list_spreadsheets
+    - mcp__tamid-drive__get_spreadsheet_info
+    - mcp__tamid-drive__read_sheet_values
+    - mcp__tamid-drive__list_sheet_tables
+    - mcp__tamid-drive__search_docs
+    - mcp__tamid-drive__list_docs_in_folder
+    - mcp__tamid-drive__get_doc_content
+    - mcp__tamid-drive__get_doc_as_markdown
+    - mcp__tamid-drive__get_form
+    - mcp__tamid-drive__list_form_responses
+    - mcp__tamid-drive__get_form_response
+    - mcp__tamid-drive__search_gmail_messages
+    - mcp__tamid-drive__get_gmail_message_content
+    - mcp__tamid-drive__get_gmail_thread_content
+  tamid_drive_write:
+    description: write to TAMID Google Sheets, Docs, Forms, and Drive folders (no sharing, no Gmail send)
+    read: false
+    tools:
+    - mcp__tamid-drive__modify_sheet_values
+    - mcp__tamid-drive__append_table_rows
+    - mcp__tamid-drive__create_spreadsheet
+    - mcp__tamid-drive__create_sheet
+    - mcp__tamid-drive__create_doc
+    - mcp__tamid-drive__modify_doc_text
+    - mcp__tamid-drive__insert_doc_elements
+    - mcp__tamid-drive__create_form
+    - mcp__tamid-drive__batch_update_form
+    - mcp__tamid-drive__set_publish_settings
+    - mcp__tamid-drive__create_drive_folder
+  stern_calendar:
+    description: 'read and write Aaron''s own NYU Stern Google Calendar (tool address owner@example.edu): list,
+      free/busy, create/update events and invites'
+    read: true
+    tools:
+    - mcp__stern-drive__list_calendars
+    - mcp__stern-drive__get_events
+    - mcp__stern-drive__query_freebusy
+    - mcp__stern-drive__manage_event
+  stern_email_read:
+    description: read Aaron's Stern Gmail (tool address owner@example.edu); no sending
+    read: true
+    tools:
+    - mcp__stern-drive__search_gmail_messages
+    - mcp__stern-drive__get_gmail_message_content
+    - mcp__stern-drive__get_gmail_thread_content
+  sjba_site_read:
+    description: 'read the SJBA (Stern Jewish Business Association) website admin backend: board members and bios,
+      events, club members, semesters, site config, contact requests, newsletter signups'
+    read: true
+    tools:
+    - mcp__sjba-admin__sjba_list_board_members
+    - mcp__sjba-admin__sjba_get_board_member
+    - mcp__sjba-admin__sjba_list_events
+    - mcp__sjba-admin__sjba_list_upcoming_events
+    - mcp__sjba-admin__sjba_get_event
+    - mcp__sjba-admin__sjba_list_members
+    - mcp__sjba-admin__sjba_list_semesters
+    - mcp__sjba-admin__sjba_list_site_config
+    - mcp__sjba-admin__sjba_get_site_config
+    - mcp__sjba-admin__sjba_list_contact_requests
+    - mcp__sjba-admin__sjba_get_contact_request
+    - mcp__sjba-admin__sjba_list_newsletter_signups
+    - mcp__sjba-admin__sjba_get_newsletter_signup
+  sjba_site_write:
+    description: 'change the SJBA (Stern Jewish Business Association) website: create/update/delete board members
+      (incl. bios and headshots), events and flyers, members, semesters, site config; manage contact requests and
+      newsletter signups. Includes read.'
+    read: false
+    tools:
+    - mcp__sjba-admin__sjba_list_board_members
+    - mcp__sjba-admin__sjba_get_board_member
+    - mcp__sjba-admin__sjba_list_events
+    - mcp__sjba-admin__sjba_list_upcoming_events
+    - mcp__sjba-admin__sjba_get_event
+    - mcp__sjba-admin__sjba_list_members
+    - mcp__sjba-admin__sjba_list_semesters
+    - mcp__sjba-admin__sjba_list_site_config
+    - mcp__sjba-admin__sjba_get_site_config
+    - mcp__sjba-admin__sjba_list_contact_requests
+    - mcp__sjba-admin__sjba_get_contact_request
+    - mcp__sjba-admin__sjba_list_newsletter_signups
+    - mcp__sjba-admin__sjba_get_newsletter_signup
+    - mcp__sjba-admin__sjba_create_board_member
+    - mcp__sjba-admin__sjba_update_board_member
+    - mcp__sjba-admin__sjba_delete_board_member
+    - mcp__sjba-admin__sjba_replace_board_member_headshot
+    - mcp__sjba-admin__sjba_create_event
+    - mcp__sjba-admin__sjba_update_event
+    - mcp__sjba-admin__sjba_delete_event
+    - mcp__sjba-admin__sjba_replace_event_flyer
+    - mcp__sjba-admin__sjba_create_member
+    - mcp__sjba-admin__sjba_update_member
+    - mcp__sjba-admin__sjba_delete_member
+    - mcp__sjba-admin__sjba_create_semester
+    - mcp__sjba-admin__sjba_update_semester
+    - mcp__sjba-admin__sjba_delete_semester
+    - mcp__sjba-admin__sjba_create_site_config
+    - mcp__sjba-admin__sjba_update_site_config
+    - mcp__sjba-admin__sjba_delete_site_config
+    - mcp__sjba-admin__sjba_update_contact_request
+    - mcp__sjba-admin__sjba_delete_contact_request
+    - mcp__sjba-admin__sjba_create_newsletter_signup
+    - mcp__sjba-admin__sjba_update_newsletter_signup
+    - mcp__sjba-admin__sjba_delete_newsletter_signup
+  tamid_site_read:
+    description: 'read the TAMID at NYU website admin backend: board members and bios, events, club members, semesters,
+      site config, contact requests, newsletter signups'
+    read: true
+    tools:
+    - mcp__tamid-admin__tamid_list_board_members
+    - mcp__tamid-admin__tamid_get_board_member
+    - mcp__tamid-admin__tamid_list_events
+    - mcp__tamid-admin__tamid_list_upcoming_events
+    - mcp__tamid-admin__tamid_get_event
+    - mcp__tamid-admin__tamid_list_members
+    - mcp__tamid-admin__tamid_list_semesters
+    - mcp__tamid-admin__tamid_list_site_config
+    - mcp__tamid-admin__tamid_get_site_config
+    - mcp__tamid-admin__tamid_list_contact_requests
+    - mcp__tamid-admin__tamid_get_contact_request
+    - mcp__tamid-admin__tamid_list_newsletter_signups
+    - mcp__tamid-admin__tamid_get_newsletter_signup
+  tamid_site_write:
+    description: 'change the TAMID at NYU website: create/update/delete board members (incl. bios and headshots),
+      events and flyers, members, semesters, site config; manage contact requests and newsletter signups. Includes
+      read.'
+    read: false
+    tools:
+    - mcp__tamid-admin__tamid_list_board_members
+    - mcp__tamid-admin__tamid_get_board_member
+    - mcp__tamid-admin__tamid_list_events
+    - mcp__tamid-admin__tamid_list_upcoming_events
+    - mcp__tamid-admin__tamid_get_event
+    - mcp__tamid-admin__tamid_list_members
+    - mcp__tamid-admin__tamid_list_semesters
+    - mcp__tamid-admin__tamid_list_site_config
+    - mcp__tamid-admin__tamid_get_site_config
+    - mcp__tamid-admin__tamid_list_contact_requests
+    - mcp__tamid-admin__tamid_get_contact_request
+    - mcp__tamid-admin__tamid_list_newsletter_signups
+    - mcp__tamid-admin__tamid_get_newsletter_signup
+    - mcp__tamid-admin__tamid_create_board_member
+    - mcp__tamid-admin__tamid_update_board_member
+    - mcp__tamid-admin__tamid_delete_board_member
+    - mcp__tamid-admin__tamid_replace_board_member_headshot
+    - mcp__tamid-admin__tamid_create_event
+    - mcp__tamid-admin__tamid_update_event
+    - mcp__tamid-admin__tamid_delete_event
+    - mcp__tamid-admin__tamid_replace_event_flyer
+    - mcp__tamid-admin__tamid_create_member
+    - mcp__tamid-admin__tamid_update_member
+    - mcp__tamid-admin__tamid_delete_member
+    - mcp__tamid-admin__tamid_create_semester
+    - mcp__tamid-admin__tamid_update_semester
+    - mcp__tamid-admin__tamid_delete_semester
+    - mcp__tamid-admin__tamid_create_site_config
+    - mcp__tamid-admin__tamid_update_site_config
+    - mcp__tamid-admin__tamid_delete_site_config
+    - mcp__tamid-admin__tamid_update_contact_request
+    - mcp__tamid-admin__tamid_delete_contact_request
+    - mcp__tamid-admin__tamid_create_newsletter_signup
+    - mcp__tamid-admin__tamid_update_newsletter_signup
+    - mcp__tamid-admin__tamid_delete_newsletter_signup
+  web:
+    description: search the public web and open web pages, only when the answer lives OUTSIDE Aaron's own systems
+      (a person's LinkedIn or employer, an outside club's leadership, news, a public page). Not for anything in
+      TAMID/SJBA Drive, sheets, forms, calendars, inboxes or the club websites' admin backends.
+    read: true
+    tools:
+    - WebSearch
+    - mcp__playwright__browser_search
+    - mcp__playwright__browser_navigate
+    - mcp__playwright__browser_snapshot
+    - mcp__playwright__browser_find
+    - mcp__playwright__browser_wait_for
+    - mcp__playwright__browser_navigate_back
+  host_read:
+    description: 'see what is running on the server Blatbot itself runs on (black-sky): containers, services, uptime,
+      disk, memory, GPUs. Read-only status only; no commands, no changes.'
+    read: true
+    tools:
+    - mcp__host__host_status
+  browser_read:
+    description: 'read a public web page in a headless browser (navigate, snapshot, find, screenshot), for things
+      that are only online and not in Aaron''s own systems. Read-only: no clicking, typing or form filling.'
+    read: true
+    tools:
+    - mcp__playwright__browser_search
+    - mcp__playwright__browser_navigate
+    - mcp__playwright__browser_navigate_back
+    - mcp__playwright__browser_snapshot
+    - mcp__playwright__browser_find
+    - mcp__playwright__browser_take_screenshot
+    - mcp__playwright__browser_wait_for
+    - mcp__playwright__browser_tabs
+    - mcp__playwright__browser_resize
+    - mcp__playwright__browser_console_messages
+    - mcp__playwright__browser_network_requests
+    - mcp__playwright__browser_close
+  browser_act:
+    description: operate a headless browser like a person (click, type, fill and submit forms, select options, upload,
+      dialogs) for something that can only be done through a website's own UI and has no tool of its own. Last resort,
+      never the first choice when a Drive, calendar, inbox, contacts or site-admin tool covers it. Includes browser_read.
+    read: false
+    tools:
+    - mcp__playwright__browser_search
+    - mcp__playwright__browser_navigate
+    - mcp__playwright__browser_navigate_back
+    - mcp__playwright__browser_snapshot
+    - mcp__playwright__browser_find
+    - mcp__playwright__browser_take_screenshot
+    - mcp__playwright__browser_wait_for
+    - mcp__playwright__browser_tabs
+    - mcp__playwright__browser_resize
+    - mcp__playwright__browser_console_messages
+    - mcp__playwright__browser_network_requests
+    - mcp__playwright__browser_close
+    - mcp__playwright__browser_click
+    - mcp__playwright__browser_type
+    - mcp__playwright__browser_fill_form
+    - mcp__playwright__browser_select_option
+    - mcp__playwright__browser_press_key
+    - mcp__playwright__browser_hover
+    - mcp__playwright__browser_drag
+    - mcp__playwright__browser_drop
+    - mcp__playwright__browser_file_upload
+    - mcp__playwright__browser_handle_dialog
+    - mcp__playwright__browser_emulate_media
+  tamid_instagram_read:
+    description: 'read TAMID''s Instagram: account, recent posts, insights, audience; check a caption'
+    read: true
+    server: tamid-instagram
+    include:
+    - ig_account
+    - ig_recent_posts
+    - ig_check_caption
+    - ig_publish_limit
+    - ig_account_insights
+    - ig_post_insights
+    - ig_audience
+  tamid_instagram_post:
+    description: stage and publish posts on TAMID's Instagram (publishing is public and needs Aaron's yes)
+    read: false
+    server: tamid-instagram
+    include:
+    - ig_stage_post
+    - ig_publish_post
+  tamid_linkedin_read:
+    description: read TAMID's LinkedIn account and check post text
+    read: true
+    server: tamid-linkedin
+    include:
+    - li_account
+    - li_check_text
+  tamid_linkedin_post:
+    description: stage, publish and delete posts on TAMID's LinkedIn (publishing is public and needs Aaron's yes)
+    read: false
+    server: tamid-linkedin
+    include:
+    - li_stage_post
+    - li_publish_post
+    - li_delete_post
+  tamid_analytics_read:
+    description: 'read TAMID''s Google Analytics property configuration: dimensions, metrics, key events, streams,
+      retention, access'
+    read: true
+    server: analytics-admin
+    include:
+    - ga_list_*
+    - ga_get_*
+  tamid_analytics_write:
+    description: 'change TAMID''s Google Analytics property: create, update, archive, delete, grant or revoke'
+    read: false
+    server: analytics-admin
+    include:
+    - ga_*
+    exclude:
+    - ga_list_*
+    - ga_get_*
+  brightspace_read:
+    description: 'read Aaron''s NYU Brightspace: courses, assignments, due dates, grades, announcements, quizzes,
+      discussions, content, notifications'
+    read: true
+    server: brightspace
+    include:
+    - bs_list_*
+    - bs_get_*
+    - bs_my_*
+    - bs_whats_due
+    - bs_overdue_items
+    - bs_unread_counts
+    - bs_notifications
+    - bs_final_grade
+    - bs_quiz_attempts
+    - bs_assignment_feedback
+    - bs_content_*
+    - bs_course_overview
+    - bs_calendar_events
+    - bs_search_content
+    - bs_user_profile
+    - bs_whoami
+    - bs_auth_status
+    - bs_classlist
+  brightspace_act:
+    description: 'act in Aaron''s NYU Brightspace: submit an assignment, post or reply in a discussion, mark complete,
+      create a calendar event, pin a course, dismiss an announcement (submitting and posting need Aaron''s yes)'
+    read: false
+    server: brightspace
+    include:
+    - bs_submit_assignment
+    - bs_post_discussion
+    - bs_reply_discussion
+    - bs_mark_*
+    - bs_pin_course
+    - bs_dismiss_announcement
+    - bs_create_calendar_event
+    - bs_download_*
+  coolify_read:
+    description: 'read the black-sky Coolify: infrastructure overview, apps, services, databases, deployments, logs,
+      env var names, health, docs'
+    read: true
+    server: coolify
+    include:
+    - get_*
+    - list_*
+    - diagnose_*
+    - find_issues
+    - projects
+    - environments
+    - logs
+    - application_logs
+    - deployment
+    - search_docs
+    - server_resources
+    - server_domains
+    - teams
+    - system
+    - tags
+    - storages
+    - scheduled_tasks
+    - database_backups
+    - validate_server
+  coolify_control:
+    description: 'change the black-sky Coolify: deploy, restart, stop, start, redeploy, edit env vars (each needs
+      Aaron''s yes)'
+    read: false
+    server: coolify
+    include:
+    - deploy
+    - control
+    - restart_project_apps
+    - redeploy_project
+    - stop_all_apps
+    - bulk_env_update
+    - env_vars
+    - application
+    - database
+    - service
+  coolify_vox_read:
+    description: 'read the Vox Coolify instance: overview, apps, services, databases, deployments, logs, health'
+    read: true
+    server: coolify-vox
+    include:
+    - get_*
+    - list_*
+    - diagnose_*
+    - find_issues
+    - projects
+    - environments
+    - logs
+    - application_logs
+    - deployment
+    - search_docs
+    - server_resources
+    - server_domains
+    - teams
+    - system
+    - tags
+    - storages
+    - scheduled_tasks
+    - database_backups
+    - validate_server
+  coolify_vox_control:
+    description: 'change the Vox Coolify instance: deploy, restart, stop, start, edit env vars (each needs Aaron''s
+      yes)'
+    read: false
+    server: coolify-vox
+    include:
+    - deploy
+    - control
+    - restart_project_apps
+    - redeploy_project
+    - stop_all_apps
+    - bulk_env_update
+    - env_vars
+    - application
+    - database
+    - service

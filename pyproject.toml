@@ -4,6 +4,7 @@ version = "0.2.10"
 description = "Inkbox bridge for Claude Code — talk to your coding agent over email, SMS, iMessage, and voice"
 requires-python = ">=3.11"
 dependencies = [
+    "pyyaml>=6",
   "aiohttp>=3.9",
   "inkbox>=0.5.9,<1.0.0",
   "claude-agent-sdk>=0.1.0",

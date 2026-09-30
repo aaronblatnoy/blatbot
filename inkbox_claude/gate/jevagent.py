@@ -1075,7 +1075,7 @@ _WRITE_RE = re.compile(r"(send|create|update|modify|delete|manage|append|publish
                        r"|browser_click|browser_type|browser_fill_form|browser_select_option|browser_press_key|browser_drag|browser_drop|browser_file_upload|browser_handle_dialog)", re.I)
 
 
-_DESTRUCTIVE_RE = re.compile(os.getenv("GATE_CONFIRM_TOOLS") or r"(delete|remove|trash|cancel|replace|clear|purge)", re.I)
+_DESTRUCTIVE_RE = re.compile(os.getenv("GATE_CONFIRM_TOOLS") or r"(delete|remove|trash|cancel|replace|clear|purge|publish|deploy|redeploy|restart|stop|submit_assignment|post_discussion|reply_discussion|bulk_env)", re.I)
 
 
 def _mentions(steps: List[Dict[str, Any]], args: Dict[str, Any]) -> List[str]:

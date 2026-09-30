@@ -5,171 +5,104 @@ applied by Claude Code on top of every scope and cannot be widened here."""
 from __future__ import annotations
 
 import os
-from typing import Dict, List
+from typing import Any, Dict, List
 
 # Which Google accounts the workspace tools act as. Set in the environment; the
 # defaults are placeholders so no real address lives in the source.
 ORG_ACCOUNT = os.getenv("GATE_ORG_GOOGLE_ACCOUNT") or "org@example.org"
 OWNER_ACCOUNT = os.getenv("GATE_OWNER_GOOGLE_ACCOUNT") or "owner@example.edu"
 
-SCOPES: Dict[str, Dict[str, object]] = {
-    "calendar": {
-        "description": f"TAMID calendar: read and write the club's Google Calendar ({ORG_ACCOUNT}; interviews, club events; NOT Aaron's own calendar): list, free/busy, create/update events",
-        "tools": [
-            "mcp__tamid-drive__list_calendars",
-            "mcp__tamid-drive__get_events",
-            "mcp__tamid-drive__query_freebusy",
-            "mcp__tamid-drive__manage_event",
-        ],
-    },
-    "inbox_read": {
-        "description": "read Blatbot's own Inkbox mailbox blatbot@inkboxmail.com (list recent inbound/outbound emails, read one by id) and its SMS/iMessage threads",
-        "tools": [
-            "mcp__inkbox__inkbox_list_emails",
-            "mcp__inkbox__inkbox_get_email",
-            "mcp__inkbox__inkbox_list_text_conversations",
-            "mcp__inkbox__inkbox_get_text_conversation",
-            "mcp__inkbox__inkbox_list_imessage_conversations",
-            "mcp__inkbox__inkbox_get_imessage_conversation",
-        ],
-    },
-    "email_send": {
-        "description": "send email from the Inkbox mailbox blatbot@inkboxmail.com and read that mailbox",
-        "tools": [
-            "mcp__inkbox__inkbox_send_email",
-            "mcp__inkbox__inkbox_list_emails",
-            "mcp__inkbox__inkbox_get_email",
-        ],
-    },
-    "imessage_send": {
-        "description": "send iMessages from Blatbot's line and read its iMessage threads",
-        "tools": [
-            "mcp__inkbox__inkbox_send_imessage",
-            "mcp__inkbox__inkbox_list_imessage_conversations",
-            "mcp__inkbox__inkbox_get_imessage_conversation",
-        ],
-    },
-    "sms_send": {
-        "description": "send SMS from Blatbot's number and read its text threads",
-        "tools": [
-            "mcp__inkbox__inkbox_send_sms",
-            "mcp__inkbox__inkbox_list_text_conversations",
-            "mcp__inkbox__inkbox_get_text_conversation",
-        ],
-    },
-    "contacts": {
-        "description": "look up, create, or update Inkbox address-book contacts and their notes",
-        "tools": [
-            "mcp__inkbox__inkbox_lookup_contact",
-            "mcp__inkbox__inkbox_list_contacts",
-            "mcp__inkbox__inkbox_get_contact",
-            "mcp__inkbox__inkbox_create_contact",
-            "mcp__inkbox__inkbox_update_contact",
-        ],
-    },
-    "tamid_drive_read": {
-        "description": f"read TAMID Google Drive, Sheets, Docs, Forms, and Gmail ({ORG_ACCOUNT})",
-        "tools": [
-            "mcp__tamid-drive__search_drive_files",
-            "mcp__tamid-drive__list_drive_items",
-            "mcp__tamid-drive__get_drive_file_content",
-            "mcp__tamid-drive__list_spreadsheets",
-            "mcp__tamid-drive__get_spreadsheet_info",
-            "mcp__tamid-drive__read_sheet_values",
-            "mcp__tamid-drive__list_sheet_tables",
-            "mcp__tamid-drive__search_docs",
-            "mcp__tamid-drive__list_docs_in_folder",
-            "mcp__tamid-drive__get_doc_content",
-            "mcp__tamid-drive__get_doc_as_markdown",
-            "mcp__tamid-drive__get_form",
-            "mcp__tamid-drive__list_form_responses",
-            "mcp__tamid-drive__get_form_response",
-            "mcp__tamid-drive__search_gmail_messages",
-            "mcp__tamid-drive__get_gmail_message_content",
-            "mcp__tamid-drive__get_gmail_thread_content",
-        ],
-    },
-    "tamid_drive_write": {
-        "description": "write to TAMID Google Sheets, Docs, Forms, and Drive folders (no sharing, no Gmail send)",
-        "tools": [
-            "mcp__tamid-drive__modify_sheet_values",
-            "mcp__tamid-drive__append_table_rows",
-            "mcp__tamid-drive__create_spreadsheet",
-            "mcp__tamid-drive__create_sheet",
-            "mcp__tamid-drive__create_doc",
-            "mcp__tamid-drive__modify_doc_text",
-            "mcp__tamid-drive__insert_doc_elements",
-            "mcp__tamid-drive__create_form",
-            "mcp__tamid-drive__batch_update_form",
-            "mcp__tamid-drive__set_publish_settings",
-            "mcp__tamid-drive__create_drive_folder",
-        ],
-    },
-    "stern_calendar": {
-        "description": f"read and write Aaron's own NYU Stern Google Calendar (tool address {OWNER_ACCOUNT}): list, free/busy, create/update events and invites",
-        "tools": [
-            "mcp__stern-drive__list_calendars",
-            "mcp__stern-drive__get_events",
-            "mcp__stern-drive__query_freebusy",
-            "mcp__stern-drive__manage_event",
-        ],
-    },
-    "stern_email_read": {
-        "description": f"read Aaron's Stern Gmail (tool address {OWNER_ACCOUNT}); no sending",
-        "tools": [
-            "mcp__stern-drive__search_gmail_messages",
-            "mcp__stern-drive__get_gmail_message_content",
-            "mcp__stern-drive__get_gmail_thread_content",
-        ],
-    },
-    "sjba_site_read": {
-        "description": "read the SJBA (Stern Jewish Business Association) website admin backend: board members and bios, events, club members, semesters, site config, contact requests, newsletter signups",
-        "tools": ['mcp__sjba-admin__sjba_list_board_members', 'mcp__sjba-admin__sjba_get_board_member', 'mcp__sjba-admin__sjba_list_events', 'mcp__sjba-admin__sjba_list_upcoming_events', 'mcp__sjba-admin__sjba_get_event', 'mcp__sjba-admin__sjba_list_members', 'mcp__sjba-admin__sjba_list_semesters', 'mcp__sjba-admin__sjba_list_site_config', 'mcp__sjba-admin__sjba_get_site_config', 'mcp__sjba-admin__sjba_list_contact_requests', 'mcp__sjba-admin__sjba_get_contact_request', 'mcp__sjba-admin__sjba_list_newsletter_signups', 'mcp__sjba-admin__sjba_get_newsletter_signup'],
-    },
-    "sjba_site_write": {
-        "description": "change the SJBA (Stern Jewish Business Association) website: create/update/delete board members (incl. bios and headshots), events and flyers, members, semesters, site config; manage contact requests and newsletter signups. Includes read.",
-        "tools": ['mcp__sjba-admin__sjba_list_board_members', 'mcp__sjba-admin__sjba_get_board_member', 'mcp__sjba-admin__sjba_list_events', 'mcp__sjba-admin__sjba_list_upcoming_events', 'mcp__sjba-admin__sjba_get_event', 'mcp__sjba-admin__sjba_list_members', 'mcp__sjba-admin__sjba_list_semesters', 'mcp__sjba-admin__sjba_list_site_config', 'mcp__sjba-admin__sjba_get_site_config', 'mcp__sjba-admin__sjba_list_contact_requests', 'mcp__sjba-admin__sjba_get_contact_request', 'mcp__sjba-admin__sjba_list_newsletter_signups', 'mcp__sjba-admin__sjba_get_newsletter_signup', 'mcp__sjba-admin__sjba_create_board_member', 'mcp__sjba-admin__sjba_update_board_member', 'mcp__sjba-admin__sjba_delete_board_member', 'mcp__sjba-admin__sjba_replace_board_member_headshot', 'mcp__sjba-admin__sjba_create_event', 'mcp__sjba-admin__sjba_update_event', 'mcp__sjba-admin__sjba_delete_event', 'mcp__sjba-admin__sjba_replace_event_flyer', 'mcp__sjba-admin__sjba_create_member', 'mcp__sjba-admin__sjba_update_member', 'mcp__sjba-admin__sjba_delete_member', 'mcp__sjba-admin__sjba_create_semester', 'mcp__sjba-admin__sjba_update_semester', 'mcp__sjba-admin__sjba_delete_semester', 'mcp__sjba-admin__sjba_create_site_config', 'mcp__sjba-admin__sjba_update_site_config', 'mcp__sjba-admin__sjba_delete_site_config', 'mcp__sjba-admin__sjba_update_contact_request', 'mcp__sjba-admin__sjba_delete_contact_request', 'mcp__sjba-admin__sjba_create_newsletter_signup', 'mcp__sjba-admin__sjba_update_newsletter_signup', 'mcp__sjba-admin__sjba_delete_newsletter_signup'],
-    },
-    "tamid_site_read": {
-        "description": "read the TAMID at NYU website admin backend: board members and bios, events, club members, semesters, site config, contact requests, newsletter signups",
-        "tools": ['mcp__tamid-admin__tamid_list_board_members', 'mcp__tamid-admin__tamid_get_board_member', 'mcp__tamid-admin__tamid_list_events', 'mcp__tamid-admin__tamid_list_upcoming_events', 'mcp__tamid-admin__tamid_get_event', 'mcp__tamid-admin__tamid_list_members', 'mcp__tamid-admin__tamid_list_semesters', 'mcp__tamid-admin__tamid_list_site_config', 'mcp__tamid-admin__tamid_get_site_config', 'mcp__tamid-admin__tamid_list_contact_requests', 'mcp__tamid-admin__tamid_get_contact_request', 'mcp__tamid-admin__tamid_list_newsletter_signups', 'mcp__tamid-admin__tamid_get_newsletter_signup'],
-    },
-    "tamid_site_write": {
-        "description": "change the TAMID at NYU website: create/update/delete board members (incl. bios and headshots), events and flyers, members, semesters, site config; manage contact requests and newsletter signups. Includes read.",
-        "tools": ['mcp__tamid-admin__tamid_list_board_members', 'mcp__tamid-admin__tamid_get_board_member', 'mcp__tamid-admin__tamid_list_events', 'mcp__tamid-admin__tamid_list_upcoming_events', 'mcp__tamid-admin__tamid_get_event', 'mcp__tamid-admin__tamid_list_members', 'mcp__tamid-admin__tamid_list_semesters', 'mcp__tamid-admin__tamid_list_site_config', 'mcp__tamid-admin__tamid_get_site_config', 'mcp__tamid-admin__tamid_list_contact_requests', 'mcp__tamid-admin__tamid_get_contact_request', 'mcp__tamid-admin__tamid_list_newsletter_signups', 'mcp__tamid-admin__tamid_get_newsletter_signup', 'mcp__tamid-admin__tamid_create_board_member', 'mcp__tamid-admin__tamid_update_board_member', 'mcp__tamid-admin__tamid_delete_board_member', 'mcp__tamid-admin__tamid_replace_board_member_headshot', 'mcp__tamid-admin__tamid_create_event', 'mcp__tamid-admin__tamid_update_event', 'mcp__tamid-admin__tamid_delete_event', 'mcp__tamid-admin__tamid_replace_event_flyer', 'mcp__tamid-admin__tamid_create_member', 'mcp__tamid-admin__tamid_update_member', 'mcp__tamid-admin__tamid_delete_member', 'mcp__tamid-admin__tamid_create_semester', 'mcp__tamid-admin__tamid_update_semester', 'mcp__tamid-admin__tamid_delete_semester', 'mcp__tamid-admin__tamid_create_site_config', 'mcp__tamid-admin__tamid_update_site_config', 'mcp__tamid-admin__tamid_delete_site_config', 'mcp__tamid-admin__tamid_update_contact_request', 'mcp__tamid-admin__tamid_delete_contact_request', 'mcp__tamid-admin__tamid_create_newsletter_signup', 'mcp__tamid-admin__tamid_update_newsletter_signup', 'mcp__tamid-admin__tamid_delete_newsletter_signup'],
-    },
-    "web": {
-        "description": "search the public web and open web pages, only when the answer lives OUTSIDE Aaron's own systems (a person's LinkedIn or employer, an outside club's leadership, news, a public page). Not for anything in TAMID/SJBA Drive, sheets, forms, calendars, inboxes or the club websites' admin backends.",
-        "tools": ["WebSearch", "mcp__playwright__browser_search", "mcp__playwright__browser_navigate", "mcp__playwright__browser_snapshot",
-                  "mcp__playwright__browser_find", "mcp__playwright__browser_wait_for", "mcp__playwright__browser_navigate_back"],
-    },
-    "host_read": {
-        "description": "see what is running on the server Blatbot itself runs on (black-sky): containers, services, uptime, disk, memory, GPUs. Read-only status only; no commands, no changes.",
-        "tools": ["mcp__host__host_status"],
-    },
-    "browser_read": {
-        "description": "read a public web page in a headless browser (navigate, snapshot, find, screenshot), for things that are only online and not in Aaron's own systems. Read-only: no clicking, typing or form filling.",
-        "tools": ["mcp__playwright__browser_search", "mcp__playwright__browser_navigate", "mcp__playwright__browser_navigate_back", "mcp__playwright__browser_snapshot",
-                  "mcp__playwright__browser_find", "mcp__playwright__browser_take_screenshot", "mcp__playwright__browser_wait_for",
-                  "mcp__playwright__browser_tabs", "mcp__playwright__browser_resize", "mcp__playwright__browser_console_messages",
-                  "mcp__playwright__browser_network_requests", "mcp__playwright__browser_close"],
-    },
-    "browser_act": {
-        "description": "operate a headless browser like a person (click, type, fill and submit forms, select options, upload, dialogs) for something that can only be done through a website's own UI and has no tool of its own. Last resort, never the first choice when a Drive, calendar, inbox, contacts or site-admin tool covers it. Includes browser_read.",
-        "tools": ["mcp__playwright__browser_search", "mcp__playwright__browser_navigate", "mcp__playwright__browser_navigate_back", "mcp__playwright__browser_snapshot",
-                  "mcp__playwright__browser_find", "mcp__playwright__browser_take_screenshot", "mcp__playwright__browser_wait_for",
-                  "mcp__playwright__browser_tabs", "mcp__playwright__browser_resize", "mcp__playwright__browser_console_messages",
-                  "mcp__playwright__browser_network_requests", "mcp__playwright__browser_close",
-                  "mcp__playwright__browser_click", "mcp__playwright__browser_type", "mcp__playwright__browser_fill_form",
-                  "mcp__playwright__browser_select_option", "mcp__playwright__browser_press_key", "mcp__playwright__browser_hover",
-                  "mcp__playwright__browser_drag", "mcp__playwright__browser_drop", "mcp__playwright__browser_file_upload",
-                  "mcp__playwright__browser_handle_dialog", "mcp__playwright__browser_emulate_media"],
-    },
+# ---------------------------------------------------------------------------
+# The registry. scopes.yaml is the single source: systems (the Jev scope tree),
+# scopes (name, description, read/write, tools). A scope lists its tools
+# explicitly, or names a server plus include/exclude glob patterns that
+# `inkbox-claude scopes sync` resolves against the live server into
+# scopes.resolved.json (committed, so runtime never connects to resolve).
+# ---------------------------------------------------------------------------
+
+import fnmatch
+import json
+from pathlib import Path
+
+import yaml
+
+_HERE = Path(__file__).resolve().parent
+REGISTRY_PATH = Path(os.getenv("GATE_SCOPES_FILE") or _HERE / "scopes.yaml")
+RESOLVED_PATH = REGISTRY_PATH.with_name("scopes.resolved.json")
+
+
+def load_registry() -> Dict[str, object]:
+    with open(REGISTRY_PATH, encoding="utf-8") as fh:
+        return yaml.safe_load(fh) or {}
+
+
+def load_resolved() -> Dict[str, List[str]]:
+    """Server -> full tool names, as last synced. Empty when never synced."""
+    try:
+        with open(RESOLVED_PATH, encoding="utf-8") as fh:
+            return {k: list(v) for k, v in (json.load(fh) or {}).items()}
+    except FileNotFoundError:
+        return {}
+
+
+def match_tools(server: str, available: List[str], include: List[str], exclude: List[str]) -> List[str]:
+    """Resolve short-name glob patterns against a server's tool list; keeps order of `include`."""
+    out: List[str] = []
+    for pat in include:
+        for t in available:
+            short = t.split("__")[-1]
+            if fnmatch.fnmatchcase(short, pat) and not any(fnmatch.fnmatchcase(short, ex) for ex in exclude or []) and t not in out:
+                out.append(t)
+    return out
+
+
+def _expand(text: str) -> str:
+    return (text or "").replace("{ORG_ACCOUNT}", ORG_ACCOUNT).replace("{OWNER_ACCOUNT}", OWNER_ACCOUNT)
+
+
+def build_scopes(reg: Dict[str, object], resolved: Dict[str, List[str]]) -> Dict[str, Dict[str, object]]:
+    out: Dict[str, Dict[str, object]] = {}
+    for name, spec in (reg.get("scopes") or {}).items():  # type: ignore[union-attr]
+        spec = dict(spec)
+        tools = list(spec.get("tools") or [])
+        if not tools and spec.get("server"):
+            avail = resolved.get(str(spec["server"]), [])
+            tools = match_tools(str(spec["server"]), avail, list(spec.get("include") or []), list(spec.get("exclude") or []))
+        out[name] = {"description": _expand(str(spec.get("description") or name)), "tools": tools,
+                     "read": bool(spec.get("read")), "server": spec.get("server"),
+                     "include": list(spec.get("include") or []), "exclude": list(spec.get("exclude") or [])}
+    return out
+
+
+_REGISTRY = load_registry()
+SCOPES: Dict[str, Dict[str, object]] = build_scopes(_REGISTRY, load_resolved())
+READ_SCOPES: List[str] = [k for k, v in SCOPES.items() if v.get("read")]
+WHERE_THINGS_LIVE: List[str] = list(_REGISTRY.get("where_things_live") or [])  # type: ignore[arg-type]
+
+# The Jev scope tree, derived from the registry's systems.
+SCOPE_TREE_SYSTEMS: Dict[str, str] = {k: _expand(str(v.get("description") or k)) for k, v in (_REGISTRY.get("systems") or {}).items()}  # type: ignore[union-attr]
+SCOPE_TREE_ALWAYS: Dict[str, List[str]] = {k: list(v.get("always") or []) for k, v in (_REGISTRY.get("systems") or {}).items()}  # type: ignore[union-attr]
+SCOPE_TREE_LEAVES: Dict[str, Dict[str, object]] = {
+    k: {leaf: (str(l.get("question") or leaf), list(l.get("grants") or [])) for leaf, l in (v.get("leaves") or {}).items()}
+    for k, v in (_REGISTRY.get("systems") or {}).items()  # type: ignore[union-attr]
 }
 
 
-READ_SCOPES = [k for k in SCOPES if k.endswith("_read") or k in ("calendar", "stern_calendar", "inbox_read", "stern_email_read",
-                                                                    "contacts", "web", "browser_read", "host_read")]
+def registry_problems() -> List[str]:
+    """Consistency checks: every granted scope exists, every scope has tools."""
+    problems: List[str] = []
+    for sysname, leaves in SCOPE_TREE_LEAVES.items():
+        for leaf, (_, grants) in leaves.items():
+            for g in grants:
+                if g not in SCOPES:
+                    problems.append(f"system {sysname} leaf {leaf} grants unknown scope {g}")
+        for g in SCOPE_TREE_ALWAYS.get(sysname, []):
+            if g not in SCOPES:
+                problems.append(f"system {sysname} always-grants unknown scope {g}")
+    for name, v in SCOPES.items():
+        if not v["tools"]:
+            problems.append(f"scope {name} has no tools" + (" (run `inkbox-claude scopes sync`)" if v.get("server") else ""))
+    return problems
 
 
 def tools_for(scopes: List[str]) -> List[str]:
