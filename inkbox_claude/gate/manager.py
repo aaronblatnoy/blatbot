@@ -82,6 +82,35 @@ class GateSession:
         self._lock = asyncio.Lock()
         self._turn_task_id: Optional[int] = None  # task the current turn's inbound was logged on
         self._found_task_ids: List[int] = []      # tasks surfaced by this turn's lookup
+        self._typing: Optional[asyncio.Task] = None
+
+    # -- typing indicator (iMessage) --------------------------------------
+    def typing_start(self) -> None:
+        """Show "Blatbot is typing" while a message is decided or its request runs.
+        iMessage only; the indicator expires on Apple's side, so it is re-sent every
+        few seconds until typing_stop."""
+        if self.mode != "imessage" or self.m.typing_fn is None or not (self.reply_meta or {}).get("conversation_id"):
+            return
+        if self._typing is not None and not self._typing.done():
+            return
+        meta = dict(self.reply_meta)
+
+        async def pulse() -> None:
+            try:
+                while True:
+                    await self.m.typing_fn(self.chat_id, "imessage", meta)
+                    await asyncio.sleep(4)
+            except asyncio.CancelledError:
+                pass
+            except Exception:
+                logger.debug("[gate %s] typing pulse ended", self.chat_id, exc_info=True)
+
+        self._typing = asyncio.create_task(pulse(), name=f"typing-{self.chat_id}")
+
+    def typing_stop(self) -> None:
+        t, self._typing = self._typing, None
+        if t is not None and not t.done():
+            t.cancel()
 
     # -- identity ----------------------------------------------------------
     def is_approver(self) -> bool:
@@ -519,6 +548,7 @@ class GateSession:
             self.m.store.set_thread(self.chat_id, "routing", mode, self.reply_meta_for_store())
             body = _strip_quoted(text) if mode == "email" else text.strip()
             self.inbound_id = self.m.store.add_message(self.chat_id, "inbound", body, mode)
+            self.typing_start()
             if self.thread_key():
                 self.m.store.link_thread(self.thread_key(), self.chat_id)
             # First thing every turn: put this message on the person's task ledger,
@@ -538,6 +568,7 @@ class GateSession:
                 logger.exception("[gate %s] turn failed", self.chat_id)
                 await self.m.report_outage(exc, self.chat_id)
             finally:
+                self.typing_stop()
                 if self.m.store.thread_state(self.chat_id) == "routing":
                     self.m.store.set_thread(self.chat_id, "idle")
 
@@ -846,6 +877,7 @@ class GateSession:
                 num = self._sender()
                 await self.m.send_fn(f"sms:{num}", text, "sms", {"to": num, "sender": num})
         else:
+            self.typing_stop()
             await self.m.send_fn(self.chat_id, text, self.mode, self.reply_meta)
         self.m.store.add_message(self.chat_id, "outbound", text, self.mode, reply_to=self.inbound_id, role=role)
         t = self.task()
@@ -951,9 +983,11 @@ def _is_acknowledgement(text: str) -> bool:
 
 class GateSessionManager:
     def __init__(self, *, cfg: Any, send_fn: SendFn, mcp_server: Any, identity_info: Dict[str, str],
-                 store_path: str, exec_cwd: str, standing_path: Optional[str] = None):
+                 store_path: str, exec_cwd: str, standing_path: Optional[str] = None,
+                 typing_fn: Optional[Callable[..., Awaitable[None]]] = None):
         self.cfg = cfg
         self.send_fn = send_fn
+        self.typing_fn = typing_fn            # iMessage typing indicator, same signature as send_fn minus text
         self.identity_info = identity_info
         self.store = Store(store_path)
         self.router = Router(api_key=cfg.deepseek_api_key, model=cfg.deepseek_model, standing_path=standing_path)
@@ -1293,11 +1327,19 @@ class GateSessionManager:
         """Run an approved request. With notify=False the caller delivers the
         result itself (a live phone call reads it aloud) and gets it back."""
         self.store.set_state(req.id, "running")
+        session = self.get(req.chat_id)
+        if notify and req.mode == "imessage":
+            session.typing_start()
         tid = self.store.task_id_for_request(req.id)
         context = self.store.task_memory_for_task(tid) if tid else ""
         logger.info("[gate] executing #%s with ledger T%s (%d chars)", req.id, tid, len(context))
-        status = await self._run_executor(req, context)
+        try:
+            status = await self._run_executor(req, context)
+        finally:
+            if not notify:
+                session.typing_stop()
         if status.get("confirm"):
+            session.typing_stop()
             await self.ask_confirmation(req, status)
             return "I need your yes before I change anything; I have texted you what it is."
         ok = bool(status.get("ok"))
@@ -1311,7 +1353,6 @@ class GateSessionManager:
         if not notify:
             self.store.add_message(req.chat_id, "system", f"Task #{req.id} {outcome}: {req.summary}\nResult:\n{result}")
             return f"{'Done' if ok else 'That failed'}. {result}"
-        session = self.get(req.chat_id)
         from_aaron = session.is_approver() or session.is_aaron_on_phone() or req.chat_id in self._approver_chat_ids()
         note = f"Task #{req.id} {outcome}: {req.summary}\nResult:\n{result}"
         meanwhile = self.store.inbound_since(req.chat_id, req.created_at)
@@ -1326,16 +1367,24 @@ class GateSessionManager:
                     await session.handle_followup(meanwhile[-1]["text"], inbound_id=meanwhile[-1]["id"])
                 except Exception:
                     logger.exception("[gate] follow-up after #%s failed", req.id)
+                finally:
+                    session.typing_stop()
                 return ""
             # Aaron asked for it himself: let the router phrase the answer.
-            replied = await session.notify_after_request(note, inbound_id=req.inbound_id)
-            if not replied:
-                await self.send_to_approver(f"{'Done' if ok else 'Failed'}: {req.summary}\n{result}")
+            try:
+                replied = await session.notify_after_request(note, inbound_id=req.inbound_id)
+                if not replied:
+                    await self.send_to_approver(f"{'Done' if ok else 'Failed'}: {req.summary}\n{result}")
+            finally:
+                session.typing_stop()
             return ""
         # Someone else's request: short status to Aaron, and the router may
         # tell the sender the outcome (never Claude's raw text).
-        await self.send_to_approver(f"[Blatbot #{req.id} {outcome}] {req.summary}\n{result}")
-        await session.notify_after_request(note, inbound_id=req.inbound_id)
+        try:
+            await self.send_to_approver(f"[Blatbot #{req.id} {outcome}] {req.summary}\n{result}")
+            await session.notify_after_request(note, inbound_id=req.inbound_id)
+        finally:
+            session.typing_stop()
         return ""
 
     def _approver_chat_ids(self) -> set:
