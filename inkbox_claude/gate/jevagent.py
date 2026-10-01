@@ -25,6 +25,7 @@ Configuration:
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import json
 import logging
 import os
@@ -108,43 +109,152 @@ VIRTUAL_TOOLS: Dict[str, Dict[str, Any]] = {
 }
 
 
+class _SessionWorker:
+    """One MCP server, owned by one asyncio task for its whole life.
+
+    anyio cancel scopes (inside stdio_client and ClientSession) must be entered and
+    exited by the same task. The agent graph calls tools from many parallel tasks,
+    so every call is handed to this worker over a queue and answered on a future;
+    the worker alone touches the session. Workers outlive a request: a server
+    started once stays warm until the gateway exits or the worker fails."""
+
+    def __init__(self, server: str, cfg: Dict[str, Any]):
+        self.server, self.cfg = server, cfg
+        self.queue: "asyncio.Queue[Optional[Tuple[Any, asyncio.Future]]]" = asyncio.Queue()
+        self.ready: "asyncio.Future[None]" = asyncio.get_event_loop().create_future()
+        self.schemas: Dict[str, Dict[str, Any]] = {}
+        self.task = asyncio.create_task(self._run(), name=f"mcp-{server}")
+        self.failed: Optional[BaseException] = None
+
+    async def _run(self) -> None:
+        from mcp import ClientSession
+        from mcp.client.stdio import StdioServerParameters, stdio_client
+        params = StdioServerParameters(command=self.cfg["command"], args=list(self.cfg.get("args") or []),
+                                       env={**os.environ, **(self.cfg.get("env") or {})})
+        try:
+            async with stdio_client(params) as (read, write):
+                async with ClientSession(read, write) as session:
+                    await session.initialize()
+                    listed = await session.list_tools()
+                    for t in listed.tools:
+                        self.schemas[f"mcp__{self.server}__{t.name}"] = {"description": t.description or "",
+                                                                         "schema": _input_schema(t)}
+                    if not self.ready.done():
+                        self.ready.set_result(None)
+                    while True:
+                        item = await self.queue.get()
+                        if item is None:
+                            return
+                        fn, fut = item
+                        try:
+                            res = await fn(session)
+                            if not fut.done():
+                                fut.set_result(res)
+                        except BaseException as exc:  # noqa: BLE001
+                            if not fut.done():
+                                fut.set_exception(exc)
+        except BaseException as exc:  # noqa: BLE001
+            self.failed = exc
+            if not self.ready.done():
+                self.ready.set_exception(exc)
+            # Anyone still queued gets the failure instead of hanging.
+            while not self.queue.empty():
+                item = self.queue.get_nowait()
+                if item is not None and not item[1].done():
+                    item[1].set_exception(exc)
+            logger.warning("mcp worker %s ended: %s", self.server, exc)
+
+    async def request(self, fn: Any) -> Any:
+        if self.failed is not None or self.task.done():
+            raise RuntimeError(f"MCP server {self.server} is not running: {self.failed}")
+        fut: asyncio.Future = asyncio.get_event_loop().create_future()
+        await self.queue.put((fn, fut))
+        return await fut
+
+    async def close(self) -> None:
+        await self.queue.put(None)
+        with contextlib.suppress(BaseException):
+            await asyncio.wait_for(self.task, 10)
+
+
+class _SessionProxy:
+    """What ToolBox hands out in place of a ClientSession: the same two methods,
+    executed on the worker's task."""
+
+    def __init__(self, worker: _SessionWorker):
+        self._w = worker
+
+    async def call_tool(self, name: str, arguments: Optional[Dict[str, Any]] = None) -> Any:
+        return await self._w.request(lambda s: s.call_tool(name, arguments=arguments or {}))
+
+    async def list_tools(self) -> Any:
+        return await self._w.request(lambda s: s.list_tools())
+
+
+class McpPool:
+    """Process-wide warm pool of MCP server workers, keyed by server name."""
+
+    def __init__(self) -> None:
+        self._workers: Dict[str, _SessionWorker] = {}
+        self._lock = asyncio.Lock()
+
+    async def get(self, server: str, cfg: Dict[str, Any]) -> _SessionWorker:
+        async with self._lock:
+            w = self._workers.get(server)
+            if w is None or w.failed is not None or w.task.done():
+                if w is not None:
+                    logger.info("mcp pool: relaunching %s", server)
+                w = _SessionWorker(server, cfg)
+                self._workers[server] = w
+        await w.ready
+        return w
+
+    async def close_all(self) -> None:
+        for w in list(self._workers.values()):
+            await w.close()
+        self._workers.clear()
+
+
+_POOL: Optional[McpPool] = None
+
+
+def pool() -> McpPool:
+    global _POOL
+    if _POOL is None:
+        _POOL = McpPool()
+    return _POOL
+
+
 class ToolBox:
     """Uniform access to every tool the gate can grant, by full name
-    (mcp__<server>__<tool>). External servers are started lazily and kept for
-    the life of one request."""
+    (mcp__<server>__<tool>). External servers come from the process-wide warm
+    pool: started on first use, then kept across requests."""
 
     def __init__(self, inkbox_server: Any, mcp_config: Dict[str, Dict[str, Any]]):
         self._inkbox = inkbox_server
         self._cfg = mcp_config
-        self._stack = AsyncExitStack()
         self._sessions: Dict[str, Any] = {}
         self._schemas: Dict[str, Dict[str, Any]] = {}
 
     async def __aenter__(self) -> "ToolBox":
-        await self._stack.__aenter__()
         return self
 
     async def __aexit__(self, *exc: Any) -> None:
-        await self._stack.__aexit__(*exc)
+        return None  # sessions belong to the pool, not to one request
 
     async def _session(self, server: str) -> Any:
         if server in self._sessions:
             return self._sessions[server]
-        from mcp import ClientSession
-        from mcp.client.stdio import StdioServerParameters, stdio_client
         cfg = self._cfg.get(server)
         if not cfg:
             raise RuntimeError(f"no launch config for MCP server {server}")
-        params = StdioServerParameters(command=cfg["command"], args=list(cfg.get("args") or []),
-                                       env={**os.environ, **(cfg.get("env") or {})})
-        read, write = await self._stack.enter_async_context(stdio_client(params))
-        session = await self._stack.enter_async_context(ClientSession(read, write))
-        await session.initialize()
-        listed = await session.list_tools()
-        for t in listed.tools:
-            self._schemas[f"mcp__{server}__{t.name}"] = {"description": t.description or "", "schema": _input_schema(t)}
-        self._sessions[server] = session
-        return session
+        if cfg.get("type") not in (None, "stdio") or not cfg.get("command"):
+            raise RuntimeError(f"MCP server {server} is not a stdio server (type={cfg.get('type')})")
+        worker = await pool().get(server, cfg)
+        self._schemas.update(worker.schemas)
+        proxy = _SessionProxy(worker)
+        self._sessions[server] = proxy
+        return proxy
 
     async def _inkbox_tools(self) -> Dict[str, Dict[str, Any]]:
         """Tools of the in-process Inkbox server (an mcp.server.Server inside the

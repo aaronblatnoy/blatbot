@@ -94,7 +94,9 @@ async def judge_done(state: AgentState, config: RunnableConfig) -> Dict[str, Any
             "criteria": {"true": "Everything the goal asked for has been done or, for a question, the retrieved "
                                  "results contain what is needed to answer it. Counting, filtering or comparing rows "
                                  "that are already retrieved is NOT a further tool call; the answer is written from "
-                                 "the results. An empty result from the right place also answers the question.",
+                                 "the results. An empty result from the right place also answers the question. A "
+                                 "failed or unauthorized call to a source the goal did not ask about (another "
+                                 "calendar, a school site) does not make the answer incomplete.",
                          "false": "Something the goal asked for has not happened yet, or the results retrieved so far "
                                   "do not contain the needed information and a different call is needed."}})
         logger.info("jev graph step %d: p(done)=%.2f", state.get("step", 0) + 1, p_done)

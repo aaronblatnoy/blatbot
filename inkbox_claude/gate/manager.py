@@ -20,7 +20,7 @@ from .executor import Executor
 from .jevagent import JevAgent, enabled as jev_agent_enabled
 from .taskpick import TaskPicker, enabled as jev_enabled
 from .router import Router, RouterOutput
-from .scopes import READ_SCOPES, SCOPES
+from .scopes import SCOPES
 from .store import Person, Request, Store, TaskRequired, task_key
 
 logger = logging.getLogger(__name__)
@@ -482,8 +482,10 @@ class GateSession:
             # yes, sends to the requester are refused), so the owner's requests get every
             # read scope, and writes are granted on a lower bar than the strict judgment.
             if self.is_approver():
-                chosen = list(dict.fromkeys(chosen + READ_SCOPES + [k for k, v in probs.items() if v >= 0.35]))
-            elif not chosen:
+                # The tree already chose with the owner's full picture; every extra read scope
+                # only widens the agent's option list and pulls in sources the goal never named.
+                chosen = list(dict.fromkeys(chosen + [k for k, v in probs.items() if v >= 0.5]))
+            if not chosen:
                 top = [k for k, v in sorted(probs.items(), key=lambda kv: -kv[1])[:2] if v >= 0.25]
                 chosen = top or ["web"]
             logger.info("[gate %s] scopes granted: %s", self.chat_id, chosen)

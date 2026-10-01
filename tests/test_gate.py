@@ -1040,7 +1040,7 @@ def test_jev_first_new_task_titled_by_router_scopes_fallback_when_undecided(tmp_
     asyncio.run(go())
     r = m.store.get_request(1)
     assert r.summary == "Book lunch with Sam Rivera"
-    assert "web" in r.scopes and "calendar" in r.scopes   # owner: every read scope, never empty
+    assert r.scopes == ["web"]                              # undecided: the read-only web scope, never empty
 
 
 def test_jev_first_stranger_request_waits_for_aaron(tmp_path):
@@ -1481,13 +1481,13 @@ def test_destructive_call_declined_leaves_everything_alone(tmp_path):
     assert any("Left alone" in t for _, t, *_ in sent)
 
 
-def test_owner_requests_get_every_read_scope_and_lenient_writes(tmp_path):
-    from inkbox_claude.gate.scopes import READ_SCOPES
+def test_owner_requests_get_jev_scopes_plus_likely_writes_only(tmp_path):
+    """The tree's choice stands for the owner; likely scopes (p >= 0.5) are added, nothing else."""
     m, sent = make_manager(tmp_path)
     p = _jev_first(m, choice="new")
     p.action, p.scopes = True, ["calendar"]
     async def judge_scopes(**kw):
-        return {"scopes": ["calendar"], "probabilities": {"calendar": 0.9, "tamid_drive_write": 0.4, "email_send": 0.1}, "reason": "ok"}
+        return {"scopes": ["calendar"], "probabilities": {"calendar": 0.9, "tamid_drive_write": 0.55, "email_send": 0.1}, "reason": "ok"}
     p.judge_scopes = judge_scopes
     m.router.next = RouterOutput(reply="On it.", task="new", task_title="x")
     async def go():
@@ -1495,7 +1495,7 @@ def test_owner_requests_get_every_read_scope_and_lenient_writes(tmp_path):
         await asyncio.sleep(0.05)
     asyncio.run(go())
     scopes = set(m.store.get_request(1).scopes)
-    assert set(READ_SCOPES) <= scopes and "tamid_drive_write" in scopes and "email_send" not in scopes
+    assert scopes == {"calendar", "tamid_drive_write"}
 
 
 def test_stranger_requests_keep_the_strict_scope_judgment(tmp_path):
