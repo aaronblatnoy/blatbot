@@ -489,7 +489,7 @@ def _tried_values(steps: List[Dict[str, Any]], tool: str, arg: str, sole: bool =
 
 
 _BUDGET = 70000         # characters per TypeSafe request (state + questions) that stay under its ~32k-token ceiling
-_REPORT_WHOLE = 6000    # a result up to this size goes to the reply writer whole; larger ones as goal-relevant evidence
+_REPORT_WHOLE = 14000    # a result up to this size goes to the reply writer whole; larger ones as goal-relevant evidence
 _LARGE = 60000          # a single result is read into evidence only when it nears the request budget
 _PART = 48000           # largest text one narrowing judgment sees
 _LEAF = 6000            # stop narrowing here: small enough to extract candidates from precisely
@@ -550,7 +550,20 @@ def _goal_terms(goal: str) -> List[str]:
         if lw in stop or lw in out or re.fullmatch(r"(19|20)\d\d", lw):
             continue                                   # years match every dated row: noise
         out.append(lw)
-    return out[:8]
+    # Relative days become the forms a sheet or calendar row actually carries:
+    # "tomorrow" -> "10/1", "oct 1", "thursday", "thu".
+    lowered = (goal or "").lower()
+    from datetime import timedelta
+    now = datetime.now(TZ)
+    rel = {"today": 0, "tonight": 0, "tomorrow": 1, "yesterday": -1}
+    for word, delta in rel.items():
+        if word in lowered:
+            d = now + timedelta(days=delta)
+            for form in (f"{d.month}/{d.day}", d.strftime("%b %-d").lower(), d.strftime("%A").lower(), d.strftime("%a").lower(),
+                         d.strftime("%Y-%m-%d")):
+                if form not in out:
+                    out.append(form)
+    return out[:14]
 
 
 _CURRENT_GOAL: List[str] = []   # set per run so digests can show the lines that matter

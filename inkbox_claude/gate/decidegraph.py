@@ -202,7 +202,13 @@ async def finalize(state: DecideState, config: RunnableConfig) -> Dict[str, Any]
                                       action_task="(NOTE: no request has been created and none will run for this "
                                                   "message; do not say you are doing, submitting or checking anything. "
                                                   "Answer from what is known, or ask what is needed.)")
-        out.reply = out2.reply if out2.reply and not gm._promises_action(out2.reply) else None
+        if out2.reply and not gm._promises_action(out2.reply):
+            out.reply = out2.reply
+        else:
+            # The writer insists the sender wants something done while the judgment said no.
+            # Silence reads as being ignored; ask the one question that resolves it.
+            logger.info("[gate %s] writer still promised an action; asking instead of going silent", s.chat_id)
+            out.reply = "Do you want me to go ahead with that? Say yes and I will."
     if state["needs_action"] and out.reply and not gm._is_acknowledgement(out.reply):
         logger.info("[gate %s] dropped a %d-word reply written alongside a request; result will follow",
                     s.chat_id, len(out.reply.split()))

@@ -159,6 +159,8 @@ class TaskPicker:
             "new_message": message,
             "task_it_belongs_to": candidate_view(task) if task else "none",
             "last_action_on_that_task": _last_request_outcome(task),
+            "last_thing_the_assistant_said": next((str(m.get("text") or "")[:400] for m in reversed(history)
+                                                   if m.get("kind") == "outbound"), ""),
             "another_model_said_action_needed": router_said_action,
         }
         body = {"state": state, "model": self.model, "questions": {"needs_action": {
@@ -226,6 +228,8 @@ class TaskPicker:
                     "The sender supplies information that `task_it_belongs_to` was waiting for, so its pending "
                     "step can now be carried out (an application, availability, a confirmation, details).",
                     "The sender wants to schedule or set up something (a chat, a meeting, a call).",
+                    "'yes', 'ok', 'sure', 'go ahead', 'do it', 'please' after `last_thing_the_assistant_said` offered "
+                    "to do or check something: the sender is accepting the offer, so do it.",
                     "A correction, addition or 'try again' on a task whose `last_action_on_that_task` already "
                     "ran (done or failed): the sender wants it done again with the change ('should be 30 minutes', "
                     "'the other one', 'give it those scopes', 'no, Friday', 'yes, resubmit').",
