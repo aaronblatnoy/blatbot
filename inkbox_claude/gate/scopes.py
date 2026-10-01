@@ -148,12 +148,17 @@ def registry_problems() -> List[str]:
     return problems
 
 
+ALWAYS_TOOLS = ["mcp__host__rows_where"]     # analysis over gathered results: granted with any scope
+
+
 def tools_for(scopes: List[str]) -> List[str]:
     out: List[str] = []
     for s in scopes:
-        for t in SCOPES[s]["tools"]:  # type: ignore[union-attr]
+        for t in SCOPES.get(s, {"tools": []})["tools"]:  # type: ignore[union-attr,index]
             if t not in out:
                 out.append(t)
+    if out:
+        out += [t for t in ALWAYS_TOOLS if t not in out]
     return out
 
 
@@ -186,6 +191,7 @@ def sends_to_requester(tool_name: str, args: dict, protected: list) -> bool:
 # the next tool instead of the servers' own (often long, implementation-flavoured)
 # descriptions. Tools not listed fall back to the server's description.
 TOOL_PURPOSE: Dict[str, str] = {
+    "mcp__host__rows_where": "COUNT OR FILTER ROWS of a result ALREADY GATHERED (a sheet read, a calendar list, search hits) by a text they contain, optionally within one column. Exact counts; the matching rows come back. Use it after a read, never instead of one.",
     "mcp__host__host_status": "WHAT IS RUNNING ON BLACK-SKY (the server Blatbot runs on): containers, services, uptime, disk, memory, GPUs. Read-only.",
     # web
     "mcp__playwright__browser_search": "SEARCH THE PUBLIC WEB (last resort for facts that live OUTSIDE Aaron's own systems): a person's LinkedIn or employer, an outside organization's leadership, an article, a public page. Not for anything that lives in TAMID/SJBA sheets, forms, rosters, calendars or inboxes; use those tools first.",

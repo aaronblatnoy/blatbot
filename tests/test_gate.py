@@ -1418,7 +1418,7 @@ def test_no_action_reply_may_not_promise_action(tmp_path):
 def test_host_read_scope_maps_to_the_status_tool():
     from inkbox_claude.gate.scopes import tools_for
     from inkbox_claude.gate import hosttools
-    assert tools_for(["host_read"]) == ["mcp__host__host_status"]
+    assert tools_for(["host_read"]) == ["mcp__host__host_status", "mcp__host__rows_where"]   # analysis rides along
     out = asyncio.run(hosttools.host_status({"parts": ["uptime_load", "nope"]}))
     assert out.startswith("## uptime_load") and "nope" not in out
 

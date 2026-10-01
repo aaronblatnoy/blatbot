@@ -98,6 +98,7 @@ SEARCH_URL = os.getenv("GATE_SEARCH_URL") or "http://127.0.0.1:8888/search"
 
 VIRTUAL_TOOLS: Dict[str, Dict[str, Any]] = {
     "mcp__host__host_status": {"description": hosttools.DESCRIPTION, "schema": hosttools.SCHEMA},
+    "mcp__host__rows_where": {"description": hosttools.ROWS_WHERE_DESCRIPTION, "schema": hosttools.ROWS_WHERE_SCHEMA},
     # A web search done THROUGH the browser: the Playwright server opens the local
     # SearXNG results page (which queries Google/Bing server-side, so no bot walls)
     # and reads it. Two browser calls, one tool from the agent's point of view.
@@ -285,6 +286,8 @@ class ToolBox:
             return await self._browser_search(str(args.get("query") or ""))
         if name == "mcp__host__host_status":
             return await hosttools.host_status(args)
+        if name == "mcp__host__rows_where":
+            return hosttools.rows_where(args, getattr(self, "facts", None) or {})
         server, short = split_tool(name)
         if server == "inkbox":
             from mcp import types as mt
@@ -1395,6 +1398,8 @@ def _candidate_values(name: str, desc: str, typ: str, facts: Dict[str, Any], ste
         out += _EMAIL_RE.findall(blob)
     if "phone" in lname or "sms" in lname or "number" in lname or name in ("to", "to_number"):
         out += [m.strip() for m in _PHONE_RE.findall(blob)]
+    if name == "result_key":
+        out += [k for k in facts if k.startswith("result_of_")]
     if name.endswith("_id") or name in ("id", "spreadsheet_id", "form_id", "event_id", "message_id", "thread_id", "file_id", "calendar_id"):
         out += _LABELED_ID_RE.findall(blob) + _ID_RE.findall(blob)
     seen: List[Any] = []

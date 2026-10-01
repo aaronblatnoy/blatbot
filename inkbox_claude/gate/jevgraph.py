@@ -423,7 +423,8 @@ async def record(state: AgentState, config: RunnableConfig) -> Dict[str, Any]:
         shown = json.dumps({k: v for k, v in s["args"].items() if k != "user_google_email"}, ensure_ascii=False)[:300]
         if s["ok"]:
             logger.info("jev graph round %d: %s(%s) -> %s", step_no, short, shown, " ".join(ja._text(s["result"]).split())[:300])
-            facts[f"result_of_{short}_{len(steps)}"] = s.get("evidence") or ja._text(s["result"])
+            # The full text, never the digest: rows_where counts over it exactly.
+            facts[f"result_of_{short}_{len(steps) - len(new) + new.index(s)}"] = ja._text(s["result"])
         else:
             logger.info("jev graph round %d: %s(%s) -> ERROR %s", step_no, short, shown, " ".join(str(s.get("error")).split())[:300])
     for s in new:
@@ -433,6 +434,7 @@ async def record(state: AgentState, config: RunnableConfig) -> Dict[str, Any]:
         total = sum(1 for x in steps if x["tool"] == s["tool"] and not x["ok"])
         if same >= 2 or total >= 3:
             return {"facts": facts, "step": step_no, "outcome": "fail", "error": f"{s['tool']} keeps failing: {s.get('error')}"}
+    _rt(config)["box"].facts = facts
     return {"facts": facts, "step": step_no, "outcome": None}
 
 
@@ -524,6 +526,7 @@ async def run(agent: "ja.JevAgent", req: Any, context: str = "") -> Dict[str, An
                     continue
                 except Exception as exc:
                     logger.warning("jev graph: cannot describe %s: %s", name, exc)
+            box.facts = facts                      # rows_where reads gathered results from here
             rt = {"agent": agent, "judge": judge, "prose": prose, "req": req, "context": context, "box": box,
                   "tool_options": tool_options}
             initial: AgentState = {"goal": req.original_message, "background": background, "task_context": context,
