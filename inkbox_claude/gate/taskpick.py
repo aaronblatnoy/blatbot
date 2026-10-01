@@ -373,12 +373,16 @@ class TaskPicker:
                 if sc not in scopes:
                     scopes.append(sc)
                 probs[sc] = systems[sysname]
+            strong = systems[sysname] >= SCOPE_MIN_YES
             for leaf, (_, granted) in SCOPE_TREE_LEAVES.get(sysname, {}).items():
                 p = answers.get(f"leaf::{sysname}::{leaf}", 0.0)
                 leaves_log.append((leaf, round(p, 2)))
                 for sc in granted:
                     probs[sc] = max(probs.get(sc, 0.0), p)
-                if p >= SCOPE_MIN_YES:
+                # A leaf under a system the task clearly touches opens on a lower bar: a write
+                # the agent never needs costs nothing (it only writes when the goal is an action,
+                # and destructive calls still wait for the owner), while a missing one fails the task.
+                if p >= SCOPE_MIN_YES or (strong and p >= SCOPE_SECONDARY_MIN):
                     for sc in granted:
                         if sc not in scopes:
                             scopes.append(sc)

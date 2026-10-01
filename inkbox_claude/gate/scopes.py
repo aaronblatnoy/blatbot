@@ -102,6 +102,64 @@ SCOPE_TREE_LEAVES: Dict[str, Dict[str, object]] = {
 }
 
 
+# ---------------------------------------------------------------------------
+# Purposes for tools without a hand-written line: a template that names WHERE the
+# tool acts (which account, site or system) before what it does, since telling
+# the website admin from the public web, or TAMID's calendar from Aaron's, is
+# the judgment that goes wrong when a tool is described only by its verb.
+# ---------------------------------------------------------------------------
+
+_SERVER_HOME = {
+    "tamid-admin": "the TAMID at NYU WEBSITE ADMIN (the club's own site: its board list with positions and bios, events, members, settings, contact-form submissions, newsletter signups)",
+    "sjba-admin": "the SJBA WEBSITE ADMIN (the Stern Jewish Business Association's own site: board list with positions and bios, events, members, settings, contact-form submissions, newsletter signups)",
+    "tamid-drive": f"TAMID's GOOGLE WORKSPACE ({ORG_ACCOUNT}: the club's Drive, Sheets, Docs, Forms, Gmail, calendar)",
+    "stern-drive": f"AARON's OWN NYU STERN GOOGLE ACCOUNT ({OWNER_ACCOUNT}: his personal calendar, Gmail and Drive, not the club's)",
+    "tamid-instagram": "TAMID's INSTAGRAM account",
+    "tamid-linkedin": "TAMID's LINKEDIN page",
+    "analytics-admin": "TAMID's GOOGLE ANALYTICS property (website traffic configuration)",
+    "brightspace": "AARON's NYU BRIGHTSPACE (the university course site: his courses, assignments, grades, discussions)",
+    "coolify": "the BLACK-SKY COOLIFY (Aaron's self-hosted PaaS: deployed apps, services, databases, deployments, logs)",
+    "coolify-vox": "the VOX COOLIFY instance (a second self-hosted PaaS)",
+    "playwright": "the PUBLIC WEB in a headless browser (only for things outside Aaron's own systems)",
+    "inkbox": "BLATBOT's OWN INKBOX (its mailbox, phone line, iMessage and address book)",
+    "host": "the BLACK-SKY SERVER itself",
+}
+_VERBS = {
+    "list": "LIST", "get": "READ ONE", "search": "SEARCH", "read": "READ", "create": "CREATE", "update": "CHANGE",
+    "delete": "DELETE", "replace": "REPLACE", "modify": "CHANGE", "append": "ADD ROWS TO", "insert": "INSERT INTO",
+    "send": "SEND", "publish": "PUBLISH", "stage": "STAGE (prepare, not yet public)", "check": "CHECK", "manage": "MANAGE",
+    "query": "QUERY", "mark": "MARK", "submit": "SUBMIT", "post": "POST", "reply": "REPLY IN", "pin": "PIN",
+    "dismiss": "DISMISS", "download": "DOWNLOAD", "deploy": "DEPLOY", "restart": "RESTART", "stop": "STOP",
+    "diagnose": "DIAGNOSE", "find": "FIND", "validate": "VALIDATE", "archive": "ARCHIVE", "grant": "GRANT",
+    "revoke": "REVOKE", "set": "SET", "import": "IMPORT", "copy": "COPY", "export": "EXPORT", "format": "FORMAT",
+}
+_PREFIXES = ("tamid_", "sjba_", "bs_", "ga_", "ig_", "li_", "inkbox_")
+
+
+def purpose_for(name: str) -> str:
+    """The hand-written purpose, else a templated one naming the tool's home and verb,
+    else the server's own description, else the name."""
+    if name in TOOL_PURPOSE:
+        return TOOL_PURPOSE[name]
+    parts = name.split("__")
+    server, short = (parts[1], parts[2]) if len(parts) >= 3 else ("", name)
+    home = _SERVER_HOME.get(server)
+    bare = short
+    for p in _PREFIXES:
+        if bare.startswith(p):
+            bare = bare[len(p):]
+            break
+    words = bare.split("_")
+    verb = _VERBS.get(words[0]) if words else None
+    obj = " ".join(words[1:]) if verb else " ".join(words)
+    desc = (TOOL_DESCRIPTIONS.get(name) or "").strip()
+    desc = (desc[:160] + ("..." if len(desc) > 160 else "")) if desc else ""
+    if home:
+        head = f"{verb} {obj}".strip() if verb else short.replace("_", " ")
+        return f"{head.upper() if verb else head}: on {home}." + (f" {desc}" if desc else "")
+    return desc or name
+
+
 def _scope_system() -> Dict[str, str]:
     m: Dict[str, str] = {}
     for sysname in SCOPE_TREE_SYSTEMS:

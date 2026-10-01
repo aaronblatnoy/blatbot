@@ -43,7 +43,7 @@ from langgraph.graph import END, START, StateGraph
 from langgraph.types import Send
 
 from . import jevagent as ja
-from .scopes import SCOPE_TREE_SYSTEMS, TOOL_DESCRIPTIONS, TOOL_SYSTEM, tools_by_system
+from .scopes import SCOPE_TREE_SYSTEMS, TOOL_DESCRIPTIONS, TOOL_SYSTEM, _SERVER_HOME as _KNOWN_HOMES, purpose_for, tools_by_system
 
 logger = logging.getLogger(__name__)
 
@@ -222,10 +222,21 @@ async def kind(state: AgentState, config: RunnableConfig) -> Dict[str, Any]:
     rt = _rt(config)
     judge = rt["judge"]
     writes = _writes(rt, state)
+    if not writes and not state.get("steps"):
+        pass
     # Arriving here with more information still wanted means the lookups ran out:
     # what is delivered is partial, with the confidence stated for the reply writer.
     partial = (1.0 - state["p_more"]) if state.get("steps") and state["p_more"] >= NEED_MORE_MIN else state.get("partial")
     if not writes:
+        # Could the goal still be an action? Then say plainly that no change capability was granted.
+        choice, conf, _ = await judge.choose(state["loop_state"], {
+            "question": "With the evidence in `steps_so_far`, what does `goal` call for now?"},
+            {ANSWER: "A question: it is answered in words from the evidence. Nothing in the world needs changing.",
+             ACT: "Something must be done: created, changed, moved, cancelled, sent, written to a sheet or site."}, min_p=0.34)
+        if choice == ACT:
+            return {"outcome": "fail", "error": "this request was granted no capability to make that change; it can "
+                                                "only read. Ask again naming what to change and it will be granted.",
+                    "partial": partial}
         return {"phase": "answer", "partial": partial}
     if not state.get("steps"):
         return {"phase": "write", "partial": partial}         # nothing to answer from: the goal is an action
@@ -595,8 +606,9 @@ async def run(agent: "ja.JevAgent", req: Any, context: str = "") -> Dict[str, An
             tool_options: Dict[str, str] = {}
             for name in allowed:
                 try:
-                    tool_options[name] = ja.TOOL_PURPOSE.get(name) or TOOL_DESCRIPTIONS.get(name) \
-                        or (await box.schema(name))["description"] or name
+                    tool_options[name] = purpose_for(name) if (name in ja.TOOL_PURPOSE or TOOL_DESCRIPTIONS.get(name)
+                                                              or name.split("__")[1] in _KNOWN_HOMES) \
+                        else ((await box.schema(name))["description"] or name)
                 except ValueError:
                     continue
                 except Exception as exc:
