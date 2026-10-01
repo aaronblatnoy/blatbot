@@ -1323,19 +1323,50 @@ class GateSessionManager:
         fallback["jev_attempt"] = {k: status.get(k) for k in ("error", "tool_calls", "jev_calls", "prose_calls", "seconds", "steps", "raw")}
         return fallback
 
+    SLOW_ACK_AFTER_S = float(os.getenv("GATE_SLOW_ACK_AFTER_S") or 9.0)
+    SLOW_ACK_LINES = ("sec, pulling that up", "one sec", "looking now", "give me a sec", "checking", "hang on",
+                      "pulling it up", "sec")
+
+    async def _ack_if_slow(self, session: "GateSession", req: Request) -> None:
+        """A request that is still running after a few seconds gets one short, casual line
+        so the wait does not read as silence. A fast one gets its answer and nothing else."""
+        try:
+            await asyncio.sleep(self.SLOW_ACK_AFTER_S)
+        except asyncio.CancelledError:
+            return
+        if self.store.get_request(req.id).state != "running":
+            return
+        import random
+        line = random.choice(self.SLOW_ACK_LINES)
+        try:
+            async with session._lock:
+                prev = session.inbound_id
+                session.inbound_id = req.inbound_id or prev
+                try:
+                    await session.send_to_sender(line, role="ack")
+                finally:
+                    session.inbound_id = prev
+            session.typing_start()           # the send stopped the pulse; the run continues
+        except Exception:
+            logger.debug("[gate] slow ack failed", exc_info=True)
+
     async def execute(self, req: Request, notify: bool = True) -> str:
         """Run an approved request. With notify=False the caller delivers the
         result itself (a live phone call reads it aloud) and gets it back."""
         self.store.set_state(req.id, "running")
         session = self.get(req.chat_id)
+        slow_ack: Optional[asyncio.Task] = None
         if notify and req.mode == "imessage":
             session.typing_start()
+            slow_ack = asyncio.create_task(self._ack_if_slow(session, req))
         tid = self.store.task_id_for_request(req.id)
         context = self.store.task_memory_for_task(tid) if tid else ""
         logger.info("[gate] executing #%s with ledger T%s (%d chars)", req.id, tid, len(context))
         try:
             status = await self._run_executor(req, context)
         finally:
+            if slow_ack is not None and not slow_ack.done():
+                slow_ack.cancel()
             if not notify:
                 session.typing_stop()
         if status.get("confirm"):

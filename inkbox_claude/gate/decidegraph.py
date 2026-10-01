@@ -97,7 +97,12 @@ def after_join(state: DecideState, config: RunnableConfig) -> List[str]:
     from . import manager as gm
     s = _s(config)
     branches: List[str] = []
-    # On a call with a request, nothing is written for the voice model to read: it holds the line.
+    # With a request on the way, the owner gets no written acknowledgement: on a call the
+    # voice model holds the line, on iMessage the typing indicator shows the work, and a
+    # short line goes out only if the run takes long (see GateSessionManager.execute).
+    # Anyone else still hears that Aaron will be asked.
+    # The writer still runs (it names the task and writes where it stands); only its
+    # acknowledgement is dropped in finalize for the owner's call or iMessage requests.
     if not (state["needs_action"] and state["mode"] == "voice"):
         branches.append("write_reply")
     if state["needs_action"] or gm._names_a_task(state["task_choice"]):
@@ -209,6 +214,9 @@ async def finalize(state: DecideState, config: RunnableConfig) -> Dict[str, Any]
             # Silence reads as being ignored; ask the one question that resolves it.
             logger.info("[gate %s] writer still promised an action; asking instead of going silent", s.chat_id)
             out.reply = "Do you want me to go ahead with that? Say yes and I will."
+    if state["needs_action"] and out.reply and s.is_approver() and state["mode"] == "imessage":
+        # The typing indicator shows the work; a line goes out only if the run is slow.
+        out.reply = None
     if state["needs_action"] and out.reply and not gm._is_acknowledgement(out.reply):
         logger.info("[gate %s] dropped a %d-word reply written alongside a request; result will follow",
                     s.chat_id, len(out.reply.split()))
