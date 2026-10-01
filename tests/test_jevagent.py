@@ -43,6 +43,9 @@ class ScriptedJudge:
 
     async def choose(self, state, question, options, min_p=None):
         self.calls += 1
+        if set(options) == {"answer", "act"}:
+            want = "act" if (self.picks and jevagent.is_write_tool(self.picks[0])) else "answer"
+            return want, 0.95, {want: 0.95}
         want = self.picks.pop(0)
         assert want in options, (want, list(options))
         return want, 0.95, {want: 0.95}
@@ -265,7 +268,8 @@ def test_date_range_bounds_are_picked_not_written(agent, monkeypatch):
                                                                        "time_min": {"type": "string", "description": "RFC3339 start"},
                                                                        "time_max": {"type": "string", "description": "RFC3339 end"}}}}}
     box = FakeBox(schemas, results={get: "6 events"})
-    judge = ScriptedJudge([get, "last_week", "last_week"])
+    # the lone read is collected without a tool choice; the script holds only the two date picks
+    judge = ScriptedJudge(["last_week", "last_week"])
     prose = ScriptedProse()
     _patch(monkeypatch, box, judge, prose, [get])
     st = asyncio.run(agent.run(_req("list my coffee chats from last week")))
@@ -509,7 +513,7 @@ def test_agent_selects_from_a_narrowed_large_result_and_never_judges_raw_text(ag
         async def yes(self, state, question):
             seen_states.append(state)
             if "WITH CONFIDENCE" in str(question):
-                return 0.9 if not self.picks else 0.1
+                return 0.9 if len(box.calls) >= 2 else 0.1     # done once the response itself was read
             return 0.9
         async def ask(self, state, questions):  # batched argument questions: pick the candidate holding the needle
             seen_states.append(state)
@@ -523,7 +527,7 @@ def test_agent_selects_from_a_narrowed_large_result_and_never_judges_raw_text(ag
                     hit = [k for k, v in q["criteria"].items() if "NEEDLE" in json.dumps(v)] or ["write_new"]
                     out[qid] = {"choice": hit[0], "probabilities": {hit[0]: 0.97}}
             return out
-    judge = J([lst, get])
+    judge = J([])                      # both reads are collected on usefulness, no tool choice
     _patch(monkeypatch, box, judge, ScriptedProse(), [lst, get])
     st = asyncio.run(agent.run(_req("open cand idate's application response")))
     assert st["ok"] and box.calls[1][1]["response_id"] == "resp_NEEDLE0000000000000"
