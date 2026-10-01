@@ -104,6 +104,7 @@ class ScriptedProse:
 @pytest.fixture
 def agent(monkeypatch):
     monkeypatch.setenv("TYPESAFE_API_KEY", "x")
+    monkeypatch.setenv("JEV_AGENT_COMPOSE", "jev")     # the scripted fakes drive Jev selection; compose has its own test
     ag = JevAgent(inkbox_server={"type": "sdk", "name": "inkbox", "instance": None}, router=None, mcp_config={}, max_steps=5)
     return ag
 
@@ -764,3 +765,27 @@ def test_blind_delete_is_never_offered_for_confirmation(agent, monkeypatch):
     assert st["confirm"]["about"] and "Sam Rivera" in st["confirm"]["about"][0]
     assert [c[0] for c in box.calls] == [find]                                   # nothing deleted, one lookup
     assert "3sq" not in json.dumps(st["confirm"])
+
+
+def test_arguments_are_composed_by_prose_and_ids_validated(agent, monkeypatch):
+    """One prose call composes every argument; a composed id must exist in evidence."""
+    monkeypatch.setenv("JEV_AGENT_COMPOSE", "deepseek")
+    lst, get = "mcp__tamid-drive__get_events", "mcp__tamid-drive__delete_event"
+    schemas = {lst: {"description": "List events", "schema": {"type": "object", "properties": {"user_google_email": {"type": "string"}, "query": {"type": "string"}}, "required": []}},
+               get: {"description": "Delete an event", "schema": {"type": "object", "required": ["event_id"],
+                                                                 "properties": {"user_google_email": {"type": "string"}, "event_id": {"type": "string"}}}}}
+    box = FakeBox(schemas, results={lst: "id=evt_ABCDEFGHIJKLMNOP123 Lunch; id=evt_ZZZZZZZZZZZZZZZZ999 Dentist"})
+    class P(ScriptedProse):
+        async def write(self, instruction, facts):
+            self.calls += 1
+            if "arguments_schema" in json.dumps(facts, default=str):
+                if facts["tool"] == "get_events":
+                    return '{"query": "dentist"}'
+                return '{"event_id": "evt_MADEUP0000000000000"}' if self.calls == 2 else '{"event_id": "evt_ZZZZZZZZZZZZZZZZ999"}'
+            return "[]"
+    judge = ScriptedJudge([lst, get, get])
+    _patch(monkeypatch, box, judge, P(), [lst, get])
+    st = asyncio.run(agent.run(_req("cancel the dentist")))
+    assert box.calls[0] == (lst, {"user_google_email": jevagent.ORG_ACCOUNT, "query": "dentist"})
+    # the invented id was rejected (lookup-first), the real one reached the confirmation
+    assert not st["ok"] and st.get("confirm") and st["confirm"]["args"]["event_id"] == "evt_ZZZZZZZZZZZZZZZZ999"

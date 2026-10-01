@@ -85,7 +85,7 @@ def _last_request_outcome(task: Optional[Dict[str, Any]]) -> str:
     return "nothing has run on this task yet"
 
 
-from .scopes import SCOPE_TREE_ALWAYS, SCOPE_TREE_LEAVES, SCOPE_TREE_SYSTEMS, WHERE_THINGS_LIVE  # the registry
+from .scopes import SCOPES, SCOPE_TREE_ALWAYS, SCOPE_TREE_LEAVES, SCOPE_TREE_SYSTEMS, WHERE_THINGS_LIVE  # the registry
 
 
 SCOPE_MIN_YES = float(os.getenv("TYPESAFE_SCOPE_MIN_YES") or 0.6)
@@ -343,6 +343,12 @@ class TaskPicker:
         # One request: every system noul and every leaf noul together. The tree is applied
         # in code afterwards: a leaf counts only when its system opened.
         questions: Dict[str, Any] = {f"sys::{k}": noul(v) for k, v in SCOPE_TREE_SYSTEMS.items()}
+        questions["wants_change"] = {"type": "noul",
+                                     "instructions": {"question": "Does `task_prompt` (with the conversation it quotes) ask for "
+                                                                  "something to be CHANGED, created, moved, cancelled, sent or "
+                                                                  "written, as opposed to only looked up or counted?"},
+                                     "criteria": {"true": "Something must be written or sent somewhere.",
+                                                  "false": "Only reading, finding, counting or answering."}}
         for sysname, leaves in SCOPE_TREE_LEAVES.items():
             for leaf, (capability, _) in leaves.items():
                 questions[f"leaf::{sysname}::{leaf}"] = noul(capability)
@@ -352,6 +358,7 @@ class TaskPicker:
             logger.warning("scope tree via TypeSafe failed: %s", exc)
             return {"scopes": None, "probabilities": {}, "reason": f"error: {exc}"}
         systems = {k: answers.get(f"sys::{k}", 0.0) for k in SCOPE_TREE_SYSTEMS}
+        wants_change = answers.get("wants_change", 0.0) >= 0.5
         chosen_systems = [k for k, v in systems.items() if v >= SCOPE_MIN_YES]
         # Secondary systems: plausible but not certain. Granting them costs nothing now
         # that the agent picks tools by system; missing them loses the right source.
@@ -364,7 +371,8 @@ class TaskPicker:
             top, p = max(systems.items(), key=lambda kv: kv[1])
             if p >= 0.4:
                 chosen_systems = [top]
-        logger.info("scope tree: systems %s | top=%s", chosen_systems, sorted(systems.items(), key=lambda kv: -kv[1])[:4])
+        logger.info("scope tree: systems %s wants_change=%.2f | top=%s", chosen_systems, answers.get("wants_change", 0.0),
+                    sorted(systems.items(), key=lambda kv: -kv[1])[:4])
         probs: Dict[str, float] = {}
         scopes: List[str] = []
         leaves_log = []
@@ -382,7 +390,10 @@ class TaskPicker:
                 # A leaf under a system the task clearly touches opens on a lower bar: a write
                 # the agent never needs costs nothing (it only writes when the goal is an action,
                 # and destructive calls still wait for the owner), while a missing one fails the task.
-                if p >= SCOPE_MIN_YES or (strong and p >= SCOPE_SECONDARY_MIN):
+                is_write = any(not SCOPES.get(sc, {}).get("read", False) for sc in granted) if granted else False
+                # The task is a change: every write leaf of a clearly chosen system opens, since
+                # which write it is was already decided by the system and the goal.
+                if p >= SCOPE_MIN_YES or (strong and p >= SCOPE_SECONDARY_MIN) or (strong and wants_change and is_write and p >= 0.1):
                     for sc in granted:
                         if sc not in scopes:
                             scopes.append(sc)

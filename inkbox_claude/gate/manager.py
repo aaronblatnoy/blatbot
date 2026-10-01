@@ -1364,8 +1364,17 @@ class GateSessionManager:
         logger.info("[gate] jev agent #%s: ok=%s steps=%s jev=%s prose=%s %ss",
                     req.id, status.get("ok"), status.get("tool_calls"), status.get("jev_calls"),
                     status.get("prose_calls"), status.get("seconds"))
-        if status.get("ok") or status.get("confirm") or not self.jev_fallback:
+        if status.get("confirm") or not self.jev_fallback:
             return status
+        if status.get("ok"):
+            # Fast is only worth it when right: a draft answer that the grounding judge
+            # cannot support in the findings sends the request on to Claude Code, with
+            # the findings, instead of a "could not" reaching the sender.
+            if await self._findings_answer_the_goal(req, status):
+                return status
+            if status.get("wrote"):
+                return status           # a write happened; never redo it
+            logger.info("[gate] jev agent #%s finished but its findings do not answer the goal; escalating", req.id)
         if status.get("wrote"):
             logger.info("[gate] jev agent #%s failed after a write; not falling back", req.id)
             return status
@@ -1401,6 +1410,29 @@ class GateSessionManager:
             session.typing_start()           # the send stopped the pulse; the run continues
         except Exception:
             logger.debug("[gate] slow ack failed", exc_info=True)
+
+    async def _findings_answer_the_goal(self, req: Request, status: Dict[str, Any]) -> bool:
+        """Draft the answer from the findings and let the grounding judge say whether the
+        findings support it. Undecided counts as yes (no judge, or too large to judge)."""
+        picker = self.task_picker
+        if picker is None or not hasattr(picker, "judge_grounded"):
+            return True
+        summary = status.get("summary") or ""
+        try:
+            draft = await self.router.phrase(
+                "Answer the question below from the findings, in one to three plain sentences. If the findings do "
+                "not contain the answer, say exactly what they do and do not show.",
+                {"question": req.original_message, "findings": summary[-20000:]})
+            res = await picker.judge_grounded(reply=draft, results=summary, question=req.original_message)
+        except Exception:
+            logger.debug("[gate] findings check failed", exc_info=True)
+            return True
+        p = float(res.get("p") or 0.0)
+        ok = res.get("grounded") is not False and (res.get("grounded") is not None or True)
+        answered = (res.get("grounded") is None) or p >= 0.5
+        logger.info("[gate] jev agent #%s findings check: p(answered)=%.2f -> %s", req.id, p, "keep" if answered else "escalate")
+        status["draft_answer"] = draft
+        return answered
 
     async def execute(self, req: Request, notify: bool = True) -> str:
         """Run an approved request. With notify=False the caller delivers the

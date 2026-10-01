@@ -472,6 +472,11 @@ def _looks_like_error(result: Any) -> bool:
 
 
 _FIXED_ARGS = {"user_google_email"}
+# Arguments composed by the prose model in one call ("deepseek", default), with Jev selection as the
+# fallback when the composition is unusable; "only" never falls back; "" / "jev" keeps Jev selection.
+def _compose_mode() -> str:
+    v = (os.getenv("JEV_AGENT_COMPOSE") or "deepseek").strip().lower()
+    return "" if v in ("", "jev", "0", "no", "false") else v
 
 
 def _tried_values(steps: List[Dict[str, Any]], tool: str, arg: str, sole: bool = False) -> List[Any]:
@@ -984,6 +989,105 @@ class JevAgent:
             return self._status(False, str(exc), steps, judge, prose, started)
         return self._status(True, "", steps, judge, prose, started)
 
+    async def _compose_args(self, box: ToolBox, prose: Prose, tool: str, meta: Dict[str, Any], facts: Dict[str, Any],
+                            steps: List[Dict[str, Any]], req: Request,
+                            avoid: Optional[Dict[str, Any]] = None) -> Optional[Dict[str, Any]]:
+        """All of one call's arguments composed by the prose model in ONE request, from the
+        goal, the item in hand and the evidence. Code then validates: required present,
+        enums honoured, types coerced, and every id-like value present verbatim in the
+        evidence (an id is copied, never invented; a required id missing from evidence
+        means the call cannot be made yet). Returns None when it cannot be made."""
+        schema = meta.get("schema") or {}
+        props: Dict[str, Any] = schema.get("properties") or {}
+        required = list(schema.get("required") or [])
+        server, short = split_tool(tool)
+        fixed: Dict[str, Any] = {}
+        spec: Dict[str, Any] = {}
+        for name, sp in props.items():
+            if name == "user_google_email":
+                fixed[name] = ORG_ACCOUNT if server == "tamid-drive" else OWNER_ACCOUNT
+                continue
+            entry: Dict[str, Any] = {"type": sp.get("type") or "string", "required": name in required}
+            if sp.get("description"):
+                entry["description"] = str(sp["description"])[:300]
+            if sp.get("enum"):
+                entry["one_of"] = list(sp["enum"])
+            if _id_like(name):
+                entry["note"] = "an id: copy it EXACTLY from the evidence, never invent or shorten one"
+            spec[name] = entry
+        if not spec:
+            return dict(fixed)
+        evidence = []
+        for s in steps[-6:]:
+            r = _seen(s)
+            r = r if isinstance(r, str) else json.dumps(r, ensure_ascii=False, default=str)
+            evidence.append({"tool": s["tool"].split("__")[-1], "args": {k: v for k, v in s["args"].items() if k not in _FIXED_ARGS},
+                             "ok": s["ok"], "result": r[:6000]})
+        tried = {name: _tried_values(steps, tool, name) for name in spec}
+        tried = {k: v for k, v in tried.items() if v}
+        if avoid:
+            for k, v in avoid.items():
+                tried.setdefault(k, []).append(v)
+        facts_in = {"goal": req.original_message, "background": str(facts.get("background") or "")[:4000],
+                    **{k: facts[k] for k in ("now", "today", "timezone", "weekday") if k in facts},
+                    "this_item": facts.get("current_item"), "accounts": facts.get("accounts"),
+                    "tool": short, "tool_description": str(meta.get("description") or "")[:400],
+                    "arguments_schema": spec, "evidence": evidence,
+                    "values_already_tried_that_did_not_work": tried or None}
+        instruction = (
+            "Compose the arguments for ONE call of `tool` so that it does what `goal` asks (for `this_item` when given). "
+            "Output ONLY a JSON object mapping argument names to values; omit optional arguments the call does not need. "
+            "Rules: datetimes in ISO 8601 with the New York offset (-04:00 / -05:00); a query argument gets the "
+            "specific words that find the thing (a person's name or email, a title), not the whole question; an id "
+            "is copied exactly from `evidence` and never invented; if a REQUIRED id is not in the evidence, output "
+            "{\"__needs_lookup__\": \"what must be looked up first\"}; never reuse a value listed under "
+            "values_already_tried_that_did_not_work; when a calendar is meant and none is named, leave calendar ids out "
+            "so the primary is used.")
+        try:
+            text = await prose.write(instruction, facts_in)
+            start, end = text.find("{"), text.rfind("}")
+            data = json.loads(text[start:end + 1]) if start >= 0 and end > start else None
+        except Exception as exc:  # noqa: BLE001
+            logger.info("jev agent: compose for %s failed (%s)", short, exc)
+            return None
+        if not isinstance(data, dict):
+            return None
+        if "__needs_lookup__" in data:
+            logger.info("jev agent: %s needs a lookup first: %s", short, data["__needs_lookup__"])
+            return None
+        args: Dict[str, Any] = dict(fixed)
+        for name, entry in spec.items():
+            if name not in data or data[name] in (None, "", [], {}):
+                if entry["required"]:
+                    logger.info("jev agent: compose left required %s.%s empty", short, name)
+                    return None
+                continue
+            val = data[name]
+            typ = entry["type"]
+            if "one_of" in entry and val not in entry["one_of"]:
+                low = {str(o).lower(): o for o in entry["one_of"]}
+                if str(val).lower() in low:
+                    val = low[str(val).lower()]
+                elif entry["required"]:
+                    logger.info("jev agent: compose gave %s.%s=%r, not one of %s", short, name, val, entry["one_of"])
+                    return None
+                else:
+                    continue
+            if _id_like(name):
+                if not _in_evidence(str(val), steps, facts):
+                    logger.info("jev agent: rejected composed id %s.%s=%r (not in evidence)", short, name, val)
+                    if entry["required"]:
+                        return None
+                    continue
+            if typ in ("string",) and not isinstance(val, str):
+                val = json.dumps(val, ensure_ascii=False) if isinstance(val, (dict, list)) else str(val)
+            elif typ in ("integer", "number", "boolean") and isinstance(val, str):
+                val = _coerce(val, typ)
+            args[name] = val
+        logger.info("jev agent: composed %s(%s)", short, json.dumps({k: v for k, v in args.items() if k not in _FIXED_ARGS}, ensure_ascii=False)[:300])
+        return args
+
+
     async def _fill_args(self, box: ToolBox, judge: Judge, prose: Prose, tool: str, facts: Dict[str, Any],
                          steps: List[Dict[str, Any]], req: Request,
                          avoid: Optional[Dict[str, Any]] = None) -> Optional[Dict[str, Any]]:
@@ -997,6 +1101,12 @@ class JevAgent:
         required = list(schema.get("required") or [])
         server, short = split_tool(tool)
         args: Dict[str, Any] = {}
+        mode = _compose_mode()
+        if mode:
+            composed = await self._compose_args(box, prose, tool, meta, facts, steps, req, avoid=avoid)
+            if composed is not None or mode == "only":
+                return composed
+            # Invalid JSON or an unusable value: fall through to selection.
         state = {"goal": req.original_message, "tool": short, "tool_description": meta.get("description") or "",
                  "arguments": {n: {"description": str(sp.get("description") or ""), "type": sp.get("type") or "string",
                                    "required": n in required} for n, sp in props.items()},
