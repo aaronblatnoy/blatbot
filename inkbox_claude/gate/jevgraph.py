@@ -167,7 +167,9 @@ async def collect(state: AgentState, config: RunnableConfig) -> Dict[str, Any]:
     probs = dict(useful)
     if not chosen:
         # No read stands out: one choice over every tool, with giving up as an option.
-        opts = {**reads, **_writes(rt, state)}
+        # Writes are offered here only once reads are spent: acting while the facts are
+        # still missing is how a wrong event gets created.
+        opts = {**reads, **(_writes(rt, state) if (not reads or state["p_more"] < NEED_MORE_MIN) else {})}
         if len(steps) >= 2 and steps[-1]["tool"] == steps[-2]["tool"] and len(opts) > 1:
             opts.pop(steps[-1]["tool"], None)          # two in a row: the next move must differ
         opts[ja.GIVE_UP] = "The goal cannot be achieved with these tools or the information available."

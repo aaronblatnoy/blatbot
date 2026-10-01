@@ -920,11 +920,11 @@ class GateSession:
             # answers (free slots from a list of events, a count from rows) score low
             # on literal support even when they are right.
             return reply2
-        logger.warning("[gate %s] rewrite still not grounded (p=%.2f); sending it with a caveat", self.chat_id, p2)
+        logger.warning("[gate %s] rewrite still not grounded (p=%.2f); sending the rewrite", self.chat_id, p2)
         body = _result_bodies(results)
         if len(body) <= 1500:
             return body                                   # short enough to show as is
-        return reply2 + "\n\nI could not fully verify that against the data I pulled; tell me if it looks off."
+        return reply2
 
     async def handle_followup(self, body: str, inbound_id: Optional[int] = None) -> bool:
         """Re-decide a message that was received while a request was running. The
@@ -1221,11 +1221,27 @@ class GateSessionManager:
         shown = {k: v for k, v in c["args"].items() if k != "user_google_email"}
         about = "\n".join(f"  {ln}" for ln in c.get("about") or []) or "  (no further detail found)"
         self.task_note(req, "request", f"Waiting on Aaron to confirm: {short} {json.dumps(shown, ensure_ascii=False)}", state="waiting_aaron")
-        await self.send_to_approver(
-            f"[Blatbot #{req.id}] Before I do this, I need your yes.\n"
-            f"Action: {short} {json.dumps(shown, ensure_ascii=False)}\n"
-            f"It refers to:\n{about}\n"
-            f"Reply \"#{req.id} yes\" to do it or \"#{req.id} no\" to leave it alone. Nothing has been changed yet.")
+        plain = await self._phrase_confirmation(req, short, shown, c.get("about") or [])
+        await self.send_to_approver(f"{plain}\nReply \"#{req.id} yes\" to do it or \"#{req.id} no\" to leave it alone.")
+
+    async def _phrase_confirmation(self, req: Request, short: str, shown: Dict[str, Any], about: List[str]) -> str:
+        """One or two plain sentences saying what the change would do, for the owner."""
+        try:
+            text = await self.router.phrase(
+                "Aaron's assistant is about to make a change and must ask him first. In one or two short plain "
+                "sentences, say exactly what would happen, naming the thing (title, date, time, person) in words, "
+                "no ids, no JSON, no links, no tool names. Start with 'Before I do this, I need your yes:' and end "
+                "with a full stop. Nothing has happened yet; say so only if it helps.",
+                {"what_he_asked": req.original_message, "the_change": {"tool": short, "arguments": shown},
+                 "what_it_refers_to": about[:6]})
+            text = " ".join((text or "").split())
+            if text:
+                return f"[Blatbot #{req.id}] {text}"
+        except Exception:
+            logger.debug("[gate] confirmation phrasing failed", exc_info=True)
+        return (f"[Blatbot #{req.id}] Before I do this, I need your yes.\n"
+                f"Action: {short} {json.dumps(shown, ensure_ascii=False)}\nIt refers to:\n"
+                + ("\n".join(f"  {ln}" for ln in about) or "  (no further detail found)"))
 
     async def perform_confirmed(self, req: Request) -> None:
         """The owner said yes: run exactly the stored call, then finish the request."""

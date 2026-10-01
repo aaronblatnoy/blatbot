@@ -754,8 +754,9 @@ def test_blind_delete_is_never_offered_for_confirmation(agent, monkeypatch):
     class J(ScriptedJudge):
         async def yes(self, state, question):
             return 0.1 if "WITH CONFIDENCE" in str(question) else 0.9
-    # first pick: delete straight away (no evidence yet); then look up; then delete with the real id
-    judge = J([change, "delete", find, change, "delete", "c0"])
+    # a write is never offered while facts are still missing: the lookup comes first, then the
+    # delete with the real id; the written id "3sq" from prose never reaches the call
+    judge = J([find, change, "delete", "c0"])
     _patch(monkeypatch, box, judge, P(), [find, change])
     st = asyncio.run(agent.run(_req("cancel sam rivera's 9am interview")))
     assert not st["ok"] and st.get("confirm"), st.get("error")

@@ -1339,7 +1339,7 @@ def test_still_ungrounded_reply_falls_back_to_the_raw_result(tmp_path):
     assert "Jamie Rivera" not in " ".join(outbound)
 
 
-def test_long_unverified_result_sends_the_rewrite_with_a_caveat_not_a_dump(tmp_path):
+def test_long_unverified_result_sends_the_rewrite_not_a_dump(tmp_path):
     m, sent = make_manager(tmp_path)
     p = _jev_first(m, choice="new")
     p.action, p.scopes = True, ["calendar"]
@@ -1356,7 +1356,7 @@ def test_long_unverified_result_sends_the_rewrite_with_a_caveat_not_a_dump(tmp_p
         await asyncio.sleep(0.2)
     asyncio.run(go())
     last = [t for _, t, *_ in sent][-1]
-    assert last.startswith("Open slots Thursday") and "could not fully verify" in last
+    assert last.startswith("Open slots Thursday") and "could not fully verify" not in last
     assert "Done via Jev agent" not in last and "get_events" not in last
 
 

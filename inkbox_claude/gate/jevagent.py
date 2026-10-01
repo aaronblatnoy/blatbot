@@ -489,7 +489,7 @@ def _tried_values(steps: List[Dict[str, Any]], tool: str, arg: str, sole: bool =
 
 
 _BUDGET = 70000         # characters per TypeSafe request (state + questions) that stay under its ~32k-token ceiling
-_REPORT_WHOLE = 14000    # a result up to this size goes to the reply writer whole; larger ones as goal-relevant evidence
+_REPORT_WHOLE = 60000    # a result up to this size goes to the reply writer whole; larger ones as goal-relevant evidence
 _LARGE = 60000          # a single result is read into evidence only when it nears the request budget
 _PART = 48000           # largest text one narrowing judgment sees
 _LEAF = 6000            # stop narrowing here: small enough to extract candidates from precisely
@@ -711,6 +711,51 @@ def _date_ranges(now: Optional[datetime] = None) -> Dict[str, Dict[str, str]]:
         "this_month": rng(month_start, next_month, "this calendar month"),
         "next_30_days": rng(now, now + timedelta(days=30), "from now through the next thirty days"),
     }
+
+
+_TIME_RE = re.compile(r"\b(1[0-2]|0?[1-9])(?::([0-5]\d))?\s*([ap])\.?m\.?\b", re.I)
+_MD_RE = re.compile(r"\b(?:mon|tue|wed|thu|fri|sat|sun)[a-z]*\.?\s*(\d{1,2})/(\d{1,2})\b|\b(\d{1,2})/(\d{1,2})\b", re.I)
+
+
+def _timed_candidates(text: str, role: str, now: Optional[datetime] = None) -> Dict[str, str]:
+    """Specific moments named in the text (a slot like '7:30 PM' on a day like 'Thu 10/1'
+    or 'tomorrow'), as ISO datetimes in New York, labelled for Jev to choose from. For an
+    END bound each start also offers +30 and +60 minutes, the usual slot lengths."""
+    now = now or datetime.now(TZ)
+    text = text or ""
+    days: List[datetime] = []
+    low = text.lower()
+    for word, delta in (("today", 0), ("tonight", 0), ("tomorrow", 1), ("yesterday", -1)):
+        if word in low:
+            days.append((now + timedelta(days=delta)).replace(hour=0, minute=0, second=0, microsecond=0))
+    for m in _MD_RE.finditer(text):
+        mo, da = (m.group(1), m.group(2)) if m.group(1) else (m.group(3), m.group(4))
+        try:
+            d = now.replace(month=int(mo), day=int(da), hour=0, minute=0, second=0, microsecond=0)
+            if d < now - timedelta(days=200):
+                d = d.replace(year=d.year + 1)
+            if d not in days:
+                days.append(d)
+        except ValueError:
+            continue
+    times: List[Tuple[int, int]] = []
+    for m in _TIME_RE.finditer(text):
+        h, mi, ap = int(m.group(1)), int(m.group(2) or 0), m.group(3).lower()
+        h = h % 12 + (12 if ap == "p" else 0)
+        if (h, mi) not in times:
+            times.append((h, mi))
+    out: Dict[str, str] = {}
+    for d in days[:4]:
+        for h, mi in times[:24]:
+            start = d.replace(hour=h, minute=mi)
+            label = start.strftime("%a %-m/%-d %-I:%M %p")
+            if role == "end":
+                for mins in (30, 60):
+                    e = start + timedelta(minutes=mins)
+                    out[e.isoformat()] = f"{label} + {mins} min = {e.strftime('%-I:%M %p')}"
+            else:
+                out[start.isoformat()] = label
+    return out
 
 
 def _date_role(name: str, desc: str) -> Optional[str]:
@@ -976,9 +1021,21 @@ class JevAgent:
             if role and typ == "string":
                 ranges = _date_ranges()
                 opts = {k: f"{v['label']} ({v['start'][:10]} to {v['end'][:10]})" for k, v in ranges.items()}
-                opts["write_new"] = "None of these ranges; a specific date or time must be composed from the goal."
+                # Specific moments named in the goal, the conversation and the evidence (a
+                # 7:30 PM slot on Thu 10/1) are offered as values of their own: a write that
+                # creates or moves something must land on the slot, not on the day's bounds.
+                timed_src = "\n".join([req.original_message, str(facts.get("background") or ""),
+                                       *(_text(s["result"])[:4000] for s in steps[-4:])])
+                timed = _timed_candidates(timed_src, role)
+                for iso, label in list(timed.items())[:24]:
+                    opts[f"at::{iso}"] = f"exactly {label}"
+                if is_write_tool(tool) and timed:
+                    for k in list(ranges):
+                        opts[k] = opts[k] + " (a whole-day bound; wrong for a timed slot)"
+                opts["write_new"] = "None of these; a specific date or time must be composed from the goal."
                 questions[f"range::{name}"] = {"type": "choice", "instructions":
-                                               f"`arguments.{name}` is the {role} of a time range. Which named range does `goal` mean?",
+                                               f"`arguments.{name}` is the {role} of a time range or a timed event. "
+                                               f"Which value does `goal` mean for THIS call?",
                                                "criteria": opts}
                 continue
             cs = await self._candidates(judge, name, str(spec.get("description") or ""), typ, facts, steps, req)
@@ -1020,7 +1077,7 @@ class JevAgent:
             if f"range::{name}" in questions:
                 pick = _top(f"range::{name}", 0.3)
                 if pick and pick != "write_new":
-                    args[name] = _date_ranges()[pick][_date_role(name, desc) or "start"]
+                    args[name] = pick[len("at::"):] if pick.startswith("at::") else _date_ranges()[pick][_date_role(name, desc) or "start"]
                     continue
                 if pick is None and name not in required:
                     continue
@@ -1195,6 +1252,8 @@ class JevAgent:
                     part.append("lines naming the goal's terms:\n" + "\n".join(hits[:60]))
             if len(part) == 1:
                 part.append("\n".join(r.splitlines()[:40]))
+            part.append(f"(this result has {len(r.splitlines()):,} lines in all; the rest were not shown here, "
+                        "not missing from the source)")
             brief.append("\n".join(part))
         tail = ([f"Reason: {error}"] if error else []) + ["STATUS: OK" if ok else "STATUS: FAILED"]
         raw = "\n".join(lines + full + tail)

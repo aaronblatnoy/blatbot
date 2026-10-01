@@ -304,6 +304,14 @@ class Router:
         logger.error("router failed twice: %s", last_err)
         return RouterOutput(reply=None, request=None)
 
+    async def phrase(self, instruction: str, facts: Dict[str, Any]) -> str:
+        """Plain prose from given facts, no JSON, no decisions: the writer as a typewriter."""
+        sys_p = ("You write short plain-text messages for Blatbot, Aaron Blatnoy's assistant. Say only what the "
+                 "facts support. No markdown, no emojis, no lists, no ids or links unless asked.")
+        user = f"{instruction}\n\nFACTS (JSON):\n{json.dumps(facts, ensure_ascii=False, default=str)}"
+        return (await self._chat([{"role": "system", "content": sys_p}, {"role": "user", "content": user}],
+                                 json_mode=False)).strip()
+
     async def _chat(self, messages: List[Dict[str, str]], json_mode: bool = True) -> str:
         body: Dict[str, Any] = {"model": self.model, "messages": messages, "temperature": 0.2}
         if json_mode:
