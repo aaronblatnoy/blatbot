@@ -48,7 +48,7 @@ from .scopes import SCOPE_TREE_SYSTEMS, TOOL_DESCRIPTIONS, TOOL_SYSTEM, _SERVER_
 logger = logging.getLogger(__name__)
 
 NEED_MORE_MIN = float(os.getenv("JEV_AGENT_NEED_MORE_MIN") or 0.5)   # p(more information needed) at or above: collect
-COLLECT_MIN = float(os.getenv("JEV_AGENT_COLLECT_MIN") or 0.5)       # a read tool this useful is called this round
+COLLECT_MIN = float(os.getenv("JEV_AGENT_COLLECT_MIN") or 0.65)       # a read tool this useful is called this round
 COLLECT_MAX = int(os.getenv("JEV_AGENT_COLLECT_MAX") or 4)
 ACTION_DONE_MIN = float(os.getenv("JEV_AGENT_ACTION_DONE_MIN") or 0.7)
 SYSTEM_MIN = float(os.getenv("JEV_AGENT_SYSTEM_MIN") or 0.25)
@@ -127,13 +127,16 @@ async def need_more(state: AgentState, config: RunnableConfig) -> Dict[str, Any]
         "question": "Can `goal` now be answered, or is the action it asks for complete, WITH CONFIDENCE "
                     "from `steps_so_far` alone: is every fact the answer needs already in the evidence?",
         "criteria": {"true": "Everything the goal asked for has been done or, for a question, the retrieved "
-                             "results contain what is needed to answer it. Counting, filtering or comparing rows "
-                             "that are already retrieved is NOT a further tool call; the answer is written from "
-                             "the results. An empty result from the right place also answers the question. A "
-                             "failed or unauthorized call to a source the goal did not ask about does not make "
-                             "the answer incomplete.",
-                     "false": "Something the goal asked for has not happened yet, or the results retrieved so far "
-                              "do not contain the needed information and a different call is needed."}})
+                             "results contain what is needed to answer it, including an exact count from rows_where "
+                             "when the goal asks how many. An empty result from a BROAD query (a name or address "
+                             "alone, no date window, no operators) in the right place answers the question. A failed "
+                             "or unauthorized call to a source the goal did not ask about does not make the answer "
+                             "incomplete.",
+                     "false": "Something the goal asked for has not happened yet, or the results do not contain the "
+                              "needed information. A search that returned NOTHING with a narrow or filtered query "
+                              "(a date window, several terms, an operator) is not proof of absence: a broader query "
+                              "is still needed. A count or filter over many retrieved rows still needs rows_where "
+                              "unless it already ran."}})
     p = 1.0 - p_done
     logger.info("jev graph round %d: p(more information needed)=%.2f", state.get("step", 0) + 1, p)
     return {"p_more": p, "loop_state": loop_state}

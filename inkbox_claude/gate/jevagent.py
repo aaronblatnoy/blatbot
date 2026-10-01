@@ -1033,12 +1033,16 @@ class JevAgent:
                     "this_item": facts.get("current_item"), "accounts": facts.get("accounts"),
                     "tool": short, "tool_description": str(meta.get("description") or "")[:400],
                     "arguments_schema": spec, "evidence": evidence,
-                    "values_already_tried_that_did_not_work": tried or None}
+                    "values_already_tried_that_did_not_work": tried or None,
+                    "note_on_retries": ("a value listed as tried returned nothing: the next attempt must be BROADER "
+                                        "(fewer terms, no filters), not narrower") if tried else None}
         instruction = (
             "Compose the arguments for ONE call of `tool` so that it does what `goal` asks (for `this_item` when given). "
             "Output ONLY a JSON object mapping argument names to values; omit optional arguments the call does not need. "
             "Rules: datetimes in ISO 8601 with the New York offset (-04:00 / -05:00); a query argument gets the "
-            "specific words that find the thing (a person's name or email, a title), not the whole question; an id "
+            "SIMPLEST form that finds the thing: a person's email or name alone, or a title, with NO date window and "
+            "NO operators on a first attempt (add 'to:', 'after:' or a second term only when a broad query returned "
+            "too much); never the whole question; an id "
             "is copied exactly from `evidence` and never invented; if a REQUIRED id is not in the evidence, output "
             "{\"__needs_lookup__\": \"what must be looked up first\"}; never reuse a value listed under "
             "values_already_tried_that_did_not_work; when a calendar is meant and none is named, leave calendar ids out "

@@ -267,7 +267,7 @@ TOOL_PURPOSE: Dict[str, str] = {
     "mcp__tamid-drive__list_spreadsheets": "LIST recent spreadsheets in TAMID Drive with their ids.",
     "mcp__tamid-drive__get_spreadsheet_info": "SHEET STRUCTURE: the tabs of a spreadsheet, their names and row/column counts, by spreadsheet id. Answers 'how many rows'.",
     "mcp__tamid-drive__read_sheet_values": "READ A SHEET'S CELLS: the rows of a spreadsheet tab (a roster, responses, a tracker) by spreadsheet id and range.",
-    "mcp__tamid-drive__get_drive_file_content": "READ A WHOLE FILE'S text by file id (a doc, a sheet export). Large; prefer read_sheet_values for sheets.",
+    "mcp__tamid-drive__get_drive_file_content": "READ A WHOLE NON-SPREADSHEET FILE'S text by file id (a doc, a PDF). NEVER for a spreadsheet or a form: read_sheet_values and list_form_responses give those as rows; this would return an unreadable export.",
     "mcp__tamid-drive__get_doc_content": "READ A GOOGLE DOC's text by document id.",
     "mcp__tamid-drive__search_docs": "FIND A GOOGLE DOC by words in its name.",
     "mcp__tamid-drive__get_form": "FORM DEFINITION: a Google Form's title, questions and settings, by form id.",
