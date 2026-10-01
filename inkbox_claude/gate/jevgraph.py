@@ -115,14 +115,12 @@ SYSTEM_MIN = float(os.getenv("JEV_AGENT_SYSTEM_MIN") or 0.25)
 
 
 def _narrow_reads(options: Dict[str, str], choice: Optional[str], sys_p: Dict[str, float]) -> Dict[str, str]:
-    """Read tools worth asking about alongside the pick: those in systems the step
-    judged relevant (all of them when only one system is granted)."""
+    """Read tools worth asking about alongside the pick. Every granted read tool is asked:
+    a source can be worth collecting from in parallel even when it is not the single best
+    next step, and that is exactly what the per-tool usefulness noul decides."""
     if not choice or choice == ja.GIVE_UP:
         return {}
-    if not sys_p:
-        return {t: d for t, d in options.items() if t != ja.GIVE_UP}
-    keep = {s for s, p in sys_p.items() if p >= SYSTEM_MIN} | {TOOL_SYSTEM.get(choice, "other")}
-    return {t: d for t, d in options.items() if t != ja.GIVE_UP and TOOL_SYSTEM.get(t, "other") in keep}
+    return {t: d for t, d in options.items() if t != ja.GIVE_UP}
 
 
 async def choose_tool(judge: "ja.Judge", loop_state: Any, options: Dict[str, str], step: int
@@ -169,7 +167,7 @@ async def choose_tool(judge: "ja.Judge", loop_state: Any, options: Dict[str, str
         for t, p in probs.items():
             if t != NONE_HERE:
                 all_probs[t] = max(all_probs.get(t, 0.0), p * sys_p[s])
-        if choice and choice != NONE_HERE and conf >= judge.min_conf:
+        if choice and choice != NONE_HERE and conf >= getattr(judge, "min_conf", 0.45):
             return choice, conf, all_probs, sys_p
     if not ordered:
         return ja.GIVE_UP, 1.0 - max(sys_p.values(), default=0.0), all_probs, sys_p
