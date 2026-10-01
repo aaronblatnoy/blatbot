@@ -5,6 +5,9 @@ Output schema (strict JSON):
 """
 
 from __future__ import annotations
+
+import asyncio
+import os
 from datetime import datetime
 from zoneinfo import ZoneInfo
 
@@ -313,15 +316,33 @@ class Router:
         return (await self._chat([{"role": "system", "content": sys_p}, {"role": "user", "content": user}],
                                  json_mode=False)).strip()
 
+    # The writer must never hang a turn: a hard wall-clock cap on the primary provider,
+    # then the same request to a second provider (OpenAI, whose key the voice side already
+    # holds). The fallback is logged so a slow primary shows up in the record.
+    CHAT_DEADLINE_S = float(os.getenv("ROUTER_CHAT_DEADLINE_S") or 30.0)
+    FALLBACK_BASE_URL = (os.getenv("ROUTER_FALLBACK_BASE_URL") or "https://api.openai.com/v1").rstrip("/")
+    FALLBACK_MODEL = os.getenv("ROUTER_FALLBACK_MODEL") or "gpt-5.4-mini"
+    FALLBACK_KEY = os.getenv("ROUTER_FALLBACK_API_KEY") or os.getenv("OPENAI_API_KEY") or ""
+
     async def _chat(self, messages: List[Dict[str, str]], json_mode: bool = True) -> str:
-        body: Dict[str, Any] = {"model": self.model, "messages": messages, "temperature": 0.2}
+        try:
+            return await asyncio.wait_for(self._post_chat(self.base_url, self.api_key, self.model, messages, json_mode),
+                                          timeout=self.CHAT_DEADLINE_S)
+        except (asyncio.TimeoutError, httpx.HTTPError) as exc:
+            if not self.FALLBACK_KEY:
+                raise
+            logger.warning("router: %s on %s after %.0fs cap (%s); falling back to %s", type(exc).__name__, self.model,
+                           self.CHAT_DEADLINE_S, str(exc)[:120], self.FALLBACK_MODEL)
+            return await asyncio.wait_for(self._post_chat(self.FALLBACK_BASE_URL, self.FALLBACK_KEY, self.FALLBACK_MODEL,
+                                                          messages, json_mode), timeout=self.CHAT_DEADLINE_S * 2)
+
+    async def _post_chat(self, base_url: str, key: str, model: str, messages: List[Dict[str, str]], json_mode: bool) -> str:
+        body: Dict[str, Any] = {"model": model, "messages": messages}
+        if not model.startswith("gpt-5"):
+            body["temperature"] = 0.2            # gpt-5 models reject a temperature setting
         if json_mode:
             body["response_format"] = {"type": "json_object"}
         async with httpx.AsyncClient(timeout=self.timeout) as client:
-            r = await client.post(
-                f"{self.base_url}/chat/completions",
-                headers={"Authorization": f"Bearer {self.api_key}"},
-                json=body,
-            )
+            r = await client.post(f"{base_url}/chat/completions", headers={"Authorization": f"Bearer {key}"}, json=body)
             r.raise_for_status()
             return r.json()["choices"][0]["message"]["content"]
