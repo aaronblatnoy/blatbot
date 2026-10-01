@@ -146,7 +146,7 @@ def test_calendar_write_fills_args_and_finishes(agent, monkeypatch):
     assert args["action"] == "create" and args["summary"] == "Lunch with Sam Rivera"
     assert args["start_time"].startswith("2026-09-29T12:00")
     assert "description" not in args
-    assert prose.calls == 2 and st["prose_calls"] == 2
+    assert prose.calls == 3 and st["prose_calls"] == 3        # item extraction + summary + start_time
     assert "STATUS: OK" in st["raw"] and st["wrote"] is True
 
 
@@ -162,7 +162,7 @@ def test_candidate_id_is_selected_not_written(agent, monkeypatch):
     st = asyncio.run(agent.run(_req("cancel the dentist")))
     # a delete pauses for the owner's yes; the selected id is in the pending call
     assert not st["ok"] and st["confirm"]["args"]["event_id"] == "evt_ZZZZZZZZZZZZZZZZ999"
-    assert [c[0] for c in box.calls] == [lst] and prose.calls == 0
+    assert [c[0] for c in box.calls] == [lst] and prose.calls == 1   # only the item extraction; the id was selected
 
 
 def test_give_up_and_unsure_fail_without_side_effects(agent, monkeypatch):

@@ -34,6 +34,11 @@ HANDOFF_LINE = (
 EXPIRE_SECONDS = 24 * 3600
 
 _EMAIL = re.compile(r"[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}")
+_CANDIDATE_STOP = {"the", "and", "for", "with", "from", "that", "this", "what", "which", "who", "how", "many", "did",
+                   "does", "check", "find", "look", "please", "his", "her", "their", "she", "him", "they", "are", "was",
+                   "were", "you", "can", "get", "all", "out", "into", "about", "give", "show", "tell", "see", "have",
+                   "has", "had", "when", "where", "why", "yes", "okay", "sure", "thanks", "blatbot", "tamid", "sjba",
+                   "stern", "nyu", "today", "tomorrow", "tonight", "week", "any", "some", "there", "here", "just", "also"}
 _YES = {"yes", "y", "1", "ok", "approve", "run", "go"}
 _NO = {"no", "n", "3", "deny", "reject", "drop", "cancel"}
 
@@ -291,24 +296,54 @@ class GateSession:
             text += f"\n\n({res['total'] - len(res['tasks'])} more matched; narrow the lookup to see them)"
         return text
 
-    def candidate_tasks(self) -> List[Dict[str, Any]]:
-        """The task objects behind the ledger text the router saw this turn."""
-        ids: List[int] = []
+    def candidate_tasks(self, message: str = "") -> List[Dict[str, Any]]:
+        """Tasks the message could belong to, as a retrieval union, never a recency slice:
+        this chat's recent tasks, every live task, tasks of people the message names,
+        full-text hits on the message's own words, and the lookup's finds. Scored by how
+        many signals agree plus recency, capped at 25 cards for the pick."""
         approver = self.is_approver()
+        score: Dict[int, float] = {}
+        order: List[int] = []
+
+        def add(tid: int, pts: float) -> None:
+            if tid not in score:
+                order.append(tid)
+            score[tid] = score.get(tid, 0.0) + pts
+
         if not approver:
             for t in self.m.store.tasks_for_person(self._sender(), open_only=False, limit=6):
-                ids.append(int(t["id"]))
-        for tid in self.m.store.task_ids_for_chat(self.chat_id):
-            if tid not in ids:
-                ids.append(tid)
+                add(int(t["id"]), 3.0)
+        for i, tid in enumerate(self.m.store.task_ids_for_chat(self.chat_id)):
+            add(tid, 3.0 - i * 0.5)                                   # locality: what this chat was on
+        for tid in self.m.store.task_ids_for_thread(self.thread_key()):
+            add(tid, 1.5)
         if approver:
-            for t in self.m.store.recent_tasks():
-                if t["id"] not in ids:
-                    ids.append(int(t["id"]))
-        ids += [i for i in self.m.store.task_ids_for_thread(self.thread_key()) if i not in ids]
-        ids += [i for i in self._found_task_ids if i not in ids]
+            for t in self.m.store.recent_tasks(limit=40):
+                add(int(t["id"]), 1.0 if t["state"] in ("open", "waiting_aaron", "running") else 0.3)
+        text = message or ""
+        # people the message names: exact participant matches
+        people = set(_EMAIL.findall(text)) | set(re.findall(r"(?:[A-Z][a-z'-]+)(?:\s+[A-Z][a-z'-]+)+", text))
+        for who in list(people)[:6]:
+            for t in self.m.store.tasks_for_person(who, open_only=False, limit=6):
+                if approver or self.m.store.is_participant(int(t["id"]), self._sender()):
+                    add(int(t["id"]), 2.5)
+        # the message's own words, OR'd, against everything on every task
+        words = [w for w in re.findall(r"[A-Za-z][A-Za-z'-]{2,}|\d{1,2}/\d{1,2}", text)
+                 if w.lower() not in _CANDIDATE_STOP][:12]
+        if words:
+            try:
+                kw: Dict[str, Any] = {"text": " OR ".join(words), "limit": 10}
+                if not approver:
+                    kw["participant"] = self._sender()
+                for t in self.m.store.query_tasks(**kw)["tasks"]:
+                    add(int(t["id"]), 2.0)
+            except Exception:
+                logger.debug("[gate %s] candidate text search failed", self.chat_id, exc_info=True)
+        for tid in self._found_task_ids:
+            add(tid, 2.0)
+        ranked = sorted(order, key=lambda tid: -score[tid])
         out: List[Dict[str, Any]] = []
-        for tid in ids[:40]:
+        for tid in ranked[:25]:
             t = self.m.store.task_with_events(tid, limit=4)
             if t and t["state"] != "closed":
                 out.append(t)

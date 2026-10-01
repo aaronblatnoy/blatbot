@@ -1027,8 +1027,9 @@ class JevAgent:
                 # Specific moments named in the goal, the conversation and the evidence (a
                 # 7:30 PM slot on Thu 10/1) are offered as values of their own: a write that
                 # creates or moves something must land on the slot, not on the day's bounds.
-                timed_src = "\n".join([req.original_message, str(facts.get("background") or ""),
-                                       *(_text(s["result"])[:4000] for s in steps[-4:])])
+                item = facts.get("current_item")
+                timed_src = "\n".join([json.dumps(item, ensure_ascii=False) if item else "", req.original_message,
+                                       str(facts.get("background") or ""), *(_text(s["result"])[:4000] for s in steps[-4:])])
                 timed = _timed_candidates(timed_src, role)
                 for iso, label in list(timed.items())[:24]:
                     opts[f"at::{iso}"] = f"exactly {label}"
@@ -1047,6 +1048,11 @@ class JevAgent:
                 # small results are offered as choices; DeepSeek only on "write new".
                 # Never for ids: a phrase is not an id.
                 cs = _span_candidates(req.original_message, steps)
+            item = facts.get("current_item")
+            if isinstance(item, dict) and typ == "string" and not _id_like(name):
+                # The item this round is about: its fields come first.
+                vals = [str(v) for v in item.values() if isinstance(v, (str, int, float)) and str(v).strip()]
+                cs = vals + [c for c in cs if c not in vals]
             if avoid and name in avoid and len(cs) > 1:
                 cs = [c for c in cs if c != avoid[name]]      # the value just used is not offered again
             variable_args = [k for k in props if k not in _FIXED_ARGS]

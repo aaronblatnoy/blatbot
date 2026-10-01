@@ -387,6 +387,40 @@ class TaskPicker:
         logger.info("scope judgment (tree): %s", scopes)
         return {"scopes": scopes, "probabilities": probs, "reason": "ok"}
 
+    async def judge_reply(self, *, reply: str, message: str) -> Dict[str, Any]:
+        """Two nouls about a drafted reply, one call: does it promise work the assistant is
+        about to do, and is it only an acknowledgement (no facts, no question)? None for
+        either when undecided; the caller falls back to its word rules."""
+        if not self.api_key or not reply:
+            return {"promises_action": None, "is_acknowledgement": None, "reason": "disabled"}
+        state = {"message_being_answered": message, "draft_reply": reply}
+        body = {"state": state, "model": self.model, "questions": {
+            "promises": {"type": "noul", "instructions": {
+                "question": "Does `draft_reply` tell the sender that the assistant is now going to do, check, look up, "
+                            "send, submit or change something (work it is about to carry out)?"},
+                "criteria": {"true": "It announces work the assistant will now do ('on it', 'pulling that up', "
+                                     "'let me check', 'submitting now', 'I'll look').",
+                             "false": "It answers, asks, acknowledges, or offers ('want me to...?') without claiming "
+                                      "work is underway."}},
+            "ack": {"type": "noul", "instructions": {
+                "question": "Is `draft_reply` ONLY a brief acknowledgement that work is underway, with no facts, no "
+                            "answer and no question in it?"},
+                "criteria": {"true": "A short holding line: 'on it', 'checking now', 'pulling your calendar up'.",
+                             "false": "It states a fact, gives an answer, lists anything, or asks a question."}},
+        }}
+        try:
+            async with httpx.AsyncClient(timeout=self.timeout) as client:
+                r = await client.post(TYPESAFE_URL, headers={"Authorization": f"Bearer {self.api_key}"}, json=body)
+                r.raise_for_status()
+                a = r.json()["answers"]
+        except Exception as exc:
+            logger.warning("reply judgment via TypeSafe failed: %s", exc)
+            return {"promises_action": None, "is_acknowledgement": None, "reason": f"error: {exc}"}
+        p1 = float((a.get("promises") or {}).get("noul") or 0.0)
+        p2 = float((a.get("ack") or {}).get("noul") or 0.0)
+        logger.info("reply judgment: p(promises)=%.2f p(ack)=%.2f", p1, p2)
+        return {"promises_action": p1 >= 0.5, "is_acknowledgement": p2 >= 0.5, "reason": "ok"}
+
     async def judge_event(self, *, message: str, sender_label: str, task: Dict[str, Any],
                           history: List[Dict[str, Any]]) -> Dict[str, Any]:
         """Given the task the message was assigned to, judge what the message did to it

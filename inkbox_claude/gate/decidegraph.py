@@ -63,7 +63,7 @@ def _label(s: Any) -> str:
 async def pick_task(state: DecideState, config: RunnableConfig) -> Dict[str, Any]:
     s = _s(config)
     pick = await s.m.task_picker.pick(message=state["message"], history=state["prior"],
-                                      candidates=s.candidate_tasks(), sender_label=_label(s),
+                                      candidates=s.candidate_tasks(state["message"]), sender_label=_label(s),
                                       router_hint=None, proposed_title="")
     choice = pick.get("choice")
     return {"pick": choice or "", "task_choice": None if choice in (None, "none", "new") else choice}
@@ -73,7 +73,7 @@ async def judge_action(state: DecideState, config: RunnableConfig) -> Dict[str, 
     """Runs alongside pick_task, so it is shown this thread's most recent task as the
     likely one rather than the pick, which is not known yet."""
     s = _s(config)
-    recent = s.candidate_tasks()[:1]
+    recent = s.candidate_tasks(state["message"])[:1]
     act = await s.m.task_picker.judge_action(message=state["message"], history=state["prior"],
                                              task=recent[0] if recent else None, sender_label=_label(s),
                                              router_said_action=None)
@@ -199,7 +199,16 @@ async def finalize(state: DecideState, config: RunnableConfig) -> Dict[str, Any]
     from .router import RouterOutput
     out = RouterOutput(reply=state.get("reply"), task=state["task_choice"], task_title=state.get("task_title"),
                        task_summary=state.get("task_summary"), request=state.get("request") if state["needs_action"] else None)
-    if not state["needs_action"] and out.reply and gm._promises_action(out.reply):
+    picker = s.m.task_picker
+    verdict = (await picker.judge_reply(reply=out.reply, message=state["message"])
+               if out.reply and picker is not None and hasattr(picker, "judge_reply") else {})
+    promises = verdict.get("promises_action")
+    if promises is None:
+        promises = gm._promises_action(out.reply or "")
+    is_ack = verdict.get("is_acknowledgement")
+    if is_ack is None:
+        is_ack = gm._is_acknowledgement(out.reply or "")
+    if not state["needs_action"] and out.reply and promises:
         logger.info("[gate %s] reply promised an action but none was decided; rewriting", s.chat_id)
         out2 = await s.m.router.route(history=state["prior"], message=state["message"], mode=state["mode"],
                                       sender=s._sender(), contact_notes=s._contact_notes(), is_approver=s.is_approver(),
@@ -217,9 +226,9 @@ async def finalize(state: DecideState, config: RunnableConfig) -> Dict[str, Any]
     if state["needs_action"] and out.reply and s.is_approver() and state["mode"] == "imessage":
         # The typing indicator shows the work. The writer's acknowledgement is kept aside and
         # sent only if the run turns out to be slow (GateSessionManager._ack_if_slow).
-        s.deferred_ack = out.reply if gm._is_acknowledgement(out.reply) else None
+        s.deferred_ack = out.reply if is_ack else None
         out.reply = None
-    if state["needs_action"] and out.reply and not gm._is_acknowledgement(out.reply):
+    if state["needs_action"] and out.reply and not is_ack:
         logger.info("[gate %s] dropped a %d-word reply written alongside a request; result will follow",
                     s.chat_id, len(out.reply.split()))
         out.reply = None

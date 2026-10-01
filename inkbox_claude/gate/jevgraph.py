@@ -81,6 +81,8 @@ class AgentState(TypedDict, total=False):
     probs: Dict[str, float]
     excluded: List[str]
     batch: List[Tuple[str, Dict[str, Any]]]
+    items: List[Dict[str, Any]]     # the concrete things to write, one per change (multi-item goals)
+    item_index: int
     outcome: Optional[str]          # "ok" | "fail" | "confirm"
     error: str
     confirm: Optional[Dict[str, Any]]
@@ -238,7 +240,49 @@ async def kind(state: AgentState, config: RunnableConfig) -> Dict[str, Any]:
 
 
 def after_kind(state: AgentState, config: RunnableConfig) -> str:
-    return "plan_write" if state.get("phase") == "write" else "finish"
+    if state.get("phase") != "write":
+        return "finish"
+    return "plan_write" if state.get("items") is not None else "plan_items"
+
+
+async def plan_items(state: AgentState, config: RunnableConfig) -> Dict[str, Any]:
+    """Before writing: the concrete things the goal asks to create, change or send, one
+    per separate change, extracted by the prose model from the goal and the evidence as a
+    JSON list. One item for a single change. Each item then drives one write round, its
+    fields offered as argument candidates."""
+    rt = _rt(config)
+    prose = rt["prose"]
+    facts = state.get("facts", {})
+    evidence = {k: (v if len(str(v)) <= 6000 else str(v)[:6000] + " ...") for k, v in facts.items() if k.startswith("result_of_")}
+    try:
+        text = await prose.write(
+            "List the concrete items the goal asks to CREATE, CHANGE, MOVE, CANCEL or SEND, one object per separate "
+            "change, as a JSON array and nothing else. Fields, in plain words, only those that apply: what (a short "
+            "title), who (name and email if known), when_start (date and time in words, e.g. 'Thu 10/1 6:30 PM'), "
+            "when_end (or the duration, e.g. '30 min'), where, text (an exact message body if one is to be sent), "
+            "target (what existing thing is being changed). Take dates, times and names from the evidence and the "
+            "conversation; do not invent any. A single change is a one-element array. If nothing is to be written, [].",
+            {"goal": rt["req"].original_message, "background": state.get("background") or "", "evidence": evidence,
+             **ja._now_facts()})
+        start, end = text.find("["), text.rfind("]")
+        items = json.loads(text[start:end + 1]) if start >= 0 and end > start else []
+        items = [it for it in items if isinstance(it, dict)]
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("jev graph: item extraction failed (%s); writing from the goal alone", exc)
+        items = []
+    logger.info("jev graph: %d item(s) to write: %s", len(items), [str(it.get("what") or it)[:60] for it in items][:8])
+    return {"items": items, "item_index": 0}
+
+
+def _with_item(state: AgentState) -> Dict[str, Any]:
+    """Facts plus the item this write round is about."""
+    facts = dict(state.get("facts", {}))
+    items, idx = state.get("items") or [], state.get("item_index", 0)
+    if items and idx < len(items):
+        facts["current_item"] = items[idx]
+        facts["items_done"] = idx
+        facts["items_total"] = len(items)
+    return facts
 
 
 # ----------------------------------------------------------------------------- plan_write
@@ -252,7 +296,11 @@ async def plan_write(state: AgentState, config: RunnableConfig) -> Dict[str, Any
     options = dict(writes)
     options[DONE_WRITE] = "Nothing needs changing: the action is already done or the goal needs no write."
     options[ja.GIVE_UP] = "The goal cannot be achieved with these tools or the information available."
-    choice, conf, probs = await choose_tool(judge, state["loop_state"], options, rnd, done_key=DONE_WRITE)
+    loop_state = dict(state["loop_state"])
+    items, idx = state.get("items") or [], state.get("item_index", 0)
+    if items and idx < len(items):
+        loop_state["this_change"] = {"item": items[idx], "number": idx + 1, "of": len(items)}
+    choice, conf, probs = await choose_tool(judge, loop_state, options, rnd, done_key=DONE_WRITE)
     logger.info("jev graph round %d: write %s (conf %.2f)", rnd, choice, conf)
     if choice == DONE_WRITE:
         return {"outcome": "ok", "chosen": None, "extras": [], "probs": probs}
@@ -269,7 +317,9 @@ async def plan_write(state: AgentState, config: RunnableConfig) -> Dict[str, Any
 def after_plan_write(state: AgentState, config: RunnableConfig):
     if state.get("outcome"):
         return "finish"
-    return [Send("fill_one", {"tool": state["chosen"], "round": state["round"], "primary": True, **_carry(state)})]
+    carry = dict(_carry(state))
+    carry["facts"] = _with_item(state)
+    return [Send("fill_one", {"tool": state["chosen"], "round": state["round"], "primary": True, **carry})]
 
 
 async def choose_tool(judge: "ja.Judge", loop_state: Any, options: Dict[str, str], step: int, done_key: str
@@ -441,7 +491,30 @@ async def record(state: AgentState, config: RunnableConfig) -> Dict[str, Any]:
 def after_record(state: AgentState, config: RunnableConfig) -> str:
     if state.get("outcome"):
         return "finish"
-    return "action_done" if state.get("phase") == "write" else "need_more"
+    if state.get("phase") != "write":
+        return "need_more"
+    return "next_item"
+
+
+async def next_item(state: AgentState, config: RunnableConfig) -> Dict[str, Any]:
+    """After a write round: the next item if the write succeeded and items remain."""
+    steps = state.get("steps", [])
+    last = next((s for s in reversed(steps) if s.get("primary")), None)
+    items, idx = state.get("items") or [], state.get("item_index", 0)
+    if last is not None and last["ok"] and items and idx + 1 < len(items):
+        logger.info("jev graph: item %d of %d done; on to the next", idx + 1, len(items))
+        return {"item_index": idx + 1}
+    return {}
+
+
+def after_next_item(state: AgentState, config: RunnableConfig) -> str:
+    items, idx = state.get("items") or [], state.get("item_index", 0)
+    steps = state.get("steps", [])
+    last = next((s for s in reversed(steps) if s.get("primary")), None)
+    if last is not None and last["ok"] and items and idx < len(items) and idx > 0 and state.get("round", 0) > 0:
+        # item_index was just advanced: write the next one
+        return "plan_write"
+    return "action_done"
 
 
 # ----------------------------------------------------------------------------- action_done
@@ -476,19 +549,21 @@ async def finish(state: AgentState, config: RunnableConfig) -> Dict[str, Any]:
 
 def build_graph():
     g = StateGraph(AgentState)
-    for name, fn in (("need_more", need_more), ("collect", collect), ("kind", kind), ("plan_write", plan_write),
-                     ("fill_one", fill_one), ("guard", guard), ("call_one", call_one), ("record", record),
-                     ("action_done", action_done), ("finish", finish)):
+    for name, fn in (("need_more", need_more), ("collect", collect), ("kind", kind), ("plan_items", plan_items),
+                     ("plan_write", plan_write), ("fill_one", fill_one), ("guard", guard), ("call_one", call_one),
+                     ("record", record), ("next_item", next_item), ("action_done", action_done), ("finish", finish)):
         g.add_node(name, fn)
     g.add_edge(START, "need_more")
     g.add_conditional_edges("need_more", after_need_more, {"collect": "collect", "kind": "kind", "finish_limit": "finish"})
     g.add_conditional_edges("collect", after_collect, ["fill_one", "kind", "finish"])
-    g.add_conditional_edges("kind", after_kind, {"plan_write": "plan_write", "finish": "finish"})
+    g.add_conditional_edges("kind", after_kind, {"plan_items": "plan_items", "plan_write": "plan_write", "finish": "finish"})
+    g.add_edge("plan_items", "plan_write")
     g.add_conditional_edges("plan_write", after_plan_write, ["fill_one", "finish"])
     g.add_edge("fill_one", "guard")
     g.add_conditional_edges("guard", after_guard, ["call_one", "finish", "need_more"])
     g.add_edge("call_one", "record")
-    g.add_conditional_edges("record", after_record, {"finish": "finish", "need_more": "need_more", "action_done": "action_done"})
+    g.add_conditional_edges("record", after_record, {"finish": "finish", "need_more": "need_more", "next_item": "next_item"})
+    g.add_conditional_edges("next_item", after_next_item, {"plan_write": "plan_write", "action_done": "action_done"})
     g.add_conditional_edges("action_done", after_action_done, {"finish": "finish", "finish_limit": "finish", "need_more": "need_more"})
     g.add_edge("finish", END)
     return g.compile()
@@ -531,7 +606,8 @@ async def run(agent: "ja.JevAgent", req: Any, context: str = "") -> Dict[str, An
                   "tool_options": tool_options}
             initial: AgentState = {"goal": req.original_message, "background": background, "task_context": context,
                                    "facts": facts, "steps": [], "filled": [], "round": 0, "step": 0, "phase": "collect",
-                                   "p_more": 1.0, "excluded": [], "outcome": None, "error": "", "confirm": None, "partial": None}
+                                   "p_more": 1.0, "excluded": [], "outcome": None, "error": "", "confirm": None, "partial": None,
+                                   "items": None, "item_index": 0}
             final = await graph().ainvoke(initial, config={"configurable": {"rt": rt}, "recursion_limit": 400})
             steps = final.get("steps", [])
             outcome = final.get("outcome")
