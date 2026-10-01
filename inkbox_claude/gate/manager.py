@@ -83,6 +83,7 @@ class GateSession:
         self._turn_task_id: Optional[int] = None  # task the current turn's inbound was logged on
         self._found_task_ids: List[int] = []      # tasks surfaced by this turn's lookup
         self._typing: Optional[asyncio.Task] = None
+        self.deferred_ack: Optional[str] = None   # the writer's "on it" line, sent only if the run is slow
 
     # -- typing indicator (iMessage) --------------------------------------
     def typing_start(self) -> None:
@@ -548,6 +549,7 @@ class GateSession:
             self.m.store.set_thread(self.chat_id, "routing", mode, self.reply_meta_for_store())
             body = _strip_quoted(text) if mode == "email" else text.strip()
             self.inbound_id = self.m.store.add_message(self.chat_id, "inbound", body, mode)
+            self.deferred_ack = None
             self.typing_start()
             if self.thread_key():
                 self.m.store.link_thread(self.thread_key(), self.chat_id)
@@ -1339,9 +1341,7 @@ class GateSessionManager:
         fallback["jev_attempt"] = {k: status.get(k) for k in ("error", "tool_calls", "jev_calls", "prose_calls", "seconds", "steps", "raw")}
         return fallback
 
-    SLOW_ACK_AFTER_S = float(os.getenv("GATE_SLOW_ACK_AFTER_S") or 9.0)
-    SLOW_ACK_LINES = ("sec, pulling that up", "one sec", "looking now", "give me a sec", "checking", "hang on",
-                      "pulling it up", "sec")
+    SLOW_ACK_AFTER_S = float(os.getenv("GATE_SLOW_ACK_AFTER_S") or 7.0)
 
     async def _ack_if_slow(self, session: "GateSession", req: Request) -> None:
         """A request that is still running after a few seconds gets one short, casual line
@@ -1352,8 +1352,9 @@ class GateSessionManager:
             return
         if self.store.get_request(req.id).state != "running":
             return
-        import random
-        line = random.choice(self.SLOW_ACK_LINES)
+        line, session.deferred_ack = session.deferred_ack, None
+        if not line:
+            return                      # the writer gave no acknowledgement; the typing bubble is enough
         try:
             async with session._lock:
                 prev = session.inbound_id

@@ -263,7 +263,8 @@ class Router:
         if action is True:
             decided = ("DECIDED: a tool request has been created for this message" +
                        (f" on task {action_task}" if action_task else "") +
-                       (" and will run now; reply briefly that you are on it, or say nothing (null) if no acknowledgement is needed. "
+                       (" and will run now; reply with one short natural line saying what you are doing, the way a person "
+                        "texts (vary it: not the same opener every time, no formula), or null if nothing needs saying. "
                         if is_approver else
                         " and will be shown to Aaron for approval; tell the sender you will confirm with Aaron. ") +
                        "Do not describe steps or claim anything is done. Do NOT output a request.\n\n")

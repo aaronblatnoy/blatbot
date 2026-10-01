@@ -215,7 +215,9 @@ async def finalize(state: DecideState, config: RunnableConfig) -> Dict[str, Any]
             logger.info("[gate %s] writer still promised an action; asking instead of going silent", s.chat_id)
             out.reply = "Do you want me to go ahead with that? Say yes and I will."
     if state["needs_action"] and out.reply and s.is_approver() and state["mode"] == "imessage":
-        # The typing indicator shows the work; a line goes out only if the run is slow.
+        # The typing indicator shows the work. The writer's acknowledgement is kept aside and
+        # sent only if the run turns out to be slow (GateSessionManager._ack_if_slow).
+        s.deferred_ack = out.reply if gm._is_acknowledgement(out.reply) else None
         out.reply = None
     if state["needs_action"] and out.reply and not gm._is_acknowledgement(out.reply):
         logger.info("[gate %s] dropped a %d-word reply written alongside a request; result will follow",
