@@ -869,7 +869,6 @@ class InkboxGateway:
             self.sessions = SessionManager(
                 cfg=self.cfg,
                 send_fn=self.send_to_contact,
-                typing_fn=self.send_typing,
                 mcp_server=server,
                 mcp_tool_names=tool_names,
                 identity_info=identity_info,
