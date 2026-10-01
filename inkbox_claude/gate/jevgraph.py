@@ -237,6 +237,11 @@ async def kind(state: AgentState, config: RunnableConfig) -> Dict[str, Any]:
             {ANSWER: "A question: it is answered in words from the evidence. Nothing in the world needs changing.",
              ACT: "Something must be done: created, changed, moved, cancelled, sent, written to a sheet or site."}, min_p=0.34)
         if choice == ACT:
+            failed = [s for s in state.get("steps", []) if not s["ok"]]
+            if failed and not any(s["ok"] for s in state.get("steps", [])):
+                # Nothing succeeded: the sources themselves failed; say that, not "no write capability".
+                last = str(failed[-1].get("error") or failed[-1].get("result") or "")[:300]
+                return {"outcome": "fail", "error": f"the lookups this needs failed: {last}", "partial": partial}
             return {"outcome": "fail", "error": "this request was granted no capability to make that change; it can "
                                                 "only read. Ask again naming what to change and it will be granted.",
                     "partial": partial}
