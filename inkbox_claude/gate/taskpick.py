@@ -89,6 +89,7 @@ from .scopes import SCOPE_TREE_ALWAYS, SCOPE_TREE_LEAVES, SCOPE_TREE_SYSTEMS, WH
 
 
 SCOPE_MIN_YES = float(os.getenv("TYPESAFE_SCOPE_MIN_YES") or 0.6)
+SCOPE_SECONDARY_MIN = float(os.getenv("TYPESAFE_SCOPE_SECONDARY_MIN") or 0.3)
 
 
 class TaskPicker:
@@ -107,6 +108,9 @@ class TaskPicker:
         claims that the results do not contain count as unsupported."""
         if not self.api_key:
             return {"grounded": None, "p": 0.0, "reason": "disabled"}
+        if len(results) > 90000:
+            # Over TypeSafe's request ceiling even after the agent's narrowing: undecided, not a 400.
+            return {"grounded": None, "p": 0.0, "reason": "results too large to judge"}
         state = {"question_asked": question, "results_retrieved": results, "draft_reply": reply}
         body = {"state": state, "model": self.model, "questions": {"grounded": {
             "type": "noul",
@@ -345,6 +349,11 @@ class TaskPicker:
             return {"scopes": None, "probabilities": {}, "reason": f"error: {exc}"}
         systems = {k: answers.get(f"sys::{k}", 0.0) for k in SCOPE_TREE_SYSTEMS}
         chosen_systems = [k for k, v in systems.items() if v >= SCOPE_MIN_YES]
+        # Secondary systems: plausible but not certain. Granting them costs nothing now
+        # that the agent picks tools by system; missing them loses the right source.
+        secondary = [k for k, v in systems.items() if SCOPE_SECONDARY_MIN <= v < SCOPE_MIN_YES]
+        if chosen_systems and secondary:
+            chosen_systems += secondary
         if not chosen_systems:
             # A request exists, so something is needed: take the likeliest system when it is
             # not implausible, rather than granting nothing and failing the run for want of a tool.

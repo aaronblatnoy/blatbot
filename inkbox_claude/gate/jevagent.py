@@ -489,6 +489,7 @@ def _tried_values(steps: List[Dict[str, Any]], tool: str, arg: str, sole: bool =
 
 
 _BUDGET = 70000         # characters per TypeSafe request (state + questions) that stay under its ~32k-token ceiling
+_REPORT_WHOLE = 6000    # a result up to this size goes to the reply writer whole; larger ones as goal-relevant evidence
 _LARGE = 60000          # a single result is read into evidence only when it nears the request budget
 _PART = 48000           # largest text one narrowing judgment sees
 _LEAF = 6000            # stop narrowing here: small enough to extract candidates from precisely
@@ -1159,26 +1160,38 @@ class JevAgent:
         lines.append("WRITES PERFORMED: " + ("; ".join(
             f"{s['tool'].split('__')[-1]}({json.dumps({k: v for k, v in s['args'].items() if k not in _FIXED_ARGS}, ensure_ascii=False)})"
             for s in writes) if writes else "none. Nothing was sent, created, changed or deleted."))
-        if partial is not None:
-            lines.append(f"CONFIDENCE: {partial:.2f}. The lookups available were exhausted before the answer was certain; "
-                         "the reply must say what the results show and what could not be established.")
-        writes = [s for s in steps if s["ok"] and is_write_tool(s["tool"])]
-        lines.append("WRITES PERFORMED: " + ("; ".join(
-            f"{s['tool'].split('__')[-1]}({json.dumps({k: v for k, v in s['args'].items() if k not in _FIXED_ARGS}, ensure_ascii=False)})"
-            for s in writes) if writes else "none. Nothing was sent, created, changed or deleted."))
-        # Full results, never truncated: the reply model answers from this text.
+        # Two renderings. `raw` carries every result in full (the record, the owner's
+        # findings file). `summary` is what the reply writer and the grounding judge read:
+        # a result small enough is given whole; a large one is given as the evidence the
+        # agent's own goal-directed narrowing extracted from it, plus every line that
+        # names a term of the goal, with its size stated. Relevance selection, not a cut.
+        full, brief = [], []
         for s in steps:
             r = s["result"] if isinstance(s["result"], str) else json.dumps(s["result"], ensure_ascii=False, default=str)
-            lines.append(f"- {s['tool'].split('__')[-1]}:\n{r}")
-        if error:
-            lines.append(f"Reason: {error}")
-        lines.append("STATUS: OK" if ok else "STATUS: FAILED")
-        raw = "\n".join(lines)
+            full.append(f"- {s['tool'].split('__')[-1]}:\n{r}")
+            if len(r) <= _REPORT_WHOLE:
+                brief.append(f"- {s['tool'].split('__')[-1]}:\n{r}")
+                continue
+            part = [f"- {s['tool'].split('__')[-1]}: ({len(r):,} characters; the parts relevant to the goal follow)"]
+            ev = s.get("evidence")
+            if ev:
+                part.append(ev if isinstance(ev, str) else json.dumps(ev, ensure_ascii=False, default=str))
+            if _CURRENT_GOAL:
+                hits = [ln.strip() for ln in r.splitlines() if any(t in ln.lower() for t in _CURRENT_GOAL)]
+                if hits:
+                    part.append("lines naming the goal's terms:\n" + "\n".join(hits[:60]))
+            if len(part) == 1:
+                part.append("\n".join(r.splitlines()[:40]))
+            brief.append("\n".join(part))
+        tail = ([f"Reason: {error}"] if error else []) + ["STATUS: OK" if ok else "STATUS: FAILED"]
+        raw = "\n".join(lines + full + tail)
+        summary = "\n".join(lines + brief + tail)
         wrote = any(s["ok"] and is_write_tool(s["tool"]) for s in steps)
-        return {"ok": ok, "summary": raw, "raw": raw, "tool_calls": [s["tool"] for s in steps], "wrote": wrote, "partial": partial,
+        return {"ok": ok, "summary": summary, "raw": raw, "tool_calls": [s["tool"] for s in steps], "wrote": wrote, "partial": partial,
                 "steps": [{"tool": s["tool"], "args": s["args"], "ok": s["ok"]} for s in steps],
                 "error": error or None, "engine": "jev", "jev_calls": judge.calls, "prose_calls": prose.calls,
                 "seconds": round(time.time() - started, 1), "probs": probs}
+
 
 
 _WRITE_RE = re.compile(r"(send|create|update|modify|delete|manage|append|publish|place_call|move|set_|replace|import|insert|format|resize|run_script|reply|complete|fail"

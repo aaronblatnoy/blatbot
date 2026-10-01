@@ -2,8 +2,9 @@ version: 1
 where_things_live:
 - 'TAMID applicants, interviews, interview schedules, coffee chats, rosters, forms, board availability: the TAMID
   workspace (sheets, forms, Gmail) and the TAMID calendar. Never the public web.'
-- 'TAMID and SJBA board members, bios, headshots, club events, contact-form submissions: the club website admin.
-  Never the public web, never a browser.'
+- 'TAMID and SJBA board members, their roles, positions and titles, bios, headshots, club events, contact-form
+  submissions: the club website admin (the board list there states each person''s position). Never the public
+  web, never a browser.'
 - 'Aaron''s own schedule and his own mail: his Stern account, not the TAMID calendar.'
 - 'Aaron''s classes, assignments, grades, due dates: NYU Brightspace.'
 - 'TAMID''s posts, followers, post performance: TAMID social (Instagram, LinkedIn). Website traffic configuration:
