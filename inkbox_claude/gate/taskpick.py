@@ -332,11 +332,18 @@ class TaskPicker:
                 answers = r.json()["answers"]
             return {k: float((answers.get(k) or {}).get("noul") or 0.0) for k in questions}
 
+        # One request: every system noul and every leaf noul together. The tree is applied
+        # in code afterwards: a leaf counts only when its system opened.
+        questions: Dict[str, Any] = {f"sys::{k}": noul(v) for k, v in SCOPE_TREE_SYSTEMS.items()}
+        for sysname, leaves in SCOPE_TREE_LEAVES.items():
+            for leaf, (capability, _) in leaves.items():
+                questions[f"leaf::{sysname}::{leaf}"] = noul(capability)
         try:
-            systems = await ask({k: noul(v) for k, v in SCOPE_TREE_SYSTEMS.items()})
+            answers = await ask(questions)
         except Exception as exc:
-            logger.warning("scope tree (systems) via TypeSafe failed: %s", exc)
+            logger.warning("scope tree via TypeSafe failed: %s", exc)
             return {"scopes": None, "probabilities": {}, "reason": f"error: {exc}"}
+        systems = {k: answers.get(f"sys::{k}", 0.0) for k in SCOPE_TREE_SYSTEMS}
         chosen_systems = [k for k, v in systems.items() if v >= SCOPE_MIN_YES]
         if not chosen_systems:
             # A request exists, so something is needed: take the likeliest system when it is
@@ -347,30 +354,23 @@ class TaskPicker:
         logger.info("scope tree: systems %s | top=%s", chosen_systems, sorted(systems.items(), key=lambda kv: -kv[1])[:4])
         probs: Dict[str, float] = {}
         scopes: List[str] = []
-        level2: Dict[str, Any] = {}
+        leaves_log = []
         for sysname in chosen_systems:
-            for leaf, (capability, _) in SCOPE_TREE_LEAVES.get(sysname, {}).items():
-                level2[leaf] = noul(capability)
             for sc in SCOPE_TREE_ALWAYS.get(sysname, []):
                 if sc not in scopes:
                     scopes.append(sc)
                 probs[sc] = systems[sysname]
-        if level2:
-            try:
-                leaves = await ask(level2)
-            except Exception as exc:
-                logger.warning("scope tree (leaves) via TypeSafe failed: %s", exc)
-                return {"scopes": None, "probabilities": {}, "reason": f"error: {exc}"}
-            for sysname in chosen_systems:
-                for leaf, (_, granted) in SCOPE_TREE_LEAVES.get(sysname, {}).items():
-                    p = leaves.get(leaf, 0.0)
+            for leaf, (_, granted) in SCOPE_TREE_LEAVES.get(sysname, {}).items():
+                p = answers.get(f"leaf::{sysname}::{leaf}", 0.0)
+                leaves_log.append((leaf, round(p, 2)))
+                for sc in granted:
+                    probs[sc] = max(probs.get(sc, 0.0), p)
+                if p >= SCOPE_MIN_YES:
                     for sc in granted:
-                        probs[sc] = max(probs.get(sc, 0.0), p)
-                    if p >= SCOPE_MIN_YES:
-                        for sc in granted:
-                            if sc not in scopes:
-                                scopes.append(sc)
-            logger.info("scope tree: leaves %s", sorted(((k, round(v, 2)) for k, v in leaves.items()), key=lambda kv: -kv[1]))
+                        if sc not in scopes:
+                            scopes.append(sc)
+        if leaves_log:
+            logger.info("scope tree: leaves %s", sorted(leaves_log, key=lambda kv: -kv[1]))
         logger.info("scope judgment (tree): %s", scopes)
         return {"scopes": scopes, "probabilities": probs, "reason": "ok"}
 

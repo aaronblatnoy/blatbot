@@ -141,27 +141,35 @@ async def choose_tool(judge: "ja.Judge", loop_state: Any, options: Dict[str, str
         rules[-1] = f"Choose {ja.GIVE_UP} only when no tool here can still help."
         ch, cf, pr = await judge.choose(loop_state, {"question": "What is the single best next step toward `goal`?", "rules": rules}, opts)
         return ch, cf, pr, {}
-    questions = {f"sys::{s}": {"type": "noul", "instructions": {
+    # One request: a noul per system AND a choice within every system. Code then takes
+    # the choice from the likeliest system that did not answer none_of_these.
+    questions: Dict[str, Any] = {f"sys::{s}": {"type": "noul", "instructions": {
         "system": SCOPE_TREE_SYSTEMS.get(s, s),
         "tools_here": [t.split("__")[-1] for t in ts][:12],
         "question": "Does the single best NEXT step toward `goal`, given `steps_so_far`, use this system?"},
         "criteria": {"true": "The next call belongs here.", "false": "The next call is elsewhere, or nothing here helps now."}}
         for s, ts in groups.items()}
+    for s, ts in groups.items():
+        opts = {t: tools[t] for t in ts}
+        opts[NONE_HERE] = "None of these is the right next step."
+        questions[f"tool::{s}"] = {"type": "choice",
+                                   "instructions": {"question": "If the next step uses this system, which tool is it?",
+                                                    "rules": rules},
+                                   "criteria": opts}
     answers = await judge.ask(loop_state, questions)
     sys_p = {s: float((answers.get(f"sys::{s}") or {}).get("noul") or 0.0) for s in groups}
     ordered = [s for s, p in sorted(sys_p.items(), key=lambda kv: -kv[1]) if p >= SYSTEM_MIN]
     logger.info("jev graph step %d: systems %s", step + 1, [(s, round(sys_p[s], 2)) for s in sorted(sys_p, key=lambda k: -sys_p[k])][:4])
     all_probs: Dict[str, float] = {}
     for s in ordered[:2]:
-        opts = {t: tools[t] for t in groups[s]}
-        opts[NONE_HERE] = "None of these is the right next step."
-        choice, conf, probs = await judge.choose(
-            loop_state, {"question": f"Within this system, what is the single best next step toward `goal`?",
-                         "rules": rules}, opts)
+        a = answers.get(f"tool::{s}") or {}
+        probs = {k: float(v) for k, v in (a.get("probabilities") or {}).items()}
+        choice = a.get("choice") or (max(probs, key=probs.get) if probs else None)
+        conf = probs.get(choice, float(a.get("confidence") or 0.0)) if choice else 0.0
         for t, p in probs.items():
             if t != NONE_HERE:
                 all_probs[t] = max(all_probs.get(t, 0.0), p * sys_p[s])
-        if choice and choice != NONE_HERE:
+        if choice and choice != NONE_HERE and conf >= judge.min_conf:
             return choice, conf, all_probs, sys_p
     if not ordered:
         return ja.GIVE_UP, 1.0 - max(sys_p.values(), default=0.0), all_probs, sys_p

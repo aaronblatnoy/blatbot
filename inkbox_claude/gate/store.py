@@ -693,6 +693,16 @@ class Store:
             self._db.commit()
         self.reindex_task(task_id)
 
+    def set_task_title(self, task_id: int, title: str) -> None:
+        """Rename a task (the reply writer named it after it was created from the message)."""
+        title = " ".join((title or "").split())[:160]
+        if not title:
+            return
+        with self._lock:
+            self._db.execute("UPDATE tasks SET title=? WHERE id=?", (title, task_id))
+            self._db.commit()
+        self.reindex_task(task_id)
+
     def set_task_state(self, task_id: int, state: str) -> None:
         with self._lock:
             self._db.execute("UPDATE tasks SET state=?, updated_at=? WHERE id=?", (state, time.time(), task_id))

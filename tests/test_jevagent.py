@@ -57,7 +57,18 @@ class ScriptedJudge:
         """Batched argument questions: supply:: -> yes_p, pick:: -> next scripted pick."""
         self.calls += 1
         out = {}
+        consumed = None
         for qid, q in questions.items():
+            if q["type"] == "choice" and qid.startswith("tool::"):
+                # the tool tree asks every system for its pick at once; only the system holding
+                # the next scripted pick answers with it, the others say none_of_these
+                want = self.picks[0] if self.picks else None
+                if want in q["criteria"]:
+                    out[qid] = {"choice": want, "probabilities": {want: 0.95}}
+                    consumed = want
+                else:
+                    out[qid] = {"choice": "none_of_these", "probabilities": {"none_of_these": 0.9}}
+                continue
             if q["type"] == "noul" and qid.startswith("sys::"):
                 # the tool tree: a system is the next step iff the next scripted pick lives in it
                 here = set(q["instructions"].get("tools_here") or [])
@@ -72,6 +83,8 @@ class ScriptedJudge:
                 want = self.picks.pop(0)
                 assert want in q["criteria"], (want, list(q["criteria"]))
                 out[qid] = {"choice": want, "probabilities": {want: 0.95}}
+        if consumed is not None and self.picks and self.picks[0] == consumed:
+            self.picks.pop(0)
         return out
 
 

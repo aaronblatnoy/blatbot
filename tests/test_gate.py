@@ -1555,12 +1555,17 @@ def test_decide_graph_nodes_and_edges():
     from inkbox_claude.gate import decidegraph
     g = decidegraph.build_graph().get_graph()
     nodes = set(g.nodes) - {"__start__", "__end__"}
-    assert nodes == {"pick_task", "judge_action", "write_reply", "check_reply", "attach_task",
-                     "build_request", "judge_scopes", "inherit_scopes", "record_event"}
+    assert nodes == {"pick_task", "judge_action", "join_judgments", "write_reply", "attach_task",
+                     "build_request", "judge_scopes", "inherit_scopes", "record_event", "finalize"}
     edges = {(e.source, e.target) for e in g.edges}
-    assert ("__start__", "pick_task") in edges
-    assert ("pick_task", "judge_action") in edges
-    assert ("build_request", "judge_scopes") in edges and ("judge_scopes", "inherit_scopes") in edges
+    # the two Jev judgments fan out from START and join
+    assert ("__start__", "pick_task") in edges and ("__start__", "judge_action") in edges
+    assert ("pick_task", "join_judgments") in edges and ("judge_action", "join_judgments") in edges
+    # scopes and the event classification fan out after the request is built
+    assert ("build_request", "judge_scopes") in edges and ("build_request", "record_event") in edges
+    assert ("judge_scopes", "inherit_scopes") in edges
+    # everything merges in finalize
+    assert ("write_reply", "finalize") in edges and ("inherit_scopes", "finalize") in edges and ("record_event", "finalize") in edges
 
 
 def test_decide_graph_runs_the_jev_first_flow(tmp_path, monkeypatch):
