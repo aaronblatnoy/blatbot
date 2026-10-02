@@ -925,8 +925,16 @@ class InkboxGateway:
         def _drive(listener):
             try:
                 listener.wait()
+                logger.error("[bridge] tunnel runtime returned; no tunnel means no webhooks")
             except Exception:
                 logger.exception("[bridge] tunnel runtime exited")
+            # A gateway without its tunnel is deaf: every message sits on Inkbox and nothing
+            # restarts us because the local health check still passes. Exit so systemd starts a
+            # fresh process, which reconnects the tunnel on the way up.
+            import os as _os, time as _t
+            logger.error("[bridge] exiting so the service restarts with a fresh tunnel")
+            _t.sleep(2)
+            _os._exit(3)
 
         threading.Thread(target=_drive, args=(self._tunnel,), name="inkbox-tunnel-wait", daemon=True).start()
         self._public_url = self._tunnel.public_url.rstrip("/")
