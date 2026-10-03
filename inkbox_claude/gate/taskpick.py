@@ -461,12 +461,20 @@ class TaskPicker:
                     "answered yet in `recent_messages`.",
                     "It is a request phrased at no one in particular ('someone pull up the deadline', "
                     "'need that doc') that the assistant can satisfy.",
+                    "It speaks to the assistant as 'you' and the assistant is the one plausibly meant: it "
+                    "briefs it, tells it what it will be doing, or asks how it feels about something. "
+                    "`recent_messages` shows who 'you' is: if the assistant just spoke, or the message is "
+                    "about work the assistant does, it is being talked to.",
+                    "It is a question put TO the assistant in the second person, including a social one "
+                    "('are you excited to work with us?', 'you ready?'): a question asked of someone is "
+                    "theirs to answer, whether it is about work or not.",
                 ],
                 "count_as_no": [
                     "People are talking to each other: plans, banter, opinions, reactions, agreement, stories.",
                     "It is addressed to a specific person who is not the assistant, by name.",
                     "It is a question only a human in the group can answer (their own availability, "
-                    "their own view, their own news).",
+                    "their own view, their own news), including a 'you' that clearly means a person "
+                    "('you free saturday?', 'you around tonight?').",
                     "It adds nothing to answer: an acknowledgement, a thanks, a greeting between people, "
                     "a one-word reaction.",
                 ],

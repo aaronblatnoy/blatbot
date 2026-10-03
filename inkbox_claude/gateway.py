@@ -1692,7 +1692,9 @@ class InkboxGateway:
             logger.warning("[bridge] telegram group judgment failed: %s", exc)
             return
         if not verdict.get("should_reply"):
-            logger.info("[bridge] telegram group: staying quiet (p=%.2f)", verdict.get("p") or 0.0)
+            # Log what was passed over, so the threshold can be tuned against real messages.
+            logger.info("[bridge] telegram group: staying quiet (p=%.2f) on %s: %s",
+                        verdict.get("p") or 0.0, u["name"] or u["from_id"], u["text"])
             return
         logger.info("[bridge] telegram group: answering unaddressed message (p=%.2f)",
                     verdict.get("p") or 0.0)
