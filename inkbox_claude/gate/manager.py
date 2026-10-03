@@ -1366,7 +1366,8 @@ class GateSessionManager:
         status leaves this function. Executors themselves never message anyone who
         asked (denied at the tool call)."""
         if not self.jev_agent:
-            return await self.executor.run(req, context=context)
+            model = await self._pick_model(req)
+            return await self.executor.run(req, context=context, model=model)
         status = await self.jev_agent.run(req, context=context)
         logger.info("[gate] jev agent #%s: ok=%s steps=%s jev=%s prose=%s %ss",
                     req.id, status.get("ok"), status.get("tool_calls"), status.get("jev_calls"),
@@ -1417,6 +1418,21 @@ class GateSessionManager:
             session.typing_start()           # the send stopped the pulse; the run continues
         except Exception:
             logger.debug("[gate] slow ack failed", exc_info=True)
+
+    STRONG_MODEL = os.getenv("GATE_STRONG_MODEL") or "opus"
+    FAST_MODEL = os.getenv("GATE_FAST_MODEL") or "sonnet"
+
+    async def _pick_model(self, req: Request) -> str:
+        """Claude Code runs the request; Jev decides which Claude: the strongest model for
+        work that combines sources, changes many things, or writes at length; the fast one
+        for a lookup or a single plain change."""
+        picker = self.task_picker
+        if picker is None or not hasattr(picker, "judge_complexity"):
+            return self.FAST_MODEL
+        res = await picker.judge_complexity(prompt=req.prompt, summary=req.summary, scopes=list(req.scopes))
+        model = self.STRONG_MODEL if res.get("complex") else self.FAST_MODEL
+        logger.info("[gate] #%s model: %s (p(complex)=%.2f)", req.id, model, float(res.get("p") or 0.0))
+        return model
 
     async def _findings_answer_the_goal(self, req: Request, status: Dict[str, Any]) -> bool:
         """Draft the answer from the findings and let the grounding judge say whether the

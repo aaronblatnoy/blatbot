@@ -63,7 +63,7 @@ class Executor:
         # Addresses/conversations the gateway itself replies to (the owner's).
         self.protected = list(protected or [])
 
-    async def run(self, req: Request, context: str = "", prior_work: str = "") -> Dict[str, Any]:
+    async def run(self, req: Request, context: str = "", prior_work: str = "", model: Optional[str] = None) -> Dict[str, Any]:
         """Run an approved request. Returns a status dict; never raises.
 
         `context` is the task ledger for the person this request concerns. It is
@@ -115,7 +115,7 @@ class Executor:
             )
         options = ClaudeAgentOptions(
             cwd=self.cwd,
-            model=self.model,
+            model=model or self.model,
             system_prompt={"type": "preset", "preset": "claude_code", "append": system_append},
             setting_sources=["user", "project"],
             permission_mode="default",
@@ -158,6 +158,7 @@ class Executor:
             is_error = True
         return {
             "ok": not is_error,
+            "engine": f"claude:{model or self.model}",
             "summary": raw[-1500:] if raw else "(no status text)",
             "tool_calls": tool_calls,
             "raw": raw,

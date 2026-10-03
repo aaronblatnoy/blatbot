@@ -436,6 +436,44 @@ class TaskPicker:
         logger.info("reply judgment: p(promises)=%.2f p(ack)=%.2f", p1, p2)
         return {"promises_action": p1 >= 0.5, "is_acknowledgement": p2 >= 0.5, "reason": "ok"}
 
+    async def judge_complexity(self, *, prompt: str, summary: str, scopes: List[str]) -> Dict[str, Any]:
+        """Does this request need the stronger (slower, dearer) model? One noul over the
+        request. Returns {"complex": bool|None, "p": float}."""
+        if not self.api_key:
+            return {"complex": None, "p": 0.0, "reason": "disabled"}
+        state = {"task_summary": summary, "task_prompt": prompt, "capabilities_granted": scopes}
+        body = {"state": state, "model": self.model, "questions": {"complex": {
+            "type": "noul",
+            "instructions": {
+                "question": "Does carrying out `task_prompt` call for the strongest reasoning model, rather than the "
+                            "fast one?",
+                "count_as_yes": [
+                    "Several sources must be combined or reconciled (a roster against responses, a sheet against a calendar).",
+                    "Many separate changes or sends (a batch of events, a mail merge), or a write whose wrong "
+                    "execution is costly (deleting, moving, publishing, emailing many people).",
+                    "Writing something substantial: a bio, an announcement, a long reply, a document.",
+                    "The request is ambiguous or underspecified and needs careful interpretation.",
+                    "Long documents or many rows must be read and judged, not just filtered.",
+                ],
+                "count_as_no": [
+                    "One lookup in one place: a time, a name, a phone, an email, a count, a status.",
+                    "A single straightforward change with the target already named.",
+                ],
+            },
+            "criteria": {"true": "The strongest model is worth its time and cost here.",
+                         "false": "The fast model handles this fine."},
+        }}}
+        try:
+            async with httpx.AsyncClient(timeout=self.timeout) as client:
+                r = await client.post(TYPESAFE_URL, headers={"Authorization": f"Bearer {self.api_key}"}, json=body)
+                r.raise_for_status()
+                p = float(r.json()["answers"]["complex"].get("noul") or 0.0)
+        except Exception as exc:
+            logger.warning("complexity judgment via TypeSafe failed: %s", exc)
+            return {"complex": None, "p": 0.0, "reason": f"error: {exc}"}
+        logger.info("complexity judgment: p(needs strongest model)=%.2f", p)
+        return {"complex": p >= 0.5, "p": p, "reason": "ok"}
+
     async def judge_event(self, *, message: str, sender_label: str, task: Dict[str, Any],
                           history: List[Dict[str, Any]]) -> Dict[str, Any]:
         """Given the task the message was assigned to, judge what the message did to it
