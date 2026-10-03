@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import logging
 import os
+import re
 import secrets
 from typing import Any, Dict, Optional, Tuple
 
@@ -88,6 +89,8 @@ async def remember_username(me: Dict[str, Any]) -> None:
     """Keep the bot's own @name, so a group mention can be recognised."""
     if me.get("username"):
         os.environ["TELEGRAM_BOT_USERNAME"] = str(me["username"])
+    if me.get("first_name"):
+        os.environ["TELEGRAM_BOT_NAME"] = str(me["first_name"])
 
 
 async def set_webhook(public_url: str) -> Dict[str, Any]:
@@ -100,6 +103,26 @@ async def set_webhook(public_url: str) -> Dict[str, Any]:
     await remember_username(me)
     logger.info("[telegram] webhook set: %s -> @%s", url, me.get("username") or "?")
     return me
+
+
+def _names_the_bot(text: str, msg: Dict[str, Any]) -> bool:
+    """Was this group message aimed at the bot? Its @username, its plain name as a word
+    (people type "blatbot, do x", not the handle), a slash command, or a reply to something
+    the bot itself said."""
+    low = text.lower()
+    handle = (os.getenv("TELEGRAM_BOT_USERNAME") or "").lstrip("@").lower()
+    if handle and f"@{handle}" in low:
+        return True
+    if text.startswith("/"):
+        return True
+    reply_to = (msg.get("reply_to_message") or {}).get("from") or {}
+    if reply_to.get("is_bot") and str(reply_to.get("username") or "").lower() == handle:
+        return True
+    for name in (os.getenv("TELEGRAM_BOT_NAME") or "", handle):
+        name = name.strip().lower()
+        if name and re.search(r"\b" + re.escape(name) + r"\b", low):
+            return True
+    return False
 
 
 def parse_update(update: Dict[str, Any]) -> Optional[Dict[str, Any]]:
@@ -118,12 +141,6 @@ def parse_update(update: Dict[str, Any]) -> Optional[Dict[str, Any]]:
         name = str(frm.get("username") or "")
     kind = str(chat.get("type") or "private")
     is_group = kind in ("group", "supergroup")
-    me = (os.getenv("TELEGRAM_BOT_USERNAME") or "").lstrip("@").lower()
-    low = text.lower()
-    reply_to = (msg.get("reply_to_message") or {}).get("from") or {}
-    addressed = (not is_group
-                 or (me and f"@{me}" in low)
-                 or text.startswith("/")
-                 or bool(reply_to.get("is_bot") and str(reply_to.get("username") or "").lower() == me))
+    addressed = not is_group or _names_the_bot(text, msg)
     return {"chat_id": chat_id, "from_id": str(frm.get("id") or ""), "name": name, "text": text,
             "is_group": is_group, "group_title": str(chat.get("title") or ""), "addressed": addressed}
