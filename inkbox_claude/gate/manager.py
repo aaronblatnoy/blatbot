@@ -95,16 +95,22 @@ class GateSession:
         """Show "Blatbot is typing" while a message is decided or its request runs.
         iMessage only; the indicator expires on Apple's side, so it is re-sent every
         few seconds until typing_stop."""
-        if self.mode != "imessage" or self.m.typing_fn is None or not (self.reply_meta or {}).get("conversation_id"):
+        if self.m.typing_fn is None:
+            return
+        if self.mode == "imessage" and not (self.reply_meta or {}).get("conversation_id"):
+            return
+        if self.mode not in ("imessage", "telegram"):
             return
         if self._typing is not None and not self._typing.done():
             return
         meta = dict(self.reply_meta)
 
+        mode = self.mode
+
         async def pulse() -> None:
             try:
                 while True:
-                    await self.m.typing_fn(self.chat_id, "imessage", meta)
+                    await self.m.typing_fn(self.chat_id, mode, meta)
                     await asyncio.sleep(4)
             except asyncio.CancelledError:
                 pass
@@ -123,6 +129,10 @@ class GateSession:
         conv = str((self.reply_meta or {}).get("conversation_id") or "")
         if self.mode == "imessage" and bool(conv) and conv == self.m.approver_conv:
             return True
+        # Telegram: the numeric user id Telegram stamps on every message. It cannot be
+        # set by the sender, so it identifies Aaron as reliably as his iMessage thread.
+        if self.mode == "telegram" and self.m.approver_telegram_id:
+            return str((self.reply_meta or {}).get("telegram_user_id") or "") == self.m.approver_telegram_id
         # Phone: caller ID can be spoofed, so Aaron's number only counts as the
         # approver when GATE_VOICE_TRUST_APPROVER=1. Otherwise his spoken requests
         # go to his iMessage for a yes like anyone else's.
@@ -1047,6 +1057,8 @@ class GateSessionManager:
         logger.info("[gate] task picker: %s", "jev (TypeSafe)" if self.task_picker else "router")
         self.approver_conv = cfg.approver_imessage_conversation_id
         self.approver_phone = str(getattr(cfg, "approver_phone", "") or "")
+        from .. import telegram as _tg
+        self.approver_telegram_id = _tg.approver_id()
         self.voice_vocabulary = str(os.getenv("GATE_VOICE_VOCABULARY") or DEFAULT_VOICE_VOCABULARY).strip()
         self.voice_trust_approver = str(os.getenv("GATE_VOICE_TRUST_APPROVER") or "").strip().lower() in ("1", "true", "yes")
         self.sessions: Dict[str, GateSession] = {}
@@ -1463,7 +1475,7 @@ class GateSessionManager:
         self.store.set_state(req.id, "running")
         session = self.get(req.chat_id)
         slow_ack: Optional[asyncio.Task] = None
-        if notify and req.mode == "imessage":
+        if notify and req.mode in ("imessage", "telegram"):
             session.typing_start()
             slow_ack = asyncio.create_task(self._ack_if_slow(session, req))
         tid = self.store.task_id_for_request(req.id)

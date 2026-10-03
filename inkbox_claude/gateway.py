@@ -87,6 +87,7 @@ try:
     from .sessions import CapturedTurnResult, SessionManager
     from .tools import build_inkbox_mcp_server
     from .webhook_providers import match_provider
+    from . import telegram
 except ImportError:  # pragma: no cover - direct local import/test fallback
     from a2a_delegations import find_by_task as find_a2a_delegation
     from config import (
@@ -117,6 +118,7 @@ except ImportError:  # pragma: no cover - direct local import/test fallback
     from sessions import CapturedTurnResult, SessionManager
     from tools import build_inkbox_mcp_server
     from webhook_providers import match_provider
+    import telegram
 
 logger = logging.getLogger(__name__)
 
@@ -893,6 +895,7 @@ class InkboxGateway:
         app = web.Application()
         app.router.add_get("/health", self._handle_health)
         app.router.add_post(DEFAULT_WEBHOOK_PATH, self._handle_webhook)
+        app.router.add_post(telegram.WEBHOOK_PATH, self._handle_telegram)
         app.router.add_get(INKBOX_WS_PATH, self._handle_call_ws)
         self._runner = web.AppRunner(app)
         await self._runner.setup()
@@ -940,6 +943,13 @@ class InkboxGateway:
         self._public_url = self._tunnel.public_url.rstrip("/")
         self._public_host = self._tunnel.tunnel.public_host
         logger.info("[bridge] tunnel ready: %s → 127.0.0.1:%d", self._public_url, self.cfg.port)
+        if telegram.enabled():
+            try:
+                me = await telegram.set_webhook(self._public_url)
+                logger.info("[bridge] telegram @%s → %s%s", me.get("username") or "?",
+                            self._public_url, telegram.WEBHOOK_PATH)
+            except Exception as exc:
+                logger.error("[bridge] telegram webhook registration failed: %s", exc)
 
     def _patch_identity_objects(self) -> None:
         """Point the identity's mailbox/phone/iMessage events at this server."""
@@ -1659,6 +1669,32 @@ class InkboxGateway:
         if provider_name == "inkbox":
             return self.cfg.signing_key
         return os.getenv(f"INKBOX_WEBHOOK_SECRET_{provider_name.upper()}", "")
+
+    async def _handle_telegram(self, request: "web.Request") -> "web.Response":
+        """One Telegram update. Telegram echoes the secret we registered with the
+        webhook, which is what proves the update is really theirs; anything else is
+        rejected before the body is read as a message."""
+        if not telegram.enabled():
+            return web.Response(status=404, text="telegram not configured")
+        if request.headers.get(telegram.SECRET_HEADER, "") != telegram.webhook_secret():
+            return web.Response(status=401, text="bad secret")
+        try:
+            update = await request.json()
+        except Exception:
+            return web.Response(status=400, text="invalid json")
+        parsed = telegram.parse_update(update if isinstance(update, dict) else {})
+        if parsed is None:
+            return web.json_response({"ok": True, "ignored": True})
+        chat_id, from_id, name, text = parsed
+        if self.sessions is None:
+            return web.json_response({"ok": True, "no_sessions": True})
+        key = f"tg:{chat_id}"
+        meta = {"sender": f"telegram:{from_id}", "to": chat_id, "telegram_chat_id": chat_id,
+                "telegram_user_id": from_id, "contact": {"name": name} if name else {}}
+        logger.info("[bridge] telegram message from %s (%s) in chat %s", name or "?", from_id, chat_id)
+        asyncio.create_task(self.sessions.get(key).handle_inbound(text, "telegram", meta),
+                            name=f"telegram-{chat_id}")
+        return web.json_response({"ok": True})
 
     async def _handle_webhook(self, request: "web.Request") -> "web.Response":
         body = await request.read()
@@ -3931,6 +3967,13 @@ class InkboxGateway:
         Returns:
             None: No-op for channels without a typing indicator (iMessage only).
         """
+        if mode == "telegram":
+            try:
+                await telegram.send_typing(str((meta or {}).get("telegram_chat_id")
+                                               or str(chat_id).removeprefix("tg:")))
+            except Exception:
+                logger.debug("[bridge] telegram typing failed", exc_info=True)
+            return
         if mode != "imessage":
             return
         conversation_id = (meta or {}).get("conversation_id")
@@ -3980,6 +4023,11 @@ class InkboxGateway:
                 "[bridge] dropped late voice reply after call ended: %s",
                 chat_id,
             )
+            return
+
+        if mode == "telegram":
+            await telegram.send_message(str(meta.get("telegram_chat_id") or str(chat_id).removeprefix("tg:")),
+                                        strip_markdown(content))
             return
 
         if mode == "sms":

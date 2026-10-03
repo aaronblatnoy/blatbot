@@ -43,7 +43,7 @@ class FakeExecutor:
         self.ran = []
         self.result = {"ok": True, "summary": "did it", "tool_calls": ["mcp__tamid-drive__manage_event"], "raw": "did it"}
 
-    async def run(self, req, context="", prior_work=""):
+    async def run(self, req, context="", prior_work="", model=None):
         self.ran.append(req.id)
         self.context = context
         self.prior_work = prior_work
@@ -1096,7 +1096,7 @@ class HoldingExecutor(FakeExecutor):
         self.release = asyncio.Event()
         self.started = asyncio.Event()
 
-    async def run(self, req, context=""):
+    async def run(self, req, context="", model=None, **kw):
         self.started.set()
         await self.release.wait()
         return await super().run(req, context)
@@ -1155,7 +1155,7 @@ def test_escalation_to_claude_produces_exactly_one_response(tmp_path):
 
     class FakeJev:
         def __init__(self): self.ran = 0
-        async def run(self, req, context=""):
+        async def run(self, req, context="", model=None, **kw):
             self.ran += 1
             return {"ok": False, "error": "JEV-GAVE-UP", "summary": "JEV-GAVE-UP", "raw": "JEV-GAVE-UP\nSTATUS: FAILED",
                     "tool_calls": [], "wrote": False, "engine": "jev"}
@@ -1270,11 +1270,11 @@ def test_second_answer_for_the_same_inbound_is_refused(tmp_path):
 def test_escalation_hands_claude_the_agents_findings(tmp_path):
     m, sent = make_manager(tmp_path)
     class FakeJev:
-        async def run(self, req, context=""):
+        async def run(self, req, context="", model=None, **kw):
             return {"ok": False, "error": "unsure", "raw": "- search_drive_files:\nFound: X (ID: 1ABC)\nSTATUS: FAILED",
                     "tool_calls": ["mcp__tamid-drive__search_drive_files"], "wrote": False, "engine": "jev"}
     class Ex(FakeExecutor):
-        async def run(self, req, context="", prior_work=""):
+        async def run(self, req, context="", prior_work="", model=None):
             self.prior = prior_work
             return await super().run(req, context)
     m.jev_agent, m.jev_fallback, m.executor = FakeJev(), True, Ex()
@@ -1431,7 +1431,7 @@ def test_destructive_call_asks_the_owner_and_runs_only_on_yes(tmp_path):
     p.action, p.scopes = True, ["calendar"]
     performed = []
     class FakeJev:
-        async def run(self, req, context=""):
+        async def run(self, req, context="", model=None, **kw):
             return {"ok": False, "error": "confirmation required", "summary": "", "raw": "WRITES PERFORMED: none",
                     "tool_calls": ["mcp__tamid-drive__get_events"], "wrote": False, "engine": "jev",
                     "confirm": {"tool": "mcp__tamid-drive__manage_event", "args": {"action": "delete", "event_id": "evt_QUANT01"},
@@ -1464,7 +1464,7 @@ def test_destructive_call_declined_leaves_everything_alone(tmp_path):
     p.action, p.scopes = True, ["calendar"]
     performed = []
     class FakeJev:
-        async def run(self, req, context=""):
+        async def run(self, req, context="", model=None, **kw):
             return {"ok": False, "error": "confirmation required", "summary": "", "raw": "", "tool_calls": [], "wrote": False, "engine": "jev",
                     "confirm": {"tool": "mcp__tamid-drive__manage_event", "args": {"action": "delete", "event_id": "evt_X"}, "about": []}}
         async def perform(self, tool, args):
