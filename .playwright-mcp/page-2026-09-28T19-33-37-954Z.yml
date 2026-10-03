@@ -1,0 +1,127 @@
+- generic [ref=e3]:
+  - banner [ref=e4]:
+    - navigation "Primary" [ref=e5]:
+      - link "TAMID home" [ref=e7] [cursor=pointer]:
+        - /url: /
+        - img "TAMID Group at NYU Logo" [ref=e8]
+      - generic [ref=e9]:
+        - link "Apply" [ref=e10] [cursor=pointer]:
+          - /url: /apply
+        - button "Programs" [ref=e12] [cursor=pointer]:
+          - text: Programs
+          - generic [aria-hidden] [ref=e13]: ▼
+        - button "Team" [ref=e15] [cursor=pointer]:
+          - text: Team
+          - generic [aria-hidden] [ref=e16]: ▼
+        - link "Contact" [ref=e17] [cursor=pointer]:
+          - /url: /contact
+  - main [ref=e18]:
+    - generic [ref=e19]:
+      - generic [ref=e24]:
+        - generic [ref=e26]:
+          - heading "TAMID at NYU" [level=1] [ref=e27]
+          - paragraph [ref=e28]: Consult · Invest · Intern Abroad
+          - paragraph [ref=e29]: "TAMID Group at NYU develops undergraduates’ professional skills through hands-on work with the Israeli economy across four programs: Investment Fund, Consulting, Quant, and Israel Fellowship."
+        - generic [ref=e34]:
+          - img "Goldman Sachs" [ref=e36]
+          - img "JPMorgan Chase" [ref=e38]
+          - img "Morgan Stanley" [ref=e40]
+          - img "Blackstone" [ref=e42]
+          - img "BentallGreenOak" [ref=e44]
+          - img "Sequoia Capital" [ref=e46]
+          - img "McKinsey & Company" [ref=e48]
+          - img "Ackman-Ziff" [ref=e50]
+          - img "Axom Partners" [ref=e52]
+          - img "Bank of America" [ref=e54]
+          - img "Carter Pierce" [ref=e56]
+          - img "Cushman & Wakefield" [ref=e58]
+          - img "Declaration Partners" [ref=e60]
+          - img "Deutsche Bank" [ref=e62]
+          - img "Eden Global Partners" [ref=e64]
+          - img "FTI Consulting" [ref=e66]
+          - img "HSBC" [ref=e68]
+          - img "IBM" [ref=e70]
+          - img "KKR" [ref=e72]
+          - img "Cantor Fitzgerald" [ref=e74]
+          - img "Palantir" [ref=e76]
+          - img "UBS" [ref=e78]
+          - img "Warby Parker" [ref=e80]
+      - generic [ref=e128]:
+        - generic [ref=e129]:
+          - heading "Three tracks, one hands-on experience." [level=2] [ref=e131]
+          - generic [ref=e132]:
+            - link "Investment Fund A student-run equity research desk. Analysts own sector coverage, build long and short theses, and compete in a national simulated-fund competition. Explore the track →" [ref=e133] [cursor=pointer]:
+              - /url: /tracks/fund
+              - heading "Investment Fund" [level=3] [ref=e134]
+              - paragraph [ref=e135]: A student-run equity research desk. Analysts own sector coverage, build long and short theses, and compete in a national simulated-fund competition.
+              - generic [ref=e136]: Explore the track →
+            - link "Consulting Small teams take on semester-long, pro-bono engagements with early-stage Israeli startups, spanning market research, competitive analysis, US market-entry, and go-to-market strategy. Explore the track →" [ref=e137] [cursor=pointer]:
+              - /url: /tracks/consulting
+              - heading "Consulting" [level=3] [ref=e138]
+              - paragraph [ref=e139]: Small teams take on semester-long, pro-bono engagements with early-stage Israeli startups, spanning market research, competitive analysis, US market-entry, and go-to-market strategy.
+              - generic [ref=e140]: Explore the track →
+            - link "Quant A quantitative and algorithmic strategy track. Members work the full research lifecycle, sourcing data, generating signals, and backtesting systematic ideas with AI-native, agentic tooling. Explore the track →" [ref=e141] [cursor=pointer]:
+              - /url: /tracks/quant
+              - heading "Quant" [level=3] [ref=e142]
+              - paragraph [ref=e143]: A quantitative and algorithmic strategy track. Members work the full research lifecycle, sourcing data, generating signals, and backtesting systematic ideas with AI-native, agentic tooling.
+              - generic [ref=e144]: Explore the track →
+        - generic [ref=e146]:
+          - heading "Learning through the Israeli economy." [level=2] [ref=e147]
+          - paragraph [ref=e148]: We develop undergraduates’ professional skills through hands-on work with the Israeli economy, from consulting for early-stage startups to pitching public companies that do business in Israel. Members gain practical experience, work directly with founders and companies, and build relationships that carry into their careers.
+          - link "Explore the Israel Fellowship →" [ref=e149] [cursor=pointer]:
+            - /url: /tracks/fellowship
+        - generic [ref=e153]:
+          - heading "Where Our Members End Up" [level=2] [ref=e154]
+          - paragraph [ref=e155]: Our members move into leading firms across finance, consulting, technology, and investing, carrying forward the skills they build at TAMID.
+        - generic [ref=e170]:
+          - heading "Join TAMID" [level=2] [ref=e171]
+          - paragraph [ref=e172]: Each semester we select a cohort of top-performing undergraduate students. Applications open at the beginning of each semester. If you are somebody who embodies merit, excellence, and intelligence, we encourage you to apply!
+          - link "Apply" [ref=e174] [cursor=pointer]:
+            - /url: /apply
+      - generic [ref=e179]:
+        - generic [ref=e180]:
+          - generic [ref=e181]:
+            - generic [ref=e182]:
+              - heading "Connect with TAMID Group at NYU." [level=2] [ref=e183]
+              - paragraph [ref=e184]: Follow club updates and keep the conversation going.
+            - generic [ref=e186]:
+              - link "LinkedIn LinkedIn @tamid-at-nyu" [ref=e187] [cursor=pointer]:
+                - /url: https://www.linkedin.com/company/tamid-at-nyu
+                - img "LinkedIn" [ref=e189]
+                - generic [ref=e190]:
+                  - generic [ref=e191]: LinkedIn
+                  - generic [ref=e192]: "@tamid-at-nyu"
+              - link "Instagram Instagram @tamidnyu" [ref=e193] [cursor=pointer]:
+                - /url: https://www.instagram.com/tamidnyu/
+                - img "Instagram" [ref=e195]
+                - generic [ref=e196]:
+                  - generic [ref=e197]: Instagram
+                  - generic [ref=e198]: "@tamidnyu"
+          - generic [ref=e199]:
+            - generic [ref=e200]:
+              - heading "Programs" [level=3] [ref=e201]
+              - link "Investment Fund" [ref=e202] [cursor=pointer]:
+                - /url: /tracks/fund
+              - link "Consulting" [ref=e203] [cursor=pointer]:
+                - /url: /tracks/consulting
+              - link "Quant" [ref=e204] [cursor=pointer]:
+                - /url: /tracks/quant
+              - link "Israel Fellowship" [ref=e205] [cursor=pointer]:
+                - /url: /tracks/fellowship
+            - generic [ref=e206]:
+              - heading "Team" [level=3] [ref=e207]
+              - link "Executive Board" [ref=e208] [cursor=pointer]:
+                - /url: /our-board
+              - link "General Members" [ref=e209] [cursor=pointer]:
+                - /url: /our-members
+            - generic [ref=e210]:
+              - heading "Connect" [level=3] [ref=e211]
+              - link "Apply" [ref=e212] [cursor=pointer]:
+                - /url: /apply
+              - link "Contact" [ref=e213] [cursor=pointer]:
+                - /url: /contact
+        - generic [ref=e214]:
+          - generic [ref=e215]:
+            - generic [ref=e216]: New York, NY
+            - paragraph [ref=e217]: TAMID Group at NYU44 West 4th StreetNew York, NY 10012
+          - paragraph [ref=e219]: Copyright © 2026 TAMID Group at NYU.All rights reserved.

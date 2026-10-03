@@ -1,0 +1,293 @@
+- generic [ref=f1e1]:
+  - dialog "Cookie banner" [active] [ref=f1e2]:
+    - generic [ref=f1e3]:
+      - paragraph [ref=f1e5]: This website stores cookies on your computer. These cookies are used to collect information about how you interact with our website and allow us to remember you. We use this information in order to improve and customize your browsing experience and for analytics and metrics about our visitors both on this website and other media. To find out more about the cookies we use, see our Privacy Policy.
+      - paragraph [ref=f1e6]: If you decline, your information won’t be tracked when you visit this website. A single cookie will be used in your browser to remember your preference not to be tracked.
+      - generic [ref=f1e8]:
+        - button "Cookies settings" [ref=f1e9] [cursor=pointer]
+        - generic [ref=f1e10]:
+          - button "Accept" [ref=f1e11] [cursor=pointer]
+          - button "Decline" [ref=f1e12] [cursor=pointer]
+  - link "Skip to main content" [ref=f1e13] [cursor=pointer]:
+    - /url: "#main-content"
+  - link "Skip to menu" [ref=f1e14] [cursor=pointer]:
+    - /url: "#menu-global-navigation"
+  - link "Skip to footer" [ref=f1e15] [cursor=pointer]:
+    - /url: "#footerSite"
+  - banner [ref=f1e16]:
+    - generic [ref=f1e18]:
+      - link [ref=f1e19] [cursor=pointer]:
+        - /url: https://blacksky.com/
+        - img "BlackSky" [ref=f1e20]
+      - navigation [ref=f1e21]:
+        - list [ref=f1e22]:
+          - listitem [ref=f1e23]:
+            - link "Technology" [ref=f1e24] [cursor=pointer]:
+              - /url: https://blacksky.com/technology/
+          - listitem [ref=f1e25]:
+            - link "Offerings" [ref=f1e26] [cursor=pointer]:
+              - /url: https://blacksky.com/offerings/
+          - listitem [ref=f1e27]:
+            - link "Company" [ref=f1e28] [cursor=pointer]:
+              - /url: https://blacksky.com/company/
+          - listitem [ref=f1e29]:
+            - link "News" [ref=f1e30] [cursor=pointer]:
+              - /url: https://blacksky.com/company/news/
+          - listitem [ref=f1e31]:
+            - link "Investors (opens in a new tab)" [ref=f1e32] [cursor=pointer]:
+              - /url: https://ir.blacksky.com/
+              - text: Investors
+        - link "Schedule a conversation" [ref=f1e36] [cursor=pointer]:
+          - /url: https://blacksky.com/start-a-conversation/
+        - generic [ref=f1e39]:
+          - paragraph [ref=f1e40]:
+            - text: BlackSky Spectra
+            - superscript [ref=f1e41]: ®
+            - text: "platform:"
+          - link "Log in (opens in a new tab)" [ref=f1e44] [cursor=pointer]:
+            - /url: https://tasking.blacksky.com/
+            - text: Log in
+  - main [ref=f1e45]:
+    - navigation [ref=f1e47]:
+      - heading [level=1] [ref=f1e48]:
+        - text: Space-based intelligence
+        - emphasis [ref=f1e49]: at the speed of conflict.
+      - generic [ref=f1e50]:
+        - heading "Real-time, AI-enhanced tactical ISR built for defense, intelligence and global security leaders who can't afford to wait." [level=2] [ref=f1e51]
+        - heading [level=2]
+      - generic [ref=f1e54]:
+        - generic [ref=f1e57]:
+          - tabpanel [ref=f1e58]:
+            - img "Madrid Intl. Airport Detect time series - 1" [ref=f1e60]
+          - tabpanel [aria-hidden] [ref=f1e61]
+          - tabpanel [aria-hidden] [ref=f1e63]
+          - tabpanel [aria-hidden] [ref=f1e65]
+          - tabpanel [aria-hidden] [ref=f1e67]
+          - tabpanel [aria-hidden] [ref=f1e69]
+          - tabpanel [aria-hidden] [ref=f1e71]
+          - tabpanel [aria-hidden] [ref=f1e73]
+          - tabpanel [aria-hidden] [ref=f1e75]
+          - tabpanel [aria-hidden] [ref=f1e77]
+          - tabpanel [aria-hidden] [ref=f1e79]
+          - tabpanel [aria-hidden] [ref=f1e81]
+          - tabpanel [aria-hidden] [ref=f1e83]
+          - tabpanel [aria-hidden] [ref=f1e85]
+          - tabpanel [aria-hidden] [ref=f1e87]
+        - generic [ref=f1e89]:
+          - generic [ref=f1e90]:
+            - generic [ref=f1e91]: IMAGE
+            - generic [ref=f1e92]: 1/15
+          - generic [ref=f1e94]:
+            - tablist [ref=f1e98]:
+              - tab "1 of 15" [selected] [ref=f1e99]: "1"
+              - tab "2 of 15" [ref=f1e100]: "2"
+              - tab "3 of 15" [ref=f1e101]: "3"
+              - tab "4 of 15" [ref=f1e102]: "4"
+              - tab "5 of 15" [ref=f1e103]: "5"
+              - tab "6 of 15" [ref=f1e104]: "6"
+              - tab "7 of 15" [ref=f1e105]: "7"
+              - tab "8 of 15" [ref=f1e106]: "8"
+              - tab "9 of 15" [ref=f1e107]: "9"
+              - tab "10 of 15" [ref=f1e108]: "10"
+              - tab "11 of 15" [ref=f1e109]: "11"
+              - tab "12 of 15" [ref=f1e110]: "12"
+              - tab "13 of 15" [ref=f1e111]: "13"
+              - tab "14 of 15" [ref=f1e112]: "14"
+              - tab "15 of 15" [ref=f1e113]: "15"
+            - paragraph [ref=f1e115]: Images from only one or two times of day don’t tell the full story. BlackSky captures and automatically analyzes up to 15 time-diverse images of your location of interest, throughout the day.
+        - heading "Tasked in minutes, delivered with urgency and designed for decisive action." [level=2] [ref=f1e119]
+      - generic [ref=f1e125]:
+        - heading "The BlackSky Spectra® platform makes real-time decision-making your new reality." [level=2] [ref=f1e126]
+        - generic [ref=f1e129]:
+          - generic [ref=f1e130]:
+            - heading "Experience the power of BlackSky Spectra in your hands." [level=3] [ref=f1e132]
+            - img "Illustration of BlackSky Technology" [ref=f1e134]
+          - heading [level=3] [ref=f1e137]: "Designed for ease of use: control your workflow from anywhere."
+          - heading [level=3] [ref=f1e142]: Task our satellite constellation in just a few clicks.
+          - heading [level=3] [ref=f1e147]: Satellites collect and return your data in near real time.
+          - heading [level=3] [ref=f1e152]: Data is automatically analyzed at machine speed.
+          - heading [level=3] [ref=f1e157]: Deliver answers to the tactical edge for critical decisions.
+          - heading [level=3] [ref=f1e162]: One powerful platform, built to keep up with your mission.
+        - navigation "Slider Navigation" [ref=f1e165]:
+          - button "Previous" [ref=f1e166]
+          - button "Next" [ref=f1e167]
+          - menu "Navigation" [ref=f1e168]:
+            - listitem [ref=f1e169]:
+              - button "1 of 7" [ref=f1e170]: "1"
+            - listitem [ref=f1e171]:
+              - button "2 of 7" [ref=f1e172]: "2"
+            - listitem [ref=f1e173]:
+              - button "3 of 7" [ref=f1e174]: "3"
+            - listitem [ref=f1e175]:
+              - button "4 of 7" [ref=f1e176]: "4"
+            - listitem [ref=f1e177]:
+              - button "5 of 7" [ref=f1e178]: "5"
+            - listitem [ref=f1e179]:
+              - button "6 of 7" [ref=f1e180]: "6"
+            - listitem [ref=f1e181]:
+              - button "7 of 7" [ref=f1e182]: "7"
+        - generic [ref=f1e183]:
+          - paragraph [ref=f1e185]: "Learn more about the power of BlackSky Spectra:"
+          - link "Technology" [ref=f1e186] [cursor=pointer]:
+            - /url: https://blacksky.com/technology/
+      - generic [ref=f1e192]:
+        - heading "Offerings built to meet you where you operate." [level=2] [ref=f1e193]
+        - generic [ref=f1e194]:
+          - generic [ref=f1e196]:
+            - img "OnDemand illustration" [ref=f1e198]
+            - generic [ref=f1e199]:
+              - heading [level=4] [ref=f1e200]:
+                - emphasis [ref=f1e201]: Blacksky
+                - text: ON-DEMAND
+              - paragraph [ref=f1e202]: Flexible, worldwide tasking to gain information advantage, when and where you need it.
+          - generic [ref=f1e204]:
+            - img "Assured illustration" [ref=f1e206]
+            - generic [ref=f1e207]:
+              - heading [level=4] [ref=f1e208]:
+                - emphasis [ref=f1e209]: Blacksky
+                - text: ASSURED
+              - paragraph [ref=f1e210]: Uncontested tasking capacity for persistent monitoring over your area of responsibility.
+        - generic [ref=f1e211]:
+          - paragraph [ref=f1e213]: "Learn how BlackSky can support your mission:"
+          - link "Offerings" [ref=f1e214] [cursor=pointer]:
+            - /url: https://blacksky.com/offerings/
+      - generic [ref=f1e218]:
+        - generic [ref=f1e219]:
+          - generic [ref=f1e220]:
+            - generic [ref=f1e223]:
+              - tabpanel [ref=f1e224]
+              - tabpanel [aria-hidden] [ref=f1e226]
+              - tabpanel [aria-hidden] [ref=f1e228]
+              - tabpanel [aria-hidden] [ref=f1e230]
+              - tabpanel [aria-hidden] [ref=f1e232]
+            - tablist [ref=f1e235]:
+              - tab "1 of 5" [selected] [ref=f1e236]: "1"
+              - tab "2 of 5" [ref=f1e237]: "2"
+              - tab "3 of 5" [ref=f1e238]: "3"
+              - tab "4 of 5" [ref=f1e239]: "4"
+              - tab "5 of 5" [ref=f1e240]: "5"
+          - generic [ref=f1e241]:
+            - heading "A trusted mission partner to the world’s most demanding organizations." [level=2] [ref=f1e242]
+            - heading "Leading global organizations depend on BlackSky to deliver timely, trusted intelligence. Powering real-time decisions for top-tier customers, BlackSky supports real-world operations with unmatched speed, scale and reliability." [level=3] [ref=f1e243]
+        - generic [ref=f1e246]:
+          - paragraph [ref=f1e248]: "To join these ranks, schedule a conversation with BlackSky:"
+          - link "Schedule a conversation (opens in a new tab)" [ref=f1e249] [cursor=pointer]:
+            - /url: https://blacksky.com/start-a-conversation/
+            - text: Schedule a conversation
+      - generic [ref=f1e255]:
+        - article [ref=f1e256]:
+          - generic [ref=f1e257]:
+            - paragraph [ref=f1e258]:
+              - text: March 10, 2026
+              - link "|Press release" [ref=f1e259] [cursor=pointer]:
+                - /url: " "
+            - heading [level=3] [ref=f1e260]:
+              - link "BlackSky fourth Gen-3 satellite achieves on-orbit first light operations within hours" [ref=f1e261] [cursor=pointer]:
+                - /url: https://blacksky.com/press-releases/blacksky-fourth-gen-3-satellite-achieves-on-orbit-first-light-operations-within-hours/
+          - link [ref=f1e263] [cursor=pointer]:
+            - /url: https://blacksky.com/press-releases/blacksky-fourth-gen-3-satellite-achieves-on-orbit-first-light-operations-within-hours/
+            - img "first light unit 4" [ref=f1e264]
+        - article [ref=f1e265]:
+          - generic [ref=f1e266]:
+            - paragraph [ref=f1e267]:
+              - text: February 17, 2026
+              - link "|Press release" [ref=f1e268] [cursor=pointer]:
+                - /url: " "
+            - heading [level=3] [ref=f1e269]:
+              - link "BlackSky signs new eight-figure international contract for accelerated delivery of Gen-3 sovereign space-based intelligence solution" [ref=f1e270] [cursor=pointer]:
+                - /url: https://blacksky.com/press-releases/blacksky-signs-new-eight-figure-international-contract-for-accelerated-delivery-of-gen-3-sovereign-space-based-intelligence-solution/
+        - article [ref=f1e271]:
+          - generic [ref=f1e272]:
+            - paragraph [ref=f1e273]:
+              - text: February 12, 2026
+              - link "|Press release" [ref=f1e274] [cursor=pointer]:
+                - /url: " "
+            - heading [level=3] [ref=f1e275]:
+              - link "BlackSky Gen-3 momentum continues with seven-figure Assured contract to accelerate space capabilities for international defense customer" [ref=f1e276] [cursor=pointer]:
+                - /url: https://blacksky.com/press-releases/blacksky-gen-3-momentum-continues-with-seven-figure-assured-contract-to-accelerate-space-capabilities-for-international-defense-customer/
+        - generic [ref=f1e277]:
+          - paragraph [ref=f1e279]: "More of the latest:"
+          - link "News" [ref=f1e280] [cursor=pointer]:
+            - /url: https://blacksky.com/company/news/
+  - navigation "Site Footer" [ref=f1e281]:
+    - generic [ref=f1e284]:
+      - generic [ref=f1e285]:
+        - figure [ref=f1e286]:
+          - link [ref=f1e287] [cursor=pointer]:
+            - /url: https://blacksky.com/
+            - img "BlackSky logo" [ref=f1e288]
+        - list [ref=f1e290]:
+          - listitem [ref=f1e291]:
+            - link "X" [ref=f1e292] [cursor=pointer]:
+              - /url: https://x.com/BlackSky_Inc
+          - listitem [ref=f1e296]:
+            - link "LinkedIn" [ref=f1e297] [cursor=pointer]:
+              - /url: https://www.linkedin.com/company/blackskyinc/
+          - listitem [ref=f1e301]:
+            - link "YouTube" [ref=f1e302] [cursor=pointer]:
+              - /url: https://www.youtube.com/@blacksky_inc
+      - navigation "Menu" [ref=f1e307]:
+        - list [ref=f1e308]:
+          - listitem [ref=f1e309]:
+            - link "Technology" [ref=f1e310] [cursor=pointer]:
+              - /url: https://blacksky.com/technology/
+          - listitem [ref=f1e311]:
+            - link "Offerings" [ref=f1e312] [cursor=pointer]:
+              - /url: https://blacksky.com/offerings/
+            - list [ref=f1e313]:
+              - listitem [ref=f1e314]:
+                - link "Imagery & Analytics" [ref=f1e315] [cursor=pointer]:
+                  - /url: https://blacksky.com/offerings/
+              - listitem [ref=f1e316]:
+                - link "Mission Solutions" [ref=f1e317] [cursor=pointer]:
+                  - /url: https://blacksky.com/mission-solutions/
+          - listitem [ref=f1e318]:
+            - link "Company" [ref=f1e319] [cursor=pointer]:
+              - /url: https://blacksky.com/company/
+            - list [ref=f1e320]:
+              - listitem [ref=f1e321]:
+                - link "About" [ref=f1e322] [cursor=pointer]:
+                  - /url: https://blacksky.com/company/
+              - listitem [ref=f1e323]:
+                - link "Leadership" [ref=f1e324] [cursor=pointer]:
+                  - /url: https://blacksky.com/company/leadership/
+              - listitem [ref=f1e325]:
+                - link "Partners" [ref=f1e326] [cursor=pointer]:
+                  - /url: https://blacksky.com/company/partners/
+              - listitem [ref=f1e327]:
+                - link "Careers" [ref=f1e328] [cursor=pointer]:
+                  - /url: https://blacksky.com/company/careers/
+              - listitem [ref=f1e329]:
+                - link "Blog" [ref=f1e330] [cursor=pointer]:
+                  - /url: https://blacksky.com/insights/
+              - listitem [ref=f1e331]:
+                - link "Contact us" [ref=f1e332] [cursor=pointer]:
+                  - /url: https://blacksky.com/company/contact-us/
+          - listitem [ref=f1e333]:
+            - link "News" [ref=f1e334] [cursor=pointer]:
+              - /url: https://blacksky.com/company/news/
+          - listitem [ref=f1e335]:
+            - link "Investors (opens in a new tab)" [ref=f1e336] [cursor=pointer]:
+              - /url: https://ir.blacksky.com/
+              - text: Investors
+      - generic [ref=f1e337]:
+        - heading [level=3] [ref=f1e338]:
+          - strong [ref=f1e339]: BlackSky Spectra
+        - list [ref=f1e340]:
+          - listitem [ref=f1e341]:
+            - link "Customer login (opens in a new tab)" [ref=f1e342] [cursor=pointer]:
+              - /url: https://tasking.blacksky.com/
+              - text: Customer login
+    - generic [ref=f1e345]:
+      - paragraph [ref=f1e347]: © 2026 BlackSky. All rights reserved.
+      - navigation "Menu" [ref=f1e349]:
+        - list [ref=f1e350]:
+          - listitem [ref=f1e351]:
+            - link "Terms of use" [ref=f1e352] [cursor=pointer]:
+              - /url: https://blacksky.com/blacksky-terms-of-use/
+          - listitem [ref=f1e353]:
+            - link "Terms for subscriptions" [ref=f1e354] [cursor=pointer]:
+              - /url: https://blacksky.com/general-terms-for-order-agreement-subscription-packages/
+          - listitem [ref=f1e355]:
+            - link "Privacy statement" [ref=f1e356] [cursor=pointer]:
+              - /url: https://blacksky.com/privacy-statement/

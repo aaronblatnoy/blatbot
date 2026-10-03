@@ -84,6 +84,12 @@ async def send_typing(chat_id: str) -> None:
     await _call("sendChatAction", {"chat_id": chat_id, "action": "typing"}, timeout=10.0)
 
 
+async def remember_username(me: Dict[str, Any]) -> None:
+    """Keep the bot's own @name, so a group mention can be recognised."""
+    if me.get("username"):
+        os.environ["TELEGRAM_BOT_USERNAME"] = str(me["username"])
+
+
 async def set_webhook(public_url: str) -> Dict[str, Any]:
     """Point Telegram at this gateway. Called at startup once the tunnel is up."""
     url = public_url.rstrip("/") + WEBHOOK_PATH
@@ -91,12 +97,15 @@ async def set_webhook(public_url: str) -> Dict[str, Any]:
                                "allowed_updates": ["message", "edited_message"],
                                "drop_pending_updates": False})
     me = await _call("getMe", {})
+    await remember_username(me)
     logger.info("[telegram] webhook set: %s -> @%s", url, me.get("username") or "?")
     return me
 
 
-def parse_update(update: Dict[str, Any]) -> Optional[Tuple[str, str, str, str]]:
-    """(chat_id, from_id, display name, text) for a message update, else None."""
+def parse_update(update: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    """What the gateway needs from one message update, or None when there is nothing
+    to act on. In a group the bot now sees every message (privacy mode off), so the
+    dict says whether this one was actually addressed to it."""
     msg = update.get("message") or update.get("edited_message") or {}
     chat = msg.get("chat") or {}
     frm = msg.get("from") or {}
@@ -107,4 +116,14 @@ def parse_update(update: Dict[str, Any]) -> Optional[Tuple[str, str, str, str]]:
     name = " ".join(str(frm.get(k) or "").strip() for k in ("first_name", "last_name")).strip()
     if not name:
         name = str(frm.get("username") or "")
-    return chat_id, str(frm.get("id") or ""), name, text
+    kind = str(chat.get("type") or "private")
+    is_group = kind in ("group", "supergroup")
+    me = (os.getenv("TELEGRAM_BOT_USERNAME") or "").lstrip("@").lower()
+    low = text.lower()
+    reply_to = (msg.get("reply_to_message") or {}).get("from") or {}
+    addressed = (not is_group
+                 or (me and f"@{me}" in low)
+                 or text.startswith("/")
+                 or bool(reply_to.get("is_bot") and str(reply_to.get("username") or "").lower() == me))
+    return {"chat_id": chat_id, "from_id": str(frm.get("id") or ""), "name": name, "text": text,
+            "is_group": is_group, "group_title": str(chat.get("title") or ""), "addressed": addressed}

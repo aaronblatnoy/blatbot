@@ -1,0 +1,119 @@
+- generic [active] [ref=e1]:
+  - generic [ref=e3]:
+    - link "Go to the home page" [ref=e4] [cursor=pointer]:
+      - /url: /
+      - img "TamidGroup.org" [ref=e5]
+    - list [ref=e6]:
+      - listitem [ref=e7]:
+        - link "About" [ref=e8] [cursor=pointer]:
+          - /url: https://tamidgroup.org/about-tamid/
+      - listitem [ref=e9]:
+        - link "Get involved" [ref=e10] [cursor=pointer]:
+          - /url: https://tamidgroup.org/get-involved/
+      - listitem [ref=e11]:
+        - link "Our programs" [ref=e12] [cursor=pointer]:
+          - /url: https://tamidgroup.org/our-programs/
+      - listitem [ref=e13]:
+        - link "Company partnerships" [ref=e14] [cursor=pointer]:
+          - /url: https://tamidgroup.org/company-partnerships/
+      - listitem [ref=e15]:
+        - link "Contact us" [ref=e16] [cursor=pointer]:
+          - /url: https://tamidgroup.org/contact-us/
+      - text:  
+    - generic [ref=e17]:
+      - textbox "Search"
+      - button [ref=e18]
+    - link "Donate" [ref=e22] [cursor=pointer]:
+      - /url: /donate/
+  - link "" [ref=e26] [cursor=pointer]:
+    - /url: "#"
+  - generic [ref=e30]:
+    - generic [ref=e33]:
+      - generic:
+        - generic:
+          - heading "Blog" [level=1]
+    - article [ref=e37]:
+      - generic [ref=e39]:
+        - generic [ref=e40]:
+          - generic [ref=e41]: "30"
+          - generic [ref=e42]: November
+        - text: 
+        - generic [ref=e43]: Share
+      - generic [ref=e47]:
+        - generic:
+          - generic:
+            - generic:
+              - list:
+                - listitem
+            - list:
+              - listitem:
+                - link "":
+                  - /url: "#"
+              - listitem:
+                - link "":
+                  - /url: "#"
+        - generic [ref=e53]:
+          - heading "TAMID at NYU" [level=2] [ref=e54]
+          - generic [ref=e55]:
+            - link "TAMIDGroup" [ref=e56] [cursor=pointer]:
+              - /url: https://tamidgroup.org/author/tamidgroup/
+            - text: "|"
+            - link "Chapters" [ref=e57] [cursor=pointer]:
+              - /url: https://tamidgroup.org/category/chapters/
+          - paragraph [ref=e58]: Hi everyone,
+          - paragraph [ref=e59]
+          - paragraph [ref=e60]: I’m Tomer Hadassi and I want to share with you my amazing experience with TAMID at NYU and how TAMID literally changed my college experience.
+          - paragraph [ref=e61]
+          - paragraph [ref=e62]: As an older freshman in NYU – Stern I didn’t find my place in any of the business clubs; too much talking and not much doing. After 3 years in the IDF and a year working for VMware, listening to a bunch of other students just talking and playing adults wasn’t too appealing. To my dismay, I ended up with no extracurriculars at all and didn’t really take advantage of the possibilities American universities offer. This is ironic as opportunities are the main reason I left Israel and came here for school. All of that changed when I found out about TAMID.
+          - paragraph [ref=e63]
+          - paragraph [ref=e64]: I actually joined TAMID by complete chance. I went into one of our dorms and signed up for a huge shabbat dinner that was held on campus. While signing up, one of TAMIDs then board members, Ariel Cooper, was there and realized where I was from and urged me to apply. After learning about the club I realized TAMID was exactly what I needed. It was right in the middle between my 2 interests, business and technology. Coming from a lengthy tech background being in a business school proved itself as a somewhat weird experience. There aren’t that many tech geeks any more, and people are mostly oblivious to the back end of technologies and hardly anyone “speaks engineering.” I then hurried to apply and, luckily, got in.
+          - paragraph [ref=e65]
+          - paragraph [ref=e66]: During my first semester I had the honor to serve as a team leader and work with the mobile ad agency Moburst, a task that proved to be harder than expected. Coordinating people as a commander in the army was a piece of cake- they’re all in the base and have to listen to me. As a TAMID team leader, however, it was a completely different task. Each student has his own priorities and schedule and on top of that the company is obviously not always available for our desires. Working with Moburst as a company was a challenge in itself, they weren’t prepared enough to take us and finding tasks to do was already an effort. BUT, TAMID had more to offer than just the consulting. It had amazing speakers brought to us on a regular basis. We got to meet and hear Jared Kushner, founder of Oscar health (which became a unicorn since!), the founder of Google docs, Matthew Bronfman and most importantly, at least for me, Jon Medved – the founder of OurCrowd.
+          - paragraph [ref=e67]
+          - paragraph [ref=e68]: Medved talked to us about entrepreneurship, Israel as the startup nation, and how he came up with the idea of building an accredited investors crowdfunding platform. Medved’s talk was enticing and very interesting to listen to but the moment that really grabbed my attention was when Medved said “we’re always looking for interns.” And so, when Medved left the room, I chased after him, quickly gave him my elevator pitch about myself and helped him catch a cab to get back home. Not before I took his card of course. I made sure to e-mail Medved and after a few months of e-mailing back and forth with his HR department and talking to the Deal Flow team I got a summer internship! (Yes, I’m aware of the irony that an Israeli came all the way to America to network his way back to an internship in Israel) And so, over the last summer, thanks to TAMID, I wasn’t unemployed but rather had an invaluable experience working for one of Israel’s biggest VC’s, learning about the VC world, researching a lot of different companies and asking poignant questions to entrepreneurs twice my age who had to answer because all of a sudden I’m “the man with the money” and not just a college student.
+          - paragraph [ref=e69]
+          - paragraph [ref=e70]: The summer ended and I came back to school after an amazing summer filled with both fun and learning. This time, I serve as our chapter’s VP of Operations where I get to oversee the heads of consulting and investing, as well as working with the education program and being able to sit and express my ideas and concerns in board meetings. In addition to all that, I was able to source OurCrowd to let us consult to their deal flow team and have more people in our chapter learn about the VC world while keeping me in the loop with them. This way, TAMID keeps providing me the ability to not feel like a full time student but rather as a part time professional.
+          - paragraph [ref=e71]
+          - paragraph [ref=e72]: This semester we also had a bunch of amazing speakers, some of whom I’m still in touch with regarding future employment opportunities. Sam Chester from Clarity Capital came and talked to us about Israel as an exporting service economy and what it means to be an idle economy. Avner Mendelson, the CEO of Bank Leumi USA, also gave his take on the Israeli economy and the Israeli startup scene presence in the U.S. The most special of all was probably Stef Wertheimer, Israel’s biggest industrialists and at one point the richest person in the country came and gave us a talk. I don’t know how many of you realize this but that is a HUGE deal. Stef doesn’t go around Israel and give talks to groups of 30-40 people, he fills in entire auditoriums and everyone wants to be able to learn from him. But here, I had to chance to moderate a talk with him and actually have a discussion with the man, who is also somewhat of a legend.
+          - paragraph [ref=e73]
+          - paragraph [ref=e74]: I think this sums up my years of experience with TAMID, which is hands down the best club on campus. TAMID is a place that lets everyone learn, participate, and collaborate in the business world with real companies and is an opportunity no one should miss. I would definitely regret it if I did.
+  - contentinfo [ref=e75]:
+    - generic [ref=e76]:
+      - link [ref=e77] [cursor=pointer]:
+        - /url: /
+      - list [ref=e80]:
+        - listitem [ref=e81]:
+          - link "FAQ" [ref=e82] [cursor=pointer]:
+            - /url: https://tamidgroup.org/faq/
+        - listitem [ref=e83]:
+          - link "Start A Chapter" [ref=e84] [cursor=pointer]:
+            - /url: https://tamidgroup.org/start-a-chapter/
+        - listitem [ref=e85]:
+          - link "Contact Us" [ref=e86] [cursor=pointer]:
+            - /url: https://tamidgroup.org/contact-us/
+        - listitem [ref=e87]:
+          - link "Privacy" [ref=e88] [cursor=pointer]:
+            - /url: https://tamidgroup.org/privacy/
+    - generic [ref=e89]:
+      - generic [ref=e90]:
+        - paragraph [ref=e91]: Stay updated with our latest news
+        - form [ref=e93]:
+          - generic [ref=e94]:
+            - status [ref=e95]
+            - list
+          - paragraph [ref=e97]:
+            - textbox "Enter your email" [ref=e99]
+            - button "Send" [ref=e100] [cursor=pointer]
+      - generic [ref=e101]:
+        - link "Instagram" [ref=e102] [cursor=pointer]:
+          - /url: https://www.instagram.com/tamidgroup/
+        - link "LinkedIn" [ref=e105] [cursor=pointer]:
+          - /url: https://www.linkedin.com/company/tamid-israel-investment-group
+    - generic [ref=e108]: © TAMID Group™, 2026
+    - link [ref=e111] [cursor=pointer]:
+      - /url: https://app.candid.org/profile/8910607/tamid-group-27-0546893
+    - generic [ref=e115]:
+      - text: TAMID Group meets all 20 BBB Charity Accountability Standards.
+      - link "Read the full report" [ref=e116] [cursor=pointer]:
+        - /url: https://give.org/charity-reviews/education-literacy/tamid-group-in-grand-rapids-mi-9999-54604
+      - text: .

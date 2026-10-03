@@ -1,0 +1,31 @@
+- main [ref=f5e2]:
+  - generic [ref=f5e3]:
+    - link [ref=f5e4] [cursor=pointer]:
+      - /url: https://www.startpage.com
+      - img "Startpage" [ref=f5e5]
+    - button "hamburger menu" [ref=f5e6] [cursor=pointer]
+  - generic [ref=f5e8]:
+    - button "close hamburger menu" [ref=f5e9] [cursor=pointer]:
+      - img "x-icon" [ref=f5e10]
+    - generic [ref=f5e12]: Products
+    - link "Startpage Search" [ref=f5e13] [cursor=pointer]:
+      - /url: https://www.startpage.com
+    - link "Mobile Browser" [ref=f5e20] [cursor=pointer]:
+      - /url: https://app.startpage.com
+    - 'link "Vanish: Private AI" [ref=f5e25] [cursor=pointer]':
+      - /url: https://vanish.startpage.com
+  - generic [ref=f5e31]:
+    - generic [ref=f5e32]:
+      - heading "Access Temporarily Suspended" [level=1] [ref=f5e33]
+      - paragraph [ref=f5e34]: To prevent possible abuse of our service, your ability to connect to Startpage has been suspended at this time. We apologize for the inconvenience, but such measures are essential to combat rampant abuse and maintain the best possible service for our users.
+      - paragraph [ref=f5e35]: Our anti-abuse systems are activated when we receive a large number of search requests from a particular internet connection in a short period of time. Screen scraping software may generate a suspicious pattern of requests, as would a connection shared by many people at the same time, for example a VPN server or Tor. Often, these issues can be resolved by connecting through a different VPN server or Tor exit node.
+      - paragraph [ref=f5e36]: "If you believe you have received this message in error, please consider helping us fine tune our anti-abuse systems by providing the following information:"
+      - list [ref=f5e37]:
+        - listitem [ref=f5e38]: Are you using a VPN, Tor, or other anonymous proxies?
+        - listitem [ref=f5e39]: Are you using a company or other shared network?
+        - listitem [ref=f5e40]: Are you using a user-agent switcher?
+        - listitem [ref=f5e41]: Do you have special browser configurations or extensions?
+        - listitem [ref=f5e42]: Do you use dynamic IP addresses?
+      - paragraph [ref=f5e43]: We are always seeking to refine and correct our anti-abuse measures whenever possible. Thank you for your patience.
+    - link "Contact Support" [ref=f5e45] [cursor=pointer]:
+      - /url: https://support.startpage.com/hc/en-us/requests/new?blocked=true

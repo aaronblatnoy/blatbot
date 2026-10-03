@@ -1,0 +1,79 @@
+- generic [ref=f6e2]:
+  - link "Skip to main content" [ref=f6e3] [cursor=pointer]:
+    - /url: "#main-content"
+  - banner [ref=f6e4]:
+    - navigation "Primary" [ref=f6e5]:
+      - link "LinkedIn" [ref=f6e6] [cursor=pointer]:
+        - /url: /?trk=seo-authwall-base_nav-header-logo
+  - main [ref=f6e20]:
+    - generic [ref=f6e21]:
+      - generic [ref=f6e22]:
+        - heading "Join LinkedIn" [level=1] [ref=f6e23]
+        - generic [ref=f6e24]:
+          - generic [ref=f6e25]:
+            - generic [ref=f6e26]:
+              - textbox "Email" [ref=f6e27]:
+                - /placeholder: " "
+              - generic: Email
+            - generic [ref=f6e28]:
+              - textbox "Password (6+ characters)" [ref=f6e29]:
+                - /placeholder: " "
+              - generic: Password (6+ characters)
+          - paragraph [ref=f6e30]:
+            - text: By clicking Agree & Join, you agree to the LinkedIn
+            - link "User Agreement" [ref=f6e31] [cursor=pointer]:
+              - /url: https://www.linkedin.com/legal/user-agreement?trk=seo-authwall-base_join-form-user-agreement
+            - text: ","
+            - link "Privacy Policy" [ref=f6e32] [cursor=pointer]:
+              - /url: https://www.linkedin.com/legal/privacy-policy?trk=seo-authwall-base_join-form-privacy-policy
+            - text: ", and"
+            - link "Cookie Policy" [ref=f6e33] [cursor=pointer]:
+              - /url: https://www.linkedin.com/legal/cookie-policy?trk=seo-authwall-base_join-form-cookie-policy
+            - text: .
+          - button "Agree & Join" [ref=f6e34] [cursor=pointer]
+          - generic [ref=f6e35]:
+            - generic [ref=f6e36]: or
+            - button "Continue with google" [ref=f6e40]:
+              - iframe [ref=f6e42]:
+                - button "Continue with Google. Opens in new tab" [ref=f10e3] [cursor=pointer]:
+                  - generic [ref=f10e5]: Continue with Google
+        - paragraph [ref=f6e43]:
+          - text: Already on Linkedin?
+          - button "Sign in" [ref=f6e44]
+      - button [aria-hidden] [ref=f6e46]
+  - contentinfo [ref=f6e47]:
+    - list [ref=f6e48]:
+      - generic [ref=f6e49]: LinkedIn
+      - generic [ref=f6e54]: © 2026
+      - listitem [ref=f6e55]:
+        - link "About" [ref=f6e56] [cursor=pointer]:
+          - /url: https://about.linkedin.com?trk=seo-authwall-base_footer-about
+      - listitem [ref=f6e57]:
+        - link "Accessibility" [ref=f6e58] [cursor=pointer]:
+          - /url: https://www.linkedin.com/accessibility?trk=seo-authwall-base_footer-accessibility
+      - listitem [ref=f6e59]:
+        - link "User Agreement" [ref=f6e60] [cursor=pointer]:
+          - /url: https://www.linkedin.com/legal/user-agreement?trk=seo-authwall-base_footer-user-agreement
+      - listitem [ref=f6e61]:
+        - link "Privacy Policy" [ref=f6e62] [cursor=pointer]:
+          - /url: https://www.linkedin.com/legal/privacy-policy?trk=seo-authwall-base_footer-privacy-policy
+      - listitem [ref=f6e63]:
+        - link "Your California Privacy Choices" [ref=f6e64] [cursor=pointer]:
+          - /url: https://www.linkedin.com/legal/california-privacy-disclosure?trk=seo-authwall-base_footer-california-privacy-rights-act
+      - listitem [ref=f6e65]:
+        - link "Cookie Policy" [ref=f6e66] [cursor=pointer]:
+          - /url: https://www.linkedin.com/legal/cookie-policy?trk=seo-authwall-base_footer-cookie-policy
+      - listitem [ref=f6e67]:
+        - link "Copyright Policy" [ref=f6e68] [cursor=pointer]:
+          - /url: https://www.linkedin.com/legal/copyright-policy?trk=seo-authwall-base_footer-copyright-policy
+      - listitem [ref=f6e69]:
+        - link "Brand Policy" [ref=f6e70] [cursor=pointer]:
+          - /url: https://brand.linkedin.com/policies?trk=seo-authwall-base_footer-brand-policy
+      - listitem [ref=f6e71]:
+        - link "Guest Controls" [ref=f6e72] [cursor=pointer]:
+          - /url: https://www.linkedin.com/psettings/guest-controls?trk=seo-authwall-base_footer-guest-controls
+      - listitem [ref=f6e73]:
+        - link "Community Guidelines" [ref=f6e74] [cursor=pointer]:
+          - /url: https://www.linkedin.com/legal/professional-community-policies?trk=seo-authwall-base_footer-community-guide
+      - listitem [ref=f6e75]:
+        - button "Language" [ref=f6e77]

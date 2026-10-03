@@ -758,6 +758,9 @@ class InkboxGateway:
         self._public_host: str = ""
         self._runner: Any = None
         self.sessions: Optional[SessionManager] = None
+        # Last few lines of each Telegram group, so Jev can judge an unaddressed
+        # message against what was being said around it.
+        self._tg_recent: Dict[str, List[str]] = {}
 
         self._self_addresses: set[str] = set()
         self._recent_request_ids: Dict[str, float] = {}
@@ -1670,6 +1673,47 @@ class InkboxGateway:
             return self.cfg.signing_key
         return os.getenv(f"INKBOX_WEBHOOK_SECRET_{provider_name.upper()}", "")
 
+    async def _telegram_group_maybe(self, u: Dict[str, Any]) -> None:
+        """A group message that did not name the bot. Ask Jev whether it is the bot's to
+        answer; stay quiet unless it says yes. Silence is the default: an undecided or
+        failed judgment says nothing rather than barging into the humans' conversation."""
+        chat_id = u["chat_id"]
+        picker = getattr(self.sessions, "task_picker", None) if self.sessions else None
+        if picker is None:
+            logger.debug("[bridge] telegram group: no judge available, staying quiet")
+            return
+        recent = "\n".join((self._tg_recent.get(chat_id) or [])[:-1])
+        try:
+            verdict = await picker.judge_group_reply(
+                message=u["text"], sender=u["name"] or u["from_id"],
+                group=u.get("group_title") or "group", recent=recent,
+                bot_name=os.getenv("TELEGRAM_BOT_USERNAME") or "Blatbot")
+        except Exception as exc:
+            logger.warning("[bridge] telegram group judgment failed: %s", exc)
+            return
+        if not verdict.get("should_reply"):
+            logger.info("[bridge] telegram group: staying quiet (p=%.2f)", verdict.get("p") or 0.0)
+            return
+        logger.info("[bridge] telegram group: answering unaddressed message (p=%.2f)",
+                    verdict.get("p") or 0.0)
+        await self._telegram_dispatch(u)
+
+    async def _telegram_dispatch(self, u: Dict[str, Any]) -> None:
+        """Hand one Telegram message to its session, with the group framing applied."""
+        chat_id, from_id, name, text = u["chat_id"], u["from_id"], u["name"], u["text"]
+        meta = {"sender": f"telegram:{from_id}", "to": chat_id, "telegram_chat_id": chat_id,
+                "telegram_user_id": from_id, "contact": {"name": name} if name else {},
+                "conversation_kind": "group" if u["is_group"] else "direct",
+                "group_title": u.get("group_title") or ""}
+        if u["is_group"]:
+            where = u.get("group_title") or "group"
+            text = ("[telegram group: " + where + " | from: " + (name or from_id)
+                    + " | your reply goes to the whole group; answer only what"
+                    + " was asked of you]" + chr(10) + text)
+        if self.sessions is None:
+            return
+        await self.sessions.get(f"tg:{chat_id}").handle_inbound(text, "telegram", meta)
+
     async def _handle_telegram(self, request: "web.Request") -> "web.Response":
         """One Telegram update. Telegram echoes the secret we registered with the
         webhook, which is what proves the update is really theirs; anything else is
@@ -1682,18 +1726,25 @@ class InkboxGateway:
             update = await request.json()
         except Exception:
             return web.Response(status=400, text="invalid json")
-        parsed = telegram.parse_update(update if isinstance(update, dict) else {})
-        if parsed is None:
+        u = telegram.parse_update(update if isinstance(update, dict) else {})
+        if u is None:
             return web.json_response({"ok": True, "ignored": True})
-        chat_id, from_id, name, text = parsed
         if self.sessions is None:
             return web.json_response({"ok": True, "no_sessions": True})
-        key = f"tg:{chat_id}"
-        meta = {"sender": f"telegram:{from_id}", "to": chat_id, "telegram_chat_id": chat_id,
-                "telegram_user_id": from_id, "contact": {"name": name} if name else {}}
-        logger.info("[bridge] telegram message from %s (%s) in chat %s", name or "?", from_id, chat_id)
-        asyncio.create_task(self.sessions.get(key).handle_inbound(text, "telegram", meta),
-                            name=f"telegram-{chat_id}")
+        chat_id, from_id, name, text = u["chat_id"], u["from_id"], u["name"], u["text"]
+        if u["is_group"]:
+            recent = self._tg_recent.setdefault(chat_id, [])
+            recent.append(f"{name or from_id}: {text}")
+            del recent[:-8]
+        if u["is_group"] and not u["addressed"]:
+            # Privacy mode is off, so every group message arrives. The bot was not named,
+            # so Jev decides whether this is nonetheless its to answer. The webhook returns
+            # at once; the judgment and any reply happen in the background.
+            asyncio.create_task(self._telegram_group_maybe(u), name=f"telegram-judge-{chat_id}")
+            return web.json_response({"ok": True, "judging": True})
+        logger.info("[bridge] telegram %s from %s (%s) in chat %s",
+                    "group message" if u["is_group"] else "message", name or "?", from_id, chat_id)
+        asyncio.create_task(self._telegram_dispatch(u), name=f"telegram-{chat_id}")
         return web.json_response({"ok": True})
 
     async def _handle_webhook(self, request: "web.Request") -> "web.Response":

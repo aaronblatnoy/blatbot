@@ -1,0 +1,666 @@
+- generic [active] [ref=e1]:
+  - main [ref=e2]:
+    - navigation [ref=e3]:
+      - link "About" [ref=e4] [cursor=pointer]:
+        - /url: /info/en/about
+      - link "Preferences" [ref=e10] [cursor=pointer]:
+        - /url: /preferences
+    - search [ref=e14]:
+      - generic [ref=e15]:
+        - link "Display the front page" [ref=e16] [cursor=pointer]:
+          - /url: /
+        - generic [ref=e23]:
+          - textbox "Search for..." [ref=e24]: Sean Parnell LinkedIn TAMID NYU co-president
+          - button "clear" [ref=e25]
+          - button "search" [ref=e29]
+          - generic:
+            - list
+        - generic [ref=e35]:
+          - button "general" [ref=e36] [cursor=pointer]
+          - button "images" [ref=e41] [cursor=pointer]
+          - button "videos" [ref=e47] [cursor=pointer]
+          - button "news" [ref=e51] [cursor=pointer]
+          - button "map" [ref=e58] [cursor=pointer]
+          - button "music" [ref=e63] [cursor=pointer]
+          - button "it" [ref=e68] [cursor=pointer]
+          - button "science" [ref=e73] [cursor=pointer]
+          - button "files" [ref=e78] [cursor=pointer]
+          - button "social media" [ref=e83] [cursor=pointer]
+      - generic [ref=e90]:
+        - combobox "Search language" [ref=e91]:
+          - option "Default language [all]"
+          - option "Auto-detect (en)"
+          - option "Afrikaans [af] 🌐"
+          - option "Català [ca] 🌐"
+          - option "Català-Espanya [ca-ES] 🇪🇸"
+          - option "Cymraeg [cy] 🌐"
+          - option "Dansk [da] 🌐"
+          - option "Dansk-Danmark [da-DK] 🇩🇰"
+          - option "Deutsch [de] 🌐"
+          - option "Deutsch-Österreich [de-AT] 🇦🇹"
+          - option "Deutsch-Belgien [de-BE] 🇧🇪"
+          - option "Deutsch-Schweiz [de-CH] 🇨🇭"
+          - option "Deutsch-Deutschland [de-DE] 🇩🇪"
+          - option "Eesti [et] 🌐"
+          - option "Eesti-Eesti [et-EE] 🇪🇪"
+          - option "English [en] 🌐" [selected]
+          - option "English-Australia [en-AU] 🇦🇺"
+          - option "English-Canada [en-CA] 🇨🇦"
+          - option "English-United Kingdom [en-GB] 🇬🇧"
+          - option "English-Hong Kong SAR China [en-HK] 🇭🇰"
+          - option "English-Ireland [en-IE] 🇮🇪"
+          - option "English-India [en-IN] 🇮🇳"
+          - option "English-New Zealand [en-NZ] 🇳🇿"
+          - option "English-Philippines [en-PH] 🇵🇭"
+          - option "English-Pakistan [en-PK] 🇵🇰"
+          - option "English-Singapore [en-SG] 🇸🇬"
+          - option "English-United States [en-US] 🇺🇸"
+          - option "English-South Africa [en-ZA] 🇿🇦"
+          - option "Español [es] 🌐"
+          - option "Español-Argentina [es-AR] 🇦🇷"
+          - option "Español-Chile [es-CL] 🇨🇱"
+          - option "Español-Colombia [es-CO] 🇨🇴"
+          - option "Español-España [es-ES] 🇪🇸"
+          - option "Español-México [es-MX] 🇲🇽"
+          - option "Español-Perú [es-PE] 🇵🇪"
+          - option "Español-Venezuela [es-VE] 🇻🇪"
+          - option "Filipino [fil] 🌐"
+          - option "Filipino-Pilipinas [fil-PH] 🇵🇭"
+          - option "Français [fr] 🌐"
+          - option "Français-Belgique [fr-BE] 🇧🇪"
+          - option "Français-Canada [fr-CA] 🇨🇦"
+          - option "Français-Suisse [fr-CH] 🇨🇭"
+          - option "Français-France [fr-FR] 🇫🇷"
+          - option "Galego [gl] 🌐"
+          - option "Hrvatski [hr] 🌐"
+          - option "Hrvatski-Hrvatska [hr-HR] 🇭🇷"
+          - option "Indonesia [id] 🌐"
+          - option "Indonesia-Indonesia [id-ID] 🇮🇩"
+          - option "Italiano [it] 🌐"
+          - option "Italiano-Svizzera [it-CH] 🇨🇭"
+          - option "Italiano-Italia [it-IT] 🇮🇹"
+          - option "Latviešu [lv] 🌐"
+          - option "Latviešu-Latvija [lv-LV] 🇱🇻"
+          - option "Lietuvių [lt] 🌐"
+          - option "Lietuvių-Lietuva [lt-LT] 🇱🇹"
+          - option "Magyar [hu] 🌐"
+          - option "Magyar-Magyarország [hu-HU] 🇭🇺"
+          - option "Māori [mi] 🌐"
+          - option "Māori-Aotearoa [mi-NZ] 🇳🇿"
+          - option "Nederlands [nl] 🌐"
+          - option "Nederlands-België [nl-BE] 🇧🇪"
+          - option "Nederlands-Nederland [nl-NL] 🇳🇱"
+          - option "Norsk Bokmål [nb] 🌐"
+          - option "Norsk Bokmål-Norge [nb-NO] 🇳🇴"
+          - option "Norsk Nynorsk [nn] 🌐"
+          - option "Norsk Nynorsk-Noreg [nn-NO] 🇳🇴"
+          - option "Polski [pl] 🌐"
+          - option "Polski-Polska [pl-PL] 🇵🇱"
+          - option "Português [pt] 🌐"
+          - option "Português-Brasil [pt-BR] 🇧🇷"
+          - option "Português-Portugal [pt-PT] 🇵🇹"
+          - option "Română [ro] 🌐"
+          - option "Română-România [ro-RO] 🇷🇴"
+          - option "Shqip [sq] 🌐"
+          - option "Slovenčina [sk] 🌐"
+          - option "Slovenčina-Slovensko [sk-SK] 🇸🇰"
+          - option "Slovenščina [sl] 🌐"
+          - option "Slovenščina-Slovenija [sl-SI] 🇸🇮"
+          - option "Suomi [fi] 🌐"
+          - option "Suomi-Suomi [fi-FI] 🇫🇮"
+          - option "Svenska [sv] 🌐"
+          - option "Svenska-Finland [sv-FI] 🇫🇮"
+          - option "Svenska-Sverige [sv-SE] 🇸🇪"
+          - option "Tiếng Việt [vi] 🌐"
+          - option "Tiếng Việt-Việt Nam [vi-VN] 🇻🇳"
+          - option "Türkçe [tr] 🌐"
+          - option "Türkçe-Türkiye [tr-TR] 🇹🇷"
+          - option "Čeština [cs] 🌐"
+          - option "Čeština-Česko [cs-CZ] 🇨🇿"
+          - option "Ελληνικά [el] 🌐"
+          - option "Ελληνικά-Ελλάδα [el-GR] 🇬🇷"
+          - option "Български [bg] 🌐"
+          - option "Български-България [bg-BG] 🇧🇬"
+          - option "Русский [ru] 🌐"
+          - option "Русский-Россия [ru-RU] 🇷🇺"
+          - option "Українська [uk] 🌐"
+          - option "Українська-Україна [uk-UA] 🇺🇦"
+          - option "العربية [ar] 🌐"
+          - option "العربية-المملكة العربية السعودية [ar-SA] 🇸🇦"
+          - option "فارسی [fa] 🌐"
+          - option "हिन्दी [hi] 🌐"
+          - option "हिन्दी-भारत [hi-IN] 🇮🇳"
+          - option "ไทย [th] 🌐"
+          - option "ไทย-ไทย [th-TH] 🇹🇭"
+          - option "中文 [zh] 🌐"
+          - option "中文-中国 [zh-CN] 🇨🇳"
+          - option "中文-中國香港特別行政區 [zh-HK] 🇭🇰"
+          - option "中文-台灣 [zh-TW] 🇹🇼"
+          - option "日本語 [ja] 🌐"
+          - option "日本語-日本 [ja-JP] 🇯🇵"
+          - option "한국어 [ko] 🌐"
+          - option "한국어-대한민국 [ko-KR] 🇰🇷"
+        - combobox "Time range" [ref=e92]:
+          - option "Anytime" [selected]
+          - option "Last day"
+          - option "Last week"
+          - option "Last month"
+          - option "Last year"
+        - combobox "SafeSearch" [ref=e93]:
+          - option "Strict": "SafeSearch: Strict"
+          - option "Moderate": "SafeSearch: Moderate"
+          - option "None" [selected]: "SafeSearch: None"
+    - generic [ref=e94]:
+      - generic [ref=e95]:
+        - group [ref=e97]:
+          - 'generic "Response time: 0.7 seconds" [ref=e98] [cursor=pointer]'
+        - complementary "Download results" [ref=e99]:
+          - group [ref=e100]:
+            - generic "Download results" [ref=e101] [cursor=pointer]
+      - main [ref=e103]:
+        - article [ref=e104]:
+          - generic [ref=e105]:
+            - link "https://en.m.wikipedia.org › wiki › Sean" [ref=e106] [cursor=pointer]:
+              - /url: https://en.m.wikipedia.org/wiki/Sean
+              - generic [ref=e107]:
+                - generic [ref=e108]: https://en.m.wikipedia.org
+                - generic [ref=e109]: › wiki › Sean
+            - heading [level=3] [ref=e111]:
+              - link "Sean - Wikipedia" [ref=e112] [cursor=pointer]:
+                - /url: https://en.m.wikipedia.org/wiki/Sean
+            - paragraph [ref=e113]: Sean, also spelled Seán (or sometimes Séan) in Hiberno-English, [1][2] is a male given name of Irish and English origin.Read more
+          - generic [ref=e114]:
+            - generic [ref=e115]: bing
+            - link "cached" [ref=e120] [cursor=pointer]:
+              - /url: https://web.archive.org/web/https://en.m.wikipedia.org/wiki/Sean
+        - article [ref=e121]:
+          - generic [ref=e122]:
+            - link "https://www.irelandbeforeyoudie.com › sean-pronunciation-meaning-explained" [ref=e123] [cursor=pointer]:
+              - /url: https://www.irelandbeforeyoudie.com/sean-pronunciation-meaning-explained/
+              - generic [ref=e124]:
+                - generic [ref=e125]: https://www.irelandbeforeyoudie.com
+                - generic [ref=e126]: › sean-pronunciation-meaning-explained
+            - heading [level=3] [ref=e128]:
+              - 'link "SEÁN: pronunciation and meaning explained" [ref=e129] [cursor=pointer]':
+                - /url: https://www.irelandbeforeyoudie.com/sean-pronunciation-meaning-explained/
+            - paragraph [ref=e130]: Mar 16, 2024 · From pronunciation to meaning, here is everything you need to know about the Irish name Seán. The name Seán is …Read more
+          - generic [ref=e131]:
+            - generic [ref=e132]: bing
+            - link "cached" [ref=e137] [cursor=pointer]:
+              - /url: https://web.archive.org/web/https://www.irelandbeforeyoudie.com/sean-pronunciation-meaning-explained/
+        - article [ref=e138]:
+          - generic [ref=e139]:
+            - link "https://www.linkedin.com › company › tamid-at-nyu" [ref=e140] [cursor=pointer]:
+              - /url: https://www.linkedin.com/company/tamid-at-nyu
+              - generic [ref=e141]:
+                - generic [ref=e142]: https://www.linkedin.com
+                - generic [ref=e143]: › company › tamid-at-nyu
+            - heading [level=3] [ref=e145]:
+              - link "TAMID at NYU" [ref=e146] [cursor=pointer]:
+                - /url: https://www.linkedin.com/company/tamid-at-nyu
+            - paragraph [ref=e147]: 1 billion members | Manage your professional identity. Build and engage with your professional network. Access knowledge, insights and opportunities.
+          - generic [ref=e148]:
+            - generic [ref=e149]: brave
+            - link "cached" [ref=e154] [cursor=pointer]:
+              - /url: https://web.archive.org/web/https://www.linkedin.com/company/tamid-at-nyu
+        - article [ref=e155]:
+          - generic [ref=e156]:
+            - link "https://www.youtube.com › @seannsean" [ref=e157] [cursor=pointer]:
+              - /url: https://www.youtube.com/@seannsean
+              - generic [ref=e158]:
+                - generic [ref=e159]: https://www.youtube.com
+                - generic [ref=e160]: › @seannsean
+            - heading [level=3] [ref=e162]:
+              - link "sean sean - YouTube" [ref=e163] [cursor=pointer]:
+                - /url: https://www.youtube.com/@seannsean
+            - paragraph [ref=e164]: JUST SHAVED ND READY TO DO A Q&A VIDEO. ASK ANYTHING ON THE COMMENTS HERE N ILL THROW IT IN THE VID.Read more
+          - generic [ref=e165]:
+            - generic [ref=e166]: bing
+            - link "cached" [ref=e171] [cursor=pointer]:
+              - /url: https://web.archive.org/web/https://www.youtube.com/@seannsean
+        - article [ref=e172]:
+          - generic [ref=e173]:
+            - link "https://www.behindthename.com › name › sean" [ref=e174] [cursor=pointer]:
+              - /url: https://www.behindthename.com/name/sean
+              - generic [ref=e175]:
+                - generic [ref=e176]: https://www.behindthename.com
+                - generic [ref=e177]: › name › sean
+            - heading [level=3] [ref=e179]:
+              - link "Meaning, origin and history of the name Sean" [ref=e180] [cursor=pointer]:
+                - /url: https://www.behindthename.com/name/sean
+            - paragraph [ref=e181]: May 26, 2026 · Anglicized form of Seán. This name, along with variants Shawn and Shaun, began to be used in the English …Read more
+          - generic [ref=e182]:
+            - generic [ref=e183]: bing
+            - link "cached" [ref=e188] [cursor=pointer]:
+              - /url: https://web.archive.org/web/https://www.behindthename.com/name/sean
+        - article [ref=e189]:
+          - generic [ref=e190]:
+            - link "https://www.linkedin.com › company › tamid-group-at-nyu-shanghai" [ref=e191] [cursor=pointer]:
+              - /url: https://www.linkedin.com/company/tamid-group-at-nyu-shanghai
+              - generic [ref=e192]:
+                - generic [ref=e193]: https://www.linkedin.com
+                - generic [ref=e194]: › company › tamid-group-at-nyu-shanghai
+            - heading [level=3] [ref=e196]:
+              - link "TAMID Group at NYU Shanghai" [ref=e197] [cursor=pointer]:
+                - /url: https://www.linkedin.com/company/tamid-group-at-nyu-shanghai
+            - paragraph [ref=e198]: 1 billion members | Manage your professional identity. Build and engage with your professional network. Access knowledge, insights and opportunities.
+          - generic [ref=e199]:
+            - generic [ref=e200]: brave
+            - link "cached" [ref=e205] [cursor=pointer]:
+              - /url: https://web.archive.org/web/https://www.linkedin.com/company/tamid-group-at-nyu-shanghai
+        - article [ref=e206]:
+          - generic [ref=e207]:
+            - link "https://momlovesbest.com › sean-name-meaning" [ref=e208] [cursor=pointer]:
+              - /url: https://momlovesbest.com/sean-name-meaning
+              - generic [ref=e209]:
+                - generic [ref=e210]: https://momlovesbest.com
+                - generic [ref=e211]: › sean-name-meaning
+            - heading [level=3] [ref=e213]:
+              - 'link "Sean Name Meaning: Origin, Popularity & Nicknames" [ref=e214] [cursor=pointer]':
+                - /url: https://momlovesbest.com/sean-name-meaning
+            - paragraph [ref=e215]: Aug 11, 2026 · Sean means God is gracious, and it is often glossed more warmly as gift from God. The sense comes straight from …Read more
+          - generic [ref=e216]:
+            - generic [ref=e217]: bing
+            - link "cached" [ref=e222] [cursor=pointer]:
+              - /url: https://web.archive.org/web/https://momlovesbest.com/sean-name-meaning
+        - article [ref=e223]:
+          - generic [ref=e224]:
+            - link "https://www.tiktok.com › @seanpanganiban_" [ref=e225] [cursor=pointer]:
+              - /url: https://www.tiktok.com/@seanpanganiban_
+              - generic [ref=e226]:
+                - generic [ref=e227]: https://www.tiktok.com
+                - generic [ref=e228]: › @seanpanganiban_
+            - heading [level=3] [ref=e230]:
+              - link "Sean (@seanpanganiban_) | TikTok" [ref=e231] [cursor=pointer]:
+                - /url: https://www.tiktok.com/@seanpanganiban_
+            - paragraph [ref=e232]: Join 5.2M followers on TikTok for more icelerskin, drlan, drlanddph content.Read more
+          - generic [ref=e233]:
+            - generic [ref=e234]: bing
+            - link "cached" [ref=e239] [cursor=pointer]:
+              - /url: https://web.archive.org/web/https://www.tiktok.com/@seanpanganiban_
+        - article [ref=e240]:
+          - generic [ref=e241]:
+            - link "https://www.datanyze.com › companies › nyu-tamid › 538930065" [ref=e242] [cursor=pointer]:
+              - /url: https://www.datanyze.com/companies/nyu-tamid/538930065
+              - generic [ref=e243]:
+                - generic [ref=e244]: https://www.datanyze.com
+                - generic [ref=e245]: › companies › nyu-tamid › 538930065
+            - heading [level=3] [ref=e247]:
+              - link "Nyu Tamid Company Profile | Management and Employees List" [ref=e248] [cursor=pointer]:
+                - /url: https://www.datanyze.com/companies/nyu-tamid/538930065
+            - paragraph [ref=e249]: Find and connect with cold sales prospects within minutes using affordable, accurate contact information from Datanyze. We're revolutionizing B2B data!
+          - generic [ref=e250]:
+            - generic [ref=e251]: brave
+            - link "cached" [ref=e256] [cursor=pointer]:
+              - /url: https://web.archive.org/web/https://www.datanyze.com/companies/nyu-tamid/538930065
+        - article [ref=e257]:
+          - link [ref=e258] [cursor=pointer]:
+            - /url: https://www.linkedin.com/in/seanparnelll
+          - generic [ref=e259]:
+            - link "https://www.linkedin.com › in › seanparnelll" [ref=e260] [cursor=pointer]:
+              - /url: https://www.linkedin.com/in/seanparnelll
+              - generic [ref=e261]:
+                - generic [ref=e262]: https://www.linkedin.com
+                - generic [ref=e263]: › in › seanparnelll
+            - heading [level=3] [ref=e265]:
+              - link "Sean Parnell - Student at New York University | LinkedIn" [ref=e266] [cursor=pointer]:
+                - /url: https://www.linkedin.com/in/seanparnelll
+            - paragraph [ref=e267]: "Student at New York University · Experience: Raymond James · Education: New York University · Location: New York · 500+ connections on LinkedIn. View Sean ..."
+          - generic [ref=e268]:
+            - generic [ref=e269]: google cse
+            - link "cached" [ref=e274] [cursor=pointer]:
+              - /url: https://web.archive.org/web/https://www.linkedin.com/in/seanparnelll
+        - article [ref=e275]:
+          - generic [ref=e276]:
+            - link "https://www.linkedin.com › in › seanparnelll" [ref=e277] [cursor=pointer]:
+              - /url: https://www.linkedin.com/in/seanparnelll/
+              - generic [ref=e278]:
+                - generic [ref=e279]: https://www.linkedin.com
+                - generic [ref=e280]: › in › seanparnelll
+            - heading [level=3] [ref=e282]:
+              - link "Sean Parnell - Raymond James | LinkedIn" [ref=e283] [cursor=pointer]:
+                - /url: https://www.linkedin.com/in/seanparnelll/
+            - paragraph [ref=e284]: "Experience: Raymond James · Education: New York University · Location: New York · 500+ connections on LinkedIn. View Sean Parnell’s profile on LinkedIn, a professional community of 1 billion members."
+          - generic [ref=e285]:
+            - generic [ref=e286]: brave
+            - link "cached" [ref=e291] [cursor=pointer]:
+              - /url: https://web.archive.org/web/https://www.linkedin.com/in/seanparnelll/
+        - article [ref=e292]:
+          - link [ref=e293] [cursor=pointer]:
+            - /url: https://www.nyutamid.org/our-board
+          - generic [ref=e294]:
+            - link "https://www.nyutamid.org › our-board" [ref=e295] [cursor=pointer]:
+              - /url: https://www.nyutamid.org/our-board
+              - generic [ref=e296]:
+                - generic [ref=e297]: https://www.nyutamid.org
+                - generic [ref=e298]: › our-board
+            - heading [level=3] [ref=e300]:
+              - link "Executive Board - TAMID Group at NYU" [ref=e301] [cursor=pointer]:
+                - /url: https://www.nyutamid.org/our-board
+            - paragraph [ref=e302]: ... at NYU this academic year. Co-President. Sean Parnell headshot. SeanParnell. SeniorEconomics. Co-President. Rick Englard headshot. RickEnglard. JuniorFinance.
+          - generic [ref=e303]:
+            - generic [ref=e304]: google cse
+            - link "cached" [ref=e309] [cursor=pointer]:
+              - /url: https://web.archive.org/web/https://www.nyutamid.org/our-board
+        - article [ref=e310]:
+          - link [ref=e311] [cursor=pointer]:
+            - /url: https://jewishinsider.com/tag/morning/
+          - generic [ref=e312]:
+            - link "https://jewishinsider.com › tag › morning" [ref=e313] [cursor=pointer]:
+              - /url: https://jewishinsider.com/tag/morning/
+              - generic [ref=e314]:
+                - generic [ref=e315]: https://jewishinsider.com
+                - generic [ref=e316]: › tag › morning
+            - heading [level=3] [ref=e318]:
+              - link "Morning Archives - Jewish Insider" [ref=e319] [cursor=pointer]:
+                - /url: https://jewishinsider.com/tag/morning/
+            - paragraph [ref=e320]: Jul 30, 2026 ... ... Sean Parnell, assistant to the secretary of defense for ... co-chair of the President's Council of Advisors on Science and Technology…
+          - generic [ref=e321]:
+            - generic [ref=e322]: google cse
+            - link "cached" [ref=e327] [cursor=pointer]:
+              - /url: https://web.archive.org/web/https://jewishinsider.com/tag/morning/
+        - article [ref=e328]:
+          - link [ref=e329] [cursor=pointer]:
+            - /url: https://www.nutamid.org/executive-board
+          - generic [ref=e330]:
+            - link "https://www.nutamid.org › executive-board" [ref=e331] [cursor=pointer]:
+              - /url: https://www.nutamid.org/executive-board
+              - generic [ref=e332]:
+                - generic [ref=e333]: https://www.nutamid.org
+                - generic [ref=e334]: › executive-board
+            - heading [level=3] [ref=e336]:
+              - link "Our Leadership — TAMID at Northeastern" [ref=e337] [cursor=pointer]:
+                - /url: https://www.nutamid.org/executive-board
+            - paragraph [ref=e338]: Executive Vice President · Vice President of Operations
+          - generic [ref=e339]:
+            - generic [ref=e340]: brave
+            - link "cached" [ref=e345] [cursor=pointer]:
+              - /url: https://web.archive.org/web/https://www.nutamid.org/executive-board
+        - article [ref=e346]:
+          - link [ref=e347] [cursor=pointer]:
+            - /url: https://intergratedtechnology.com/
+          - generic [ref=e348]:
+            - link "https://intergratedtechnology.com" [ref=e349] [cursor=pointer]:
+              - /url: https://intergratedtechnology.com/
+            - heading [level=3] [ref=e352]:
+              - 'link "Intergratedtechnology: Home" [ref=e353] [cursor=pointer]':
+                - /url: https://intergratedtechnology.com/
+            - paragraph [ref=e354]: Stay ahead with expert insights on hardware, mobile devices, and space technology. Trusted source for tech trends and innovations.
+          - generic [ref=e355]:
+            - generic [ref=e356]: google cse
+            - link "cached" [ref=e361] [cursor=pointer]:
+              - /url: https://web.archive.org/web/https://intergratedtechnology.com/
+        - article [ref=e362]:
+          - link [ref=e363] [cursor=pointer]:
+            - /url: https://www.linkedin.com/in/sean-parnell-63a17b20/
+          - generic [ref=e364]:
+            - link "https://www.linkedin.com › in › sean-parnell-63a17b20" [ref=e365] [cursor=pointer]:
+              - /url: https://www.linkedin.com/in/sean-parnell-63a17b20/
+              - generic [ref=e366]:
+                - generic [ref=e367]: https://www.linkedin.com
+                - generic [ref=e368]: › in › sean-parnell-63a17b20
+            - heading [level=3] [ref=e370]:
+              - link "Sean Parnell - Co-Founder and CEO | LinkedIn" [ref=e371] [cursor=pointer]:
+                - /url: https://www.linkedin.com/in/sean-parnell-63a17b20/
+            - paragraph [ref=e372]: Co-Founder and CEO · Being present, intentional and impactful with your daily actions develops great company culture and company success. Everyday I strive to lead by example and do good things.
+          - generic [ref=e373]:
+            - generic [ref=e374]: brave
+            - link "cached" [ref=e379] [cursor=pointer]:
+              - /url: https://web.archive.org/web/https://www.linkedin.com/in/sean-parnell-63a17b20/
+        - article [ref=e380]:
+          - link [ref=e381] [cursor=pointer]:
+            - /url: https://www.linkedin.com/in/sean-parnell-a2734298/
+          - generic [ref=e382]:
+            - link "https://www.linkedin.com › in › sean-parnell-a2734298" [ref=e383] [cursor=pointer]:
+              - /url: https://www.linkedin.com/in/sean-parnell-a2734298/
+              - generic [ref=e384]:
+                - generic [ref=e385]: https://www.linkedin.com
+                - generic [ref=e386]: › in › sean-parnell-a2734298
+            - heading [level=3] [ref=e388]:
+              - link "Sean Parnell - Fort Drum | LinkedIn" [ref=e389] [cursor=pointer]:
+                - /url: https://www.linkedin.com/in/sean-parnell-a2734298/
+            - paragraph [ref=e390]: "Follow Sean on Twitter: @SeanParnellUSA Like Sean on Facebook:… · Experience: Fort Drum · Education: Duquesne University · Location: Cranberry Township · 500+ connections on LinkedIn. View Sean Parnell’s profile on LinkedIn, a professional community of 1 billion members."
+          - generic [ref=e391]:
+            - generic [ref=e392]: brave
+            - link "cached" [ref=e397] [cursor=pointer]:
+              - /url: https://web.archive.org/web/https://www.linkedin.com/in/sean-parnell-a2734298/
+        - article [ref=e398]:
+          - generic [ref=e399]:
+            - link "https://www.youtube.com › @seantv977" [ref=e400] [cursor=pointer]:
+              - /url: https://www.youtube.com/@seantv977
+              - generic [ref=e401]:
+                - generic [ref=e402]: https://www.youtube.com
+                - generic [ref=e403]: › @seantv977
+            - heading [level=3] [ref=e405]:
+              - link "Sean's World TV - YouTube" [ref=e406] [cursor=pointer]:
+                - /url: https://www.youtube.com/@seantv977
+            - paragraph [ref=e407]: "\"Traverse the world without network restrictions! Sean's eSim store: https://shln.top/flK8VLEveSim makes traveling easier. Just scan …Read more"
+          - generic [ref=e408]:
+            - generic [ref=e409]: bing
+            - link "cached" [ref=e414] [cursor=pointer]:
+              - /url: https://web.archive.org/web/https://www.youtube.com/@seantv977
+        - article [ref=e415]:
+          - generic [ref=e416]:
+            - link "https://engage.nyu.edu › organization › tamid-at-nyu" [ref=e417] [cursor=pointer]:
+              - /url: https://engage.nyu.edu/organization/tamid-at-nyu
+              - generic [ref=e418]:
+                - generic [ref=e419]: https://engage.nyu.edu
+                - generic [ref=e420]: › organization › tamid-at-nyu
+            - heading [level=3] [ref=e422]:
+              - link "TAMID at NYU - All-University" [ref=e423] [cursor=pointer]:
+                - /url: https://engage.nyu.edu/organization/tamid-at-nyu
+            - paragraph [ref=e424]: Discover unique opportunities at NYU Engage! Find and attend events, browse and join organizations, and showcase your involvement.
+          - generic [ref=e425]:
+            - generic [ref=e426]: brave
+            - link "cached" [ref=e431] [cursor=pointer]:
+              - /url: https://web.archive.org/web/https://engage.nyu.edu/organization/tamid-at-nyu
+        - article [ref=e432]:
+          - generic [ref=e433]:
+            - link "https://seans.uccs.edu" [ref=e434] [cursor=pointer]:
+              - /url: https://seans.uccs.edu/
+            - heading [level=3] [ref=e437]:
+              - link "SEANS" [ref=e438] [cursor=pointer]:
+                - /url: https://seans.uccs.edu/
+            - paragraph [ref=e439]: The UCCS Student Employment Assistance Network (SEAN) is where students can go to apply for on-campus and off-campus …Read more
+          - generic [ref=e440]:
+            - generic [ref=e441]: bing
+            - link "cached" [ref=e446] [cursor=pointer]:
+              - /url: https://web.archive.org/web/https://seans.uccs.edu/
+        - article [ref=e447]:
+          - generic [ref=e448]:
+            - link "https://www.linkedin.com › in › tamidatnyu" [ref=e449] [cursor=pointer]:
+              - /url: https://www.linkedin.com/in/tamidatnyu
+              - generic [ref=e450]:
+                - generic [ref=e451]: https://www.linkedin.com
+                - generic [ref=e452]: › in › tamidatnyu
+            - heading [level=3] [ref=e454]:
+              - link "TAMID at NYU New York University" [ref=e455] [cursor=pointer]:
+                - /url: https://www.linkedin.com/in/tamidatnyu
+            - paragraph [ref=e456]: 1 billion members | Manage your professional identity. Build and engage with your professional network. Access knowledge, insights and opportunities.
+          - generic [ref=e457]:
+            - generic [ref=e458]: brave
+            - link "cached" [ref=e463] [cursor=pointer]:
+              - /url: https://web.archive.org/web/https://www.linkedin.com/in/tamidatnyu
+        - article [ref=e464]:
+          - generic [ref=e465]:
+            - link "https://m.imdb.com › name › nm0000576" [ref=e466] [cursor=pointer]:
+              - /url: https://m.imdb.com/name/nm0000576/
+              - generic [ref=e467]:
+                - generic [ref=e468]: https://m.imdb.com
+                - generic [ref=e469]: › name › nm0000576
+            - heading [level=3] [ref=e471]:
+              - link "Sean Penn - IMDb" [ref=e472] [cursor=pointer]:
+                - /url: https://m.imdb.com/name/nm0000576/
+            - paragraph [ref=e473]: Sean Penn is a powerhouse film performer capable of intensely moving work, who has gone from strength to strength during a …Read more
+          - generic [ref=e474]:
+            - generic [ref=e475]: bing
+            - link "cached" [ref=e480] [cursor=pointer]:
+              - /url: https://web.archive.org/web/https://m.imdb.com/name/nm0000576/
+        - article [ref=e481]:
+          - generic [ref=e482]:
+            - link "https://www.linkedin.com › in › seanparnell" [ref=e483] [cursor=pointer]:
+              - /url: https://www.linkedin.com/in/seanparnell
+              - generic [ref=e484]:
+                - generic [ref=e485]: https://www.linkedin.com
+                - generic [ref=e486]: › in › seanparnell
+            - heading [level=3] [ref=e488]:
+              - link "Sean Parnell - Innovaxis Marketing" [ref=e489] [cursor=pointer]:
+                - /url: https://www.linkedin.com/in/seanparnell
+            - paragraph [ref=e490]: 1 billion members | Manage your professional identity. Build and engage with your professional network. Access knowledge, insights and opportunities.
+          - generic [ref=e491]:
+            - generic [ref=e492]: brave
+            - link "cached" [ref=e497] [cursor=pointer]:
+              - /url: https://web.archive.org/web/https://www.linkedin.com/in/seanparnell
+        - article [ref=e498]:
+          - generic [ref=e499]:
+            - link "https://english.stackexchange.com › questions › 217012 › why-is-sean-pronounced-shawn" [ref=e500] [cursor=pointer]:
+              - /url: https://english.stackexchange.com/questions/217012/why-is-sean-pronounced-shawn
+              - generic [ref=e501]:
+                - generic [ref=e502]: https://english.stackexchange.com
+                - generic [ref=e503]: › questions › 217012 › why-is-sean-pronounced-shawn
+            - heading [level=3] [ref=e505]:
+              - link "pronunciation - Why is Sean pronounced Shawn? - English ..." [ref=e506] [cursor=pointer]:
+                - /url: https://english.stackexchange.com/questions/217012/why-is-sean-pronounced-shawn
+            - paragraph [ref=e507]: Dec 27, 2014 · Sean (written "Seán" or "Séan" in Irish) is a Hibernization of the English name "John"; that is, it's a transliteration of …Read more
+          - generic [ref=e508]:
+            - generic [ref=e509]: bing
+            - link "cached" [ref=e514] [cursor=pointer]:
+              - /url: https://web.archive.org/web/https://english.stackexchange.com/questions/217012/why-is-sean-pronounced-shawn
+        - article [ref=e515]:
+          - generic [ref=e516]:
+            - link "https://engage.shanghai.nyu.edu › organization › tamid-nyush" [ref=e517] [cursor=pointer]:
+              - /url: https://engage.shanghai.nyu.edu/organization/tamid-nyush
+              - generic [ref=e518]:
+                - generic [ref=e519]: https://engage.shanghai.nyu.edu
+                - generic [ref=e520]: › organization › tamid-nyush
+            - heading [level=3] [ref=e522]:
+              - link "TAMID Group at NYU Shanghai" [ref=e523] [cursor=pointer]:
+                - /url: https://engage.shanghai.nyu.edu/organization/tamid-nyush
+            - paragraph [ref=e524]: Discover unique opportunities at NYU Shanghai Engage! Find and attend events, browse and join organizations, and showcase your involvement.
+          - generic [ref=e525]:
+            - generic [ref=e526]: brave
+            - link "cached" [ref=e531] [cursor=pointer]:
+              - /url: https://web.archive.org/web/https://engage.shanghai.nyu.edu/organization/tamid-nyush
+        - article [ref=e532]:
+          - generic [ref=e533]:
+            - link "https://www.linkedin.com › company › tamidgroup" [ref=e534] [cursor=pointer]:
+              - /url: https://www.linkedin.com/company/tamidgroup
+              - generic [ref=e535]:
+                - generic [ref=e536]: https://www.linkedin.com
+                - generic [ref=e537]: › company › tamidgroup
+            - heading [level=3] [ref=e539]:
+              - link "TAMID Group | LinkedIn" [ref=e540] [cursor=pointer]:
+                - /url: https://www.linkedin.com/company/tamidgroup
+            - paragraph [ref=e541]: TAMID Group | 18,763 followers on LinkedIn. Experiential learning through business in Israel. | TAMID Group is a nonprofit organization that develops the professional skills of undergraduate students through hands-on interaction with Israeli business. TAMID integrates the next generation of entrepreneurs and business professionals with Israel through a comprehensive education curriculum, pro-bono consulting for Israeli startups, capital market investment research, and a summer internship program in Israel.
+          - generic [ref=e542]:
+            - generic [ref=e543]: brave
+            - link "cached" [ref=e548] [cursor=pointer]:
+              - /url: https://web.archive.org/web/https://www.linkedin.com/company/tamidgroup
+        - article [ref=e549]:
+          - generic [ref=e550]:
+            - link "https://www.signalhire.com › companies › tamid-at-nyu" [ref=e551] [cursor=pointer]:
+              - /url: https://www.signalhire.com/companies/tamid-at-nyu
+              - generic [ref=e552]:
+                - generic [ref=e553]: https://www.signalhire.com
+                - generic [ref=e554]: › companies › tamid-at-nyu
+            - heading [level=3] [ref=e556]:
+              - link "TAMID at NYU Overview | SignalHire Company Profile" [ref=e557] [cursor=pointer]:
+                - /url: https://www.signalhire.com/companies/tamid-at-nyu
+            - paragraph [ref=e558]: Access our comprehensive directory of businesses to reach your goals faster. Find company profiles, revenue, address and employee contact details with SignalHire.
+          - generic [ref=e559]:
+            - generic [ref=e560]: brave
+            - link "cached" [ref=e565] [cursor=pointer]:
+              - /url: https://web.archive.org/web/https://www.signalhire.com/companies/tamid-at-nyu
+        - article [ref=e566]:
+          - generic [ref=e567]:
+            - link "https://www.zoominfo.com › c › nyu-tamid › 538930065" [ref=e568] [cursor=pointer]:
+              - /url: https://www.zoominfo.com/c/nyu-tamid/538930065
+              - generic [ref=e569]:
+                - generic [ref=e570]: https://www.zoominfo.com
+                - generic [ref=e571]: › c › nyu-tamid › 538930065
+            - heading [level=3] [ref=e573]:
+              - link "Nyu Tamid - Overview, News & Similar companies | ZoomInfo.com" [ref=e574] [cursor=pointer]:
+                - /url: https://www.zoominfo.com/c/nyu-tamid/538930065
+            - paragraph [ref=e575]: TAMID introduces the next generation of entrepreneurs and business professionals to Israel through a comprehensive education curriculum, pro-bono consulting for Israeli startups, equity research, and a summer fellowship program in Israel.Explore moreNyu Tamid's Social Media ... View contact profiles from Nyu TamidPopular SearchesNyu TamidTAMID at NYUNYU Bronfman Center For JewishNyuTAMID GroupSIC Code 86,861NAICS Code 81,813Show more
+          - generic [ref=e576]:
+            - generic [ref=e577]: brave
+            - link "cached" [ref=e582] [cursor=pointer]:
+              - /url: https://web.archive.org/web/https://www.zoominfo.com/c/nyu-tamid/538930065
+        - article [ref=e583]:
+          - generic [ref=e584]:
+            - link "https://www.linkedin.com › company › tamid-at-yeshiva-university" [ref=e585] [cursor=pointer]:
+              - /url: https://www.linkedin.com/company/tamid-at-yeshiva-university
+              - generic [ref=e586]:
+                - generic [ref=e587]: https://www.linkedin.com
+                - generic [ref=e588]: › company › tamid-at-yeshiva-university
+            - heading [level=3] [ref=e590]:
+              - link "TAMID at YU | LinkedIn" [ref=e591] [cursor=pointer]:
+                - /url: https://www.linkedin.com/company/tamid-at-yeshiva-university
+            - paragraph [ref=e592]: We are so proud of our TAMID at YU members participating in the TAMIDxMcKinsey Case study on Gett Taxi! Thank you to our Co-President Leah Schewitz and members Eva (Ahuva) Abraham, Menucha Ross and Lizzy Zucker for all of your hard work.
+          - generic [ref=e593]:
+            - generic [ref=e594]: brave
+            - link "cached" [ref=e599] [cursor=pointer]:
+              - /url: https://web.archive.org/web/https://www.linkedin.com/company/tamid-at-yeshiva-university
+        - article [ref=e600]:
+          - generic [ref=e601]:
+            - link "https://www.linkedin.com › company › tamid-at-northeastern" [ref=e602] [cursor=pointer]:
+              - /url: https://www.linkedin.com/company/tamid-at-northeastern
+              - generic [ref=e603]:
+                - generic [ref=e604]: https://www.linkedin.com
+                - generic [ref=e605]: › company › tamid-at-northeastern
+            - heading [level=3] [ref=e607]:
+              - link "TAMID at Northeastern | LinkedIn" [ref=e608] [cursor=pointer]:
+                - /url: https://www.linkedin.com/company/tamid-at-northeastern
+            - paragraph [ref=e609]: TAMID at Northeastern | 652 followers on LinkedIn. TAMID provides students with hands-on investment and consulting experience within the Israeli startup ecosystem. | TAMID is a non-political and non-religious organization that aims to train the next generation of entrepreneurs through a ...
+          - generic [ref=e610]:
+            - generic [ref=e611]: brave
+            - link "cached" [ref=e616] [cursor=pointer]:
+              - /url: https://web.archive.org/web/https://www.linkedin.com/company/tamid-at-northeastern
+        - article [ref=e617]:
+          - generic [ref=e618]:
+            - link "https://www.linkedin.com › company › tamidbu" [ref=e619] [cursor=pointer]:
+              - /url: https://www.linkedin.com/company/tamidbu
+              - generic [ref=e620]:
+                - generic [ref=e621]: https://www.linkedin.com
+                - generic [ref=e622]: › company › tamidbu
+            - heading [level=3] [ref=e624]:
+              - 'link "LinkedIn: Log In or Sign Up" [ref=e625] [cursor=pointer]':
+                - /url: https://www.linkedin.com/company/tamidbu
+            - paragraph [ref=e626]: 1 billion members | Manage your professional identity. Build and engage with your professional network. Access knowledge, insights and opportunities.
+          - generic [ref=e627]:
+            - generic [ref=e628]: brave
+            - link "cached" [ref=e633] [cursor=pointer]:
+              - /url: https://web.archive.org/web/https://www.linkedin.com/company/tamidbu
+      - generic:
+        - link "Back to top":
+          - /url: "#"
+      - navigation [ref=e634]:
+        - link "Next page" [ref=e636] [cursor=pointer]
+        - generic [ref=e639]:
+          - link "1" [ref=e641]
+          - link "2" [ref=e643] [cursor=pointer]
+          - link "3" [ref=e645] [cursor=pointer]
+          - link "4" [ref=e647] [cursor=pointer]
+          - link "5" [ref=e649] [cursor=pointer]
+          - link "6" [ref=e651] [cursor=pointer]
+          - link "7" [ref=e653] [cursor=pointer]
+          - link "8" [ref=e655] [cursor=pointer]
+          - link "9" [ref=e657] [cursor=pointer]
+          - link "10" [ref=e659] [cursor=pointer]
+  - contentinfo [ref=e660]:
+    - paragraph [ref=e661]:
+      - text: Powered by
+      - link "SearXNG" [ref=e662] [cursor=pointer]:
+        - /url: /info/en/about
+      - text: "- 2026.9.25+12f8b6515 — a privacy-respecting, open metasearch engine"
+      - link "Source code" [ref=e663] [cursor=pointer]:
+        - /url: https://github.com/searxng/searxng
+      - text: "|"
+      - link "Issue tracker" [ref=e664] [cursor=pointer]:
+        - /url: https://github.com/searxng/searxng/issues
+      - text: "|"
+      - link "Engine stats" [ref=e665] [cursor=pointer]:
+        - /url: /stats
+      - text: "|"
+      - link "Public instances" [ref=e666] [cursor=pointer]:
+        - /url: https://searx.space

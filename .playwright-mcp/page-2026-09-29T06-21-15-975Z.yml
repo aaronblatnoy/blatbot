@@ -1,0 +1,83 @@
+- generic [ref=e2]:
+  - banner:
+    - generic [ref=e3]:
+      - link "Skip to Content" [ref=e4] [cursor=pointer]:
+        - /url: "#page"
+      - generic [ref=e7]:
+        - generic [ref=e8]:
+          - link [ref=e11] [cursor=pointer]:
+            - /url: /
+            - img "SREG" [ref=e12]
+          - navigation [ref=e15]:
+            - button "About" [ref=e17] [cursor=pointer]
+            - link "Executive Board" [ref=e20] [cursor=pointer]:
+              - /url: /executive-board
+            - button "Membership" [ref=e22] [cursor=pointer]
+        - link "Contact" [ref=e26] [cursor=pointer]:
+          - /url: /contact
+  - main [ref=e27]:
+    - article [ref=e28]:
+      - generic [ref=e29]:
+        - generic [ref=e40]:
+          - heading [level=2] [ref=e41]:
+            - strong [ref=e43]: The Stern Real Estate Group
+          - paragraph [ref=e44]:
+            - strong [ref=e45]: The Stern Real Estate Group is an NYU Stern undergraduate club that promotes real estate education, recruitment, and professionalism.
+        - generic [ref=e59] [cursor=pointer]:
+          - button "Play" [ref=e60]
+          - generic:
+            - timer "Current time" [ref=e62]: 00:00
+            - timer "Duration" [ref=e63]: ⁄00:26
+            - button "Mute" [ref=e65]
+            - button "Settings" [ref=e68]
+            - button "Enter fullscreen" [ref=e70]
+            - generic [ref=e73]:
+              - slider "Seek" [ref=e74]: "0"
+              - progressbar [aria-hidden] [ref=e75]: "% buffered"
+              - generic: 00:00
+        - generic [ref=e85]:
+          - generic [ref=e90]:
+            - heading [level=2] [ref=e91]:
+              - strong [ref=e92]: Our Mission
+            - paragraph [ref=e93]: The Stern Real Estate Group aims to foster a greater understanding of the real estate industry for students through professional resources, networking, and mentorship.
+          - separator [ref=e98]
+          - heading [level=2] [ref=e104]:
+            - strong [ref=e105]: Events We Host
+          - generic [ref=e110]:
+            - heading "Weekly Speakers" [level=3] [ref=e111]
+            - paragraph [ref=e112]: Every Monday, SREG hosts a real estate professional, typically an alumnus, to discuss his/her education, career experience, and view of the market. Students also get the chance to speak directly with these real estate experts.
+            - heading "Workshops" [level=3] [ref=e113]
+            - paragraph [ref=e114]: SREG hosts technical real estate workshops throughout the year, including but not limited to basic RE terminology and concepts, ARGUS training courses, and elementary to advanced Excel modeling classes.
+          - generic [ref=e119]:
+            - heading "Site Tours" [level=3] [ref=e120]
+            - paragraph [ref=e121]: Working with real estate developers and owners, SREG arranges private site tours for our members to learn more about top real estate firms in person, interact with professionals, and explore development projects.
+            - heading "Networking Events" [level=3] [ref=e122]
+            - paragraph [ref=e123]: SREG frequently organizes networking events for students to begin building their networks. Our annual RE Alumni Mingle hosts 120+ students and alumni, while private corporate events allow students to meet professionals.
+  - contentinfo [ref=e124]:
+    - navigation [ref=e136]:
+      - link "Facebook" [ref=e137] [cursor=pointer]:
+        - /url: https://www.facebook.com/NYUSternRealEstateGroup/
+      - link "Instagram" [ref=e142] [cursor=pointer]:
+        - /url: https://www.instagram.com/nyusreg/
+      - link "sreg@stern.nyu.edu" [ref=e147] [cursor=pointer]:
+        - /url: mailto:sreg@stern.nyu.edu
+      - link "LinkedIn" [ref=e152] [cursor=pointer]:
+        - /url: https://www.linkedin.com/company/stern-real-estate-group
+    - generic [ref=e162]:
+      - paragraph [ref=e168]: NYU Stern Real Estate Group | 44 West 4th St, New York, NY, 10012, USA | sreg@stern.nyu.edu
+      - generic [ref=e173]:
+        - generic [ref=e174]:
+          - heading "Subscribe" [level=2] [ref=e175]
+          - paragraph [ref=e177]: Sign up with your email address to receive news and updates from SREG.
+        - generic [ref=e178]:
+          - generic [ref=e179]:
+            - group [ref=e180]:
+              - textbox "First Name" [ref=e182]
+              - textbox "Last Name" [ref=e184]
+            - textbox "Email Address" [ref=e186]
+          - button "Sign Up" [ref=e188] [cursor=pointer]
+        - paragraph [ref=e190]: We respect your privacy.
+      - paragraph [ref=e196]:
+        - text: Powered by
+        - link "Squarespace" [ref=e197] [cursor=pointer]:
+          - /url: http://www.squarespace.com

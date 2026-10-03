@@ -1,0 +1,204 @@
+- generic [active] [ref=f6e1]:
+  - generic [ref=f6e2]:
+    - generic [ref=f6e4]:
+      - generic [ref=f6e5]:
+        - generic [ref=f6e6]:
+          - link "DuckDuckGo home" [ref=f6e7] [cursor=pointer]:
+            - /url: /
+            - generic [ref=f6e8]: DuckDuckGo
+          - generic [ref=f6e15]:
+            - combobox "Search privately" [ref=f6e17]: Sean Parnell TAMID NYU linkedin
+            - button "Search" [ref=f6e19] [cursor=pointer]
+        - generic [ref=f6e22]:
+          - link "Protection. Privacy. Peace of mind." [ref=f6e24] [cursor=pointer]:
+            - /url: /compare-privacy
+          - button "Open menu" [ref=f6e25] [cursor=pointer]
+      - navigation [ref=f6e33]:
+        - list [ref=f6e34]:
+          - listitem [ref=f6e35]:
+            - link [ref=f6e36] [cursor=pointer]:
+              - /url: /?q=Sean+Parnell+TAMID+NYU+linkedin&ia=web
+              - strong [ref=f6e37]: All
+          - listitem [ref=f6e40]:
+            - link [ref=f6e41] [cursor=pointer]:
+              - /url: /?q=Sean+Parnell+TAMID+NYU+linkedin&ia=images&iax=images
+              - strong [ref=f6e42]: Images
+          - listitem [ref=f6e43]:
+            - link [ref=f6e44] [cursor=pointer]:
+              - /url: /?q=Sean+Parnell+TAMID+NYU+linkedin&ia=videos&iax=videos
+              - strong [ref=f6e45]: Videos
+          - listitem [ref=f6e46]:
+            - link [ref=f6e47] [cursor=pointer]:
+              - /url: /?q=Sean+Parnell+TAMID+NYU+linkedin&ia=news&iar=news
+              - strong [ref=f6e48]: News
+          - listitem [ref=f6e49]:
+            - link [ref=f6e50] [cursor=pointer]:
+              - /url: /?q=Sean+Parnell+TAMID+NYU+linkedin&iaxm=maps
+              - strong [ref=f6e51]: Maps
+          - listitem [ref=f6e52]:
+            - link [ref=f6e53] [cursor=pointer]:
+              - /url: /?q=Sean+Parnell+TAMID+NYU+linkedin&ia=shopping&iax=shopping
+              - strong [ref=f6e54]: Shopping
+        - list [ref=f6e55]:
+          - listitem [ref=f6e56]:
+            - link "Duck.ai" [ref=f6e58] [cursor=pointer]:
+              - /url: /?q=Sean+Parnell+TAMID+NYU+linkedin&ia=chat
+          - listitem [ref=f6e62]:
+            - button "Search Settings ✀" [ref=f6e64] [cursor=pointer]:
+              - strong [ref=f6e65]:
+                - generic [ref=f6e68]: Search Settings
+                - generic [ref=f6e69]: ✀
+    - navigation [ref=f6e78]:
+      - button [ref=f6e80] [cursor=pointer]:
+        - strong [ref=f6e87]: Private
+      - button "All regions" [ref=f6e92] [cursor=pointer]
+      - button [ref=f6e97] [cursor=pointer]:
+        - strong [ref=f6e99]: "Safe search: moderate"
+      - button [ref=f6e103] [cursor=pointer]:
+        - strong [ref=f6e105]: Any time
+    - list [ref=f6e109]:
+      - button "Close menu" [ref=f6e110] [cursor=pointer]
+      - list [ref=f6e114]:
+        - listitem [ref=f6e115]: Search
+        - listitem [ref=f6e116]:
+          - link "Homepage" [ref=f6e117] [cursor=pointer]:
+            - /url: https://start.duckduckgo.com/
+        - listitem [ref=f6e118]:
+          - link "Themes" [ref=f6e119] [cursor=pointer]:
+            - /url: /settings#appearance
+        - listitem [ref=f6e120]:
+          - link "Settings" [ref=f6e121] [cursor=pointer]:
+            - /url: /settings
+      - list [ref=f6e122]:
+        - listitem [ref=f6e123]: Share Feedback
+        - listitem [ref=f6e124]:
+          - generic [ref=f6e127]:
+            - button "Positive feedback" [ref=f6e128] [cursor=pointer]
+            - button "Negative feedback" [ref=f6e132] [cursor=pointer]
+      - list [ref=f6e136]:
+        - listitem [ref=f6e137]: Downloads
+        - listitem [ref=f6e138]:
+          - link "iOS Browser" [ref=f6e139] [cursor=pointer]:
+            - /url: https://apps.apple.com/app/duckduckgo-private-browser/id663592361?platform=iphone&pt=866401&mt=8&ct=serp-atb-serp
+        - listitem [ref=f6e140]:
+          - link "Android Browser" [ref=f6e141] [cursor=pointer]:
+            - /url: https://play.google.com/store/apps/details?id=com.duckduckgo.mobile.android&referrer=utm_campaign%3Dserp-atb-serp%26origin%3Dfunnel_playstore_searchresults
+        - listitem [ref=f6e142]:
+          - link "Mac Browser" [ref=f6e143] [cursor=pointer]:
+            - /url: /mac?origin=funnel_browser_searchresults
+        - listitem [ref=f6e144]:
+          - link "Windows Browser" [ref=f6e145] [cursor=pointer]:
+            - /url: /windows?origin=funnel_browser_searchresults
+        - listitem [ref=f6e146]:
+          - link "Browser Extensions" [ref=f6e147] [cursor=pointer]:
+            - /url: /duckduckgo-help-pages/desktop/adding-duckduckgo-to-your-browser/
+      - list [ref=f6e148]:
+        - listitem [ref=f6e149]: More From DuckDuckGo
+        - listitem
+        - listitem [ref=f6e150]:
+          - link "DuckDuckGo Subscription" [ref=f6e151] [cursor=pointer]:
+            - /url: /pro?origin=funnel_pro_searchresults
+        - listitem [ref=f6e152]:
+          - link "Duck.ai" [ref=f6e153] [cursor=pointer]:
+            - /url: https://duck.ai
+        - listitem [ref=f6e154]:
+          - link "Email Protection" [ref=f6e155] [cursor=pointer]:
+            - /url: /email
+        - listitem [ref=f6e156]:
+          - link "Newsletter" [ref=f6e157] [cursor=pointer]:
+            - /url: /newsletter
+        - listitem [ref=f6e158]:
+          - link "Blog" [ref=f6e159] [cursor=pointer]:
+            - /url: /blog
+        - listitem [ref=f6e160]:
+          - link "Podcast" [ref=f6e161] [cursor=pointer]:
+            - /url: https://insideduckduckgo.substack.com/?showWelcome=true
+        - listitem [ref=f6e162]:
+          - link "Collaborations" [ref=f6e163] [cursor=pointer]:
+            - /url: /collaborations
+      - list [ref=f6e164]:
+        - listitem [ref=f6e165]: Learn More
+        - listitem [ref=f6e166]:
+          - link "What’s New" [ref=f6e167] [cursor=pointer]:
+            - /url: /updates
+        - listitem [ref=f6e168]:
+          - link "Compare Privacy" [ref=f6e169] [cursor=pointer]:
+            - /url: /compare-privacy
+        - listitem [ref=f6e170]:
+          - link "About Our Browser" [ref=f6e171] [cursor=pointer]:
+            - /url: /app
+        - listitem [ref=f6e172]:
+          - link "About DuckDuckGo" [ref=f6e173] [cursor=pointer]:
+            - /url: /about
+      - list [ref=f6e174]:
+        - listitem [ref=f6e175]: Other Resources
+        - listitem [ref=f6e176]:
+          - link "Help" [ref=f6e177] [cursor=pointer]:
+            - /url: /duckduckgo-help-pages
+        - listitem [ref=f6e178]:
+          - link "Community" [ref=f6e179] [cursor=pointer]:
+            - /url: https://www.reddit.com/r/duckduckgo/
+        - listitem [ref=f6e180]:
+          - link "Careers" [ref=f6e181] [cursor=pointer]:
+            - /url: /careers
+        - listitem [ref=f6e182]:
+          - link "Privacy Policy" [ref=f6e183] [cursor=pointer]:
+            - /url: /privacy
+        - listitem [ref=f6e184]:
+          - link "Terms of Service" [ref=f6e185] [cursor=pointer]:
+            - /url: /terms
+        - listitem [ref=f6e186]:
+          - link "Press Kit" [ref=f6e187] [cursor=pointer]:
+            - /url: /press
+        - listitem [ref=f6e188]:
+          - link "Advertise on Search" [ref=f6e189] [cursor=pointer]:
+            - /url: /duckduckgo-help-pages/company/advertise-on-duckduckgo-search
+  - generic [ref=f6e193]:
+    - generic [ref=f6e195]:
+      - generic [ref=f6e206]:
+        - heading "Introducing DuckDuckGo Collaborations" [level=3] [ref=f6e207]
+        - paragraph [ref=f6e208]: Expertly crafted products for people who give a duck about privacy.
+      - link "See More" [ref=f6e209] [cursor=pointer]:
+        - /url: https://duckduckgo.com/collaborations
+    - generic [ref=f6e211]:
+      - generic [ref=f6e212]:
+        - heading "Learn More" [level=3] [ref=f6e213]
+        - list [ref=f6e214]:
+          - listitem [ref=f6e215]:
+            - link "What's New" [ref=f6e216] [cursor=pointer]:
+              - /url: https://duckduckgo.com/updates
+          - listitem [ref=f6e217]:
+            - link "About Browser" [ref=f6e218] [cursor=pointer]:
+              - /url: https://duckduckgo.com/app
+          - listitem [ref=f6e219]:
+            - link "Compare Privacy" [ref=f6e220] [cursor=pointer]:
+              - /url: https://duckduckgo.com/compare-privacy
+          - listitem [ref=f6e221]:
+            - link "Help Pages" [ref=f6e222] [cursor=pointer]:
+              - /url: https://duckduckgo.com/duckduckgo-help-pages/
+      - generic [ref=f6e223]:
+        - heading "Get More" [level=3] [ref=f6e224]
+        - list [ref=f6e225]:
+          - listitem [ref=f6e226]:
+            - link "Subscription" [ref=f6e227] [cursor=pointer]:
+              - /url: https://duckduckgo.com/pro
+          - listitem [ref=f6e228]:
+            - link "Email Protection" [ref=f6e229] [cursor=pointer]:
+              - /url: https://duckduckgo.com/email
+          - listitem [ref=f6e230]:
+            - generic [ref=f6e231]:
+              - link "Podcast" [ref=f6e233] [cursor=pointer]:
+                - /url: https://insideduckduckgo.substack.com/?showWelcome=true
+              - generic [ref=f6e234]:
+                - text: "&"
+                - link "Newsletter" [ref=f6e235] [cursor=pointer]:
+                  - /url: https://duckduckgo.com/newsletter
+          - listitem [ref=f6e236]:
+            - link "Collaborations" [ref=f6e237] [cursor=pointer]:
+              - /url: https://duckduckgo.com/collaborations
+  - generic [ref=f6e240]:
+    - generic [ref=f6e241]: Unfortunately, bots use DuckDuckGo too.
+    - generic [ref=f6e242]: Please complete the following challenge to confirm this search was made by a human.
+    - generic [ref=f6e243]: "Select all squares containing a duck:"
+    - button "Submit" [ref=f6e265] [cursor=pointer]
+  - button "Share Feedback" [ref=f6e269] [cursor=pointer]

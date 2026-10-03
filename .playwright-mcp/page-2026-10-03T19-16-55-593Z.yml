@@ -1,0 +1,607 @@
+- generic [ref=f13e2]:
+  - generic [ref=f13e3]:
+    - link "Skip to content" [ref=f13e4] [cursor=pointer]:
+      - /url: "#start-of-content"
+    - banner [ref=f13e9]:
+      - heading "Navigation Menu" [level=2] [ref=f13e10]
+      - generic [ref=f13e11]:
+        - link "Homepage" [ref=f13e13] [cursor=pointer]:
+          - /url: /
+        - generic [ref=f13e16]:
+          - navigation "Global" [ref=f13e17]:
+            - list [ref=f13e18]:
+              - listitem [ref=f13e19]:
+                - button "Platform" [ref=f13e21] [cursor=pointer]
+              - listitem [ref=f13e24]:
+                - button "Solutions" [ref=f13e26] [cursor=pointer]
+              - listitem [ref=f13e29]:
+                - button "Resources" [ref=f13e31] [cursor=pointer]
+              - listitem [ref=f13e34]:
+                - button "Open Source" [ref=f13e36] [cursor=pointer]
+              - listitem [ref=f13e39]:
+                - button "Enterprise" [ref=f13e41] [cursor=pointer]
+              - listitem [ref=f13e44]:
+                - link "Pricing" [ref=f13e45] [cursor=pointer]:
+                  - /url: https://github.com/pricing
+          - generic [ref=f13e46]:
+            - button "Search or jump to, type / to search" [ref=f13e48] [cursor=pointer]
+            - link "Sign in" [ref=f13e55] [cursor=pointer]:
+              - /url: /login?return_to=https%3A%2F%2Fgithub.com%2Fsearch%3Fq%3Dmcp%2Btelegram
+            - link "Sign up" [ref=f13e58] [cursor=pointer]:
+              - /url: /signup?ref_cta=Sign+up&ref_loc=header+logged+out&ref_page=%2Fsearch&source=header
+            - button "Appearance settings" [ref=f13e61] [cursor=pointer]
+  - main [ref=f13e67]:
+    - generic [ref=f13e70]:
+      - heading "repositories Search Results · mcp telegram" [level=1] [ref=f13e71]
+      - generic [ref=f13e74]:
+        - generic [ref=f13e75]:
+          - generic [ref=f13e76]:
+            - heading "Filter by" [level=2] [ref=f13e77]
+            - list "Filter by" [ref=f13e82]:
+              - listitem [ref=f13e83]:
+                - list [ref=f13e84]:
+                  - listitem [ref=f13e85]:
+                    - link "Code (...) results" [ref=f13e86] [cursor=pointer]:
+                      - /url: https://github.com/search?q=mcp+telegram&type=code
+                      - generic [ref=f13e87]:
+                        - generic [ref=f13e88]: Code
+                        - generic:
+                          - generic [aria-hidden]: ...
+                          - generic: (...)
+                          - generic: results
+                  - listitem [ref=f13e89]:
+                    - link "Repositories results" [ref=f13e90] [cursor=pointer]:
+                      - /url: https://github.com/search?q=mcp+telegram&type=repositories
+                      - generic [ref=f13e91]:
+                        - generic [ref=f13e92]: Repositories
+                        - generic: results
+                  - listitem [ref=f13e93]:
+                    - link "Issues results" [ref=f13e94] [cursor=pointer]:
+                      - /url: https://github.com/search?q=mcp+telegram&type=issues
+                      - generic [ref=f13e95]:
+                        - generic [ref=f13e96]: Issues
+                        - generic: results
+                  - listitem [ref=f13e97]:
+                    - link "Pull requests results" [ref=f13e98] [cursor=pointer]:
+                      - /url: https://github.com/search?q=mcp+telegram&type=pullrequests
+                      - generic [ref=f13e99]:
+                        - generic [ref=f13e100]: Pull requests
+                        - generic: results
+                  - listitem [ref=f13e101]:
+                    - link "Discussions results" [ref=f13e102] [cursor=pointer]:
+                      - /url: https://github.com/search?q=mcp+telegram&type=discussions
+                      - generic [ref=f13e103]:
+                        - generic [ref=f13e104]: Discussions
+                        - generic: results
+                  - listitem [ref=f13e105]:
+                    - link "Users results" [ref=f13e106] [cursor=pointer]:
+                      - /url: https://github.com/search?q=mcp+telegram&type=users
+                      - generic [ref=f13e107]:
+                        - generic [ref=f13e108]: Users
+                        - generic: results
+                  - listitem [ref=f13e109]:
+                    - button "More" [ref=f13e110] [cursor=pointer]
+              - listitem [aria-hidden] [ref=f13e113]
+              - listitem [ref=f13e114]:
+                - heading "Languages" [level=3] [ref=f13e116]
+                - list "Languages" [ref=f13e117]:
+                  - listitem [ref=f13e118]:
+                    - link "Python" [ref=f13e119] [cursor=pointer]:
+                      - /url: https://github.com/search?q=mcp+telegram+language%3APython
+                      - generic "Python" [ref=f13e123]
+                  - listitem [ref=f13e124]:
+                    - link "TypeScript" [ref=f13e125] [cursor=pointer]:
+                      - /url: https://github.com/search?q=mcp+telegram+language%3ATypeScript
+                      - generic "TypeScript" [ref=f13e129]
+                  - listitem [ref=f13e130]:
+                    - link "JavaScript" [ref=f13e131] [cursor=pointer]:
+                      - /url: https://github.com/search?q=mcp+telegram+language%3AJavaScript
+                      - generic "JavaScript" [ref=f13e135]
+                  - listitem [ref=f13e136]:
+                    - link "Go" [ref=f13e137] [cursor=pointer]:
+                      - /url: https://github.com/search?q=mcp+telegram+language%3AGo
+                      - generic "Go" [ref=f13e141]
+                  - listitem [ref=f13e142]:
+                    - link "Java" [ref=f13e143] [cursor=pointer]:
+                      - /url: https://github.com/search?q=mcp+telegram+language%3AJava
+                      - generic "Java" [ref=f13e147]
+                  - listitem [ref=f13e148]:
+                    - link "Rust" [ref=f13e149] [cursor=pointer]:
+                      - /url: https://github.com/search?q=mcp+telegram+language%3ARust
+                      - generic "Rust" [ref=f13e153]
+                  - listitem [ref=f13e154]:
+                    - link "HTML" [ref=f13e155] [cursor=pointer]:
+                      - /url: https://github.com/search?q=mcp+telegram+language%3AHTML
+                      - generic "HTML" [ref=f13e159]
+                  - listitem [ref=f13e160]:
+                    - link "Shell" [ref=f13e161] [cursor=pointer]:
+                      - /url: https://github.com/search?q=mcp+telegram+language%3AShell
+                      - generic "Shell" [ref=f13e165]
+                  - listitem [ref=f13e166]:
+                    - link "C#" [ref=f13e167] [cursor=pointer]:
+                      - /url: https://github.com/search?q=mcp+telegram+language%3AC%23
+                      - generic "C#" [ref=f13e171]
+                  - listitem [ref=f13e172]:
+                    - link "Swift" [ref=f13e173] [cursor=pointer]:
+                      - /url: https://github.com/search?q=mcp+telegram+language%3ASwift
+                      - generic "Swift" [ref=f13e177]
+                  - listitem [ref=f13e178]:
+                    - button "More languages..." [ref=f13e179] [cursor=pointer]:
+                      - generic "More languages..." [ref=f13e182]
+                  - listitem [aria-hidden] [ref=f13e183]
+              - listitem [ref=f13e184]:
+                - heading "Advanced" [level=3] [ref=f13e186]
+                - list "Advanced" [ref=f13e187]:
+                  - listitem [ref=f13e188]:
+                    - button "Owner" [ref=f13e189] [cursor=pointer]:
+                      - generic "Owner" [ref=f13e193]
+                  - listitem [ref=f13e194]:
+                    - button "Size" [ref=f13e195] [cursor=pointer]:
+                      - generic "Size" [ref=f13e199]
+                  - listitem [ref=f13e200]:
+                    - button "Number of followers" [ref=f13e201] [cursor=pointer]:
+                      - generic "Number of followers" [ref=f13e205]
+                  - listitem [ref=f13e206]:
+                    - button "Number of forks" [ref=f13e207] [cursor=pointer]:
+                      - generic "Number of forks" [ref=f13e211]
+                  - listitem [ref=f13e212]:
+                    - button "Number of stars" [ref=f13e213] [cursor=pointer]:
+                      - generic "Number of stars" [ref=f13e217]
+                  - listitem [ref=f13e218]:
+                    - button "Date created" [ref=f13e219] [cursor=pointer]:
+                      - generic "Date created" [ref=f13e223]
+                  - listitem [ref=f13e224]:
+                    - button "Date pushed" [ref=f13e225] [cursor=pointer]:
+                      - generic "Date pushed" [ref=f13e229]
+                  - listitem [ref=f13e230]:
+                    - button "Topic" [ref=f13e231] [cursor=pointer]:
+                      - generic "Topic" [ref=f13e235]
+                  - listitem [ref=f13e236]:
+                    - button "License" [ref=f13e237] [cursor=pointer]:
+                      - generic "License" [ref=f13e241]
+                  - listitem [ref=f13e242]:
+                    - button "Archived" [ref=f13e243] [cursor=pointer]:
+                      - generic "Archived" [ref=f13e247]
+                  - listitem [ref=f13e248]:
+                    - link "Public" [ref=f13e249] [cursor=pointer]:
+                      - /url: https://github.com/search?q=mcp+telegram+is%3Apublic
+                      - generic "Public" [ref=f13e253]
+                  - listitem [ref=f13e254]:
+                    - link "Private" [ref=f13e255] [cursor=pointer]:
+                      - /url: https://github.com/search?q=mcp+telegram+is%3Aprivate
+                      - generic "Private" [ref=f13e259]
+              - listitem [aria-hidden] [ref=f13e260]
+              - listitem [ref=f13e261]:
+                - link "Advanced search" [ref=f13e262] [cursor=pointer]:
+                  - /url: /search/advanced
+          - slider "Draggable pane splitter" [ref=f13e266]
+        - generic [ref=f13e269]:
+          - generic [ref=f13e270]:
+            - generic [ref=f13e272]:
+              - generic [ref=f13e273]:
+                - generic [ref=f13e274]:
+                  - generic [ref=f13e275]: 0 results
+                  - generic [ref=f13e276]: (138 ms)
+                - heading "0 results" [level=2] [ref=f13e277]
+              - generic [ref=f13e278]:
+                - 'button "Sort by: Best match" [ref=f13e280] [cursor=pointer]'
+                - button "Open column options" [ref=f13e284] [cursor=pointer]
+            - generic [ref=f13e289]:
+              - generic [ref=f13e291]:
+                - generic [ref=f13e292]:
+                  - heading "chigwell/telegram-mcp" [level=3] [ref=f13e293]:
+                    - link [ref=f13e297] [cursor=pointer]:
+                      - /url: /chigwell/telegram-mcp
+                      - generic [ref=f13e298]:
+                        - text: chigwell/
+                        - emphasis [ref=f13e299]: telegram
+                        - text: "-"
+                        - emphasis [ref=f13e300]: mcp
+                  - generic [ref=f13e302]:
+                    - emphasis [ref=f13e303]: Telegram
+                    - emphasis [ref=f13e304]: MCP
+                    - text: server powered by Telethon to let
+                    - emphasis [ref=f13e305]: MCP
+                    - text: clients read chats, manage groups, and send/modify messages, media, contacts, and sett…
+                  - generic [ref=f13e306]:
+                    - link "search" [ref=f13e308] [cursor=pointer]:
+                      - /url: /topics/search
+                    - link "api" [ref=f13e310] [cursor=pointer]:
+                      - /url: /topics/api
+                    - link "groups" [ref=f13e312] [cursor=pointer]:
+                      - /url: /topics/groups
+                    - link "admin" [ref=f13e314] [cursor=pointer]:
+                      - /url: /topics/admin
+                    - link "telegram" [ref=f13e316] [cursor=pointer]:
+                      - /url: /topics/telegram
+                  - list [ref=f13e317]:
+                    - listitem [ref=f13e318]:
+                      - generic "Python language" [ref=f13e321]: Python
+                    - generic [aria-hidden] [ref=f13e322]: ·
+                    - listitem [ref=f13e323]:
+                      - link "1747 stars" [ref=f13e324] [cursor=pointer]:
+                        - /url: /chigwell/telegram-mcp/stargazers
+                        - generic [ref=f13e327]: 1.7k
+                    - generic [aria-hidden] [ref=f13e328]: ·
+                    - listitem [ref=f13e329]:
+                      - generic [ref=f13e330]:
+                        - text: Updated
+                        - generic "Oct 3, 2026, 2:12 PM UTC" [ref=f13e331]: 5 hours ago
+                - link "Star" [ref=f13e334] [cursor=pointer]:
+                  - /url: /login?return_to=https%3A%2F%2Fgithub.com%2Fsearch%3Fq%3Dmcp%2Btelegram
+              - generic [ref=f13e338]:
+                - generic [ref=f13e339]:
+                  - heading "groupultra/telegram-search" [level=3] [ref=f13e340]:
+                    - link [ref=f13e344] [cursor=pointer]:
+                      - /url: /groupultra/telegram-search
+                      - generic [ref=f13e345]:
+                        - text: groupultra/
+                        - emphasis [ref=f13e346]: telegram
+                        - text: "-search"
+                  - generic [ref=f13e348]:
+                    - text: 🔍 导出并模糊搜索
+                    - emphasis [ref=f13e349]: Telegram
+                    - text: 聊天记录 | Export and fuzzy search your
+                    - emphasis [ref=f13e350]: Telegram
+                    - text: chat history
+                  - generic [ref=f13e351]:
+                    - link "ai" [ref=f13e353] [cursor=pointer]:
+                      - /url: /topics/ai
+                    - link "telegram" [ref=f13e355] [cursor=pointer]:
+                      - /url: /topics/telegram
+                    - link "telegram-bot" [ref=f13e357] [cursor=pointer]:
+                      - /url: /topics/telegram-bot
+                    - link "mcp" [ref=f13e359] [cursor=pointer]:
+                      - /url: /topics/mcp
+                    - link "embedding" [ref=f13e361] [cursor=pointer]:
+                      - /url: /topics/embedding
+                  - list [ref=f13e362]:
+                    - listitem [ref=f13e363]:
+                      - generic "TypeScript language" [ref=f13e366]: TypeScript
+                    - generic [aria-hidden] [ref=f13e367]: ·
+                    - listitem [ref=f13e368]:
+                      - link "4114 stars" [ref=f13e369] [cursor=pointer]:
+                        - /url: /groupultra/telegram-search/stargazers
+                        - generic [ref=f13e372]: 4.1k
+                    - generic [aria-hidden] [ref=f13e373]: ·
+                    - listitem [ref=f13e374]:
+                      - generic [ref=f13e375]:
+                        - text: Updated
+                        - generic "Sep 28, 2026, 1:38 PM UTC" [ref=f13e376]: 5 days ago
+                - link "Star" [ref=f13e379] [cursor=pointer]:
+                  - /url: /login?return_to=https%3A%2F%2Fgithub.com%2Fsearch%3Fq%3Dmcp%2Btelegram
+              - generic [ref=f13e383]:
+                - generic [ref=f13e384]:
+                  - heading "chaindead/telegram-mcp" [level=3] [ref=f13e385]:
+                    - link [ref=f13e389] [cursor=pointer]:
+                      - /url: /chaindead/telegram-mcp
+                      - generic [ref=f13e390]:
+                        - text: chaindead/
+                        - emphasis [ref=f13e391]: telegram
+                        - text: "-"
+                        - emphasis [ref=f13e392]: mcp
+                  - generic [ref=f13e394]:
+                    - emphasis [ref=f13e395]: Telegram
+                    - emphasis [ref=f13e396]: MCP
+                    - text: for managing dialogs, messages, drafts, read statuses, and more.
+                  - generic [ref=f13e397]:
+                    - link "telegram" [ref=f13e399] [cursor=pointer]:
+                      - /url: /topics/telegram
+                    - link "mcp" [ref=f13e401] [cursor=pointer]:
+                      - /url: /topics/mcp
+                    - link "telegram-api" [ref=f13e403] [cursor=pointer]:
+                      - /url: /topics/telegram-api
+                    - link "mtproto" [ref=f13e405] [cursor=pointer]:
+                      - /url: /topics/mtproto
+                    - link "mcp-server" [ref=f13e407] [cursor=pointer]:
+                      - /url: /topics/mcp-server
+                  - list [ref=f13e408]:
+                    - listitem [ref=f13e409]:
+                      - generic "Go language" [ref=f13e412]: Go
+                    - generic [aria-hidden] [ref=f13e413]: ·
+                    - listitem [ref=f13e414]:
+                      - link "349 stars" [ref=f13e415] [cursor=pointer]:
+                        - /url: /chaindead/telegram-mcp/stargazers
+                        - generic [ref=f13e418]: "349"
+                    - generic [aria-hidden] [ref=f13e419]: ·
+                    - listitem [ref=f13e420]:
+                      - generic [ref=f13e421]:
+                        - text: Updated
+                        - generic "May 28, 2026, 5:44 PM UTC" [ref=f13e422]: on May 28
+                - link "Star" [ref=f13e425] [cursor=pointer]:
+                  - /url: /login?return_to=https%3A%2F%2Fgithub.com%2Fsearch%3Fq%3Dmcp%2Btelegram
+              - generic [ref=f13e429]:
+                - generic [ref=f13e430]:
+                  - heading "dryeab/mcp-telegram" [level=3] [ref=f13e431]:
+                    - link [ref=f13e435] [cursor=pointer]:
+                      - /url: /dryeab/mcp-telegram
+                      - generic [ref=f13e436]:
+                        - text: dryeab/
+                        - emphasis [ref=f13e437]: mcp
+                        - text: "-"
+                        - emphasis [ref=f13e438]: telegram
+                  - generic [ref=f13e440]:
+                    - emphasis [ref=f13e441]: MCP
+                    - text: Server for
+                    - emphasis [ref=f13e442]: Telegram
+                  - generic [ref=f13e443]:
+                    - link "bot" [ref=f13e445] [cursor=pointer]:
+                      - /url: /topics/bot
+                    - link "ai" [ref=f13e447] [cursor=pointer]:
+                      - /url: /topics/ai
+                    - link "telegram" [ref=f13e449] [cursor=pointer]:
+                      - /url: /topics/telegram
+                    - link "telegram-bot" [ref=f13e451] [cursor=pointer]:
+                      - /url: /topics/telegram-bot
+                    - link "mcp" [ref=f13e453] [cursor=pointer]:
+                      - /url: /topics/mcp
+                  - list [ref=f13e454]:
+                    - listitem [ref=f13e455]:
+                      - generic "Python language" [ref=f13e458]: Python
+                    - generic [aria-hidden] [ref=f13e459]: ·
+                    - listitem [ref=f13e460]:
+                      - link "251 stars" [ref=f13e461] [cursor=pointer]:
+                        - /url: /dryeab/mcp-telegram/stargazers
+                        - generic [ref=f13e464]: "251"
+                    - generic [aria-hidden] [ref=f13e465]: ·
+                    - listitem [ref=f13e466]:
+                      - generic [ref=f13e467]:
+                        - text: Updated
+                        - generic "Jun 15, 2025, 10:11 AM UTC" [ref=f13e468]: on Jun 15, 2025
+                - link "Star" [ref=f13e471] [cursor=pointer]:
+                  - /url: /login?return_to=https%3A%2F%2Fgithub.com%2Fsearch%3Fq%3Dmcp%2Btelegram
+              - generic [ref=f13e475]:
+                - generic [ref=f13e476]:
+                  - heading "sparfenyuk/mcp-telegram" [level=3] [ref=f13e477]:
+                    - link [ref=f13e481] [cursor=pointer]:
+                      - /url: /sparfenyuk/mcp-telegram
+                      - generic [ref=f13e482]:
+                        - text: sparfenyuk/
+                        - emphasis [ref=f13e483]: mcp
+                        - text: "-"
+                        - emphasis [ref=f13e484]: telegram
+                  - generic [ref=f13e486]:
+                    - emphasis [ref=f13e487]: MCP
+                    - text: server to work with
+                    - emphasis [ref=f13e488]: Telegram
+                    - text: through MTProto
+                  - generic [ref=f13e489]:
+                    - link "telegram-api" [ref=f13e491] [cursor=pointer]:
+                      - /url: /topics/telegram-api
+                    - link "claude" [ref=f13e493] [cursor=pointer]:
+                      - /url: /topics/claude
+                    - link "mcp-servers" [ref=f13e495] [cursor=pointer]:
+                      - /url: /topics/mcp-servers
+                  - list [ref=f13e496]:
+                    - listitem [ref=f13e497]:
+                      - generic "Python language" [ref=f13e500]: Python
+                    - generic [aria-hidden] [ref=f13e501]: ·
+                    - listitem [ref=f13e502]:
+                      - link "188 stars" [ref=f13e503] [cursor=pointer]:
+                        - /url: /sparfenyuk/mcp-telegram/stargazers
+                        - generic [ref=f13e506]: "188"
+                    - generic [aria-hidden] [ref=f13e507]: ·
+                    - listitem [ref=f13e508]:
+                      - generic [ref=f13e509]:
+                        - text: Updated
+                        - generic "Mar 14, 2025, 11:27 AM UTC" [ref=f13e510]: on Mar 14, 2025
+                - link "Star" [ref=f13e513] [cursor=pointer]:
+                  - /url: /login?return_to=https%3A%2F%2Fgithub.com%2Fsearch%3Fq%3Dmcp%2Btelegram
+              - generic [ref=f13e517]:
+                - generic [ref=f13e518]:
+                  - heading "popstas/telegram-download-chat" [level=3] [ref=f13e519]:
+                    - link [ref=f13e523] [cursor=pointer]:
+                      - /url: /popstas/telegram-download-chat
+                      - generic [ref=f13e524]:
+                        - text: popstas/
+                        - emphasis [ref=f13e525]: telegram
+                        - text: "-download-chat"
+                  - generic [ref=f13e527]:
+                    - text: Download any
+                    - emphasis [ref=f13e528]: Telegram
+                    - text: "chat history: CLI, GUI, WebUI,"
+                    - emphasis [ref=f13e529]: MCP
+                    - text: ", Skill"
+                  - list [ref=f13e530]:
+                    - listitem [ref=f13e531]:
+                      - generic "Python language" [ref=f13e534]: Python
+                    - generic [aria-hidden] [ref=f13e535]: ·
+                    - listitem [ref=f13e536]:
+                      - link "218 stars" [ref=f13e537] [cursor=pointer]:
+                        - /url: /popstas/telegram-download-chat/stargazers
+                        - generic [ref=f13e540]: "218"
+                    - generic [aria-hidden] [ref=f13e541]: ·
+                    - listitem [ref=f13e542]:
+                      - generic [ref=f13e543]:
+                        - text: Updated
+                        - generic "Sep 16, 2026, 6:33 PM UTC" [ref=f13e544]: 17 days ago
+                - link "Star" [ref=f13e547] [cursor=pointer]:
+                  - /url: /login?return_to=https%3A%2F%2Fgithub.com%2Fsearch%3Fq%3Dmcp%2Btelegram
+              - generic [ref=f13e551]:
+                - generic [ref=f13e552]:
+                  - heading "qpd-v/mcp-communicator-telegram" [level=3] [ref=f13e553]:
+                    - link [ref=f13e557] [cursor=pointer]:
+                      - /url: /qpd-v/mcp-communicator-telegram
+                      - generic [ref=f13e558]:
+                        - text: qpd-v/
+                        - emphasis [ref=f13e559]: mcp
+                        - text: "-communicator-"
+                        - emphasis [ref=f13e560]: telegram
+                  - generic [ref=f13e562]:
+                    - text: An
+                    - emphasis [ref=f13e563]: MCP
+                    - text: server that enables communication with users through
+                    - emphasis [ref=f13e564]: Telegram
+                    - text: . This server provides a tool to ask questions to users and receive t…
+                  - list [ref=f13e565]:
+                    - listitem [ref=f13e566]:
+                      - generic "JavaScript language" [ref=f13e569]: JavaScript
+                    - generic [aria-hidden] [ref=f13e570]: ·
+                    - listitem [ref=f13e571]:
+                      - link "47 stars" [ref=f13e572] [cursor=pointer]:
+                        - /url: /qpd-v/mcp-communicator-telegram/stargazers
+                        - generic [ref=f13e575]: "47"
+                    - generic [aria-hidden] [ref=f13e576]: ·
+                    - listitem [ref=f13e577]:
+                      - generic [ref=f13e578]:
+                        - text: Updated
+                        - generic "Jan 24, 2025, 1:34 AM UTC" [ref=f13e579]: on Jan 24, 2025
+                - link "Star" [ref=f13e582] [cursor=pointer]:
+                  - /url: /login?return_to=https%3A%2F%2Fgithub.com%2Fsearch%3Fq%3Dmcp%2Btelegram
+              - generic [ref=f13e586]:
+                - generic [ref=f13e587]:
+                  - heading "mcp-telegram/mcp-telegram" [level=3] [ref=f13e588]:
+                    - link [ref=f13e592] [cursor=pointer]:
+                      - /url: /mcp-telegram/mcp-telegram
+                      - generic [ref=f13e593]:
+                        - text: mcp-telegram/
+                        - emphasis [ref=f13e594]: mcp
+                        - text: "-"
+                        - emphasis [ref=f13e595]: telegram
+                  - generic [ref=f13e597]:
+                    - emphasis [ref=f13e598]: Telegram
+                    - emphasis [ref=f13e599]: MCP
+                    - text: "server: connect your personal"
+                    - emphasis [ref=f13e600]: Telegram
+                    - text: account to Claude, ChatGPT, Cursor and any
+                    - emphasis [ref=f13e601]: MCP
+                    - text: client. 182 tools over MTProto. Self-h…
+                  - generic [ref=f13e602]:
+                    - link "typescript" [ref=f13e604] [cursor=pointer]:
+                      - /url: /topics/typescript
+                    - link "telegram" [ref=f13e606] [cursor=pointer]:
+                      - /url: /topics/telegram
+                    - link "mcp" [ref=f13e608] [cursor=pointer]:
+                      - /url: /topics/mcp
+                    - link "mtproto" [ref=f13e610] [cursor=pointer]:
+                      - /url: /topics/mtproto
+                    - link "userbot" [ref=f13e612] [cursor=pointer]:
+                      - /url: /topics/userbot
+                  - list [ref=f13e613]:
+                    - listitem [ref=f13e614]:
+                      - generic "TypeScript language" [ref=f13e617]: TypeScript
+                    - generic [aria-hidden] [ref=f13e618]: ·
+                    - listitem [ref=f13e619]:
+                      - link "44 stars" [ref=f13e620] [cursor=pointer]:
+                        - /url: /mcp-telegram/mcp-telegram/stargazers
+                        - generic [ref=f13e623]: "44"
+                    - generic [aria-hidden] [ref=f13e624]: ·
+                    - listitem [ref=f13e625]:
+                      - generic [ref=f13e626]:
+                        - text: Updated
+                        - generic "Oct 3, 2026, 3:38 PM UTC" [ref=f13e627]: 3 hours ago
+                - link "Star" [ref=f13e630] [cursor=pointer]:
+                  - /url: /login?return_to=https%3A%2F%2Fgithub.com%2Fsearch%3Fq%3Dmcp%2Btelegram
+              - generic [ref=f13e634]:
+                - generic [ref=f13e635]:
+                  - heading "leshchenko1979/fast-mcp-telegram" [level=3] [ref=f13e636]:
+                    - link [ref=f13e640] [cursor=pointer]:
+                      - /url: /leshchenko1979/fast-mcp-telegram
+                      - generic [ref=f13e641]:
+                        - text: leshchenko1979/fast-
+                        - emphasis [ref=f13e642]: mcp
+                        - text: "-"
+                        - emphasis [ref=f13e643]: telegram
+                  - generic [ref=f13e645]:
+                    - emphasis [ref=f13e646]: Telegram
+                    - emphasis [ref=f13e647]: MCP
+                    - text: "gateway for AI agents: 8 tools, multi-tenant HTTP/stdio, MTProto"
+                  - generic [ref=f13e648]:
+                    - link "agent" [ref=f13e650] [cursor=pointer]:
+                      - /url: /topics/agent
+                    - link "docker" [ref=f13e652] [cursor=pointer]:
+                      - /url: /topics/docker
+                    - link "automation" [ref=f13e654] [cursor=pointer]:
+                      - /url: /topics/automation
+                    - link "telegram" [ref=f13e656] [cursor=pointer]:
+                      - /url: /topics/telegram
+                    - link "mcp" [ref=f13e658] [cursor=pointer]:
+                      - /url: /topics/mcp
+                  - list [ref=f13e659]:
+                    - listitem [ref=f13e660]:
+                      - generic "Python language" [ref=f13e663]: Python
+                    - generic [aria-hidden] [ref=f13e664]: ·
+                    - listitem [ref=f13e665]:
+                      - link "48 stars" [ref=f13e666] [cursor=pointer]:
+                        - /url: /leshchenko1979/fast-mcp-telegram/stargazers
+                        - generic [ref=f13e669]: "48"
+                    - generic [aria-hidden] [ref=f13e670]: ·
+                    - listitem [ref=f13e671]:
+                      - generic [ref=f13e672]:
+                        - text: Updated
+                        - generic "Oct 1, 2026, 1:49 PM UTC" [ref=f13e673]: 2 days ago
+                - link "Star" [ref=f13e676] [cursor=pointer]:
+                  - /url: /login?return_to=https%3A%2F%2Fgithub.com%2Fsearch%3Fq%3Dmcp%2Btelegram
+              - generic [ref=f13e680]:
+                - generic [ref=f13e681]:
+                  - heading "archetyx/telegram-mcp-server" [level=3] [ref=f13e682]:
+                    - link [ref=f13e686] [cursor=pointer]:
+                      - /url: /archetyx/telegram-mcp-server
+                      - generic [ref=f13e687]:
+                        - text: archetyx/
+                        - emphasis [ref=f13e688]: telegram
+                        - text: "-"
+                        - emphasis [ref=f13e689]: mcp
+                        - text: "-server"
+                  - generic [ref=f13e691]:
+                    - text: Remote control AI coding assistants (Claude Code/Codex) via
+                    - emphasis [ref=f13e692]: Telegram
+                  - list [ref=f13e693]:
+                    - listitem [ref=f13e694]:
+                      - generic "Python language" [ref=f13e697]: Python
+                    - generic [aria-hidden] [ref=f13e698]: ·
+                    - listitem [ref=f13e699]:
+                      - link "30 stars" [ref=f13e700] [cursor=pointer]:
+                        - /url: /archetyx/telegram-mcp-server/stargazers
+                        - generic [ref=f13e703]: "30"
+                    - generic [aria-hidden] [ref=f13e704]: ·
+                    - listitem [ref=f13e705]:
+                      - generic [ref=f13e706]:
+                        - text: Updated
+                        - generic "Oct 22, 2025, 11:27 AM UTC" [ref=f13e707]: on Oct 22, 2025
+                - link "Star" [ref=f13e710] [cursor=pointer]:
+                  - /url: /login?return_to=https%3A%2F%2Fgithub.com%2Fsearch%3Fq%3Dmcp%2Btelegram
+            - navigation "Pagination" [ref=f13e715]:
+              - generic [ref=f13e716]:
+                - generic [aria-hidden] [ref=f13e717]: Previous
+                - link "Page 1" [ref=f13e720] [cursor=pointer]:
+                  - /url: https://github.com/search?q=mcp+telegram&p=1
+                  - text: "1"
+                - link "Page 2" [ref=f13e721] [cursor=pointer]:
+                  - /url: https://github.com/search?q=mcp+telegram&p=2
+                  - text: "2"
+                - link "Page 3" [ref=f13e722] [cursor=pointer]:
+                  - /url: https://github.com/search?q=mcp+telegram&p=3
+                  - text: "3"
+                - link "Page 4" [ref=f13e723] [cursor=pointer]:
+                  - /url: https://github.com/search?q=mcp+telegram&p=4
+                  - text: "4"
+                - link "Page 5" [ref=f13e724] [cursor=pointer]:
+                  - /url: https://github.com/search?q=mcp+telegram&p=5
+                  - text: "5"
+                - link "Page 6" [ref=f13e725] [cursor=pointer]:
+                  - /url: https://github.com/search?q=mcp+telegram&p=6
+                  - text: "6"
+                - link "Page 7..." [ref=f13e726] [cursor=pointer]:
+                  - /url: https://github.com/search?q=mcp+telegram&p=7
+                  - text: "7"
+                - text: …
+                - link "Page 100" [ref=f13e727] [cursor=pointer]:
+                  - /url: https://github.com/search?q=mcp+telegram&p=100
+                  - text: "100"
+                - link "Next Page" [ref=f13e728] [cursor=pointer]:
+                  - /url: https://github.com/search?q=mcp+telegram&p=2
+                  - text: Next
+          - generic [ref=f13e732]:
+            - generic [ref=f13e733]:
+              - img "Package icon" [ref=f13e735]
+              - heading "Sponsor open source projects you depend on" [level=2] [ref=f13e736]
+              - generic [ref=f13e737]: Contributors are working behind the scenes to make open source better for everyone—give them the help and recognition they deserve.
+              - link "Explore sponsorable projects" [ref=f13e738] [cursor=pointer]:
+                - /url: https://github.com/sponsors/explore
+            - generic [ref=f13e741]:
+              - generic [ref=f13e742]: ProTip!
+              - generic [ref=f13e745]:
+                - text: Press the
+                - generic [ref=f13e746]: /
+                - text: key to activate the search input again and adjust your query.

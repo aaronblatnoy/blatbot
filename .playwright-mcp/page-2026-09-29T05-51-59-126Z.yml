@@ -1,0 +1,766 @@
+- generic [active] [ref=f16e1]:
+  - main [ref=f16e2]:
+    - navigation [ref=f16e3]:
+      - link "About" [ref=f16e4] [cursor=pointer]:
+        - /url: /info/en/about
+      - link "Preferences" [ref=f16e10] [cursor=pointer]:
+        - /url: /preferences
+    - search [ref=f16e14]:
+      - generic [ref=f16e15]:
+        - link "Display the front page" [ref=f16e16] [cursor=pointer]:
+          - /url: /
+        - generic [ref=f16e23]:
+          - textbox "Search for..." [ref=f16e24]: Sean Parnell TAMID NYU co-president internship experience
+          - button "clear" [ref=f16e25]
+          - button "search" [ref=f16e29]
+          - generic:
+            - list
+        - generic [ref=f16e35]:
+          - button "general" [ref=f16e36] [cursor=pointer]
+          - button "images" [ref=f16e41] [cursor=pointer]
+          - button "videos" [ref=f16e47] [cursor=pointer]
+          - button "news" [ref=f16e51] [cursor=pointer]
+          - button "map" [ref=f16e58] [cursor=pointer]
+          - button "music" [ref=f16e63] [cursor=pointer]
+          - button "it" [ref=f16e68] [cursor=pointer]
+          - button "science" [ref=f16e73] [cursor=pointer]
+          - button "files" [ref=f16e78] [cursor=pointer]
+          - button "social media" [ref=f16e83] [cursor=pointer]
+      - generic [ref=f16e90]:
+        - combobox "Search language" [ref=f16e91]:
+          - option "Default language [all]"
+          - option "Auto-detect (en)"
+          - option "Afrikaans [af] 🌐"
+          - option "Català [ca] 🌐"
+          - option "Català-Espanya [ca-ES] 🇪🇸"
+          - option "Cymraeg [cy] 🌐"
+          - option "Dansk [da] 🌐"
+          - option "Dansk-Danmark [da-DK] 🇩🇰"
+          - option "Deutsch [de] 🌐"
+          - option "Deutsch-Österreich [de-AT] 🇦🇹"
+          - option "Deutsch-Belgien [de-BE] 🇧🇪"
+          - option "Deutsch-Schweiz [de-CH] 🇨🇭"
+          - option "Deutsch-Deutschland [de-DE] 🇩🇪"
+          - option "Eesti [et] 🌐"
+          - option "Eesti-Eesti [et-EE] 🇪🇪"
+          - option "English [en] 🌐" [selected]
+          - option "English-Australia [en-AU] 🇦🇺"
+          - option "English-Canada [en-CA] 🇨🇦"
+          - option "English-United Kingdom [en-GB] 🇬🇧"
+          - option "English-Hong Kong SAR China [en-HK] 🇭🇰"
+          - option "English-Ireland [en-IE] 🇮🇪"
+          - option "English-India [en-IN] 🇮🇳"
+          - option "English-New Zealand [en-NZ] 🇳🇿"
+          - option "English-Philippines [en-PH] 🇵🇭"
+          - option "English-Pakistan [en-PK] 🇵🇰"
+          - option "English-Singapore [en-SG] 🇸🇬"
+          - option "English-United States [en-US] 🇺🇸"
+          - option "English-South Africa [en-ZA] 🇿🇦"
+          - option "Español [es] 🌐"
+          - option "Español-Argentina [es-AR] 🇦🇷"
+          - option "Español-Chile [es-CL] 🇨🇱"
+          - option "Español-Colombia [es-CO] 🇨🇴"
+          - option "Español-España [es-ES] 🇪🇸"
+          - option "Español-México [es-MX] 🇲🇽"
+          - option "Español-Perú [es-PE] 🇵🇪"
+          - option "Español-Venezuela [es-VE] 🇻🇪"
+          - option "Filipino [fil] 🌐"
+          - option "Filipino-Pilipinas [fil-PH] 🇵🇭"
+          - option "Français [fr] 🌐"
+          - option "Français-Belgique [fr-BE] 🇧🇪"
+          - option "Français-Canada [fr-CA] 🇨🇦"
+          - option "Français-Suisse [fr-CH] 🇨🇭"
+          - option "Français-France [fr-FR] 🇫🇷"
+          - option "Galego [gl] 🌐"
+          - option "Hrvatski [hr] 🌐"
+          - option "Hrvatski-Hrvatska [hr-HR] 🇭🇷"
+          - option "Indonesia [id] 🌐"
+          - option "Indonesia-Indonesia [id-ID] 🇮🇩"
+          - option "Italiano [it] 🌐"
+          - option "Italiano-Svizzera [it-CH] 🇨🇭"
+          - option "Italiano-Italia [it-IT] 🇮🇹"
+          - option "Latviešu [lv] 🌐"
+          - option "Latviešu-Latvija [lv-LV] 🇱🇻"
+          - option "Lietuvių [lt] 🌐"
+          - option "Lietuvių-Lietuva [lt-LT] 🇱🇹"
+          - option "Magyar [hu] 🌐"
+          - option "Magyar-Magyarország [hu-HU] 🇭🇺"
+          - option "Māori [mi] 🌐"
+          - option "Māori-Aotearoa [mi-NZ] 🇳🇿"
+          - option "Nederlands [nl] 🌐"
+          - option "Nederlands-België [nl-BE] 🇧🇪"
+          - option "Nederlands-Nederland [nl-NL] 🇳🇱"
+          - option "Norsk Bokmål [nb] 🌐"
+          - option "Norsk Bokmål-Norge [nb-NO] 🇳🇴"
+          - option "Norsk Nynorsk [nn] 🌐"
+          - option "Norsk Nynorsk-Noreg [nn-NO] 🇳🇴"
+          - option "Polski [pl] 🌐"
+          - option "Polski-Polska [pl-PL] 🇵🇱"
+          - option "Português [pt] 🌐"
+          - option "Português-Brasil [pt-BR] 🇧🇷"
+          - option "Português-Portugal [pt-PT] 🇵🇹"
+          - option "Română [ro] 🌐"
+          - option "Română-România [ro-RO] 🇷🇴"
+          - option "Shqip [sq] 🌐"
+          - option "Slovenčina [sk] 🌐"
+          - option "Slovenčina-Slovensko [sk-SK] 🇸🇰"
+          - option "Slovenščina [sl] 🌐"
+          - option "Slovenščina-Slovenija [sl-SI] 🇸🇮"
+          - option "Suomi [fi] 🌐"
+          - option "Suomi-Suomi [fi-FI] 🇫🇮"
+          - option "Svenska [sv] 🌐"
+          - option "Svenska-Finland [sv-FI] 🇫🇮"
+          - option "Svenska-Sverige [sv-SE] 🇸🇪"
+          - option "Tiếng Việt [vi] 🌐"
+          - option "Tiếng Việt-Việt Nam [vi-VN] 🇻🇳"
+          - option "Türkçe [tr] 🌐"
+          - option "Türkçe-Türkiye [tr-TR] 🇹🇷"
+          - option "Čeština [cs] 🌐"
+          - option "Čeština-Česko [cs-CZ] 🇨🇿"
+          - option "Ελληνικά [el] 🌐"
+          - option "Ελληνικά-Ελλάδα [el-GR] 🇬🇷"
+          - option "Български [bg] 🌐"
+          - option "Български-България [bg-BG] 🇧🇬"
+          - option "Русский [ru] 🌐"
+          - option "Русский-Россия [ru-RU] 🇷🇺"
+          - option "Українська [uk] 🌐"
+          - option "Українська-Україна [uk-UA] 🇺🇦"
+          - option "العربية [ar] 🌐"
+          - option "العربية-المملكة العربية السعودية [ar-SA] 🇸🇦"
+          - option "فارسی [fa] 🌐"
+          - option "हिन्दी [hi] 🌐"
+          - option "हिन्दी-भारत [hi-IN] 🇮🇳"
+          - option "ไทย [th] 🌐"
+          - option "ไทย-ไทย [th-TH] 🇹🇭"
+          - option "中文 [zh] 🌐"
+          - option "中文-中国 [zh-CN] 🇨🇳"
+          - option "中文-中國香港特別行政區 [zh-HK] 🇭🇰"
+          - option "中文-台灣 [zh-TW] 🇹🇼"
+          - option "日本語 [ja] 🌐"
+          - option "日本語-日本 [ja-JP] 🇯🇵"
+          - option "한국어 [ko] 🌐"
+          - option "한국어-대한민국 [ko-KR] 🇰🇷"
+        - combobox "Time range" [ref=f16e92]:
+          - option "Anytime" [selected]
+          - option "Last day"
+          - option "Last week"
+          - option "Last month"
+          - option "Last year"
+        - combobox "SafeSearch" [ref=f16e93]:
+          - option "Strict": "SafeSearch: Strict"
+          - option "Moderate": "SafeSearch: Moderate"
+          - option "None" [selected]: "SafeSearch: None"
+    - generic [ref=f16e94]:
+      - generic [ref=f16e95]:
+        - group [ref=f16e97]:
+          - 'generic "Response time: 0.6 seconds" [ref=f16e98] [cursor=pointer]'
+        - complementary "Download results" [ref=f16e99]:
+          - group [ref=f16e100]:
+            - generic "Download results" [ref=f16e101] [cursor=pointer]
+      - main [ref=f16e103]:
+        - article [ref=f16e104]:
+          - generic [ref=f16e105]:
+            - link "https://en.m.wikipedia.org › wiki › Sean" [ref=f16e106] [cursor=pointer]:
+              - /url: https://en.m.wikipedia.org/wiki/Sean
+              - generic [ref=f16e107]:
+                - generic [ref=f16e108]: https://en.m.wikipedia.org
+                - generic [ref=f16e109]: › wiki › Sean
+            - heading [level=3] [ref=f16e111]:
+              - link "Sean - Wikipedia" [ref=f16e112] [cursor=pointer]:
+                - /url: https://en.m.wikipedia.org/wiki/Sean
+            - paragraph [ref=f16e113]: Sean, also spelled Seán (or sometimes Séan) in Hiberno-English, [1][2] is a male given name of Irish and English origin.
+          - generic [ref=f16e114]:
+            - generic [ref=f16e115]: bing
+            - link "cached" [ref=f16e120] [cursor=pointer]:
+              - /url: https://web.archive.org/web/https://en.m.wikipedia.org/wiki/Sean
+        - article [ref=f16e121]:
+          - generic [ref=f16e122]:
+            - link "https://www.nyutamid.org › our-board" [ref=f16e123] [cursor=pointer]:
+              - /url: https://www.nyutamid.org/our-board
+              - generic [ref=f16e124]:
+                - generic [ref=f16e125]: https://www.nyutamid.org
+                - generic [ref=f16e126]: › our-board
+            - heading [level=3] [ref=f16e128]:
+              - link "Executive Board - TAMID" [ref=f16e129] [cursor=pointer]:
+                - /url: https://www.nyutamid.org/our-board
+            - paragraph [ref=f16e130]: Interested in Joining Our Board? TAMID Group at NYU is always looking for passionate students who want to build professional skills and lead. Board positions become available each academic year through our application process.
+          - generic [ref=f16e131]:
+            - generic [ref=f16e132]: duckduckgo
+            - link "cached" [ref=f16e137] [cursor=pointer]:
+              - /url: https://web.archive.org/web/https://www.nyutamid.org/our-board
+        - article [ref=f16e138]:
+          - generic [ref=f16e139]:
+            - link "https://tamidgroup.org › tamid-at-nyu" [ref=f16e140] [cursor=pointer]:
+              - /url: https://tamidgroup.org/tamid-at-nyu/
+              - generic [ref=f16e141]:
+                - generic [ref=f16e142]: https://tamidgroup.org
+                - generic [ref=f16e143]: › tamid-at-nyu
+            - heading [level=3] [ref=f16e145]:
+              - link "TAMID Group | A student's experience at NYU" [ref=f16e146] [cursor=pointer]:
+                - /url: https://tamidgroup.org/tamid-at-nyu/
+            - paragraph [ref=f16e147]: (Yes, I’m aware of the irony that an Israeli came all the way to America to network his way back to an internship in Israel) And so, over the last summer, thanks to TAMID, I wasn’t unemployed but rather had an invaluable experience working for one of Israel’s biggest VC’s, learning about the VC world, researching a lot of different companies and asking poignant questions to entrepreneurs twice my age who had to answer because all of a sudden I’m “the man with the money” and not just a college student.
+          - generic [ref=f16e148]:
+            - generic [ref=f16e149]: brave
+            - generic [ref=f16e150]: duckduckgo
+            - link "cached" [ref=f16e155] [cursor=pointer]:
+              - /url: https://web.archive.org/web/https://tamidgroup.org/tamid-at-nyu/
+        - article [ref=f16e156]:
+          - generic [ref=f16e157]:
+            - link "https://www.linkedin.com › company › tamid-at-nyu" [ref=f16e158] [cursor=pointer]:
+              - /url: https://www.linkedin.com/company/tamid-at-nyu
+              - generic [ref=f16e159]:
+                - generic [ref=f16e160]: https://www.linkedin.com
+                - generic [ref=f16e161]: › company › tamid-at-nyu
+            - heading [level=3] [ref=f16e163]:
+              - link "TAMID at NYU - LinkedIn" [ref=f16e164] [cursor=pointer]:
+                - /url: https://www.linkedin.com/company/tamid-at-nyu
+            - paragraph [ref=f16e165]: TAMID Group at NYU develops the professional skills of undergraduate students through hands-on interaction with the Israeli economy. TAMID introduces the next generation of entrepreneurs and ...
+          - generic [ref=f16e166]:
+            - generic [ref=f16e167]: brave
+            - generic [ref=f16e168]: duckduckgo
+            - link "cached" [ref=f16e173] [cursor=pointer]:
+              - /url: https://web.archive.org/web/https://www.linkedin.com/company/tamid-at-nyu
+        - article [ref=f16e174]:
+          - generic [ref=f16e175]:
+            - link "https://engage.nyu.edu › organization › tamid-at-nyu" [ref=f16e176] [cursor=pointer]:
+              - /url: https://engage.nyu.edu/organization/tamid-at-nyu
+              - generic [ref=f16e177]:
+                - generic [ref=f16e178]: https://engage.nyu.edu
+                - generic [ref=f16e179]: › organization › tamid-at-nyu
+            - heading [level=3] [ref=f16e181]:
+              - link "TAMID at NYU - All-University - NYU Engage" [ref=f16e182] [cursor=pointer]:
+                - /url: https://engage.nyu.edu/organization/tamid-at-nyu
+            - paragraph [ref=f16e183]: TAMID is an areligious and apolitical undergraduate club that consults for Israeli startups and invests in publicly traded Israeli companies. TAMID students are paired with challenging, yet exciting projects within consulting, tech, and fund tracks to help build skills through real-world experiences to prepare them for their future careers.
+          - generic [ref=f16e184]:
+            - generic [ref=f16e185]: brave
+            - generic [ref=f16e186]: duckduckgo
+            - link "cached" [ref=f16e191] [cursor=pointer]:
+              - /url: https://web.archive.org/web/https://engage.nyu.edu/organization/tamid-at-nyu
+        - article [ref=f16e192]:
+          - generic [ref=f16e193]:
+            - link "https://www.irelandbeforeyoudie.com › sean-pronunciation-meaning-explained" [ref=f16e194] [cursor=pointer]:
+              - /url: https://www.irelandbeforeyoudie.com/sean-pronunciation-meaning-explained/
+              - generic [ref=f16e195]:
+                - generic [ref=f16e196]: https://www.irelandbeforeyoudie.com
+                - generic [ref=f16e197]: › sean-pronunciation-meaning-explained
+            - heading [level=3] [ref=f16e199]:
+              - 'link "SEÁN: pronunciation and meaning explained" [ref=f16e200] [cursor=pointer]':
+                - /url: https://www.irelandbeforeyoudie.com/sean-pronunciation-meaning-explained/
+            - paragraph [ref=f16e201]: Mar 16, 2024 · From pronunciation to meaning, here is everything you need to know about the Irish name Seán. The name Seán is …
+          - generic [ref=f16e202]:
+            - generic [ref=f16e203]: bing
+            - link "cached" [ref=f16e208] [cursor=pointer]:
+              - /url: https://web.archive.org/web/https://www.irelandbeforeyoudie.com/sean-pronunciation-meaning-explained/
+        - article [ref=f16e209]:
+          - generic [ref=f16e210]:
+            - link "https://www.linkedin.com › in › seanparnelll" [ref=f16e211] [cursor=pointer]:
+              - /url: https://www.linkedin.com/in/seanparnelll
+              - generic [ref=f16e212]:
+                - generic [ref=f16e213]: https://www.linkedin.com
+                - generic [ref=f16e214]: › in › seanparnelll
+            - heading [level=3] [ref=f16e216]:
+              - link "Sean Parnell - Student at New York University | LinkedIn" [ref=f16e217] [cursor=pointer]:
+                - /url: https://www.linkedin.com/in/seanparnelll
+            - paragraph [ref=f16e218]: "Student at New York University · Experience: Raymond James · Education: New York University · Location: New York · 500+ connections on LinkedIn. View Sean Parnell's profile on LinkedIn, a ..."
+          - generic [ref=f16e219]:
+            - generic [ref=f16e220]: duckduckgo
+            - link "cached" [ref=f16e225] [cursor=pointer]:
+              - /url: https://web.archive.org/web/https://www.linkedin.com/in/seanparnelll
+        - article [ref=f16e226]:
+          - generic [ref=f16e227]:
+            - link "https://tamidgroup.org › get-involved" [ref=f16e228] [cursor=pointer]:
+              - /url: https://tamidgroup.org/get-involved/
+              - generic [ref=f16e229]:
+                - generic [ref=f16e230]: https://tamidgroup.org
+                - generic [ref=f16e231]: › get-involved
+            - heading [level=3] [ref=f16e233]:
+              - link "TAMID Group | Get Involved" [ref=f16e234] [cursor=pointer]:
+                - /url: https://tamidgroup.org/get-involved/
+            - time [ref=f16e235]: 2025-07-24 19:04:08
+            - paragraph [ref=f16e236]: “As my internship with Promo.com comes to a close, I can say that I am now more than ever connected to Israel through my enhanced understanding of what it means to work at a startup in the startup nation. From my hands-on experience in marketing at Promo.com to being immersed into the Israeli culture through TAMID-sponsored trips, I have been able to refine my understanding of what it means to be in this part of the world and see firsthand Israel’s continued global impact.”
+          - generic [ref=f16e237]:
+            - generic [ref=f16e238]: brave
+            - link "cached" [ref=f16e243] [cursor=pointer]:
+              - /url: https://web.archive.org/web/https://tamidgroup.org/get-involved/
+        - article [ref=f16e244]:
+          - generic [ref=f16e245]:
+            - link "https://tamidgroup.org" [ref=f16e246] [cursor=pointer]:
+              - /url: https://tamidgroup.org/
+            - heading [level=3] [ref=f16e249]:
+              - link "TAMID GROUP - Experiential learning through business in Israel" [ref=f16e250] [cursor=pointer]:
+                - /url: https://tamidgroup.org/
+            - paragraph [ref=f16e251]: “TAMID fosters a connection to Israel that goes far beyond business. Students gain an understanding of the country’s culture, challenges, and strengths—getting involved in a nation that thrives on resilience and innovation is special.
+          - generic [ref=f16e252]:
+            - generic [ref=f16e253]: brave
+            - generic [ref=f16e254]: duckduckgo
+            - link "cached" [ref=f16e259] [cursor=pointer]:
+              - /url: https://web.archive.org/web/https://tamidgroup.org/
+        - article [ref=f16e260]:
+          - link [ref=f16e261] [cursor=pointer]:
+            - /url: https://intergratedtechnology.com/
+          - generic [ref=f16e262]:
+            - link "https://intergratedtechnology.com" [ref=f16e263] [cursor=pointer]:
+              - /url: https://intergratedtechnology.com/
+            - heading [level=3] [ref=f16e266]:
+              - 'link "Intergratedtechnology: Home" [ref=f16e267] [cursor=pointer]':
+                - /url: https://intergratedtechnology.com/
+            - paragraph [ref=f16e268]: Stay ahead with expert insights on hardware, mobile devices, and space technology. Trusted source for tech trends and innovations.
+          - generic [ref=f16e269]:
+            - generic [ref=f16e270]: google cse
+            - link "cached" [ref=f16e275] [cursor=pointer]:
+              - /url: https://web.archive.org/web/https://intergratedtechnology.com/
+        - article [ref=f16e276]:
+          - link [ref=f16e277] [cursor=pointer]:
+            - /url: https://tamidgroup.org/chapter-spotlight-cornell-university-new-york-university/
+          - generic [ref=f16e278]:
+            - link "https://tamidgroup.org › chapter-spotlight-cornell-university-new-york-university" [ref=f16e279] [cursor=pointer]:
+              - /url: https://tamidgroup.org/chapter-spotlight-cornell-university-new-york-university/
+              - generic [ref=f16e280]:
+                - generic [ref=f16e281]: https://tamidgroup.org
+                - generic [ref=f16e282]: › chapter-spotlight-cornell-university-new-york-university
+            - heading [level=3] [ref=f16e284]:
+              - 'link "Chapter Spotlight: Cornell University and New York University - ..." [ref=f16e285] [cursor=pointer]':
+                - /url: https://tamidgroup.org/chapter-spotlight-cornell-university-new-york-university/
+            - time [ref=f16e286]: 2016-08-25 03:42:21
+            - paragraph [ref=f16e287]: "(follow me- @kiddyeats) Name: Ross ... Experience: This past summer I had the incredible oppurtunity of working at Tufin, a cyber security firm focused on firewall network security policy orchestration...."
+          - generic [ref=f16e288]:
+            - generic [ref=f16e289]: brave
+            - link "cached" [ref=f16e294] [cursor=pointer]:
+              - /url: https://web.archive.org/web/https://tamidgroup.org/chapter-spotlight-cornell-university-new-york-university/
+        - article [ref=f16e295]:
+          - link [ref=f16e296] [cursor=pointer]:
+            - /url: https://theorg.com/org/tamid-at-nyu/offices/new-york
+          - generic [ref=f16e297]:
+            - link "https://theorg.com › org › tamid-at-nyu › offices › new-york" [ref=f16e298] [cursor=pointer]:
+              - /url: https://theorg.com/org/tamid-at-nyu/offices/new-york
+              - generic [ref=f16e299]:
+                - generic [ref=f16e300]: https://theorg.com
+                - generic [ref=f16e301]: › org › tamid-at-nyu › offices › new-york
+            - heading [level=3] [ref=f16e303]:
+              - link "TAMID at NYU - New York | The Org" [ref=f16e304] [cursor=pointer]:
+                - /url: https://theorg.com/org/tamid-at-nyu/offices/new-york
+            - paragraph [ref=f16e305]: "Director Of Technology: Tamid At NYU · Natalie Trump · VP Recruitment Marketing · Chaney Giampaolo · Member · Jagger Lambert · Director Of Consulting, VP Of Professional Development · Samantha Stern · General Education Member · Jeffrey Bichovsky · Fund Analyst · Zahava Butler · Member · Nathan Sholomon · Member · Stanley Rabkin · President ·"
+          - generic [ref=f16e306]:
+            - generic [ref=f16e307]: brave
+            - link "cached" [ref=f16e312] [cursor=pointer]:
+              - /url: https://web.archive.org/web/https://theorg.com/org/tamid-at-nyu/offices/new-york
+        - article [ref=f16e313]:
+          - link [ref=f16e314] [cursor=pointer]:
+            - /url: https://www.nyu.edu/students/student-information-and-resources/career-development-and-jobs/find-a-job-or-internship/internship-directory.html
+          - generic [ref=f16e315]:
+            - link "https://www.nyu.edu › students › student-information-and-resources › career-development-and-jobs › find-a-job-or-internship › internship-directory.html" [ref=f16e316] [cursor=pointer]:
+              - /url: https://www.nyu.edu/students/student-information-and-resources/career-development-and-jobs/find-a-job-or-internship/internship-directory.html
+              - generic [ref=f16e317]:
+                - generic [ref=f16e318]: https://www.nyu.edu
+                - generic [ref=f16e319]: › students › student-information-and-resources › career-development-and-jobs › find-a-job-or-internship › internship-directory.html
+            - heading [level=3] [ref=f16e321]:
+              - link "Internship Coordinator Directory" [ref=f16e322] [cursor=pointer]:
+                - /url: https://www.nyu.edu/students/student-information-and-resources/career-development-and-jobs/find-a-job-or-internship/internship-directory.html
+            - paragraph [ref=f16e323]: "If you received an internship ... administration, and credit related to your internship · Grossman School of Medicine Office of Science and Research: Brittany Edghill, Program ......"
+          - generic [ref=f16e324]:
+            - generic [ref=f16e325]: brave
+            - link "cached" [ref=f16e330] [cursor=pointer]:
+              - /url: https://web.archive.org/web/https://www.nyu.edu/students/student-information-and-resources/career-development-and-jobs/find-a-job-or-internship/internship-directory.html
+        - article [ref=f16e331]:
+          - link [ref=f16e332] [cursor=pointer]:
+            - /url: https://tamidgroup.org/fellowship/
+          - generic [ref=f16e333]:
+            - link "https://tamidgroup.org › fellowship" [ref=f16e334] [cursor=pointer]:
+              - /url: https://tamidgroup.org/fellowship/
+              - generic [ref=f16e335]:
+                - generic [ref=f16e336]: https://tamidgroup.org
+                - generic [ref=f16e337]: › fellowship
+            - heading [level=3] [ref=f16e339]:
+              - link "TAMID Group | Fellowship" [ref=f16e340] [cursor=pointer]:
+                - /url: https://tamidgroup.org/fellowship/
+            - time [ref=f16e341]: 2022-10-31 19:55:34
+            - paragraph [ref=f16e342]: The TAMID Fellowship offers high-quality internships at top Israeli companies. Through a personalized matching process, Fellows gain real-world experience in job searching and contribute meaningfully to their host companies.
+          - generic [ref=f16e343]:
+            - generic [ref=f16e344]: brave
+            - link "cached" [ref=f16e349] [cursor=pointer]:
+              - /url: https://web.archive.org/web/https://tamidgroup.org/fellowship/
+        - article [ref=f16e350]:
+          - link [ref=f16e351] [cursor=pointer]:
+            - /url: https://www.nyu.edu/academics/studying-abroad/student-experiences/academics/nyu-students-share-their-global-internship-experiences.html
+          - generic [ref=f16e352]:
+            - link "https://www.nyu.edu › academics › studying-abroad › student-experiences › academics › nyu-students-share-their-global-internship-experiences.html" [ref=f16e353] [cursor=pointer]:
+              - /url: https://www.nyu.edu/academics/studying-abroad/student-experiences/academics/nyu-students-share-their-global-internship-experiences.html
+              - generic [ref=f16e354]:
+                - generic [ref=f16e355]: https://www.nyu.edu
+                - generic [ref=f16e356]: › academics › studying-abroad › student-experiences › academics › nyu-students-share-their-global-internship-experiences.html
+            - heading [level=3] [ref=f16e358]:
+              - link "NYU Students Share Their Global Internship Experiences" [ref=f16e359] [cursor=pointer]:
+                - /url: https://www.nyu.edu/academics/studying-abroad/student-experiences/academics/nyu-students-share-their-global-internship-experiences.html
+            - paragraph [ref=f16e360]: The internship reinforced Sean’s love for the music industry, but it also taught him about new positions and departments he didn’t know existed. “I definitely have new aspirations because of my deeper understanding of how labels operate,” he says.
+          - generic [ref=f16e361]:
+            - generic [ref=f16e362]: brave
+            - link "cached" [ref=f16e367] [cursor=pointer]:
+              - /url: https://web.archive.org/web/https://www.nyu.edu/academics/studying-abroad/student-experiences/academics/nyu-students-share-their-global-internship-experiences.html
+        - article [ref=f16e368]:
+          - link [ref=f16e369] [cursor=pointer]:
+            - /url: https://jewishstandard.timesofisrael.com/the-business-of-tamid-is-business/
+          - generic [ref=f16e370]:
+            - link "https://jewishstandard.timesofisrael.com › the-business-of-tamid-is-business" [ref=f16e371] [cursor=pointer]:
+              - /url: https://jewishstandard.timesofisrael.com/the-business-of-tamid-is-business/
+              - generic [ref=f16e372]:
+                - generic [ref=f16e373]: https://jewishstandard.timesofisrael.com
+                - generic [ref=f16e374]: › the-business-of-tamid-is-business
+            - heading [level=3] [ref=f16e376]:
+              - link "The business of Tamid is business - The Jewish Standard" [ref=f16e377] [cursor=pointer]:
+                - /url: https://jewishstandard.timesofisrael.com/the-business-of-tamid-is-business/
+            - time [ref=f16e378]: 2016-10-13 18:22:21
+            - paragraph [ref=f16e379]: Last month the NYU chapter, together with Hillel, co-sponsored a talk by former Israeli Foreign Minister Tzipi Livni, and hosted investor Josh Kushner (yes, the New Jersey-born brother-of-son-in-law-of-Donald–J-Trump Jared.) Then there are the summer internships in Israel. This is an aspect of Tamid in which Ms.
+          - generic [ref=f16e380]:
+            - generic [ref=f16e381]: brave
+            - link "cached" [ref=f16e386] [cursor=pointer]:
+              - /url: https://web.archive.org/web/https://jewishstandard.timesofisrael.com/the-business-of-tamid-is-business/
+        - article [ref=f16e387]:
+          - link [ref=f16e388] [cursor=pointer]:
+            - /url: https://umbrex.com/resources/directory-of-consulting-clubs/nyu-tamid-group/
+          - generic [ref=f16e389]:
+            - link "https://umbrex.com › resources › directory-of-consulting-clubs › nyu-tamid-group" [ref=f16e390] [cursor=pointer]:
+              - /url: https://umbrex.com/resources/directory-of-consulting-clubs/nyu-tamid-group/
+              - generic [ref=f16e391]:
+                - generic [ref=f16e392]: https://umbrex.com
+                - generic [ref=f16e393]: › resources › directory-of-consulting-clubs › nyu-tamid-group
+            - heading [level=3] [ref=f16e395]:
+              - link "NYU TAMID Group" [ref=f16e396] [cursor=pointer]:
+                - /url: https://umbrex.com/resources/directory-of-consulting-clubs/nyu-tamid-group/
+            - time [ref=f16e397]: 2025-01-06 07:25:40
+            - paragraph [ref=f16e398]: TAMID Group at New York University is an areligious and apolitical undergraduate club that consults for Israeli startups and invests in publicly traded Israeli companies.
+          - generic [ref=f16e399]:
+            - generic [ref=f16e400]: brave
+            - link "cached" [ref=f16e405] [cursor=pointer]:
+              - /url: https://web.archive.org/web/https://umbrex.com/resources/directory-of-consulting-clubs/nyu-tamid-group/
+        - article [ref=f16e406]:
+          - link [ref=f16e407] [cursor=pointer]:
+            - /url: https://www.nyu.edu/about/leadership-university-administration/office-of-the-president/presidential-internship-program/alumni-interns.html
+          - generic [ref=f16e408]:
+            - link "https://www.nyu.edu › about › leadership-university-administration › office-of-the-president › presidential-internship-program › alumni-interns.html" [ref=f16e409] [cursor=pointer]:
+              - /url: https://www.nyu.edu/about/leadership-university-administration/office-of-the-president/presidential-internship-program/alumni-interns.html
+              - generic [ref=f16e410]:
+                - generic [ref=f16e411]: https://www.nyu.edu
+                - generic [ref=f16e412]: › about › leadership-university-administration › office-of-the-president › presidential-internship-program › alumni-interns.html
+            - heading [level=3] [ref=f16e414]:
+              - link "Alumni" [ref=f16e415] [cursor=pointer]:
+                - /url: https://www.nyu.edu/about/leadership-university-administration/office-of-the-president/presidential-internship-program/alumni-interns.html
+            - paragraph [ref=f16e416]: One of my most fulfilling projects was presenting and speaking with 6th - 8th grade students at the Hispanic Scholarship Fund College Camp. Hearing their dreams and aspirations, and speaking with them about future possibilities, reminded me ...
+          - generic [ref=f16e417]:
+            - generic [ref=f16e418]: brave
+            - link "cached" [ref=f16e423] [cursor=pointer]:
+              - /url: https://web.archive.org/web/https://www.nyu.edu/about/leadership-university-administration/office-of-the-president/presidential-internship-program/alumni-interns.html
+        - article [ref=f16e424]:
+          - generic [ref=f16e425]:
+            - link "https://www.youtube.com › @seannsean" [ref=f16e426] [cursor=pointer]:
+              - /url: https://www.youtube.com/@seannsean
+              - generic [ref=f16e427]:
+                - generic [ref=f16e428]: https://www.youtube.com
+                - generic [ref=f16e429]: › @seannsean
+            - heading [level=3] [ref=f16e431]:
+              - link "sean sean - YouTube" [ref=f16e432] [cursor=pointer]:
+                - /url: https://www.youtube.com/@seannsean
+            - paragraph [ref=f16e433]: JUST SHAVED ND READY TO DO A Q&A VIDEO. ASK ANYTHING ON THE COMMENTS HERE N ILL THROW IT IN THE VID.
+          - generic [ref=f16e434]:
+            - generic [ref=f16e435]: bing
+            - link "cached" [ref=f16e440] [cursor=pointer]:
+              - /url: https://web.archive.org/web/https://www.youtube.com/@seannsean
+        - article [ref=f16e441]:
+          - generic [ref=f16e442]:
+            - link "https://tamidgroup.org › fellowship-internships" [ref=f16e443] [cursor=pointer]:
+              - /url: https://tamidgroup.org/fellowship-internships/
+              - generic [ref=f16e444]:
+                - generic [ref=f16e445]: https://tamidgroup.org
+                - generic [ref=f16e446]: › fellowship-internships
+            - heading [level=3] [ref=f16e448]:
+              - link "TAMID Group | Fellowship / Internships" [ref=f16e449] [cursor=pointer]:
+                - /url: https://tamidgroup.org/fellowship-internships/
+            - time [ref=f16e450]: 2022-10-28 20:17:29
+            - paragraph [ref=f16e451]: Each summer, TAMID sponsors a highly competitive group of undergraduate students for a meaningful internship experience.
+          - generic [ref=f16e452]:
+            - generic [ref=f16e453]: brave
+            - link "cached" [ref=f16e458] [cursor=pointer]:
+              - /url: https://web.archive.org/web/https://tamidgroup.org/fellowship-internships/
+        - article [ref=f16e459]:
+          - generic [ref=f16e460]:
+            - link "https://www.behindthename.com › name › sean" [ref=f16e461] [cursor=pointer]:
+              - /url: https://www.behindthename.com/name/sean
+              - generic [ref=f16e462]:
+                - generic [ref=f16e463]: https://www.behindthename.com
+                - generic [ref=f16e464]: › name › sean
+            - heading [level=3] [ref=f16e466]:
+              - link "Meaning, origin and history of the name Sean" [ref=f16e467] [cursor=pointer]:
+                - /url: https://www.behindthename.com/name/sean
+            - paragraph [ref=f16e468]: May 26, 2026 · Anglicized form of Seán. This name, along with variants Shawn and Shaun, began to be used in the English …
+          - generic [ref=f16e469]:
+            - generic [ref=f16e470]: bing
+            - link "cached" [ref=f16e475] [cursor=pointer]:
+              - /url: https://web.archive.org/web/https://www.behindthename.com/name/sean
+        - article [ref=f16e476]:
+          - generic [ref=f16e477]:
+            - link "https://www.nyutamid.org" [ref=f16e478] [cursor=pointer]:
+              - /url: https://www.nyutamid.org/
+            - heading [level=3] [ref=f16e481]:
+              - link "TAMID Group at NYU" [ref=f16e482] [cursor=pointer]:
+                - /url: https://www.nyutamid.org/
+            - paragraph [ref=f16e483]: "TAMID at NYU Consult · Invest · Intern Abroad TAMID Group at NYU develops undergraduates' professional skills through hands-on work with the Israeli economy across four programs: Investment Fund, Consulting, Quant, and Israel Fellowship."
+          - generic [ref=f16e484]:
+            - generic [ref=f16e485]: duckduckgo
+            - link "cached" [ref=f16e490] [cursor=pointer]:
+              - /url: https://web.archive.org/web/https://www.nyutamid.org/
+        - article [ref=f16e491]:
+          - generic [ref=f16e492]:
+            - link "https://momlovesbest.com › sean-name-meaning" [ref=f16e493] [cursor=pointer]:
+              - /url: https://momlovesbest.com/sean-name-meaning
+              - generic [ref=f16e494]:
+                - generic [ref=f16e495]: https://momlovesbest.com
+                - generic [ref=f16e496]: › sean-name-meaning
+            - heading [level=3] [ref=f16e498]:
+              - 'link "Sean Name Meaning: Origin, Popularity & Nicknames" [ref=f16e499] [cursor=pointer]':
+                - /url: https://momlovesbest.com/sean-name-meaning
+            - paragraph [ref=f16e500]: Aug 11, 2026 · Sean means God is gracious, and it is often glossed more warmly as gift from God. The sense comes straight from …
+          - generic [ref=f16e501]:
+            - generic [ref=f16e502]: bing
+            - link "cached" [ref=f16e507] [cursor=pointer]:
+              - /url: https://web.archive.org/web/https://momlovesbest.com/sean-name-meaning
+        - article [ref=f16e508]:
+          - generic [ref=f16e509]:
+            - link "https://www.linkedin.com › in › tamidatnyu" [ref=f16e510] [cursor=pointer]:
+              - /url: https://www.linkedin.com/in/tamidatnyu
+              - generic [ref=f16e511]:
+                - generic [ref=f16e512]: https://www.linkedin.com
+                - generic [ref=f16e513]: › in › tamidatnyu
+            - heading [level=3] [ref=f16e515]:
+              - link "TAMID at New York University - LinkedIn" [ref=f16e516] [cursor=pointer]:
+                - /url: https://www.linkedin.com/in/tamidatnyu
+            - paragraph [ref=f16e517]: "Student at New York University · Experience: TAMID at NYU · Education: New York University · Location: New York · 145 connections on LinkedIn. View TAMID at New York University's profile on ..."
+          - generic [ref=f16e518]:
+            - generic [ref=f16e519]: duckduckgo
+            - link "cached" [ref=f16e524] [cursor=pointer]:
+              - /url: https://web.archive.org/web/https://www.linkedin.com/in/tamidatnyu
+        - article [ref=f16e525]:
+          - generic [ref=f16e526]:
+            - link "https://www.tiktok.com › @seanpanganiban_" [ref=f16e527] [cursor=pointer]:
+              - /url: https://www.tiktok.com/@seanpanganiban_
+              - generic [ref=f16e528]:
+                - generic [ref=f16e529]: https://www.tiktok.com
+                - generic [ref=f16e530]: › @seanpanganiban_
+            - heading [level=3] [ref=f16e532]:
+              - link "Sean (@seanpanganiban_) | TikTok" [ref=f16e533] [cursor=pointer]:
+                - /url: https://www.tiktok.com/@seanpanganiban_
+            - paragraph [ref=f16e534]: Join 5.2M followers on TikTok for more icelerskin, drlan, drlanddph content.
+          - generic [ref=f16e535]:
+            - generic [ref=f16e536]: bing
+            - link "cached" [ref=f16e541] [cursor=pointer]:
+              - /url: https://web.archive.org/web/https://www.tiktok.com/@seanpanganiban_
+        - article [ref=f16e542]:
+          - generic [ref=f16e543]:
+            - link "https://tamidgroup.org › faq" [ref=f16e544] [cursor=pointer]:
+              - /url: https://tamidgroup.org/faq/
+              - generic [ref=f16e545]:
+                - generic [ref=f16e546]: https://tamidgroup.org
+                - generic [ref=f16e547]: › faq
+            - heading [level=3] [ref=f16e549]:
+              - link "TAMID Group | FAQ" [ref=f16e550] [cursor=pointer]:
+                - /url: https://tamidgroup.org/faq/
+            - time [ref=f16e551]: 2022-10-17 19:00:09
+            - paragraph [ref=f16e552]: "Internship experiences are most valuable for companies and students when the intern has one or two large projects to work on over the course of a summer. Each intern comes with their own set of skills, but in general, they may be interested in: ... The easiest way to donate is at our donation page. ... As of March 1, 2018, TAMID Group operates as an independent organization with a dedicated Board of Directors and staff."
+          - generic [ref=f16e553]:
+            - generic [ref=f16e554]: brave
+            - link "cached" [ref=f16e559] [cursor=pointer]:
+              - /url: https://web.archive.org/web/https://tamidgroup.org/faq/
+        - article [ref=f16e560]:
+          - generic [ref=f16e561]:
+            - link "https://www.youtube.com › @seantv977" [ref=f16e562] [cursor=pointer]:
+              - /url: https://www.youtube.com/@seantv977
+              - generic [ref=f16e563]:
+                - generic [ref=f16e564]: https://www.youtube.com
+                - generic [ref=f16e565]: › @seantv977
+            - heading [level=3] [ref=f16e567]:
+              - link "Sean's World TV - YouTube" [ref=f16e568] [cursor=pointer]:
+                - /url: https://www.youtube.com/@seantv977
+            - paragraph [ref=f16e569]: "\"Traverse the world without network restrictions! Sean's eSim store: https://shln.top/flK8VLEveSim makes traveling easier. Just scan …"
+          - generic [ref=f16e570]:
+            - generic [ref=f16e571]: bing
+            - link "cached" [ref=f16e576] [cursor=pointer]:
+              - /url: https://web.archive.org/web/https://www.youtube.com/@seantv977
+        - article [ref=f16e577]:
+          - generic [ref=f16e578]:
+            - link "https://seans.uccs.edu" [ref=f16e579] [cursor=pointer]:
+              - /url: https://seans.uccs.edu/
+            - heading [level=3] [ref=f16e582]:
+              - link "SEANS" [ref=f16e583] [cursor=pointer]:
+                - /url: https://seans.uccs.edu/
+            - paragraph [ref=f16e584]: The UCCS Student Employment Assistance Network (SEAN) is where students can go to apply for on-campus and off-campus …
+          - generic [ref=f16e585]:
+            - generic [ref=f16e586]: bing
+            - link "cached" [ref=f16e591] [cursor=pointer]:
+              - /url: https://web.archive.org/web/https://seans.uccs.edu/
+        - article [ref=f16e592]:
+          - generic [ref=f16e593]:
+            - link "https://www.nyutamid.org › apply" [ref=f16e594] [cursor=pointer]:
+              - /url: https://www.nyutamid.org/apply
+              - generic [ref=f16e595]:
+                - generic [ref=f16e596]: https://www.nyutamid.org
+                - generic [ref=f16e597]: › apply
+            - heading [level=3] [ref=f16e599]:
+              - link "Apply | TAMID at NYU" [ref=f16e600] [cursor=pointer]:
+                - /url: https://www.nyutamid.org/apply
+            - paragraph [ref=f16e601]: Apply to TAMID Group at NYU. Each semester we select a cohort of top-performing undergraduates for the Investment Fund, Consulting, and Quant tracks. Applications open at the start of each term.
+          - generic [ref=f16e602]:
+            - generic [ref=f16e603]: duckduckgo
+            - link "cached" [ref=f16e608] [cursor=pointer]:
+              - /url: https://web.archive.org/web/https://www.nyutamid.org/apply
+        - article [ref=f16e609]:
+          - generic [ref=f16e610]:
+            - link "https://m.imdb.com › name › nm0000576" [ref=f16e611] [cursor=pointer]:
+              - /url: https://m.imdb.com/name/nm0000576/
+              - generic [ref=f16e612]:
+                - generic [ref=f16e613]: https://m.imdb.com
+                - generic [ref=f16e614]: › name › nm0000576
+            - heading [level=3] [ref=f16e616]:
+              - link "Sean Penn - IMDb" [ref=f16e617] [cursor=pointer]:
+                - /url: https://m.imdb.com/name/nm0000576/
+            - paragraph [ref=f16e618]: Sean Penn is a powerhouse film performer capable of intensely moving work, who has gone from strength to strength during a …
+          - generic [ref=f16e619]:
+            - generic [ref=f16e620]: bing
+            - link "cached" [ref=f16e625] [cursor=pointer]:
+              - /url: https://web.archive.org/web/https://m.imdb.com/name/nm0000576/
+        - article [ref=f16e626]:
+          - generic [ref=f16e627]:
+            - link "https://english.stackexchange.com › questions › 217012 › why-is-sean-pronounced-shawn" [ref=f16e628] [cursor=pointer]:
+              - /url: https://english.stackexchange.com/questions/217012/why-is-sean-pronounced-shawn
+              - generic [ref=f16e629]:
+                - generic [ref=f16e630]: https://english.stackexchange.com
+                - generic [ref=f16e631]: › questions › 217012 › why-is-sean-pronounced-shawn
+            - heading [level=3] [ref=f16e633]:
+              - link "pronunciation - Why is Sean pronounced Shawn? - English ..." [ref=f16e634] [cursor=pointer]:
+                - /url: https://english.stackexchange.com/questions/217012/why-is-sean-pronounced-shawn
+            - paragraph [ref=f16e635]: Dec 27, 2014 · Sean (written "Seán" or "Séan" in Irish) is a Hibernization of the English name "John"; that is, it's a transliteration of …
+          - generic [ref=f16e636]:
+            - generic [ref=f16e637]: bing
+            - link "cached" [ref=f16e642] [cursor=pointer]:
+              - /url: https://web.archive.org/web/https://english.stackexchange.com/questions/217012/why-is-sean-pronounced-shawn
+        - article [ref=f16e643]:
+          - generic [ref=f16e644]:
+            - link "https://www.nyutamid.org › tracks › fund" [ref=f16e645] [cursor=pointer]:
+              - /url: https://www.nyutamid.org/tracks/fund
+              - generic [ref=f16e646]:
+                - generic [ref=f16e647]: https://www.nyutamid.org
+                - generic [ref=f16e648]: › tracks › fund
+            - heading [level=3] [ref=f16e650]:
+              - link "Investment Fund | TAMID at NYU" [ref=f16e651] [cursor=pointer]:
+                - /url: https://www.nyutamid.org/tracks/fund
+            - paragraph [ref=f16e652]: "TAMID Group at NYU's student-run Investment Fund: equity research and a national simulated-fund competition where members build and pitch long/short theses."
+          - generic [ref=f16e653]:
+            - generic [ref=f16e654]: duckduckgo
+            - link "cached" [ref=f16e659] [cursor=pointer]:
+              - /url: https://web.archive.org/web/https://www.nyutamid.org/tracks/fund
+        - article [ref=f16e660]:
+          - generic [ref=f16e661]:
+            - link "https://il.linkedin.com › company › tamid-group-at-nyu-shanghai" [ref=f16e662] [cursor=pointer]:
+              - /url: https://il.linkedin.com/company/tamid-group-at-nyu-shanghai
+              - generic [ref=f16e663]:
+                - generic [ref=f16e664]: https://il.linkedin.com
+                - generic [ref=f16e665]: › company › tamid-group-at-nyu-shanghai
+            - heading [level=3] [ref=f16e667]:
+              - link "TAMID Group at NYU Shanghai" [ref=f16e668] [cursor=pointer]:
+                - /url: https://il.linkedin.com/company/tamid-group-at-nyu-shanghai
+            - paragraph [ref=f16e669]: 1 billion members | Manage your professional identity. Build and engage with your professional network. Access knowledge, insights and opportunities.
+          - generic [ref=f16e670]:
+            - generic [ref=f16e671]: brave
+            - link "cached" [ref=f16e676] [cursor=pointer]:
+              - /url: https://web.archive.org/web/https://il.linkedin.com/company/tamid-group-at-nyu-shanghai
+        - article [ref=f16e677]:
+          - generic [ref=f16e678]:
+            - link "https://wp.nyu.edu › global_dimensions › 2025 › 02 › 10 › students-share-their-global-internship-experiences" [ref=f16e679] [cursor=pointer]:
+              - /url: https://wp.nyu.edu/global_dimensions/2025/02/10/students-share-their-global-internship-experiences/
+              - generic [ref=f16e680]:
+                - generic [ref=f16e681]: https://wp.nyu.edu
+                - generic [ref=f16e682]: › global_dimensions › 2025 › 02 › 10 › students-share-their-global-internship-experiences
+            - heading [level=3] [ref=f16e684]:
+              - link "Students Share Their Global Internship Experiences – Global ..." [ref=f16e685] [cursor=pointer]:
+                - /url: https://wp.nyu.edu/global_dimensions/2025/02/10/students-share-their-global-internship-experiences/
+            - paragraph [ref=f16e686]: “Sitting in on meetings gave me the behind-the-scenes scoop on how different departments function,” he says. “Communication and flexibility are huge skills to have in the music industry that I developed on the job.” The internship reinforced Sean’s love for the music industry, but it also taught him about new positions and departments he didn’t know existed.
+          - generic [ref=f16e687]:
+            - generic [ref=f16e688]: brave
+            - link "cached" [ref=f16e693] [cursor=pointer]:
+              - /url: https://web.archive.org/web/https://wp.nyu.edu/global_dimensions/2025/02/10/students-share-their-global-internship-experiences/
+        - article [ref=f16e694]:
+          - generic [ref=f16e695]:
+            - link "https://www.signalhire.com › companies › tamid-at-nyu" [ref=f16e696] [cursor=pointer]:
+              - /url: https://www.signalhire.com/companies/tamid-at-nyu
+              - generic [ref=f16e697]:
+                - generic [ref=f16e698]: https://www.signalhire.com
+                - generic [ref=f16e699]: › companies › tamid-at-nyu
+            - heading [level=3] [ref=f16e701]:
+              - link "TAMID at NYU Overview | SignalHire Company Profile" [ref=f16e702] [cursor=pointer]:
+                - /url: https://www.signalhire.com/companies/tamid-at-nyu
+            - paragraph [ref=f16e703]: Access our comprehensive directory of businesses to reach your goals faster. Find company profiles, revenue, address and employee contact details with SignalHire.
+          - generic [ref=f16e704]:
+            - generic [ref=f16e705]: brave
+            - link "cached" [ref=f16e710] [cursor=pointer]:
+              - /url: https://web.archive.org/web/https://www.signalhire.com/companies/tamid-at-nyu
+        - article [ref=f16e711]:
+          - link [ref=f16e712] [cursor=pointer]:
+            - /url: https://tamidgroup.org/author/tamidgroup/
+          - generic [ref=f16e713]:
+            - link "https://tamidgroup.org › author › tamidgroup" [ref=f16e714] [cursor=pointer]:
+              - /url: https://tamidgroup.org/author/tamidgroup/
+              - generic [ref=f16e715]:
+                - generic [ref=f16e716]: https://tamidgroup.org
+                - generic [ref=f16e717]: › author › tamidgroup
+            - heading [level=3] [ref=f16e719]:
+              - link "TAMIDGroup, Author at TAMID GROUP" [ref=f16e720] [cursor=pointer]:
+                - /url: https://tamidgroup.org/author/tamidgroup/
+            - paragraph [ref=f16e721]: "Hi - I'm Meitar Landau, Business Development Manager at Winn.ai. Last summer, we hosted 3 awesome interns: Daniel, Nicole, and Sam. While we had a great time hosting them and partnering with TAMID, the experience was also educational for both sides."
+          - generic [ref=f16e722]:
+            - generic [ref=f16e723]: brave
+            - link "cached" [ref=f16e728] [cursor=pointer]:
+              - /url: https://web.archive.org/web/https://tamidgroup.org/author/tamidgroup/
+        - article [ref=f16e729]:
+          - link [ref=f16e730] [cursor=pointer]:
+            - /url: https://www.nutamid.org/
+          - generic [ref=f16e731]:
+            - link "https://www.nutamid.org" [ref=f16e732] [cursor=pointer]:
+              - /url: https://www.nutamid.org/
+            - heading [level=3] [ref=f16e735]:
+              - link "TAMID at Northeastern" [ref=f16e736] [cursor=pointer]:
+                - /url: https://www.nutamid.org/
+            - paragraph [ref=f16e737]: A challenging, exclusive summer internship program in Israel, just for TAMID members.
+          - generic [ref=f16e738]:
+            - generic [ref=f16e739]: brave
+            - link "cached" [ref=f16e744] [cursor=pointer]:
+              - /url: https://web.archive.org/web/https://www.nutamid.org/
+      - generic:
+        - link "Back to top":
+          - /url: "#"
+      - navigation [ref=f16e745]:
+        - link "Next page" [ref=f16e747] [cursor=pointer]
+        - generic [ref=f16e750]:
+          - link "1" [ref=f16e752]
+          - link "2" [ref=f16e754] [cursor=pointer]
+          - link "3" [ref=f16e756] [cursor=pointer]
+          - link "4" [ref=f16e758] [cursor=pointer]
+          - link "5" [ref=f16e760] [cursor=pointer]
+          - link "6" [ref=f16e762] [cursor=pointer]
+          - link "7" [ref=f16e764] [cursor=pointer]
+          - link "8" [ref=f16e766] [cursor=pointer]
+          - link "9" [ref=f16e768] [cursor=pointer]
+          - link "10" [ref=f16e770] [cursor=pointer]
+  - contentinfo [ref=f16e771]:
+    - paragraph [ref=f16e772]:
+      - text: Powered by
+      - link "SearXNG" [ref=f16e773] [cursor=pointer]:
+        - /url: /info/en/about
+      - text: "- 2026.9.25+12f8b6515 — a privacy-respecting, open metasearch engine"
+      - link "Source code" [ref=f16e774] [cursor=pointer]:
+        - /url: https://github.com/searxng/searxng
+      - text: "|"
+      - link "Issue tracker" [ref=f16e775] [cursor=pointer]:
+        - /url: https://github.com/searxng/searxng/issues
+      - text: "|"
+      - link "Engine stats" [ref=f16e776] [cursor=pointer]:
+        - /url: /stats
+      - text: "|"
+      - link "Public instances" [ref=f16e777] [cursor=pointer]:
+        - /url: https://searx.space

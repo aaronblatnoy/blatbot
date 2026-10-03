@@ -1,0 +1,90 @@
+- generic [ref=f11e2]:
+  - generic [ref=f11e3]:
+    - link "Skip to content" [ref=f11e4] [cursor=pointer]:
+      - /url: "#start-of-content"
+    - banner [ref=f11e9]:
+      - heading "Navigation Menu" [level=2] [ref=f11e10]
+      - generic [ref=f11e11]:
+        - link "Homepage" [ref=f11e13] [cursor=pointer]:
+          - /url: /
+        - generic [ref=f11e16]:
+          - navigation "Global" [ref=f11e17]:
+            - list [ref=f11e18]:
+              - listitem [ref=f11e19]:
+                - button "Platform" [ref=f11e21] [cursor=pointer]
+              - listitem [ref=f11e24]:
+                - button "Solutions" [ref=f11e26] [cursor=pointer]
+              - listitem [ref=f11e29]:
+                - button "Resources" [ref=f11e31] [cursor=pointer]
+              - listitem [ref=f11e34]:
+                - button "Open Source" [ref=f11e36] [cursor=pointer]
+              - listitem [ref=f11e39]:
+                - button "Enterprise" [ref=f11e41] [cursor=pointer]
+              - listitem [ref=f11e44]:
+                - link "Pricing" [ref=f11e45] [cursor=pointer]:
+                  - /url: https://github.com/pricing
+          - generic [ref=f11e46]:
+            - button "Search or jump to, type / to search" [ref=f11e48] [cursor=pointer]
+            - link "Sign in" [ref=f11e55] [cursor=pointer]:
+              - /url: /login?return_to=https%3A%2F%2Fgithub.com%2Fsearch%3Fq%3Dtelegram
+            - link "Sign up" [ref=f11e58] [cursor=pointer]:
+              - /url: /signup?ref_cta=Sign+up&ref_loc=header+logged+out&ref_page=%2Fsearch&source=header
+            - button "Appearance settings" [ref=f11e61] [cursor=pointer]
+  - main [ref=f11e67]:
+    - generic [ref=f11e70]:
+      - heading "Search Results · telegram" [level=1] [ref=f11e71]
+      - generic [ref=f11e75]:
+        - region [ref=f11e76]:
+          - heading "Filter by" [level=2] [ref=f11e77]
+          - list "Filter by" [ref=f11e82]:
+            - listitem [ref=f11e83]:
+              - list [ref=f11e84]:
+                - listitem [ref=f11e85]:
+                  - link "Code (...) results" [ref=f11e86] [cursor=pointer]:
+                    - /url: https://github.com/search?q=telegram&type=code
+                    - generic [ref=f11e87]:
+                      - generic [ref=f11e88]: Code
+                      - generic:
+                        - generic [aria-hidden]: ...
+                        - generic: (...)
+                        - generic: results
+                - listitem [ref=f11e89]:
+                  - link "Repositories results" [ref=f11e90] [cursor=pointer]:
+                    - /url: https://github.com/search?q=telegram&type=repositories
+                    - generic [ref=f11e91]:
+                      - generic [ref=f11e92]: Repositories
+                      - generic: results
+                - listitem [ref=f11e93]:
+                  - link "Issues results" [ref=f11e94] [cursor=pointer]:
+                    - /url: https://github.com/search?q=telegram&type=issues
+                    - generic [ref=f11e95]:
+                      - generic [ref=f11e96]: Issues
+                      - generic: results
+                - listitem [ref=f11e97]:
+                  - link "Pull requests results" [ref=f11e98] [cursor=pointer]:
+                    - /url: https://github.com/search?q=telegram&type=pullrequests
+                    - generic [ref=f11e99]:
+                      - generic [ref=f11e100]: Pull requests
+                      - generic: results
+                - listitem [ref=f11e101]:
+                  - link "Discussions results" [ref=f11e102] [cursor=pointer]:
+                    - /url: https://github.com/search?q=telegram&type=discussions
+                    - generic [ref=f11e103]:
+                      - generic [ref=f11e104]: Discussions
+                      - generic: results
+                - listitem [ref=f11e105]:
+                  - link "Users (12.6k) results" [ref=f11e106] [cursor=pointer]:
+                    - /url: https://github.com/search?q=telegram&type=users
+                    - generic [ref=f11e107]:
+                      - generic [ref=f11e108]: Users
+                      - generic:
+                        - generic [aria-hidden]: 12.6k
+                        - generic: (12.6k)
+                        - generic: results
+                - listitem [ref=f11e109]:
+                  - button "More" [ref=f11e110] [cursor=pointer]
+            - listitem [aria-hidden] [ref=f11e140]
+            - listitem [ref=f11e141]:
+              - link "Advanced search" [ref=f11e142] [cursor=pointer]:
+                - /url: /search/advanced
+        - slider "Draggable pane splitter" [ref=f11e146]

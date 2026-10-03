@@ -1,0 +1,109 @@
+- generic [ref=f5e2]:
+  - banner:
+    - generic [ref=f5e3]:
+      - link "Skip to Content" [ref=f5e4] [cursor=pointer]:
+        - /url: "#page"
+      - generic [ref=f5e7]:
+        - generic [ref=f5e8]:
+          - link [ref=f5e11] [cursor=pointer]:
+            - /url: /
+            - img "SREG" [ref=f5e12]
+          - navigation [ref=f5e15]:
+            - button "About" [ref=f5e17] [cursor=pointer]
+            - link "Executive Board" [ref=f5e20] [cursor=pointer]:
+              - /url: /executive-board
+            - button "Membership" [ref=f5e22] [cursor=pointer]
+        - link "Contact" [ref=f5e26] [cursor=pointer]:
+          - /url: /contact
+  - main [ref=f5e27]:
+    - article [ref=f5e28]:
+      - generic [ref=f5e43]:
+        - heading "Fall 2026 Executive Board" [level=2] [ref=f5e49]
+        - generic [ref=f5e62]:
+          - paragraph [ref=f5e63]:
+            - link "Joshua Haghani" [ref=f5e64] [cursor=pointer]:
+              - /url: /joshua-haghani
+          - paragraph [ref=f5e65]: Co-President
+        - generic [ref=f5e78]:
+          - paragraph [ref=f5e79]:
+            - link "Mariel Rocca" [ref=f5e80] [cursor=pointer]:
+              - /url: /mariel-rocca
+          - paragraph [ref=f5e81]: Co-President
+        - generic [ref=f5e94]:
+          - paragraph [ref=f5e95]:
+            - link "Eric Azrak" [ref=f5e96] [cursor=pointer]:
+              - /url: /eric-azrak
+          - paragraph [ref=f5e97]: Co-Vice President
+        - generic [ref=f5e110]:
+          - paragraph [ref=f5e111]:
+            - link "Louise Jeanbart" [ref=f5e112] [cursor=pointer]:
+              - /url: /louise-jeanbart
+          - paragraph [ref=f5e113]: Co-Vice President
+        - generic [ref=f5e126]:
+          - paragraph [ref=f5e127]:
+            - link "Alex Flores" [ref=f5e128] [cursor=pointer]:
+              - /url: /alex-flores
+          - paragraph [ref=f5e129]: Director of Operations
+        - generic [ref=f5e142]:
+          - paragraph [ref=f5e143]:
+            - link "Saagar Sharma" [ref=f5e144] [cursor=pointer]:
+              - /url: /saagar-sharma
+          - paragraph [ref=f5e145]: Co-Director of Professional Development (Strategy Board)
+        - generic [ref=f5e158]:
+          - paragraph [ref=f5e159]:
+            - link "Mark Shalam" [ref=f5e160] [cursor=pointer]:
+              - /url: /mark-shalam
+          - paragraph [ref=f5e161]: Co-Director of Professional Development (Strategy Board)
+        - generic [ref=f5e174]:
+          - paragraph [ref=f5e175]:
+            - link "Omid Aliahmadi" [ref=f5e176] [cursor=pointer]:
+              - /url: /omid-aliahmadi
+          - paragraph [ref=f5e177]: Director of Professional Development (Mentorship)
+        - generic [ref=f5e190]:
+          - paragraph [ref=f5e191]:
+            - link "Carolina Brown" [ref=f5e192] [cursor=pointer]:
+              - /url: /carolina-brown
+          - paragraph [ref=f5e193]: Treasurer
+        - generic [ref=f5e206]:
+          - paragraph [ref=f5e207]:
+            - link "Sonya Kovtun" [ref=f5e208] [cursor=pointer]:
+              - /url: /sonya-kovtun
+          - paragraph [ref=f5e209]: Director of Communications
+        - generic [ref=f5e222]:
+          - paragraph [ref=f5e223]:
+            - link "Ezra Habert" [ref=f5e224] [cursor=pointer]:
+              - /url: /ezra-habert
+          - paragraph [ref=f5e225]: Director of Professional Recruitment
+        - generic [ref=f5e238]:
+          - paragraph [ref=f5e239]:
+            - link "Matthew Manesh" [ref=f5e240] [cursor=pointer]:
+              - /url: /matthew-manesh
+          - paragraph [ref=f5e241]: Senior Advisor
+  - contentinfo [ref=f5e242]:
+    - navigation [ref=f5e254]:
+      - link "Facebook" [ref=f5e255] [cursor=pointer]:
+        - /url: https://www.facebook.com/NYUSternRealEstateGroup/
+      - link "Instagram" [ref=f5e260] [cursor=pointer]:
+        - /url: https://www.instagram.com/nyusreg/
+      - link "sreg@stern.nyu.edu" [ref=f5e265] [cursor=pointer]:
+        - /url: mailto:sreg@stern.nyu.edu
+      - link "LinkedIn" [ref=f5e270] [cursor=pointer]:
+        - /url: https://www.linkedin.com/company/stern-real-estate-group
+    - generic [ref=f5e280]:
+      - paragraph [ref=f5e286]: NYU Stern Real Estate Group | 44 West 4th St, New York, NY, 10012, USA | sreg@stern.nyu.edu
+      - generic [ref=f5e291]:
+        - generic [ref=f5e292]:
+          - heading "Subscribe" [level=2] [ref=f5e293]
+          - paragraph [ref=f5e295]: Sign up with your email address to receive news and updates from SREG.
+        - generic [ref=f5e296]:
+          - generic [ref=f5e297]:
+            - group [ref=f5e298]:
+              - textbox "First Name" [ref=f5e300]
+              - textbox "Last Name" [ref=f5e302]
+            - textbox "Email Address" [ref=f5e304]
+          - button "Sign Up" [ref=f5e306] [cursor=pointer]
+        - paragraph [ref=f5e308]: We respect your privacy.
+      - paragraph [ref=f5e314]:
+        - text: Powered by
+        - link "Squarespace" [ref=f5e315] [cursor=pointer]:
+          - /url: http://www.squarespace.com
