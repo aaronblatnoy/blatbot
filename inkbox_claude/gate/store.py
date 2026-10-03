@@ -765,7 +765,7 @@ class Store:
             seen: Dict[int, Dict[str, Any]] = {}
             total = 0
             for sub in any_of:
-                r = self.query_tasks(**{k: v for k, v in sub.items() if k != "any_of"}, limit=50)
+                r = self.query_tasks(**{k: v for k, v in sub.items() if k not in ("any_of", "limit")}, limit=50)
                 for t in r["tasks"]:
                     seen.setdefault(int(t["id"]), t)
             ordered = sorted(seen.values(), key=lambda t: (0 if t["state"] in OPEN_STATES else 1, -t["updated_at"]))

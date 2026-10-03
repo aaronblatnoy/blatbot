@@ -1075,6 +1075,13 @@ class GateSessionManager:
     async def send_to_approver(self, text: str) -> None:
         conv = self.approver_conv
         await self.send_fn(f"imessage:{conv}", text, "imessage", {"conversation_id": conv})
+        # What Aaron was sent is part of what Aaron can refer to ("what was that message?"):
+        # record it on his thread as a plain outbound, outside the one-ack-one-answer rule.
+        for cid in self._approver_chat_ids():
+            try:
+                self.store.add_message(cid, "outbound", text, "imessage", reply_to=None, role="notice")
+            except Exception:
+                logger.debug("[gate] could not record approver notice on %s", cid, exc_info=True)
 
     _outage_notified: Dict[str, float] = {}
 
