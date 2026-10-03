@@ -451,18 +451,24 @@ class TaskPicker:
                 "question": "`message` was sent in a group chat the assistant is in, and it does NOT mention the "
                             "assistant by name. Should the assistant speak up anyway?",
                 "count_as_yes": [
-                    "It asks for something the assistant alone can do or knows: a lookup, a schedule, a file, "
-                    "a record, a calculation, the status of work it was given.",
-                    "It is a direct follow-up to something the assistant itself just said in `recent_messages`, "
-                    "the way a reply continues a turn.",
-                    "It asks the room a factual question nobody present has answered and the assistant can.",
+                    "It asks for something the assistant can do or knows: a lookup, a schedule, a file, "
+                    "a record, a calculation, a fact, the status of work it was given.",
+                    "It is a follow-up to something the assistant itself said in `recent_messages`, the way a "
+                    "reply continues a turn, including a short one ('and the next?', 'what about friday').",
+                    "It asks the room an open question nobody present has answered and the assistant could.",
+                    "It asks about the assistant itself: what it is, what it can do, who built it.",
+                    "Someone is clearly waiting on the assistant: a request was made of it and it has not "
+                    "answered yet in `recent_messages`.",
+                    "It is a request phrased at no one in particular ('someone pull up the deadline', "
+                    "'need that doc') that the assistant can satisfy.",
                 ],
                 "count_as_no": [
-                    "People are talking to each other: plans, banter, opinions, reactions, agreement.",
-                    "It is addressed to a specific person who is not the assistant.",
+                    "People are talking to each other: plans, banter, opinions, reactions, agreement, stories.",
+                    "It is addressed to a specific person who is not the assistant, by name.",
                     "It is a question only a human in the group can answer (their own availability, "
                     "their own view, their own news).",
-                    "It adds nothing to answer: an acknowledgement, an emoji, a thanks, a greeting between people.",
+                    "It adds nothing to answer: an acknowledgement, a thanks, a greeting between people, "
+                    "a one-word reaction.",
                 ],
             },
             "criteria": {"true": "The assistant is the right one to answer this, even unnamed.",
@@ -477,7 +483,7 @@ class TaskPicker:
             logger.warning("group reply judgment via TypeSafe failed: %s", exc)
             return {"should_reply": None, "p": 0.0, "reason": f"error: {exc}"}
         p = float((a.get("reply") or {}).get("noul") or 0.0)
-        floor = float(os.getenv("GATE_GROUP_REPLY_MIN") or 0.7)
+        floor = float(os.getenv("GATE_GROUP_REPLY_MIN") or 0.55)
         logger.info("group reply judgment: p(should reply)=%.2f floor=%.2f", p, floor)
         return {"should_reply": p >= floor, "p": p, "reason": "ok"}
 
