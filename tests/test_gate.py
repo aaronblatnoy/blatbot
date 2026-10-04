@@ -1580,6 +1580,17 @@ def test_send_tools_are_taken_off_the_preapproved_list_for_the_owner(tmp_path):
         "someone else's approved request must still be able to reply"
 
 
+def test_each_thread_keeps_one_claude_session(tmp_path):
+    """A request is a turn in an ongoing conversation, not a stranger's first sentence. The
+    executor resumes the session that thread was already having, and remembers the new id."""
+    from inkbox_claude.gate.executor import Executor
+    ex = Executor(mcp_server=object(), cwd=str(tmp_path), model="sonnet")
+    assert ex._sessions == {}
+    ex._sessions["owner"] = "sess-abc"
+    assert ex._sessions.get("owner") == "sess-abc"
+    assert ex._sessions.get("someone-else") is None, "threads do not share a session"
+
+
 def test_a_run_that_calls_no_tool_is_not_done(tmp_path):
     """A request exists because a tool was needed. "Already answered, no action needed",
     with nothing looked up, is the failure that reads most like a success."""

@@ -66,6 +66,8 @@ class Executor:
     allow_send = False        # set for one run, after the owner has read the draft and said yes
     held_send: Optional[Dict[str, Any]] = None   # the call that was stopped, for the gate to show him
 
+    _sessions: Dict[str, str] = {}      # thread -> the Claude session that thread is having
+
     async def run(self, req: Request, context: str = "", prior_work: str = "", model: Optional[str] = None,
                   from_owner: bool = False) -> Dict[str, Any]:
         """Run an approved request. Returns a status dict; never raises.
@@ -145,6 +147,10 @@ class Executor:
             permission_mode="default",
             allowed_tools=allowed,
             mcp_servers={"inkbox": self.mcp_server, "host": hosttools.sdk_server()},
+            # One conversation per thread, continued rather than restarted. A request is a
+            # turn in it, so what was looked up an hour ago is still in view and a follow-up
+            # does not arrive as a stranger's first sentence.
+            resume=self._sessions.get(req.chat_id),
             can_use_tool=can_use,
             max_turns=30,
         )
@@ -161,6 +167,9 @@ class Executor:
                         elif isinstance(block, ToolUseBlock):
                             tool_calls.append(block.name)
                 elif isinstance(msg, ResultMessage):
+                    sid = getattr(msg, "session_id", None)
+                    if sid:
+                        self._sessions[req.chat_id] = sid
                     final = msg
             return final
 
