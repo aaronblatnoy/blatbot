@@ -537,11 +537,7 @@ class TaskPicker:
             logger.warning("group reply judgment via TypeSafe failed: %s", exc)
             return {"should_reply": None, "p": 0.0, "reason": f"error: {exc}"}
         p = float((a.get("reply") or {}).get("noul") or 0.0)
-        # The two errors cost differently depending on who spoke. From the person it works
-        # for, a missed question costs them a re-ask and a spare line costs nothing, so it
-        # leans in; from anyone else an unwanted interjection is the dearer mistake.
-        floor = float((os.getenv("GATE_GROUP_REPLY_MIN_OWNER") or 0.4) if from_principal
-                      else (os.getenv("GATE_GROUP_REPLY_MIN") or 0.45))
+        floor = float(os.getenv("GATE_GROUP_REPLY_MIN") or 0.45)
         logger.info("group reply judgment: p(should reply)=%.2f floor=%.2f", p, floor)
         return {"should_reply": p >= floor, "p": p, "reason": "ok"}
 
