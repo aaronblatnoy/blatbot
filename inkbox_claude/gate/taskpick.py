@@ -86,6 +86,7 @@ def _last_request_outcome(task: Optional[Dict[str, Any]]) -> str:
 
 
 from .scopes import SCOPES, SCOPE_TREE_ALWAYS, SCOPE_TREE_LEAVES, SCOPE_TREE_SYSTEMS, WHERE_THINGS_LIVE  # the registry
+from . import settings as _settings
 
 
 SCOPE_MIN_YES = float(os.getenv("TYPESAFE_SCOPE_MIN_YES") or 0.6)
@@ -496,7 +497,7 @@ class TaskPicker:
             logger.warning("actionable judgment via TypeSafe failed: %s", exc)
             return {"actionable": None, "p": 0.0, "reason": f"error: {exc}"}
         p = float((a.get("clear") or {}).get("noul") or 0.0)
-        floor = float(os.getenv("GATE_ACTIONABLE_MIN") or 0.4)
+        floor = float(_settings.get("GATE_ACTIONABLE_MIN"))
         logger.info("actionable judgment: p(clear enough to run)=%.2f floor=%.2f", p, floor)
         return {"actionable": p >= floor, "p": p, "reason": "ok"}
 
@@ -515,7 +516,7 @@ class TaskPicker:
                  "recent_messages": recent, "assistant_name": bot_name or "Blatbot",
                  # Who the assistant is in this room. Without it, "is this mine to answer?"
                  # has no referent and the judgment is guessing at its own job.
-                 "assistant_role": role or (os.getenv("GATE_ASSISTANT_ROLE") or _DEFAULT_ROLE)}
+                 "assistant_role": role or (_settings.get("GATE_ASSISTANT_ROLE") or _DEFAULT_ROLE)}
         body = {"state": state, "model": self.model, "questions": {"reply": {
             "type": "noul",
             "instructions": {
@@ -540,7 +541,7 @@ class TaskPicker:
             logger.warning("group reply judgment via TypeSafe failed: %s", exc)
             return {"should_reply": None, "p": 0.0, "reason": f"error: {exc}"}
         p = float((a.get("reply") or {}).get("noul") or 0.0)
-        floor = float(os.getenv("GATE_GROUP_REPLY_MIN") or 0.45)
+        floor = float(_settings.get("GATE_GROUP_REPLY_MIN"))
         logger.info("group reply judgment: p(should reply)=%.2f floor=%.2f", p, floor)
         return {"should_reply": p >= floor, "p": p, "reason": "ok"}
 

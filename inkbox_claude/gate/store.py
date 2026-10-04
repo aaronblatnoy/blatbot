@@ -555,6 +555,37 @@ class Store:
         """Let permission editors identify the normalized row they just changed."""
         return _trust_key(key)
 
+    # -- knobs the owner turns -------------------------------------------------
+    def _ensure_settings(self) -> None:
+        with self._lock:
+            self._db.execute("CREATE TABLE IF NOT EXISTS settings ("
+                             "name TEXT PRIMARY KEY, value TEXT NOT NULL DEFAULT '', "
+                             "updated_at REAL NOT NULL DEFAULT 0)")
+            self._db.commit()
+
+    def settings(self) -> Dict[str, str]:
+        """Every value the owner has set, overriding the environment."""
+        self._ensure_settings()
+        with self._lock:
+            rows = self._db.execute("SELECT name, value FROM settings").fetchall()
+        return {str(r["name"]): str(r["value"]) for r in rows}
+
+    def set_setting(self, name: str, value: str) -> None:
+        self._ensure_settings()
+        with self._lock:
+            self._db.execute(
+                "INSERT INTO settings(name,value,updated_at) VALUES(?,?,?) "
+                "ON CONFLICT(name) DO UPDATE SET value=excluded.value, updated_at=excluded.updated_at",
+                (name, str(value), time.time()))
+            self._db.commit()
+
+    def clear_setting(self, name: str) -> None:
+        """Hand one knob back to the environment, or to its built-in default."""
+        self._ensure_settings()
+        with self._lock:
+            self._db.execute("DELETE FROM settings WHERE name=?", (name,))
+            self._db.commit()
+
     def requests_in_state(self, state: str) -> List[Request]:
         """Every request sitting in one state. Used at startup to find runs the process
         died in the middle of."""

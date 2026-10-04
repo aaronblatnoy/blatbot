@@ -16,6 +16,31 @@ REQUEST_STATES = frozenset(
 )
 
 
+def settings_list(_store: Any) -> List[Dict[str, Any]]:
+    """Every knob the owner may turn, with its value and where that value came from."""
+    from ..gate import settings as gate_settings
+    return gate_settings.describe()
+
+
+def settings_set(store: Any, payload: Dict[str, Any]) -> Dict[str, Any]:
+    """Set one knob, or hand it back by sending a null value. The registry decides what is
+    allowed: a name it does not know, or a value out of range, is refused."""
+    from ..gate import settings as gate_settings
+    name = _required_text(payload.get("name"), "name")
+    if not gate_settings.known(name):
+        raise ValidationError(f"{name} is not a setting the console may change")
+    if payload.get("value", None) is None:
+        store.clear_setting(name)
+    else:
+        try:
+            store.set_setting(name, gate_settings.coerce(name, payload.get("value")))
+        except ValueError as exc:
+            raise ValidationError(str(exc)) from exc
+    gate_settings.invalidate()
+    events.publish("settings.changed", {"name": name})
+    return {"ok": True, "settings": gate_settings.describe()}
+
+
 class ValidationError(ValueError):
     """A command payload is invalid and should become an HTTP 400."""
 

@@ -144,6 +144,14 @@ def _asset(name: str, content_type: str):
     return handler
 
 
+async def get_settings(request: web.Request) -> web.StreamResponse:
+    return _json(api.settings_list(_manager(request).store))
+
+
+async def post_settings(request: web.Request) -> web.StreamResponse:
+    return _json(api.settings_set(_manager(request).store, await _payload(request)))
+
+
 def register(app: web.Application, gateway: Any) -> None:
     """Mount the console without assuming the gate is initialized yet."""
     gateway._console_started_at = getattr(gateway, "_console_started_at", time.time())
@@ -165,6 +173,8 @@ def register(app: web.Application, gateway: Any) -> None:
     app.router.add_get("/console/api/tasks", _endpoint(get_tasks))
     app.router.add_get("/console/api/tasks/{id}", _endpoint(get_task))
     app.router.add_get("/console/api/health", _endpoint(get_health))
+    app.router.add_get("/console/api/settings", _endpoint(get_settings))
+    app.router.add_post("/console/api/settings", _endpoint(post_settings, mutation=True))
     app.router.add_get("/console/events", get_events)
     app.router.add_static("/console/static/", _STATIC, show_index=False)
     # The page asks for its own assets next to itself; serve them there too, so the markup

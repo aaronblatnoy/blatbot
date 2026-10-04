@@ -85,7 +85,8 @@ class Executor:
         # A message the owner asked to have sent is him speaking to someone through the
         # assistant, and he sees it before it goes. A request that came from someone else
         # was already read and approved by him in full, so answering it needs nothing more.
-        confirm_sends = bool(from_owner)
+        from .settings import get as _setting
+        confirm_sends = bool(from_owner) and bool(_setting("GATE_CONFIRM_SENDS"))
         if confirm_sends:
             # A tool listed in allowed_tools is pre-approved and the permission hook is never
             # consulted for it. Sends are therefore taken off that list, which is what routes

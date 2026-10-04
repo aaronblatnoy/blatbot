@@ -17,6 +17,7 @@ import time
 from typing import Any, Awaitable, Callable, Dict, List, Optional, Tuple
 
 from .executor import Executor
+from . import settings as _settings
 from .jevagent import JevAgent, enabled as jev_agent_enabled
 from .taskpick import TaskPicker, enabled as jev_enabled
 from .router import Router, RouterOutput
@@ -1136,6 +1137,9 @@ class GateSessionManager:
         self.typing_fn = typing_fn            # iMessage typing indicator, same signature as send_fn minus text
         self.identity_info = identity_info
         self.store = Store(store_path)
+        # Knobs read the database from here on, so a change in the console takes effect on
+        # the next turn rather than the next restart.
+        _settings.bind(self.store)
         self.router = Router(api_key=cfg.deepseek_api_key, model=cfg.deepseek_model, standing_path=standing_path)
         protected = [str(cfg.approver_imessage_conversation_id or ""), str(getattr(cfg, "approver_phone", "") or "")]
         self.executor = Executor(mcp_server=mcp_server, cwd=exec_cwd, model=cfg.claude_model or "sonnet",
@@ -1163,7 +1167,7 @@ class GateSessionManager:
         from .. import telegram as _tg
         self.approver_telegram_id = _tg.approver_id()
         self.voice_vocabulary = str(os.getenv("GATE_VOICE_VOCABULARY") or DEFAULT_VOICE_VOCABULARY).strip()
-        self.voice_trust_approver = str(os.getenv("GATE_VOICE_TRUST_APPROVER") or "").strip().lower() in ("1", "true", "yes")
+        self.voice_trust_approver = str(_settings.raw("GATE_VOICE_TRUST_APPROVER") or "").strip().lower() in ("1", "true", "yes")
         self.sessions: Dict[str, GateSession] = {}
         self._expiry_task: Optional[asyncio.Task] = None
         try:
@@ -1598,7 +1602,7 @@ class GateSessionManager:
         fallback["jev_attempt"] = {k: status.get(k) for k in ("error", "tool_calls", "jev_calls", "prose_calls", "seconds", "steps", "raw")}
         return fallback
 
-    SLOW_ACK_AFTER_S = float(os.getenv("GATE_SLOW_ACK_AFTER_S") or 7.0)
+    SLOW_ACK_AFTER_S = float(_settings.raw("GATE_SLOW_ACK_AFTER_S") or 7.0)
 
     async def _ack_if_slow(self, session: "GateSession", req: Request) -> None:
         """A request that is still running after a few seconds gets one short, casual line
@@ -1624,8 +1628,8 @@ class GateSessionManager:
         except Exception:
             logger.debug("[gate] slow ack failed", exc_info=True)
 
-    STRONG_MODEL = os.getenv("GATE_STRONG_MODEL") or "opus"
-    FAST_MODEL = os.getenv("GATE_FAST_MODEL") or "sonnet"
+    STRONG_MODEL = _settings.raw("GATE_STRONG_MODEL") or "opus"
+    FAST_MODEL = _settings.raw("GATE_FAST_MODEL") or "sonnet"
 
     async def _pick_model(self, req: Request) -> str:
         """Claude Code runs the request; Jev decides which Claude: the strongest model for
