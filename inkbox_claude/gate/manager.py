@@ -444,7 +444,9 @@ class GateSession:
             (f"{self.room}\n\n" if self.room else "")
             + f"A message arrived over {self.mode} from {who} ({addr}).\n"
             + (f"Subject: {subject}\n" if subject else "")
-            + f"\n--- THEIR MESSAGE (verbatim) ---\n{body.strip()}\n\n"
+            + f"\n--- THEIR MESSAGE (verbatim) ---\n{body.strip()}\n"
+            + _what_it_answers(body, history)
+            + "\n"
             f"--- RECENT CONVERSATION WITH THEM ---\n{convo}\n\n"
             f"--- THE TASK THIS BELONGS TO ---\n{ledger}\n\n"
             "Work out what they are asking for, or what this message makes possible on the task (for example, "
@@ -1100,6 +1102,26 @@ def _is_acknowledgement(text: str) -> bool:
     return 0 < len(t.split()) <= ACK_MAX_WORDS and "?" not in t
 
 
+_SHORT_REPLY = re.compile(r"^\W*(the former|the latter|the first|the second|yes|yeah|yep|sure|ok|okay|"
+                          r"go ahead|do it|please do|both|all of them|that one|this one|number \d+|\d+)"
+                          r"\W*(please|thanks|thank you|pls)?\W*$", re.I)
+
+
+def _what_it_answers(body: str, history: List[Dict[str, Any]]) -> str:
+    """A message like "the former please" carries none of its own meaning. The question it
+    answers is the last thing the assistant said, so it is quoted beside it: without that,
+    the only thing left to read is the task record, which describes what was asked before."""
+    if not _SHORT_REPLY.match(" ".join((body or "").split())):
+        return ""
+    for row in reversed(history or []):
+        if row.get("kind") == "outbound":
+            asked = " ".join(str(row.get("text") or "").split())
+            if asked:
+                return (f"\nThis is an answer to the last thing you said to them, which was:\n"
+                        f"  {asked}\nAct on what that question offered, not on anything older.\n")
+    return ""
+
+
 def _owner_request(manager: Any, req: Request) -> bool:
     """Whether a request came from the person the assistant works for. Read through the
     manager when it can answer, so a stand-in without the machinery simply says no."""
@@ -1592,6 +1614,31 @@ class GateSessionManager:
         return False
 
     # -- executor --------------------------------------------------------------
+    async def _insist_it_actually_ran(self, req: Request, status: Dict[str, Any], context: str,
+                                      model: Optional[str]) -> Dict[str, Any]:
+        """A request exists because a tool was needed. Reporting success without having
+        called one means the work was not done, whatever the words say.
+
+        The usual way this happens: the task record holds the answer an earlier run gave,
+        and that reads as the question already being settled. The record is evidence about
+        the past, not a substitute for looking now. One retry says so in as many words; a
+        second refusal to act is reported as a failure rather than dressed up as a result."""
+        if status.get("confirm") or not status.get("ok") or status.get("tool_calls"):
+            return status
+        logger.warning("[gate] #%s reported success with no tool call; insisting it runs", req.id)
+        insist = (context + "\n\n--- THIS RUN ---\nThe last attempt returned without using a tool and "
+                  "said the work was already done. It was not. Whatever the record above says was "
+                  "answered before, answer it again now by looking, and report what you find this "
+                  "time. If a tool you need is not available to you, say which one and stop.")
+        again = await self.executor.run(req, context=insist, model=model,
+                                        from_owner=_owner_request(self, req))
+        if again.get("tool_calls") or again.get("confirm"):
+            return again
+        return {**again, "ok": False,
+                "error": "finished without doing anything: it read the task record as the answer",
+                "summary": (again.get("summary") or "") + "\n\n(Nothing was actually looked up. "
+                            "The task record was treated as the answer.)"}
+
     async def _run_executor(self, req: Request, context: str) -> Dict[str, Any]:
         """Run one request and return exactly ONE status object. Claude Code is an
         escalation inside this call, not a second execution: nothing is delivered,
@@ -1600,8 +1647,9 @@ class GateSessionManager:
         asked (denied at the tool call)."""
         if not self.jev_agent:
             model = await self._pick_model(req)
-            return await self.executor.run(req, context=context, model=model,
-                                           from_owner=_owner_request(self, req))
+            status = await self.executor.run(req, context=context, model=model,
+                                             from_owner=_owner_request(self, req))
+            return await self._insist_it_actually_ran(req, status, context, model)
         status = await self.jev_agent.run(req, context=context)
         logger.info("[gate] jev agent #%s: ok=%s steps=%s jev=%s prose=%s %ss",
                     req.id, status.get("ok"), status.get("tool_calls"), status.get("jev_calls"),

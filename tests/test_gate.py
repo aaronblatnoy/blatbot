@@ -1580,6 +1580,40 @@ def test_send_tools_are_taken_off_the_preapproved_list_for_the_owner(tmp_path):
         "someone else's approved request must still be able to reply"
 
 
+def test_a_run_that_calls_no_tool_is_not_done(tmp_path):
+    """A request exists because a tool was needed. "Already answered, no action needed",
+    with nothing looked up, is the failure that reads most like a success."""
+    m, sent = make_manager(tmp_path)
+    p = _jev_first(m, choice="new")
+    p.action, p.scopes = True, ["brightspace_read"]
+    tries = []
+
+    class E:
+        async def run(self, req, context="", prior_work="", model=None, **kw):
+            tries.append(context)
+            return {"ok": True, "summary": "Already answered earlier. No further action needed.",
+                    "tool_calls": [], "raw": "STATUS: OK"}
+    m.jev_agent = None
+    m.executor = E()
+    m.router.next = RouterOutput(reply="On it.", task="new", task_title="x")
+    async def go():
+        await m.get("aaron").handle_inbound("what is due this week", "imessage", approver_meta())
+        await asyncio.sleep(0.2)
+    asyncio.run(go())
+    assert len(tries) == 2, "it should be told to go and actually look, once"
+    assert "returned without using a tool" in tries[1]
+    assert m.store.get_request(1).state == "failed", "doing nothing is not done"
+
+
+def test_a_bare_confirmation_carries_the_question_it_answers(tmp_path):
+    """"The former please" means nothing alone; the prompt must say what it answers."""
+    from inkbox_claude.gate.manager import _what_it_answers
+    h = [{"kind": "inbound", "text": "what do I have due this week?"},
+         {"kind": "outbound", "text": "Everything, or one course?"}]
+    assert "Everything, or one course?" in _what_it_answers("The former please.", h)
+    assert _what_it_answers("book me a flight", h) == ""
+
+
 def test_a_trusted_person_runs_their_own_scopes_and_nothing_more(tmp_path):
     """Everyone starts with nothing. A person Aaron has trusted for certain scopes runs
     those without waking him; the same person asking for anything else still waits."""
