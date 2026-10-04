@@ -1476,6 +1476,57 @@ class GateSessionManager:
         if not replied:
             await self.send_to_approver(f"{'Done' if ok else 'Failed'}: {req.summary}\n{result}")
 
+    async def decide_request(self, request_id: int, decision: str, *, actor: str = "aaron",
+                            source: str = "imessage", note: str = "") -> Dict[str, Any]:
+        """The one place a pending request is answered, whatever surface the answer came in
+        on. A text reply and a click in the console both land here, so the rules about what
+        may run, and the record of who said so, cannot drift apart.
+
+        decision: "yes" runs it, "no" drops it, "edit" revises it with `note`.
+        Returns {"ok", "state", "error"}. Deciding twice is refused, not repeated.
+        """
+        req = self.store.get_request(int(request_id))
+        if req is None:
+            return {"ok": False, "error": f"no request #{request_id}", "state": ""}
+        if req.state not in ("pending",):
+            # Someone already answered this one. Say so rather than acting again.
+            return {"ok": False, "error": f"#{req.id} is already {req.state}", "state": req.state}
+        d = (decision or "").strip().lower()
+        confirm = (req.status or {}).get("confirm") or {}
+        if d in ("yes", "y", "ok", "approve", "run", "go"):
+            if confirm:
+                self.store.add_message(OWNER_THREAD, "system",
+                                       f"Confirmed the held call on request #{req.id} ({source}).")
+                self.task_note(req, "approved", f"{actor} confirmed the change: {req.summary}", state="running")
+                asyncio.create_task(self.perform_confirmed(req))
+                return {"ok": True, "state": "running", "error": ""}
+            self.store.set_state(req.id, "approved")
+            self.store.add_message(OWNER_THREAD, "system", f"Approved request #{req.id} ({source}).")
+            self.task_note(req, "approved", f"{actor} approved: {req.summary}", state="running")
+            asyncio.create_task(self.execute(self.store.get_request(req.id)))  # type: ignore[arg-type]
+            return {"ok": True, "state": "approved", "error": ""}
+        if d in ("no", "n", "stop", "drop", "reject", "decline"):
+            self.store.set_state(req.id, "rejected")
+            self.store.set_thread(req.chat_id, "idle")
+            kind = "rejected" if confirm else "declined"
+            self.task_note(req, "rejected", f"{actor} {kind}: {req.summary}", state="open")
+            if confirm:
+                await self.send_to_approver(f"Left alone. Nothing was changed for #{req.id}.")
+            else:
+                await self.send_to_approver(f"Dropped #{req.id}.")
+                asyncio.create_task(self.get(req.chat_id).notify_after_request(
+                    f"Aaron declined the task: {req.summary}. Nothing was done. "
+                    f"Reply to the sender briefly if appropriate."))
+            return {"ok": True, "state": "rejected", "error": ""}
+        if d == "edit":
+            if not note.strip():
+                return {"ok": False, "error": "an edit needs instructions", "state": req.state}
+            base = req.prompt.split("\n\n--- AARON'S INSTRUCTIONS ---")[0]
+            new_req = self.store.revise_prompt(req.id, f"{base}\n\n--- AARON'S INSTRUCTIONS ---\n{note.strip()}")
+            await self.send_approval_text(new_req, revised=True)
+            return {"ok": True, "state": "pending", "error": ""}
+        return {"ok": False, "error": f"unknown decision {decision!r}", "state": req.state}
+
     async def handle_approver_command(self, session: GateSession, text: str) -> bool:
         """Parse Aaron's reply as a gate command. Returns True if consumed."""
         if await self.handle_task_command(session, text):
@@ -1494,37 +1545,19 @@ class GateSessionManager:
             req = pending[0]
         if req is None:
             return False
+        # Parsing stops here: what the words mean is decided in one place, so a text and a
+        # click in the console cannot drift apart.
         low = rest.lower()
-        if low in _YES and (req.status or {}).get("confirm"):
-            self.store.add_message(session.chat_id, "system", f"Aaron confirmed the pending change on request #{req.id}.")
-            asyncio.create_task(self.perform_confirmed(req))
-            return True
-        if low in _NO and (req.status or {}).get("confirm"):
-            self.store.set_state(req.id, "rejected")
-            self.store.set_thread(req.chat_id, "idle")
-            self.task_note(req, "rejected", f"Aaron declined the change: {req.summary}", state="open")
-            await self.send_to_approver(f"Left alone. Nothing was changed for #{req.id}.")
-            return True
-        if low in _YES:
-            self.store.set_state(req.id, "approved")
-            self.store.add_message(session.chat_id, "system", f"Approved request #{req.id}.")
-            self.task_note(req, "approved", f"Aaron approved: {req.summary}", state="running")
-            asyncio.create_task(self.execute(self.store.get_request(req.id)))  # type: ignore[arg-type]
-            return True
-        if low in _NO:
-            self.store.set_state(req.id, "rejected")
-            self.store.set_thread(req.chat_id, "idle")
-            self.task_note(req, "rejected", f"Aaron declined: {req.summary}", state="open")
-            await self.send_to_approver(f"Dropped #{req.id}.")
-            asyncio.create_task(self.get(req.chat_id).notify_after_request(
-                f"Aaron declined the task: {req.summary}. Nothing was done. Reply to the sender briefly if appropriate."))
+        if low in _YES or low in _NO:
+            out = await self.decide_request(req.id, "yes" if low in _YES else "no",
+                                            actor="Aaron", source=session.mode or "imessage")
+            if not out.get("ok") and out.get("error"):
+                await self.send_to_approver(out["error"])
             return True
         em = re.match(r"^edit\s*:\s*(.+)$", rest, re.S | re.I)
         if em:
-            note = em.group(1).strip()
-            base = req.prompt.split("\n\n--- AARON'S INSTRUCTIONS ---")[0]
-            new = self.store.revise_prompt(req.id, f"{base}\n\n--- AARON'S INSTRUCTIONS ---\n{note}")
-            await self.send_approval_text(new, revised=True)
+            await self.decide_request(req.id, "edit", actor="Aaron",
+                                      source=session.mode or "imessage", note=em.group(1).strip())
             return True
         return False
 
