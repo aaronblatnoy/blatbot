@@ -9,6 +9,7 @@ import json
 from types import SimpleNamespace
 
 import pytest
+from inkbox_claude.gate.manager import OWNER_THREAD
 
 from inkbox_claude.gate import manager as gm
 from inkbox_claude.gate.router import RouterOutput, RouterRequest
@@ -1172,7 +1173,7 @@ def test_escalation_to_claude_produces_exactly_one_response(tmp_path):
     assert r.state == "done" and r.status["escalated"] is True and m.jev_agent.ran == 1 and m.executor.ran == [1]
     outbound = [t for _, t, *_ in sent]
     assert outbound == ["On it.", "There are 40 rows."]                  # one ack, one result, nothing in between
-    everything = " ".join(outbound) + " ".join(x["text"] for x in m.store.history("aaron", 50)) + m.store.task_memory_for_task(1)
+    everything = " ".join(outbound) + " ".join(x["text"] for x in m.store.history(OWNER_THREAD, 50)) + m.store.task_memory_for_task(1)
     assert "JEV-GAVE-UP" not in everything and "CLAUDE-RESULT" in everything
 
 
@@ -1220,7 +1221,7 @@ def test_reply_alongside_a_request_must_be_an_acknowledgement(tmp_path):
 
 # --- every outbound is flagged against the inbound it responds to: one ack, one answer ---
 
-def _roles(m, chat="aaron"):
+def _roles(m, chat=OWNER_THREAD):
     with m.store._lock:
         rows = m.store._db.execute("SELECT reply_to, role, text FROM messages WHERE chat_id=? AND kind='outbound' ORDER BY id", (chat,)).fetchall()
     return [(r["reply_to"], r["role"], r["text"]) for r in rows]
@@ -1230,7 +1231,7 @@ def test_reply_only_turn_is_flagged_as_the_answer(tmp_path):
     m, sent = make_manager(tmp_path)
     m.router.next = RouterOutput(reply="Donald Trump.", task=None)
     asyncio.run(m.get("aaron").handle_inbound("who is the president?", "imessage", approver_meta()))
-    inbound = m.store.history("aaron", 5)[0]
+    inbound = m.store.history(OWNER_THREAD, 5)[0]
     roles = _roles(m)
     assert len(roles) == 1 and roles[0][1] == "answer" and roles[0][0] is not None
     assert m.store.responses_to(roles[0][0]) == ["answer"]
@@ -1516,6 +1517,18 @@ def test_a_request_nobody_could_act_on_asks_instead_of_running(tmp_path):
     assert m.router.calls and m.router.calls[0].get("ask") is True
     # The question has to reach the sender: nothing is running behind the silence.
     assert any("What would you like me to check?" in str(row) for row in sent), sent
+
+
+def test_a_notice_reaches_the_owner_record_with_no_session_loaded(tmp_path):
+    """Sessions fall out of memory between turns. A notice sent then still has to land on
+    his thread, or his next message has nothing to refer back to."""
+    m, sent = make_manager(tmp_path)
+    asyncio.run(m.get("aaron").handle_inbound("hello", "imessage", approver_meta()))
+    chat_id = "aaron"
+    m.sessions.clear()                       # overnight: nothing live
+    asyncio.run(m.send_to_approver("[Blatbot FYI] someone via email | a thing happened"))
+    texts = [str(r.get("text") or "") for r in m.store.history(OWNER_THREAD, 20)]
+    assert any("a thing happened" in t for t in texts), texts
 
 
 def test_the_room_note_works_for_any_group(tmp_path):

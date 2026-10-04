@@ -78,6 +78,9 @@ def _strip_quoted(text: str) -> str:
     return "\n".join(out).strip()
 
 
+OWNER_THREAD = "owner"   # the one thread for the person the assistant works for
+
+
 class GateSession:
     def __init__(self, chat_id: str, manager: "GateSessionManager"):
         self.chat_id = chat_id
@@ -90,6 +93,14 @@ class GateSession:
         self._typing: Optional[asyncio.Task] = None
         self.deferred_ack: Optional[str] = None   # the writer's "on it" line, sent only if the run is slow
         self.room: str = ""                       # set when this thread is a group chat: who is in it
+
+    @property
+    def record_id(self) -> str:
+        """Where this conversation is written down. A surface is how a message arrived, not
+        who it is with: email, iMessage, SMS, Telegram and the phone are one conversation
+        with the owner, so they share one thread. chat_id stays the routing key, so a reply
+        still goes back out the way it came."""
+        return OWNER_THREAD if self.is_approver() else self.chat_id
 
     # -- typing indicator (iMessage) --------------------------------------
     def typing_start(self) -> None:
@@ -198,7 +209,7 @@ class GateSession:
         """The inbound was logged on the person's most recent open task at the top of the
         turn. If the router routed this turn to a different (or new) task, log it there."""
         if self._turn_task_id != task["id"]:
-            self.m.store.task_event(task["id"], "inbound", body, chat_id=self.chat_id)
+            self.m.store.task_event(task["id"], "inbound", body, chat_id=self.record_id)
             self._turn_task_id = task["id"]
 
     async def jev_event(self, task: Dict[str, Any], body: str, history: List[Dict[str, Any]],
@@ -225,7 +236,7 @@ class GateSession:
             new_state = "waiting_aaron"
         elif task.get("state") in ("done", "failed") and kind in ("asked_for_something", "changed_or_corrected"):
             new_state = "open"
-        self.m.store.task_event(task["id"], kind, line, chat_id=self.chat_id, state=new_state)
+        self.m.store.task_event(task["id"], kind, line, chat_id=self.record_id, state=new_state)
         if not out.task_summary:
             # The router gave no summary this turn: keep the ledger honest with a short one.
             wo = res.get("waiting_on")
@@ -280,7 +291,7 @@ class GateSession:
         def to_kw(tq: Any) -> Dict[str, Any]:
             kw: Dict[str, Any] = dict(text=tq.text or "", states=tq.states, touched_within_days=tq.touched_within_days,
                                       created_within_days=tq.created_within_days, has_participants=tq.has_participants,
-                                      chat_id=self.chat_id if tq.this_conversation else "",
+                                      chat_id=self.record_id if tq.this_conversation else "",
                                       date_from=tq.date_from, date_to=tq.date_to, limit=tq.limit)
             if self.is_approver():
                 kw["participant"] = tq.participant or ""
@@ -325,7 +336,7 @@ class GateSession:
         if not approver:
             for t in self.m.store.tasks_for_person(self._sender(), open_only=False, limit=6):
                 add(int(t["id"]), 3.0)
-        for i, tid in enumerate(self.m.store.task_ids_for_chat(self.chat_id)):
+        for i, tid in enumerate(self.m.store.task_ids_for_chat(self.record_id)):
             add(tid, 3.0 - i * 0.5)                                   # locality: what this chat was on
         for tid in self.m.store.task_ids_for_thread(self.thread_key()):
             add(tid, 1.5)
@@ -578,7 +589,7 @@ class GateSession:
         out.request.scopes = chosen
 
     def task_memory(self) -> str:
-        mem = self.m.store.task_memory(self.chat_id, is_approver=self.is_approver(),
+        mem = self.m.store.task_memory(self.record_id, is_approver=self.is_approver(),
                                        person="" if self.is_approver() else self._sender())
         extra = []
         for tid in self.m.store.task_ids_for_thread(self.thread_key()):
@@ -596,19 +607,22 @@ class GateSession:
         async with self._lock:
             self.mode = mode
             self.reply_meta = dict(meta or {})
-            self.m.store.set_thread(self.chat_id, "routing", mode, self.reply_meta_for_store())
+            self.m.store.set_thread(self.record_id, "routing", mode, self.reply_meta_for_store())
+            if self.is_approver():
+                # Remembered on disk: notices have to land here even when no session is loaded.
+                self.m.store.mark_owner_thread(self.record_id, mode)
             body = _strip_quoted(text) if mode == "email" else text.strip()
-            self.inbound_id = self.m.store.add_message(self.chat_id, "inbound", body, mode)
+            self.inbound_id = self.m.store.add_message(self.record_id, "inbound", body, mode)
             self.deferred_ack = None
             self.typing_start()
             if self.thread_key():
-                self.m.store.link_thread(self.thread_key(), self.chat_id)
+                self.m.store.link_thread(self.thread_key(), self.record_id)
             # First thing every turn: put this message on the person's task ledger,
             # so the router starts from the record, not from a 20-message window.
             t = self.task()
             self._turn_task_id = t["id"] if t is not None else None
             if t is not None:
-                self.m.store.task_event(t["id"], "inbound", body, chat_id=self.chat_id)
+                self.m.store.task_event(t["id"], "inbound", body, chat_id=self.record_id)
             try:
                 if self.is_approver() and self.mode != "voice" and await self.m.handle_approver_command(self, body):
                     return
@@ -621,8 +635,8 @@ class GateSession:
                 await self.m.report_outage(exc, self.chat_id)
             finally:
                 self.typing_stop()
-                if self.m.store.thread_state(self.chat_id) == "routing":
-                    self.m.store.set_thread(self.chat_id, "idle")
+                if self.m.store.thread_state(self.record_id) == "routing":
+                    self.m.store.set_thread(self.record_id, "idle")
 
     def reply_meta_for_store(self) -> Dict[str, Any]:
         keep = {k: v for k, v in (self.reply_meta or {}).items()
@@ -644,8 +658,8 @@ class GateSession:
         try:
             t = self.task()
             if t is not None:
-                self.m.store.task_event(t["id"], "call_ended", "Phone call ended.", chat_id=self.chat_id)
-            self.m.store.add_message(self.chat_id, "system", "Phone call ended.")
+                self.m.store.task_event(t["id"], "call_ended", "Phone call ended.", chat_id=self.record_id)
+            self.m.store.add_message(self.record_id, "system", "Phone call ended.")
         except Exception:
             logger.exception("[gate %s] call-ended hook failed", self.chat_id)
         return ""
@@ -732,16 +746,16 @@ class GateSession:
         async with self._lock:
             prev = (self.mode, self.reply_meta)
             self.mode, self.reply_meta = "voice", dict(meta or {})
-            self.m.store.set_thread(self.chat_id, "routing")  # state only: keep their text/email route
+            self.m.store.set_thread(self.record_id, "routing")  # state only: keep their text/email route
             body = (query or "").strip()
-            self.inbound_id = self.m.store.add_message(self.chat_id, "inbound", body, "voice")
+            self.inbound_id = self.m.store.add_message(self.record_id, "inbound", body, "voice")
             t = self.task()
             self._turn_task_id = t["id"] if t is not None else None
             if t is not None:
-                self.m.store.task_event(t["id"], "inbound", f"(phone) {body}", chat_id=self.chat_id)
+                self.m.store.task_event(t["id"], "inbound", f"(phone) {body}", chat_id=self.record_id)
             try:
                 approver = self.is_approver()
-                history = self.m.store.history(self.chat_id, limit=20)
+                history = self.m.store.history(self.record_id, limit=20)
                 memory = self.task_memory()
                 logger.info("[gate %s] ledger loaded (voice consult): %d chars", self.chat_id, len(memory))
                 found = await self.lookup_tasks(history[:-1], body, memory)
@@ -749,30 +763,30 @@ class GateSession:
                                               memory=memory, found=found)
                 reply = out.reply or ""
                 if reply:
-                    self.m.store.add_message(self.chat_id, "outbound", reply, "voice")
+                    self.m.store.add_message(self.record_id, "outbound", reply, "voice")
                     if t is not None:
-                        self.m.store.task_event(t["id"], "outbound", f"(phone) {reply}", chat_id=self.chat_id)
+                        self.m.store.task_event(t["id"], "outbound", f"(phone) {reply}", chat_id=self.record_id)
                 if out.request is None:
                     return reply or "I don't have anything on that."
-                if self.m.store.pending_for_thread(self.chat_id) and not approver:
+                if self.m.store.pending_for_thread(self.record_id) and not approver:
                     return reply or "I already have a request waiting on Aaron for you."
                 assert task is not None
                 req = self.m.store.create_request(
-                    chat_id=self.chat_id, sender=self._sender(), sender_name=self._sender_name(), mode="voice",
+                    chat_id=self.record_id, sender=self._sender(), sender_name=self._sender_name(), mode="voice",
                     subject="", original_message=body, summary=out.request.summary,
                     scopes=out.request.scopes, prompt=out.request.prompt,
                     state="approved" if approver else "pending", task_id=task["id"], inbound_id=self.inbound_id)
                 self.m.record_request_on_task(req, task, self)
                 if not approver:
-                    self.m.store.set_thread(self.chat_id, "awaiting_aaron")
+                    self.m.store.set_thread(self.record_id, "awaiting_aaron")
                     await self.m.send_approval_text(req)
                     return reply or "I need to confirm that with Aaron first. I will follow up by text once he answers."
             except Exception:
                 logger.exception("[gate %s] voice consult failed", self.chat_id)
                 return "Something went wrong on my end. Please try that again."
             finally:
-                if self.m.store.thread_state(self.chat_id) == "routing":
-                    self.m.store.set_thread(self.chat_id, "idle")
+                if self.m.store.thread_state(self.record_id) == "routing":
+                    self.m.store.set_thread(self.record_id, "idle")
                 aaron_call = self.is_aaron_on_phone()
                 caller = self._sender()
                 self.mode, self.reply_meta = prev
@@ -791,7 +805,7 @@ class GateSession:
             self.mode = "voice"
             try:
                 approver = self.is_approver()
-                history = self.m.store.history(self.chat_id, limit=20)
+                history = self.m.store.history(self.record_id, limit=20)
                 memory = self.task_memory()
                 out = await self.m.router.route(
                     history=history, mode="voice", sender=self._sender(), contact_notes=self._contact_notes(),
@@ -811,7 +825,7 @@ class GateSession:
                 self.mode, self.reply_meta = prev
         reply = " ".join((reply or "").split())
         if reply and not reply.startswith(("Done via", "Failed via")):
-            self.m.store.add_message(self.chat_id, "outbound", reply, "voice")
+            self.m.store.add_message(self.record_id, "outbound", reply, "voice")
             return reply
         # Fallback: the tool bodies only, never the agent's header.
         body = _result_bodies(text.split("Result:", 1)[-1] if "Result:" in text else text)
@@ -825,8 +839,9 @@ class GateSession:
             if aaron_call:
                 await self.m.send_to_approver(text)
             else:
-                await self.m.send_fn(f"sms:{caller}", text, "sms", {"to": caller, "sender": caller})
-            self.m.store.add_message(self.chat_id, "outbound", text, "sms")
+                await self.m.send(f"sms:{caller}", text, "sms", {"to": caller, "sender": caller},
+                                  chat_id=self.record_id)
+            self.m.store.add_message(self.record_id, "outbound", text, "sms")
         return text
 
     async def run_consult_detailed(self, *args: Any, **kwargs: Any) -> Any:
@@ -838,8 +853,8 @@ class GateSession:
     # -- core ----------------------------------------------------------------
     async def _route_and_act(self, body: str, system_note: Optional[str] = None) -> bool:
         approver = self.is_approver()
-        history = self.m.store.thread_history(self.thread_key(), exclude_chat=self.chat_id) + \
-            self.m.store.history(self.chat_id, limit=20)
+        history = self.m.store.thread_history(self.thread_key(), exclude_chat=self.record_id) + \
+            self.m.store.history(self.record_id, limit=20)
         if system_note:
             prior, message = history, "(No new message from the sender. A system note with a task result was just added above. Write the reply the sender should receive: for Aaron, give him the answer or outcome clearly and naturally, in his voice preference (brief, no emojis); for anyone else, tell them only what concerns them, without internal details. Reply null only if there is truly nothing to say. Do not create a request.)"
         else:
@@ -849,7 +864,7 @@ class GateSession:
                     memory.count("\nTask T") + (1 if memory.startswith("Task T") else 0), len(memory))
         found = "" if system_note else await self.lookup_tasks(prior, message, memory)
         task: Optional[Dict[str, Any]] = None
-        running = None if system_note else self.m.store.running_for_thread(self.chat_id)
+        running = None if system_note else self.m.store.running_for_thread(self.record_id)
         if running is not None:
             # One request at a time per thread. The new message is already on the
             # thread and the task; when the running request ends, execute() re-reads
@@ -889,12 +904,12 @@ class GateSession:
         if out.request is None:
             return sent_reply
         # Validate scopes (pydantic already rejected unknown ones).
-        if self.m.store.pending_for_thread(self.chat_id) and not approver:
-            self.m.store.add_message(self.chat_id, "system", "A request is already awaiting Aaron; new request not created.")
+        if self.m.store.pending_for_thread(self.record_id) and not approver:
+            self.m.store.add_message(self.record_id, "system", "A request is already awaiting Aaron; new request not created.")
             return sent_reply
         assert task is not None
         req = self.m.store.create_request(
-            chat_id=self.chat_id, sender=self._sender(), sender_name=self._sender_name(), mode=self.mode,
+            chat_id=self.record_id, sender=self._sender(), sender_name=self._sender_name(), mode=self.mode,
             subject=str(self.reply_meta.get("subject") or ""), original_message=body,
             summary=out.request.summary, scopes=out.request.scopes, prompt=out.request.prompt,
             state="approved" if approver else "pending", task_id=task["id"], inbound_id=self.inbound_id,
@@ -905,7 +920,7 @@ class GateSession:
             # re-enter the session to phrase the result.
             asyncio.create_task(self.m.execute(req))
             return True
-        self.m.store.set_thread(self.chat_id, "awaiting_aaron")
+        self.m.store.set_thread(self.record_id, "awaiting_aaron")
         await self.m.send_approval_text(req)
         if not sent_reply:
             await self.send_to_sender(HANDOFF_LINE, role="ack")
@@ -927,14 +942,14 @@ class GateSession:
                 await self.m.send_to_approver(text)
             else:
                 num = self._sender()
-                await self.m.send_fn(f"sms:{num}", text, "sms", {"to": num, "sender": num})
+                await self.m.send(f"sms:{num}", text, "sms", {"to": num, "sender": num}, record=False)
         else:
             self.typing_stop()
-            await self.m.send_fn(self.chat_id, text, self.mode, self.reply_meta)
-        self.m.store.add_message(self.chat_id, "outbound", text, self.mode, reply_to=self.inbound_id, role=role)
+            await self.m.send(self.chat_id, text, self.mode, self.reply_meta, record=False)
+        self.m.store.add_message(self.record_id, "outbound", text, self.mode, reply_to=self.inbound_id, role=role)
         t = self.task()
         if t is not None:
-            self.m.store.task_event(t["id"], "outbound", text, chat_id=self.chat_id)
+            self.m.store.task_event(t["id"], "outbound", text, chat_id=self.record_id)
         return True
 
     async def ground_reply(self, reply: Optional[str], note: str, prior: List[Dict[str, Any]], memory: str,
@@ -993,7 +1008,7 @@ class GateSession:
         async with self._lock:
             if inbound_id:
                 self.inbound_id = inbound_id
-            self.m.store.add_message(self.chat_id, "system", note)
+            self.m.store.add_message(self.record_id, "system", note)
             if self.inbound_id and "answer" in self.m.store.responses_to(self.inbound_id):
                 logger.warning("[gate %s] inbound #%s already answered; result of a request not delivered again",
                                self.chat_id, self.inbound_id)
@@ -1089,16 +1104,33 @@ class GateSessionManager:
             self._expiry_task.cancel()
 
     # -- approver channel ----------------------------------------------------
+    async def send(self, target: str, text: str, mode: str, meta: Dict[str, Any], *,
+                   chat_id: str = "", role: str = "notice", reply_to: Optional[int] = None,
+                   record: bool = True) -> None:
+        """Every outbound message goes through here, and every one of them is written to a
+        thread. What was said is what can be referred to later, so a message that was sent
+        but never recorded leaves the next turn reading a conversation that did not happen."""
+        await self.send_fn(target, text, mode, meta)
+        if not record:
+            return      # the caller writes its own line, with the turn's reply_to and role
+        for cid in self._threads_for(target, chat_id):
+            try:
+                self.store.add_message(cid, "outbound", text, mode, reply_to=reply_to, role=role)
+            except Exception:
+                logger.debug("[gate] could not record an outbound on %s", cid, exc_info=True)
+
+    def _threads_for(self, target: str, chat_id: str = "") -> List[str]:
+        """Where an outbound belongs. The caller's record when it named one, the owner's
+        single thread for anything addressed to him, and otherwise the target itself so the
+        message is written down somewhere rather than nowhere."""
+        if chat_id:
+            return [chat_id]
+        conv = str(self.approver_conv or "")
+        return [OWNER_THREAD] if (conv and conv in target) else [target]
+
     async def send_to_approver(self, text: str) -> None:
         conv = self.approver_conv
-        await self.send_fn(f"imessage:{conv}", text, "imessage", {"conversation_id": conv})
-        # What Aaron was sent is part of what Aaron can refer to ("what was that message?"):
-        # record it on his thread as a plain outbound, outside the one-ack-one-answer rule.
-        for cid in self._approver_chat_ids():
-            try:
-                self.store.add_message(cid, "outbound", text, "imessage", reply_to=None, role="notice")
-            except Exception:
-                logger.debug("[gate] could not record approver notice on %s", cid, exc_info=True)
+        await self.send(f"imessage:{conv}", text, "imessage", {"conversation_id": conv})
 
     _outage_notified: Dict[str, float] = {}
 
@@ -1543,10 +1575,10 @@ class GateSessionManager:
         return ""
 
     def _approver_chat_ids(self) -> set:
-        out = set()
-        for cid, sess in self.sessions.items():
-            if sess.is_approver():
-                out.add(cid)
+        """The owner's record. One thread, whatever surface a message came in on, so it no
+        longer depends on which session happens to be loaded."""
+        out = {OWNER_THREAD}
+        out.update(cid for cid, sess in self.sessions.items() if sess.is_approver())
         return out
 
     # -- expiry ----------------------------------------------------------------

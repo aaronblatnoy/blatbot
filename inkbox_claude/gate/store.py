@@ -371,6 +371,29 @@ class Store:
                                     (inbound_id,)).fetchall()
         return [r["role"] or "answer" for r in rows]
 
+    def mark_owner_thread(self, chat_id: str, mode: str = "") -> None:
+        """Remember that this thread is the owner's. Notices have to reach his record even
+        when no session for him is live in memory, which is the usual case overnight."""
+        if not chat_id:
+            return
+        with self._lock:
+            self._db.execute(
+                "INSERT INTO threads(chat_id,state,mode,meta_json,updated_at) VALUES(?,?,?,?,?) "
+                "ON CONFLICT(chat_id) DO UPDATE SET meta_json=json_set(COALESCE(threads.meta_json,'{}'),"
+                "'$.owner',1), mode=COALESCE(excluded.mode, threads.mode), updated_at=excluded.updated_at",
+                (chat_id, "idle", mode or None, '{"owner": 1}', time.time()),
+            )
+            self._db.commit()
+
+    def owner_threads(self) -> List[str]:
+        """Every thread known to be the owner's, newest first."""
+        with self._lock:
+            rows = self._db.execute(
+                "SELECT chat_id FROM threads WHERE json_extract(COALESCE(meta_json,'{}'),'$.owner')=1 "
+                "ORDER BY updated_at DESC"
+            ).fetchall()
+        return [str(r["chat_id"]) for r in rows]
+
     def history(self, chat_id: str, limit: int = 20) -> List[Dict[str, Any]]:
         with self._lock:
             rows = self._db.execute(
