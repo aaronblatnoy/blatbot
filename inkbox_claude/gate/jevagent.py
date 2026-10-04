@@ -1420,6 +1420,36 @@ def is_destructive(name: str, args: Dict[str, Any]) -> bool:
     return bool(act) and bool(_DESTRUCTIVE_RE.search(act))
 
 
+_SEND_RE = re.compile(r"(send|reply|forward|post|publish|dm|text)", re.I)
+_NOT_SEND = re.compile(r"(draft|schedule_send|list|get|read|search)", re.I)
+
+
+def is_outbound_message(name: str, args: Dict[str, Any]) -> bool:
+    """Does this tool put words in front of another person? Mail, texts, chat messages,
+    anything posted somewhere others read. Drafting is not sending; neither is reading.
+
+    This is the one class of act that cannot be taken back once it happens, and the
+    damage lands on someone who never asked to be in the loop, so it is confirmed by
+    the owner every time, including when he is the one who asked for it."""
+    short = name.split("__")[-1]
+    if _NOT_SEND.search(short):
+        return False
+    return bool(_SEND_RE.search(short))
+
+
+def recipients_of(args: Dict[str, Any]) -> List[str]:
+    """Everyone a call would reach, from whichever fields the tool happens to use."""
+    out: List[str] = []
+    for key in ("to", "recipient", "recipients", "cc", "bcc", "chat_id", "conversation_id",
+                "phone", "number", "to_email", "email", "addresses"):
+        v = args.get(key)
+        for item in (v if isinstance(v, (list, tuple)) else [v]):
+            item = str(item or "").strip()
+            if item and item not in out:
+                out.append(item)
+    return out
+
+
 def is_write_tool(name: str) -> bool:
     """Whether a tool changes the world. A successful write must never be
     retried by the Claude fallback (double email, duplicate event)."""

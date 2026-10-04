@@ -607,10 +607,10 @@ class GateSession:
         async with self._lock:
             self.mode = mode
             self.reply_meta = dict(meta or {})
-            self.m.store.set_thread(self.record_id, "routing", mode, self.reply_meta_for_store())
+            self.m.store.set_thread(self.chat_id, "routing", mode, self.reply_meta_for_store())
             if self.is_approver():
                 # Remembered on disk: notices have to land here even when no session is loaded.
-                self.m.store.mark_owner_thread(self.record_id, mode)
+                self.m.store.mark_owner_thread(self.chat_id, mode)
             body = _strip_quoted(text) if mode == "email" else text.strip()
             self.inbound_id = self.m.store.add_message(self.record_id, "inbound", body, mode)
             self.deferred_ack = None
@@ -635,8 +635,8 @@ class GateSession:
                 await self.m.report_outage(exc, self.chat_id)
             finally:
                 self.typing_stop()
-                if self.m.store.thread_state(self.record_id) == "routing":
-                    self.m.store.set_thread(self.record_id, "idle")
+                if self.m.store.thread_state(self.chat_id) == "routing":
+                    self.m.store.set_thread(self.chat_id, "idle")
 
     def reply_meta_for_store(self) -> Dict[str, Any]:
         keep = {k: v for k, v in (self.reply_meta or {}).items()
@@ -746,7 +746,7 @@ class GateSession:
         async with self._lock:
             prev = (self.mode, self.reply_meta)
             self.mode, self.reply_meta = "voice", dict(meta or {})
-            self.m.store.set_thread(self.record_id, "routing")  # state only: keep their text/email route
+            self.m.store.set_thread(self.chat_id, "routing")  # state only: keep their text/email route
             body = (query or "").strip()
             self.inbound_id = self.m.store.add_message(self.record_id, "inbound", body, "voice")
             t = self.task()
@@ -768,25 +768,25 @@ class GateSession:
                         self.m.store.task_event(t["id"], "outbound", f"(phone) {reply}", chat_id=self.record_id)
                 if out.request is None:
                     return reply or "I don't have anything on that."
-                if self.m.store.pending_for_thread(self.record_id) and not approver:
+                if self.m.store.pending_for_thread(self.chat_id) and not approver:
                     return reply or "I already have a request waiting on Aaron for you."
                 assert task is not None
                 req = self.m.store.create_request(
-                    chat_id=self.record_id, sender=self._sender(), sender_name=self._sender_name(), mode="voice",
+                    chat_id=self.chat_id, sender=self._sender(), sender_name=self._sender_name(), mode="voice",
                     subject="", original_message=body, summary=out.request.summary,
                     scopes=out.request.scopes, prompt=out.request.prompt,
                     state="approved" if approver else "pending", task_id=task["id"], inbound_id=self.inbound_id)
                 self.m.record_request_on_task(req, task, self)
                 if not approver:
-                    self.m.store.set_thread(self.record_id, "awaiting_aaron")
+                    self.m.store.set_thread(self.chat_id, "awaiting_aaron")
                     await self.m.send_approval_text(req)
                     return reply or "I need to confirm that with Aaron first. I will follow up by text once he answers."
             except Exception:
                 logger.exception("[gate %s] voice consult failed", self.chat_id)
                 return "Something went wrong on my end. Please try that again."
             finally:
-                if self.m.store.thread_state(self.record_id) == "routing":
-                    self.m.store.set_thread(self.record_id, "idle")
+                if self.m.store.thread_state(self.chat_id) == "routing":
+                    self.m.store.set_thread(self.chat_id, "idle")
                 aaron_call = self.is_aaron_on_phone()
                 caller = self._sender()
                 self.mode, self.reply_meta = prev
@@ -864,7 +864,7 @@ class GateSession:
                     memory.count("\nTask T") + (1 if memory.startswith("Task T") else 0), len(memory))
         found = "" if system_note else await self.lookup_tasks(prior, message, memory)
         task: Optional[Dict[str, Any]] = None
-        running = None if system_note else self.m.store.running_for_thread(self.record_id)
+        running = None if system_note else self.m.store.running_for_thread(self.chat_id)
         if running is not None:
             # One request at a time per thread. The new message is already on the
             # thread and the task; when the running request ends, execute() re-reads
@@ -904,12 +904,12 @@ class GateSession:
         if out.request is None:
             return sent_reply
         # Validate scopes (pydantic already rejected unknown ones).
-        if self.m.store.pending_for_thread(self.record_id) and not approver:
+        if self.m.store.pending_for_thread(self.chat_id) and not approver:
             self.m.store.add_message(self.record_id, "system", "A request is already awaiting Aaron; new request not created.")
             return sent_reply
         assert task is not None
         req = self.m.store.create_request(
-            chat_id=self.record_id, sender=self._sender(), sender_name=self._sender_name(), mode=self.mode,
+            chat_id=self.chat_id, sender=self._sender(), sender_name=self._sender_name(), mode=self.mode,
             subject=str(self.reply_meta.get("subject") or ""), original_message=body,
             summary=out.request.summary, scopes=out.request.scopes, prompt=out.request.prompt,
             state="approved" if approver else "pending", task_id=task["id"], inbound_id=self.inbound_id,
@@ -920,7 +920,7 @@ class GateSession:
             # re-enter the session to phrase the result.
             asyncio.create_task(self.m.execute(req))
             return True
-        self.m.store.set_thread(self.record_id, "awaiting_aaron")
+        self.m.store.set_thread(self.chat_id, "awaiting_aaron")
         await self.m.send_approval_text(req)
         if not sent_reply:
             await self.send_to_sender(HANDOFF_LINE, role="ack")
@@ -1048,6 +1048,46 @@ def _is_acknowledgement(text: str) -> bool:
     return 0 < len(t.split()) <= ACK_MAX_WORDS and "?" not in t
 
 
+def _owner_request(manager: Any, req: Request) -> bool:
+    """Whether a request came from the person the assistant works for. Read through the
+    manager when it can answer, so a stand-in without the machinery simply says no."""
+    fn = getattr(manager, "_is_owner_request", None)
+    try:
+        return bool(fn(req)) if callable(fn) else False
+    except Exception:
+        return False
+
+
+def _draft_text(args: Dict[str, Any]) -> str:
+    """One outbound message, laid out as the person reading it would want to check it:
+    who it reaches first, then what it says, whole and unedited."""
+    def val(*keys: str) -> str:
+        for k in keys:
+            v = args.get(k)
+            if isinstance(v, (list, tuple)):
+                v = ", ".join(str(x) for x in v if str(x).strip())
+            v = str(v or "").strip()
+            if v:
+                return v
+        return ""
+    lines = []
+    for label, keys in (("To", ("to", "recipient", "recipients", "to_email", "email", "phone", "number")),
+                        ("Cc", ("cc",)), ("Bcc", ("bcc",)), ("Subject", ("subject", "title"))):
+        got = val(*keys)
+        if got:
+            lines.append(f"{label}: {got}")
+    body = val("body", "message", "text", "content", "caption")
+    rest = {k: v for k, v in args.items()
+            if k not in {"to", "recipient", "recipients", "to_email", "email", "phone", "number", "cc", "bcc",
+                         "subject", "title", "body", "message", "text", "content", "caption", "user_google_email"}}
+    out = "\n".join(lines)
+    if body:
+        out += ("\n\n" if out else "") + body
+    if rest:
+        out += ("\n\n" if out else "") + json.dumps(rest, ensure_ascii=False)
+    return out or json.dumps(args, ensure_ascii=False)
+
+
 class GateSessionManager:
     def __init__(self, *, cfg: Any, send_fn: SendFn, mcp_server: Any, identity_info: Dict[str, str],
                  store_path: str, exec_cwd: str, standing_path: Optional[str] = None,
@@ -1066,6 +1106,10 @@ class GateSessionManager:
         # needed); Claude Code stays as the fallback unless GATE_EXECUTOR_FALLBACK=none.
         self.jev_agent: Optional[JevAgent] = JevAgent(inkbox_server=mcp_server, router=self.router,
                                                       protected=protected) if jev_agent_enabled() else None
+        # One confirmed call has to be runnable whoever the executor is: when the owner has
+        # read a draft and said yes, the same call goes out, and nothing else does.
+        self.caller: JevAgent = self.jev_agent or JevAgent(inkbox_server=mcp_server, router=self.router,
+                                                           protected=protected)
         self.jev_fallback = (os.getenv("GATE_EXECUTOR_FALLBACK") or "claude").strip().lower() != "none"
         logger.info("[gate] executor: %s", "jev agent (fallback %s)" % ("claude" if self.jev_fallback else "none") if self.jev_agent else "claude code")
         self.task_picker: Optional[TaskPicker] = TaskPicker() if jev_enabled() else None
@@ -1304,6 +1348,12 @@ class GateSessionManager:
             await self.send_to_approver(f"T{tid} reopened: {task['title']}")
         return True
 
+    def _is_owner_request(self, req: Request) -> bool:
+        """Did this come from the person the assistant works for? His own requests send in
+        his name, so he reads anything that would go out. A request from anyone else was
+        already shown to him and approved before it ran, and its answer goes back to them."""
+        return req.chat_id == OWNER_THREAD or req.chat_id in self._approver_chat_ids()
+
     async def ask_confirmation(self, req: Request, status: Dict[str, Any]) -> None:
         """A destructive call is waiting. Park the request as pending with the exact call
         stored, and text the owner what it is. '#N yes' performs that one call."""
@@ -1314,7 +1364,11 @@ class GateSessionManager:
         shown = {k: v for k, v in c["args"].items() if k != "user_google_email"}
         about = "\n".join(f"  {ln}" for ln in c.get("about") or []) or "  (no further detail found)"
         self.task_note(req, "request", f"Waiting on Aaron to confirm: {short} {json.dumps(shown, ensure_ascii=False)}", state="waiting_aaron")
-        plain = await self._phrase_confirmation(req, short, shown, c.get("about") or [])
+        if c.get("kind") == "send":
+            # Not a summary of a message: the message. He approves the words that will go out.
+            plain = f"[Blatbot #{req.id}] Nothing has been sent. This is what would go out:\n\n{_draft_text(shown)}"
+        else:
+            plain = await self._phrase_confirmation(req, short, shown, c.get("about") or [])
         await self.send_to_approver(f"{plain}\nReply \"#{req.id} yes\" to do it or \"#{req.id} no\" to leave it alone.")
 
     async def _phrase_confirmation(self, req: Request, short: str, shown: Dict[str, Any], about: List[str]) -> str:
@@ -1340,10 +1394,12 @@ class GateSessionManager:
         """The owner said yes: run exactly the stored call, then finish the request."""
         c = (req.status or {}).get("confirm") or {}
         self.store.set_state(req.id, "running")
-        if self.jev_agent is None or not c:
+        if not c:
             status = {"ok": False, "error": "no confirmed call on record", "summary": "no confirmed call on record", "raw": "", "tool_calls": []}
         else:
-            status = await self.jev_agent.perform(c["tool"], c["args"])
+            # He has read it and said yes. That exact call runs, once, and nothing else.
+            caller = self.jev_agent or self.caller
+            status = await caller.perform(c["tool"], c["args"])
         ok = bool(status.get("ok"))
         self.store.set_state(req.id, "done" if ok else "failed", status=status, raw_output=status.get("raw"))
         self.store.set_thread(req.chat_id, "idle")
@@ -1416,7 +1472,8 @@ class GateSessionManager:
         asked (denied at the tool call)."""
         if not self.jev_agent:
             model = await self._pick_model(req)
-            return await self.executor.run(req, context=context, model=model)
+            return await self.executor.run(req, context=context, model=model,
+                                           from_owner=_owner_request(self, req))
         status = await self.jev_agent.run(req, context=context)
         logger.info("[gate] jev agent #%s: ok=%s steps=%s jev=%s prose=%s %ss",
                     req.id, status.get("ok"), status.get("tool_calls"), status.get("jev_calls"),
@@ -1437,7 +1494,8 @@ class GateSessionManager:
             return status
         logger.info("[gate] jev agent gave up on #%s (%s); falling back to claude code", req.id, status.get("error"))
         findings = status.get("raw") or ""
-        fallback = await self.executor.run(req, context=context, prior_work=findings)
+        fallback = await self.executor.run(req, context=context, prior_work=findings,
+                                           from_owner=_owner_request(self, req))
         fallback["escalated"] = True
         fallback["jev_attempt"] = {k: status.get(k) for k in ("error", "tool_calls", "jev_calls", "prose_calls", "seconds", "steps", "raw")}
         return fallback
@@ -1542,7 +1600,8 @@ class GateSessionManager:
             return f"{'Done' if ok else 'That failed'}. {result}"
         from_aaron = session.is_approver() or session.is_aaron_on_phone() or req.chat_id in self._approver_chat_ids()
         note = f"Task #{req.id} {outcome}: {req.summary}\nResult:\n{result}"
-        meanwhile = self.store.inbound_since(req.chat_id, req.created_at)
+        # Messages live on the person's record, which for the owner spans every surface.
+        meanwhile = self.store.inbound_since(self.get(req.chat_id).record_id, req.created_at)
         if from_aaron:
             if not ok and meanwhile:
                 # The run failed and Aaron said more while it ran (a hint, a correction):

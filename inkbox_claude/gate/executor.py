@@ -63,7 +63,11 @@ class Executor:
         # Addresses/conversations the gateway itself replies to (the owner's).
         self.protected = list(protected or [])
 
-    async def run(self, req: Request, context: str = "", prior_work: str = "", model: Optional[str] = None) -> Dict[str, Any]:
+    allow_send = False        # set for one run, after the owner has read the draft and said yes
+    held_send: Optional[Dict[str, Any]] = None   # the call that was stopped, for the gate to show him
+
+    async def run(self, req: Request, context: str = "", prior_work: str = "", model: Optional[str] = None,
+                  from_owner: bool = False) -> Dict[str, Any]:
         """Run an approved request. Returns a status dict; never raises.
 
         `context` is the task ledger for the person this request concerns. It is
@@ -77,11 +81,24 @@ class Executor:
         texts: List[str] = []
 
         protected = self.protected + [req.sender, req.chat_id]
+        self.held_send = None
+        # A message the owner asked to have sent is him speaking to someone through the
+        # assistant, and he sees it before it goes. A request that came from someone else
+        # was already read and approved by him in full, so answering it needs nothing more.
+        confirm_sends = bool(from_owner)
 
         async def can_use(tool_name: str, input_data: Dict[str, Any], context: Any):
             if tool_name not in allowed_set:
                 return PermissionResultDeny(message=f"{tool_name} is outside this task's scope; do not retry it.")
-            from .jevagent import is_destructive
+            from .jevagent import is_destructive, is_outbound_message, recipients_of
+            if confirm_sends and is_outbound_message(tool_name, input_data or {}) and not self.allow_send:
+                who = ", ".join(recipients_of(input_data or {})) or "(no recipient in the call)"
+                self.held_send = {"tool": tool_name, "args": dict(input_data or {}), "to": who}
+                return PermissionResultDeny(message=(
+                    "Nothing goes out to another person without Aaron seeing it first, including when he "
+                    f"asked for it. This would have reached: {who}. Do not try another tool or another "
+                    "route to send it. Put the whole thing in your final status, exactly as you would send "
+                    "it: every recipient, every cc, the subject, and the full text, then stop."))
             if is_destructive(tool_name, input_data or {}):
                 return PermissionResultDeny(message="Deleting, cancelling or replacing anything requires Aaron's "
                                                     "confirmation, which only the gateway can ask for. Report exactly "
@@ -156,11 +173,17 @@ class Executor:
             is_error = is_error or ("FAILED" in last)
         elif raw.lower().startswith("task failed") or "STATUS: FAILED" in raw.upper():
             is_error = True
-        return {
+        out = {
             "ok": not is_error,
             "engine": f"claude:{model or self.model}",
-            "summary": raw[-1500:] if raw else "(no status text)",
+            "summary": raw if raw else "(no status text)",
             "tool_calls": tool_calls,
             "raw": raw,
             "cost_usd": getattr(result, "total_cost_usd", None) if result is not None else None,
         }
+        if self.held_send is not None:
+            # Something was going to be said to someone else. It is not sent, it is shown.
+            out["confirm"] = {"tool": self.held_send["tool"], "args": self.held_send["args"],
+                              "about": [f"It would go to: {self.held_send['to']}"], "kind": "send"}
+            out["ok"] = False
+        return out

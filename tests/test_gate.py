@@ -44,7 +44,7 @@ class FakeExecutor:
         self.ran = []
         self.result = {"ok": True, "summary": "did it", "tool_calls": ["mcp__tamid-drive__manage_event"], "raw": "did it"}
 
-    async def run(self, req, context="", prior_work="", model=None):
+    async def run(self, req, context="", prior_work="", model=None, **kw):
         self.ran.append(req.id)
         self.context = context
         self.prior_work = prior_work
@@ -1275,7 +1275,7 @@ def test_escalation_hands_claude_the_agents_findings(tmp_path):
             return {"ok": False, "error": "unsure", "raw": "- search_drive_files:\nFound: X (ID: 1ABC)\nSTATUS: FAILED",
                     "tool_calls": ["mcp__tamid-drive__search_drive_files"], "wrote": False, "engine": "jev"}
     class Ex(FakeExecutor):
-        async def run(self, req, context="", prior_work="", model=None):
+        async def run(self, req, context="", prior_work="", model=None, **kw):
             self.prior = prior_work
             return await super().run(req, context)
     m.jev_agent, m.jev_fallback, m.executor = FakeJev(), True, Ex()

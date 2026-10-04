@@ -211,8 +211,8 @@ def test_manager_fallback_rules(monkeypatch):
         _run_executor = mg.GateSessionManager._run_executor
         def __init__(self, jev_status, fallback=True):
             self.jev_fallback = fallback
-            self.jev_agent = type("A", (), {"run": staticmethod(lambda req, context: _aw(jev_status))})()
-            self.executor = type("E", (), {"run": staticmethod(lambda req, context, prior_work="": _aw({"ok": True, "summary": "claude did it"}))})()
+            self.jev_agent = type("A", (), {"run": staticmethod(lambda req, context="", **kw: _aw(jev_status))})()
+            self.executor = type("E", (), {"run": staticmethod(lambda req, context="", prior_work="", **kw: _aw({"ok": True, "summary": "claude did it"}))})()
 
     async def _aw(v): return v
     req = _req()
