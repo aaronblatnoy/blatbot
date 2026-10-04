@@ -477,8 +477,11 @@ class TaskPicker:
                     "Judge it as the one who has to go and do it, having read the thread properly. What "
                     "the words point to is whatever the conversation last put there: that, it, him, the "
                     "same again, all carry their sense back from `conversation`, and a request that reads "
-                    "as empty on its own is often complete once it is read in place. Missing means still "
-                    "missing after that reading, and a detail you could settle by looking is not missing.",
+                    "as empty on its own is often complete once it is read in place. That includes your own "
+                    "words: an answer to something you just offered or asked takes its content from your "
+                    "question, so a bare yes or go ahead is the whole of the instruction. Missing means "
+                    "still missing after that reading, and a detail you could settle by looking is not "
+                    "missing.",
                 ],
             },
             "criteria": {"true": "They could go and do it.",

@@ -120,15 +120,11 @@ def after_join(state: DecideState, config: RunnableConfig) -> List[str]:
     # Anyone else still hears that Aaron will be asked.
     # The writer still runs (it names the task and writes where it stands); only its
     # acknowledgement is dropped in finalize for the owner's call or iMessage requests.
-    ask_first = state["needs_action"] and not state["actionable"]
-    if ask_first:
-        # Nobody could carry this out as it stands, so the reply asks instead. The task is
-        # still attached, so the answer lands on the same thread and nothing is lost.
+    if state["needs_action"] and not state["actionable"]:
+        # Nobody could obviously carry this out as it stands, so the writer is told to ask.
+        # The request is built anyway and held: if the writer, reading the whole thread,
+        # commits to doing it instead, finalize keeps the request so the words are true.
         logger.info("[gate %s] asking before acting (p=%.2f)", s.chat_id, state["p_actionable"])
-        branches.append("write_reply")
-        if gm._names_a_task(state["task_choice"]):
-            branches.append("attach_task")
-        return branches
     if not (state["needs_action"] and state["mode"] == "voice"):
         branches.append("write_reply")
     if state["needs_action"] or gm._names_a_task(state["task_choice"]):
@@ -227,6 +223,7 @@ async def finalize(state: DecideState, config: RunnableConfig) -> Dict[str, Any]
     from .router import RouterOutput
     out = RouterOutput(reply=state.get("reply"), task=state["task_choice"], task_title=state.get("task_title"),
                        task_summary=state.get("task_summary"), request=state.get("request") if state["needs_action"] else None)
+    asking = bool(state["needs_action"] and not state["actionable"])
     picker = s.m.task_picker
     verdict = (await picker.judge_reply(reply=out.reply, message=state["message"])
                if out.reply and picker is not None and hasattr(picker, "judge_reply") else {})
@@ -236,6 +233,13 @@ async def finalize(state: DecideState, config: RunnableConfig) -> Dict[str, Any]
     is_ack = verdict.get("is_acknowledgement")
     if is_ack is None:
         is_ack = gm._is_acknowledgement(out.reply or "")
+    if asking and out.reply is not None:
+        # The two have to agree. A reply that says it is doing something keeps its request
+        # and runs; a reply that asks drops it, so nothing runs behind a question.
+        if promises:
+            logger.info("[gate %s] the reply commits to the work, so it runs", s.chat_id)
+        else:
+            out.request = None
     if not state["needs_action"] and out.reply and promises:
         logger.info("[gate %s] reply promised an action but none was decided; rewriting", s.chat_id)
         out2 = await s.m.router.route(history=state["prior"], message=state["message"], mode=state["mode"],

@@ -1518,6 +1518,26 @@ def test_a_request_nobody_could_act_on_asks_instead_of_running(tmp_path):
     assert any("What would you like me to check?" in str(row) for row in sent), sent
 
 
+def test_a_reply_that_commits_to_the_work_runs_it(tmp_path):
+    """The gate meant to ask, but the writer read the thread and said it was doing it. The
+    words have to be true, so the request survives and runs."""
+    m, sent = make_manager(tmp_path)
+    p = _jev_first(m, choice="new")
+    p.action = True
+    async def judge_actionable(**kw):
+        return {"actionable": False, "p": 0.3, "reason": "ok"}
+    p.judge_actionable = judge_actionable
+    async def judge_reply(**kw):
+        return {"promises_action": True, "is_acknowledgement": True, "reason": "ok"}
+    p.judge_reply = judge_reply
+    m.router.next = RouterOutput(reply="On it. I will pull the sheet and rank them.", task="new", task_title="x")
+    async def go():
+        await m.get("aaron").handle_inbound("yes", "imessage", approver_meta())
+        await asyncio.sleep(0.05)
+    asyncio.run(go())
+    assert m.store.get_request(1) is not None, "a reply that says it is doing the work must run it"
+
+
 def test_a_clear_request_still_runs(tmp_path):
     """The same path with a request anyone could act on: the run happens as before."""
     m, sent = make_manager(tmp_path)
