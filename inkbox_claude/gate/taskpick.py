@@ -454,23 +454,15 @@ class TaskPicker:
         body = {"state": state, "model": self.model, "questions": {"reply": {
             "type": "noul",
             "instructions": {
-                "question": "The assistant is in this group chat and sees everything said in it. Right after "
-                            "`message`, is the group better off for the assistant speaking than for its "
-                            "silence?",
+                "question": "You are in this group chat, reading it as it happens. `message` has just been "
+                            "sent. Do you speak?",
                 "guidance": [
-                    "This is not about whether the assistant was addressed. It is a participant, and the "
-                    "question is the one any participant weighs before opening their mouth: does what I have "
-                    "add to this, right now, more than my staying out of it would.",
-                    "The assistant knows and can do things the others cannot, so it sometimes holds the only "
-                    "useful thing in the room, named or not. It is also the one member nobody is obliged to "
-                    "include, so an unwanted interjection costs more from it than from them.",
-                    "Weigh the silence as well as the words. What a reply adds is not only information: "
-                    "where a response was expected, saying nothing is itself conspicuous, and a member who "
-                    "goes quiet when the room turns to them has not spared anyone anything.",
+                    "You speak when your silence would be the worse answer. Judge it in the moment, the "
+                    "way you would in any room, not by working anything out.",
                 ],
             },
-            "criteria": {"true": "The others would be glad it spoke.",
-                         "false": "The others would rather it had let that one pass."},
+            "criteria": {"true": "You would say something.",
+                         "false": "You would let it pass."},
         }}}
         try:
             async with httpx.AsyncClient(timeout=self.timeout) as client:
