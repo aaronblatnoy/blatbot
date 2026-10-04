@@ -196,6 +196,29 @@ class GateSession:
         self.m.store.remember_person(p)
         return p
 
+    def handles(self) -> List[str]:
+        """Every way this sender reaches the assistant on this turn. Trust is held against
+        handles rather than a person record, because a handle is what a message carries."""
+        meta = self.reply_meta or {}
+        c = meta.get("contact") if isinstance(meta.get("contact"), dict) else {}
+        out = [self._sender(), str(meta.get("telegram_user_id") or ""), str((c or {}).get("id") or ""),
+               str((c or {}).get("name") or ""), self._sender_name()]
+        tg = str(meta.get("telegram_user_id") or "")
+        if tg:
+            out.append(f"telegram:{tg}")
+        return [h for h in out if str(h or "").strip()]
+
+    def trust(self) -> Dict[str, Any]:
+        """What this sender may have done without asking Aaron. Nothing, unless he has put
+        them in the table: everyone starts at no permissions."""
+        if self.is_approver():
+            return {"role": "owner", "scopes": ["*"], "person": "Aaron"}
+        try:
+            return self.m.store.trust_for(self.handles())
+        except Exception:
+            logger.exception("[gate] could not read trust; treating as untrusted")
+            return {"role": "", "scopes": [], "person": ""}
+
     def _contact_notes(self) -> str:
         c = (self.reply_meta or {}).get("contact") or {}
         notes = str(c.get("notes") or "") if isinstance(c, dict) else ""
@@ -913,14 +936,25 @@ class GateSession:
             self.m.store.add_message(self.record_id, "system", "A request is already awaiting Aaron; new request not created.")
             return sent_reply
         assert task is not None
+        # Someone Aaron has trusted for exactly these scopes does not need him woken up.
+        # Anyone else, and any scope outside what they were given, still waits for his yes.
+        trusted = False
+        if not approver:
+            t = self.trust()
+            allowed = set(t.get("scopes") or [])
+            trusted = bool(allowed) and set(out.request.scopes or []) <= allowed
+            if trusted:
+                logger.info("[gate %s] %s is trusted for %s; running without asking Aaron",
+                            self.chat_id, t.get("person") or self._sender(), sorted(out.request.scopes))
         req = self.m.store.create_request(
             chat_id=self.chat_id, sender=self._sender(), sender_name=self._sender_name(), mode=self.mode,
             subject=str(self.reply_meta.get("subject") or ""), original_message=body,
             summary=out.request.summary, scopes=out.request.scopes, prompt=out.request.prompt,
-            state="approved" if approver else "pending", task_id=task["id"], inbound_id=self.inbound_id,
+            state="approved" if (approver or trusted) else "pending", task_id=task["id"],
+            inbound_id=self.inbound_id,
         )
         self.m.record_request_on_task(req, task, self)
-        if approver:
+        if approver or trusted:
             # Run after this turn releases the session lock; execute() will
             # re-enter the session to phrase the result.
             asyncio.create_task(self.m.execute(req))

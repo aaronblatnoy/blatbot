@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
 import logging
 import sqlite3
 import threading
@@ -254,6 +255,16 @@ class Request:
         )
 
 
+def _trust_key(value: str) -> str:
+    """One handle, normalised. A phone is its digits, anything else is lowercase text, so
+    the same person matches whether they arrive as +1 (555) 010-0001 or 15550100001."""
+    v = " ".join(str(value or "").split()).lower()
+    digits = re.sub(r"\D", "", v)
+    if len(digits) >= 10 and not any(c.isalpha() for c in v):
+        return digits[-10:]
+    return v
+
+
 class Store:
     def __init__(self, path: str):
         Path(path).parent.mkdir(parents=True, exist_ok=True)
@@ -393,6 +404,98 @@ class Store:
                 "ORDER BY updated_at DESC"
             ).fetchall()
         return [str(r["chat_id"]) for r in rows]
+
+    # -- who may act without asking ------------------------------------------
+    def _ensure_trust(self) -> None:
+        with self._lock:
+            self._db.executescript("""
+                CREATE TABLE IF NOT EXISTS roles (
+                  name TEXT PRIMARY KEY,
+                  scopes TEXT NOT NULL DEFAULT '[]',
+                  note TEXT NOT NULL DEFAULT '',
+                  updated_at REAL NOT NULL DEFAULT 0
+                );
+                CREATE TABLE IF NOT EXISTS trust (
+                  key TEXT PRIMARY KEY,
+                  person TEXT NOT NULL DEFAULT '',
+                  role TEXT NOT NULL DEFAULT '',
+                  scopes TEXT NOT NULL DEFAULT '[]',
+                  note TEXT NOT NULL DEFAULT '',
+                  updated_at REAL NOT NULL DEFAULT 0
+                );
+            """)
+            self._db.commit()
+
+    def set_role(self, name: str, scopes: List[str], note: str = "") -> None:
+        """A named level of trust and the scopes it may use without asking the owner."""
+        self._ensure_trust()
+        with self._lock:
+            self._db.execute(
+                "INSERT INTO roles(name,scopes,note,updated_at) VALUES(?,?,?,?) "
+                "ON CONFLICT(name) DO UPDATE SET scopes=excluded.scopes, note=excluded.note, "
+                "updated_at=excluded.updated_at",
+                (name.strip().lower(), json.dumps(sorted(set(scopes))), note, time.time()))
+            self._db.commit()
+
+    def drop_role(self, name: str) -> None:
+        self._ensure_trust()
+        with self._lock:
+            self._db.execute("DELETE FROM roles WHERE name=?", (name.strip().lower(),))
+            self._db.commit()
+
+    def roles(self) -> List[Dict[str, Any]]:
+        self._ensure_trust()
+        with self._lock:
+            rows = self._db.execute("SELECT * FROM roles ORDER BY name").fetchall()
+        return [{"name": r["name"], "scopes": json.loads(r["scopes"] or "[]"), "note": r["note"]} for r in rows]
+
+    def set_trust(self, key: str, *, person: str = "", role: str = "", scopes: Optional[List[str]] = None,
+                  note: str = "") -> None:
+        """Trust one handle: an email, a phone, a telegram id, a name. Handles are what
+        arrive on a message, so a person is trusted once per way of reaching them."""
+        self._ensure_trust()
+        with self._lock:
+            self._db.execute(
+                "INSERT INTO trust(key,person,role,scopes,note,updated_at) VALUES(?,?,?,?,?,?) "
+                "ON CONFLICT(key) DO UPDATE SET person=excluded.person, role=excluded.role, "
+                "scopes=excluded.scopes, note=excluded.note, updated_at=excluded.updated_at",
+                (_trust_key(key), person, (role or "").strip().lower(),
+                 json.dumps(sorted(set(scopes or []))), note, time.time()))
+            self._db.commit()
+
+    def drop_trust(self, key: str) -> None:
+        self._ensure_trust()
+        with self._lock:
+            self._db.execute("DELETE FROM trust WHERE key=?", (_trust_key(key),))
+            self._db.commit()
+
+    def trusted(self) -> List[Dict[str, Any]]:
+        self._ensure_trust()
+        with self._lock:
+            rows = self._db.execute("SELECT * FROM trust ORDER BY person, key").fetchall()
+        return [{"key": r["key"], "person": r["person"], "role": r["role"],
+                 "scopes": json.loads(r["scopes"] or "[]"), "note": r["note"]} for r in rows]
+
+    def trust_for(self, keys: List[str]) -> Dict[str, Any]:
+        """What this sender may do without asking. Unknown handles get nothing, which is
+        the default for everyone: a person has to be put in this table to be trusted at all."""
+        self._ensure_trust()
+        wanted = [_trust_key(k) for k in keys if str(k or "").strip()]
+        if not wanted:
+            return {"role": "", "scopes": [], "person": ""}
+        marks = ",".join("?" for _ in wanted)
+        with self._lock:
+            rows = self._db.execute(f"SELECT * FROM trust WHERE key IN ({marks})", wanted).fetchall()
+            roles = {r["name"]: json.loads(r["scopes"] or "[]")
+                     for r in self._db.execute("SELECT * FROM roles").fetchall()}
+        scopes: List[str] = []
+        role, person = "", ""
+        for r in rows:
+            role = role or r["role"]
+            person = person or r["person"]
+            scopes += json.loads(r["scopes"] or "[]")
+            scopes += roles.get(r["role"], [])
+        return {"role": role, "scopes": sorted(set(scopes)), "person": person}
 
     def requests_in_state(self, state: str) -> List[Request]:
         """Every request sitting in one state. Used at startup to find runs the process

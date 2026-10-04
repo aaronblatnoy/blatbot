@@ -1577,6 +1577,33 @@ def test_send_tools_are_taken_off_the_preapproved_list_for_the_owner(tmp_path):
         "someone else's approved request must still be able to reply"
 
 
+def test_a_trusted_person_runs_their_own_scopes_and_nothing_more(tmp_path):
+    """Everyone starts with nothing. A person Aaron has trusted for certain scopes runs
+    those without waking him; the same person asking for anything else still waits."""
+    m, sent = make_manager(tmp_path)
+    m.store.set_role("colleague", ["calendar"], "works with Aaron")
+    m.store.set_trust("cand@nyu.edu", person="Cand Idate", role="colleague")
+
+    m.router.next = RouterOutput(reply="On it.", task="new", task_title="x",
+                                 request=RouterRequest(prompt="book", scopes=["calendar"], summary="book"))
+    asyncio.run(m.get("c1").handle_inbound("book tuesday", "email", stranger_meta()))
+    assert m.store.get_request(1).state in ("approved", "running", "done"), \
+        "a trusted scope should not wait for Aaron"
+
+    m.router.next = RouterOutput(reply="On it.", task="new", task_title="y",
+                                 request=RouterRequest(prompt="mail", scopes=["email_send"], summary="mail"))
+    asyncio.run(m.get("c2").handle_inbound("email the team", "email", stranger_meta()))
+    assert m.store.get_request(2).state == "pending", "a scope they were not given must still wait"
+
+
+def test_an_unknown_person_is_trusted_with_nothing(tmp_path):
+    m, sent = make_manager(tmp_path)
+    m.router.next = RouterOutput(reply="I will check with Aaron.", task="new", task_title="x",
+                                 request=RouterRequest(prompt="book", scopes=["calendar"], summary="book"))
+    asyncio.run(m.get("c9").handle_inbound("book tuesday", "email", stranger_meta()))
+    assert m.store.get_request(1).state == "pending"
+
+
 def test_telegram_is_just_another_surface_for_permissions(tmp_path, monkeypatch):
     """A request from anyone but the owner waits for him, whichever surface it arrived on.
     Telegram identifies the sender by a numeric id Telegram stamps and the sender cannot
