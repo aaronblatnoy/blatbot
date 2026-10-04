@@ -1531,6 +1531,45 @@ def test_a_notice_reaches_the_owner_record_with_no_session_loaded(tmp_path):
     assert any("a thing happened" in t for t in texts), texts
 
 
+def telegram_meta(user_id: str):
+    return {"sender": f"telegram:{user_id}", "to": "-100", "telegram_chat_id": "-100",
+            "telegram_user_id": user_id, "contact": {"name": "Someone"}}
+
+
+def test_telegram_is_just_another_surface_for_permissions(tmp_path, monkeypatch):
+    """A request from anyone but the owner waits for him, whichever surface it arrived on.
+    Telegram identifies the sender by a numeric id Telegram stamps and the sender cannot
+    set, so it is held to exactly the standard of email, text and the phone."""
+    monkeypatch.setenv("GATE_APPROVER_TELEGRAM_ID", "6752193595")
+    m, sent = make_manager(tmp_path)
+    m.approver_telegram_id = "6752193595"
+    m.router.next = RouterOutput(reply="I will check with Aaron.", task="new", task_title="x",
+                                 request=RouterRequest(prompt="do it", scopes=["calendar"], summary="do it"))
+    asyncio.run(m.get("tg:999").handle_inbound("book me a slot", "telegram", telegram_meta("999")))
+    req = m.store.get_request(1)
+    assert req is not None and req.state == "pending", "a stranger on Telegram must wait for Aaron"
+    assert any("Blatbot #1" in str(row) for row in sent), sent
+
+    # The owner, on the same surface, runs immediately: the id is his.
+    m2, sent2 = make_manager(tmp_path / "b")
+    m2.approver_telegram_id = "6752193595"
+    s = m2.get("tg:6752193595")
+    asyncio.run(s.handle_inbound("hi", "telegram", telegram_meta("6752193595")))
+    assert s.is_approver() is True
+
+
+def test_a_telegram_group_member_who_is_not_the_owner_still_waits(tmp_path):
+    """Being in a group with the owner grants nothing: the sender id is what counts."""
+    m, sent = make_manager(tmp_path)
+    m.approver_telegram_id = "6752193595"
+    s = m.get("tg:-100")
+    meta = telegram_meta("4242")
+    meta["conversation_kind"] = "group"
+    s.reply_meta = meta
+    s.mode = "telegram"
+    assert s.is_approver() is False
+
+
 def test_the_room_note_works_for_any_group(tmp_path):
     """Nothing in it is particular to one chat, one channel, or one set of people."""
     from inkbox_claude.gate.rooms import room_note
