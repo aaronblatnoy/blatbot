@@ -437,50 +437,48 @@ class TaskPicker:
         return {"promises_action": p1 >= 0.5, "is_acknowledgement": p2 >= 0.5, "reason": "ok"}
 
     async def judge_group_reply(self, *, message: str, sender: str, group: str,
-                                recent: str = "", bot_name: str = "") -> Dict[str, Any]:
+                                recent: str = "", bot_name: str = "", role: str = "") -> Dict[str, Any]:
         """A group message that did not name the assistant: is it nonetheless something the
         assistant should answer? One noul. Returns {"should_reply": bool|None, "p": float}.
         Undecided (None) means stay quiet: in a group, silence is the safe default."""
         if not self.api_key or not message:
             return {"should_reply": None, "p": 0.0, "reason": "disabled"}
         state = {"group_name": group, "sender": sender, "message": message,
-                 "recent_messages": recent, "assistant_name": bot_name or "Blatbot"}
+                 "recent_messages": recent, "assistant_name": bot_name or "Blatbot",
+                 # Who the assistant is in this room. Without it, "is this mine to answer?"
+                 # has no referent and the judgment is guessing at its own job.
+                 "assistant_role": role or (os.getenv("GATE_ASSISTANT_ROLE") or
+                                            "A personal assistant to one member of this group, able to look "
+                                            "things up, run errands against their accounts and systems, and "
+                                            "answer questions about itself and its work.")}
         body = {"state": state, "model": self.model, "questions": {"reply": {
             "type": "noul",
             "instructions": {
-                "question": "`message` was sent in a group chat the assistant is in, and it does NOT mention the "
-                            "assistant by name. Should the assistant speak up anyway?",
-                "count_as_yes": [
-                    "It asks for something the assistant can do or knows: a lookup, a schedule, a file, "
-                    "a record, a calculation, a fact, the status of work it was given.",
-                    "It is a follow-up to something the assistant itself said in `recent_messages`, the way a "
-                    "reply continues a turn, including a short one ('and the next?', 'what about friday').",
-                    "It asks the room an open question nobody present has answered and the assistant could.",
-                    "It asks about the assistant itself: what it is, what it can do, who built it.",
-                    "Someone is clearly waiting on the assistant: a request was made of it and it has not "
-                    "answered yet in `recent_messages`.",
-                    "It is a request phrased at no one in particular ('someone pull up the deadline', "
-                    "'need that doc') that the assistant can satisfy.",
-                    "It speaks to the assistant as 'you' and the assistant is the one plausibly meant: it "
-                    "briefs it, tells it what it will be doing, or asks how it feels about something. "
-                    "`recent_messages` shows who 'you' is: if the assistant just spoke, or the message is "
-                    "about work the assistant does, it is being talked to.",
-                    "It is a question put TO the assistant in the second person, including a social one "
-                    "('are you excited to work with us?', 'you ready?'): a question asked of someone is "
-                    "theirs to answer, whether it is about work or not.",
-                ],
-                "count_as_no": [
-                    "People are talking to each other: plans, banter, opinions, reactions, agreement, stories.",
-                    "It is addressed to a specific person who is not the assistant, by name.",
-                    "It is a question only a human in the group can answer (their own availability, "
-                    "their own view, their own news), including a 'you' that clearly means a person "
-                    "('you free saturday?', 'you around tonight?').",
-                    "It adds nothing to answer: an acknowledgement, a thanks, a greeting between people, "
-                    "a one-word reaction.",
+                "question": "The assistant is a member of this group chat and sees everything said in it. "
+                            "`message` does not say its name. Reading the room, is this message for the "
+                            "assistant?",
+                "guidance": [
+                    "Judge it the way a person sitting in the room would. You can tell when something is "
+                    "aimed at you and when two other people are talking: who was last spoken to, who was "
+                    "asked, and whose turn it now is.",
+                    "A question or an instruction puts the turn on whoever it was aimed at. If that is you, "
+                    "answering is not optional, and it does not matter whether the question is about work, "
+                    "about you, or just friendly. A statement, a reaction or an aside puts the turn on "
+                    "nobody.",
+                    "Work out who 'you' means from what came just before. The one who spoke last, or the one "
+                    "who can actually do the thing being asked for, is usually the one being addressed.",
+                    "When a message closes an exchange rather than opening one, the turn is over and nothing "
+                    "more is wanted. Thanks, agreement and sign-offs end a conversation; treating one as an "
+                    "opening restarts something that had finished.",
+                    "Being able to help is not a reason to speak. Cutting into a conversation that was going "
+                    "fine without you is worse than staying out of it, and no group owes you a part in every "
+                    "exchange.",
+                    "The two mistakes are not symmetric, but neither is free: barging in where you were not "
+                    "wanted is rude, and sitting silent when someone was plainly talking to you is worse.",
                 ],
             },
-            "criteria": {"true": "The assistant is the right one to answer this, even unnamed.",
-                         "false": "This is the humans' conversation; the assistant should stay quiet."},
+            "criteria": {"true": "A person in the assistant's seat would take this as theirs to answer.",
+                         "false": "A person in the assistant's seat would let someone else have it."},
         }}}
         try:
             async with httpx.AsyncClient(timeout=self.timeout) as client:
@@ -491,7 +489,7 @@ class TaskPicker:
             logger.warning("group reply judgment via TypeSafe failed: %s", exc)
             return {"should_reply": None, "p": 0.0, "reason": f"error: {exc}"}
         p = float((a.get("reply") or {}).get("noul") or 0.0)
-        floor = float(os.getenv("GATE_GROUP_REPLY_MIN") or 0.55)
+        floor = float(os.getenv("GATE_GROUP_REPLY_MIN") or 0.5)
         logger.info("group reply judgment: p(should reply)=%.2f floor=%.2f", p, floor)
         return {"should_reply": p >= floor, "p": p, "reason": "ok"}
 
