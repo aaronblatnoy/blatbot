@@ -256,14 +256,21 @@ class Router:
     async def route(self, *, history: List[Dict[str, Any]], message: str, mode: str,
                     sender: str, contact_notes: str, is_approver: bool,
                     task_memory: str = "", found_tasks: str = "",
-                    action: Optional[bool] = None, action_task: str = "") -> RouterOutput:
+                    action: Optional[bool] = None, action_task: str = "",
+                    ask: bool = False) -> RouterOutput:
         """`action` is set when typed judgments have already decided whether a tool
         request exists for this message; the router then only writes the reply
         (and the task title/summary) and must not define a request."""
         sender_label = f"Aaron Blatnoy (the owner; his private iMessage) {sender}" if is_approver else sender
         found = f"TASKS FOUND BY YOUR LOOKUP (same format; may include older or other people's tasks):\n{found_tasks}\n\n" if found_tasks else ""
         decided = ""
-        if action is True:
+        if ask:
+            decided = ("DECIDED: this asks for something to be done, but not clearly enough for anyone to go "
+                       "and do it. Reply with the one question that would let the work start: name what you "
+                       "need, in a single short line, the way a person asks. Do not guess at what was meant, "
+                       "do not list options unless two readings are equally likely, do not say you are on it, "
+                       "and do not claim anything was looked at. Do NOT output a request.\n\n")
+        elif action is True:
             decided = ("DECIDED: a tool request has been created for this message" +
                        (f" on task {action_task}" if action_task else "") +
                        (" and will run now; reply with one short natural line saying what you are doing, the way a person "

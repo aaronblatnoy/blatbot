@@ -102,6 +102,17 @@ _DEFAULT_ROLE = (
 )
 
 
+def _history_text(history: List[Dict[str, Any]], limit: int = 12) -> str:
+    """The conversation as plain lines, for a judgment that has to read it."""
+    out = []
+    for row in (history or [])[-limit:]:
+        who = "them" if (row.get("kind") or row.get("role")) in ("inbound", "user") else "you"
+        text = (row.get("text") or row.get("content") or "").strip()
+        if text:
+            out.append(f"{who}: {text}")
+    return "\n".join(out)
+
+
 class TaskPicker:
     def __init__(self, api_key: Optional[str] = None, model: Optional[str] = None,
                  min_confidence: Optional[float] = None, timeout: float = 20.0):
@@ -445,6 +456,43 @@ class TaskPicker:
         p2 = float((a.get("ack") or {}).get("noul") or 0.0)
         logger.info("reply judgment: p(promises)=%.2f p(ack)=%.2f", p1, p2)
         return {"promises_action": p1 >= 0.5, "is_acknowledgement": p2 >= 0.5, "reason": "ok"}
+
+    async def judge_actionable(self, *, message: str, history: List[Dict[str, Any]],
+                               task: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+        """Before anything is handed to the execution layer: can it be carried out as it
+        stands? One noul. A request missing the thing it acts on is better answered with a
+        question than with a run that fails and asks the same question afterwards.
+        Returns {"actionable": bool|None, "p": float}."""
+        if not self.api_key or not message:
+            return {"actionable": None, "p": 0.0, "reason": "disabled"}
+        state = {"message": message, "conversation": _history_text(history),
+                 "task_in_hand": (task or {}).get("title") or ""}
+        body = {"state": state, "model": self.model, "questions": {"clear": {
+            "type": "noul",
+            "instructions": {
+                "question": "Someone with full access to the accounts, files and calendars is about to go and "
+                            "do what `message` asks. Reading it with `conversation`, do they know what to do, "
+                            "or would they have to come back and ask what was meant?",
+                "guidance": [
+                    "Judge it as the one who has to go and do it. What is missing has to be missing: a "
+                    "detail you can settle by looking, or that the conversation already supplies, is not.",
+                ],
+            },
+            "criteria": {"true": "They could go and do it.",
+                         "false": "They would have to ask first."},
+        }}}
+        try:
+            async with httpx.AsyncClient(timeout=self.timeout) as client:
+                r = await client.post(TYPESAFE_URL, headers={"Authorization": f"Bearer {self.api_key}"}, json=body)
+                r.raise_for_status()
+                a = r.json()["answers"]
+        except Exception as exc:
+            logger.warning("actionable judgment via TypeSafe failed: %s", exc)
+            return {"actionable": None, "p": 0.0, "reason": f"error: {exc}"}
+        p = float((a.get("clear") or {}).get("noul") or 0.0)
+        floor = float(os.getenv("GATE_ACTIONABLE_MIN") or 0.4)
+        logger.info("actionable judgment: p(clear enough to run)=%.2f floor=%.2f", p, floor)
+        return {"actionable": p >= floor, "p": p, "reason": "ok"}
 
     async def judge_group_reply(self, *, message: str, sender: str, group: str,
                                 recent: str = "", bot_name: str = "", role: str = "") -> Dict[str, Any]:

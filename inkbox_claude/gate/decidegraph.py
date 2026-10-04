@@ -38,6 +38,8 @@ class DecideState(TypedDict, total=False):
     pick: str                       # raw pick: "T12" | "new" | "none" | ""
     needs_action: bool
     p_action: float
+    actionable: bool                # can the request be run as it stands, or must we ask first
+    p_actionable: float
     # the reply writer's outputs (DeepSeek)
     reply: Optional[str]
     task_title: Optional[str]
@@ -86,10 +88,25 @@ async def judge_action(state: DecideState, config: RunnableConfig) -> Dict[str, 
     return {"needs_action": bool(needs), "p_action": p}
 
 
+async def judge_actionable(state: DecideState, config: RunnableConfig) -> Dict[str, Any]:
+    """Runs beside the others: if this turns out to want action, could someone actually go
+    and do it? When the answer is no, asking beats a run that fails and asks anyway."""
+    s = _s(config)
+    judge = getattr(s.m.task_picker, "judge_actionable", None)
+    if judge is None:
+        return {"actionable": True, "p_actionable": 0.0}
+    recent = s.candidate_tasks(state["message"])[:1]
+    out = await judge(message=state["message"], history=state["prior"],
+                      task=recent[0] if recent else None)
+    clear = out.get("actionable")
+    return {"actionable": True if clear is None else bool(clear), "p_actionable": float(out.get("p") or 0.0)}
+
+
 async def join_judgments(state: DecideState, config: RunnableConfig) -> Dict[str, Any]:
     s = _s(config)
-    logger.info("[gate %s] jev-first: task=%s action=%s (p=%.2f)", s.chat_id,
-                state["task_choice"] or ("new" if state["pick"] == "new" else None), state["needs_action"], state["p_action"])
+    logger.info("[gate %s] jev-first: task=%s action=%s (p=%.2f) actionable=%s (p=%.2f)", s.chat_id,
+                state["task_choice"] or ("new" if state["pick"] == "new" else None), state["needs_action"],
+                state["p_action"], state["actionable"], state["p_actionable"])
     return {}
 
 
@@ -103,6 +120,15 @@ def after_join(state: DecideState, config: RunnableConfig) -> List[str]:
     # Anyone else still hears that Aaron will be asked.
     # The writer still runs (it names the task and writes where it stands); only its
     # acknowledgement is dropped in finalize for the owner's call or iMessage requests.
+    ask_first = state["needs_action"] and not state["actionable"]
+    if ask_first:
+        # Nobody could carry this out as it stands, so the reply asks instead. The task is
+        # still attached, so the answer lands on the same thread and nothing is lost.
+        logger.info("[gate %s] asking before acting (p=%.2f)", s.chat_id, state["p_actionable"])
+        branches.append("write_reply")
+        if gm._names_a_task(state["task_choice"]):
+            branches.append("attach_task")
+        return branches
     if not (state["needs_action"] and state["mode"] == "voice"):
         branches.append("write_reply")
     if state["needs_action"] or gm._names_a_task(state["task_choice"]):
@@ -120,7 +146,9 @@ async def write_reply(state: DecideState, config: RunnableConfig) -> Dict[str, A
     out = await s.m.router.route(history=state["prior"], message=state["message"], mode=state["mode"],
                                  sender=s._sender(), contact_notes=s._contact_notes(), is_approver=s.is_approver(),
                                  task_memory=state["memory"], found_tasks=state["found"],
-                                 action=state["needs_action"], action_task=(peek or {}).get("title") or "")
+                                 action=state["needs_action"] and state["actionable"],
+                                 action_task=(peek or {}).get("title") or "",
+                                 ask=bool(state["needs_action"] and not state["actionable"]))
     return {"reply": out.reply, "task_title": out.task_title, "task_summary": out.task_summary}
 
 
@@ -252,14 +280,16 @@ async def finalize(state: DecideState, config: RunnableConfig) -> Dict[str, Any]
 
 def build_graph():
     g = StateGraph(DecideState)
-    for name, fn in (("pick_task", pick_task), ("judge_action", judge_action), ("join_judgments", join_judgments),
+    for name, fn in (("pick_task", pick_task), ("judge_action", judge_action),
+                     ("judge_actionable", judge_actionable), ("join_judgments", join_judgments),
                      ("write_reply", write_reply), ("attach_task", attach_task), ("build_request", build_request),
                      ("judge_scopes", judge_scopes), ("inherit_scopes", inherit_scopes), ("record_event", record_event),
                      ("finalize", finalize)):
         g.add_node(name, fn)
     g.add_edge(START, "pick_task")
     g.add_edge(START, "judge_action")
-    g.add_edge(["pick_task", "judge_action"], "join_judgments")
+    g.add_edge(START, "judge_actionable")
+    g.add_edge(["pick_task", "judge_action", "judge_actionable"], "join_judgments")
     g.add_conditional_edges("join_judgments", after_join, ["write_reply", "attach_task", "finalize"])
     g.add_conditional_edges("attach_task", after_attach, {"build_request": "build_request", "record_event": "record_event"})
     g.add_edge("build_request", "judge_scopes")

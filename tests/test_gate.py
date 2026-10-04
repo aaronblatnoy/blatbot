@@ -1498,6 +1498,41 @@ def test_owner_requests_get_jev_scopes_plus_likely_writes_only(tmp_path):
     assert scopes == {"calendar", "tamid_drive_write"}
 
 
+def test_a_request_nobody_could_act_on_asks_instead_of_running(tmp_path):
+    """A message that wants something done but does not say what: the gate asks, and no
+    request reaches the execution layer."""
+    m, sent = make_manager(tmp_path)
+    p = _jev_first(m, choice="new")
+    p.action = True
+    async def judge_actionable(**kw):
+        return {"actionable": False, "p": 0.1, "reason": "ok"}
+    p.judge_actionable = judge_actionable
+    m.router.next = RouterOutput(reply="What would you like me to check?", task="new", task_title="x")
+    async def go():
+        await m.get("aaron").handle_inbound("blatbot, could you please check", "imessage", approver_meta())
+        await asyncio.sleep(0.05)
+    asyncio.run(go())
+    assert m.store.get_request(1) is None
+    assert m.router.calls and m.router.calls[0].get("ask") is True
+
+
+def test_a_clear_request_still_runs(tmp_path):
+    """The same path with a request anyone could act on: the run happens as before."""
+    m, sent = make_manager(tmp_path)
+    p = _jev_first(m, choice="new")
+    p.action, p.scopes = True, ["calendar"]
+    async def judge_actionable(**kw):
+        return {"actionable": True, "p": 0.9, "reason": "ok"}
+    p.judge_actionable = judge_actionable
+    m.router.next = RouterOutput(reply="On it.", task="new", task_title="x")
+    async def go():
+        await m.get("aaron").handle_inbound("what is on my calendar tomorrow", "imessage", approver_meta())
+        await asyncio.sleep(0.05)
+    asyncio.run(go())
+    assert m.store.get_request(1) is not None
+    assert m.router.calls[0].get("ask") is False
+
+
 def test_stranger_requests_keep_the_strict_scope_judgment(tmp_path):
     m, sent = make_manager(tmp_path)
     p = _jev_first(m, choice="new")
@@ -1555,7 +1590,7 @@ def test_decide_graph_nodes_and_edges():
     from inkbox_claude.gate import decidegraph
     g = decidegraph.build_graph().get_graph()
     nodes = set(g.nodes) - {"__start__", "__end__"}
-    assert nodes == {"pick_task", "judge_action", "join_judgments", "write_reply", "attach_task",
+    assert nodes == {"pick_task", "judge_action", "judge_actionable", "join_judgments", "write_reply", "attach_task",
                      "build_request", "judge_scopes", "inherit_scopes", "record_event", "finalize"}
     edges = {(e.source, e.target) for e in g.edges}
     # the two Jev judgments fan out from START and join
