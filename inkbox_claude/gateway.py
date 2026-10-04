@@ -1684,10 +1684,12 @@ class InkboxGateway:
             return
         recent = self._telegram_history(chat_id)
         try:
+            owner = (telegram.approver_id() or "").strip()
             verdict = await picker.judge_group_reply(
                 message=u["text"], sender=u["name"] or u["from_id"],
                 group=u.get("group_title") or "group", recent=recent,
-                bot_name=os.getenv("TELEGRAM_BOT_USERNAME") or "Blatbot")
+                bot_name=os.getenv("TELEGRAM_BOT_NAME") or os.getenv("TELEGRAM_BOT_USERNAME") or "Blatbot",
+                from_principal=bool(owner and str(u["from_id"]) == owner))
         except Exception as exc:
             logger.warning("[bridge] telegram group judgment failed: %s", exc)
             return

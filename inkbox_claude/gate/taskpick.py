@@ -95,7 +95,7 @@ SCOPE_SECONDARY_MIN = float(os.getenv("TYPESAFE_SCOPE_SECONDARY_MIN") or 0.3)
 # Who the assistant is in a room full of people. Not a rule about when to talk: it is
 # what any participant knows about their own standing and reach before deciding to speak.
 _DEFAULT_ROLE = (
-    "Executive assistant to one member of this chat. Works on their behalf across their "
+    "Executive assistant to one member of this chat, who is named in the state as the person you work for. Works on their behalf across their "
     "email, calendar, contacts, files and the organisations they run, can look things up "
     "and act in those systems, and holds the record of the work it has been given. The "
     "others in the room have none of that reach."
@@ -474,8 +474,11 @@ class TaskPicker:
                             "do what `message` asks. Reading it with `conversation`, do they know what to do, "
                             "or would they have to come back and ask what was meant?",
                 "guidance": [
-                    "Judge it as the one who has to go and do it. What is missing has to be missing: a "
-                    "detail you can settle by looking, or that the conversation already supplies, is not.",
+                    "Judge it as the one who has to go and do it, having read the thread properly. What "
+                    "the words point to is whatever the conversation last put there: that, it, him, the "
+                    "same again, all carry their sense back from `conversation`, and a request that reads "
+                    "as empty on its own is often complete once it is read in place. Missing means still "
+                    "missing after that reading, and a detail you could settle by looking is not missing.",
                 ],
             },
             "criteria": {"true": "They could go and do it.",
@@ -495,13 +498,17 @@ class TaskPicker:
         return {"actionable": p >= floor, "p": p, "reason": "ok"}
 
     async def judge_group_reply(self, *, message: str, sender: str, group: str,
-                                recent: str = "", bot_name: str = "", role: str = "") -> Dict[str, Any]:
+                                recent: str = "", bot_name: str = "", role: str = "",
+                                from_principal: bool = False) -> Dict[str, Any]:
         """A group message that did not name the assistant: is it nonetheless something the
         assistant should answer? One noul. Returns {"should_reply": bool|None, "p": float}.
         Undecided (None) means stay quiet: in a group, silence is the safe default."""
         if not self.api_key or not message:
             return {"should_reply": None, "p": 0.0, "reason": "disabled"}
         state = {"group_name": group, "sender": sender, "message": message,
+                 # Whether this came from the person the assistant works for. A room full of
+                 # equals is one thing; the one whose assistant you are is not one of them.
+                 "sender_is_the_person_you_work_for": bool(from_principal),
                  "recent_messages": recent, "assistant_name": bot_name or "Blatbot",
                  # Who the assistant is in this room. Without it, "is this mine to answer?"
                  # has no referent and the judgment is guessing at its own job.
