@@ -1518,6 +1518,27 @@ def test_a_request_nobody_could_act_on_asks_instead_of_running(tmp_path):
     assert any("What would you like me to check?" in str(row) for row in sent), sent
 
 
+def test_a_group_thread_tells_the_executor_where_it_is(tmp_path):
+    """In a group the prompt describes the room, so questions about who is here include it."""
+    m, sent = make_manager(tmp_path)
+    s = m.get("tg:-1")
+    s.room = "--- WHERE YOU ARE ---\nThis is a group chat and you are one of its members."
+    task = m.store.create_task("x", [])
+    prompt = s.build_task_prompt("anyone here have my calendar?", [], task)
+    assert "one of its members" in prompt
+    assert prompt.index("WHERE YOU ARE") < prompt.index("THEIR MESSAGE")
+
+
+def test_the_executor_sees_whole_messages(tmp_path):
+    """No clipping: a long line reaches the executor intact."""
+    m, sent = make_manager(tmp_path)
+    s = m.get("c1")
+    long_line = "x" * 2500
+    task = m.store.create_task("x", [])
+    prompt = s.build_task_prompt("do it", [{"kind": "inbound", "text": long_line}], task)
+    assert long_line in prompt
+
+
 def test_a_reply_that_commits_to_the_work_runs_it(tmp_path):
     """The gate meant to ask, but the writer read the thread and said it was doing it. The
     words have to be true, so the request survives and runs."""

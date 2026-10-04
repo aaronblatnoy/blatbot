@@ -1735,6 +1735,27 @@ class InkboxGateway:
             lines = list(self._tg_recent.get(chat_id) or [])
         return "\n".join(lines[-limit:][:-1] if lines else [])
 
+    def _room_note(self, u: Dict[str, Any]) -> str:
+        """What the assistant needs to know about being in a group rather than a DM. Not a
+        rule about when to talk, which the gate decides: a description of the room, so that
+        questions about who is here, and what is said in front of whom, come out right."""
+        me = os.getenv("TELEGRAM_BOT_NAME") or "Blatbot"
+        title = u.get("group_title") or "a group"
+        return (
+            f"--- WHERE YOU ARE ---\n"
+            f"This is a group chat on Telegram called \"{title}\". It has several people in it "
+            f"and you, {me}, are one of its members, not an outside service they are calling.\n"
+            f"Everything you say is read by everyone in the room, and you see everything they say "
+            f"to each other, including messages not meant for you.\n"
+            f"Because you are a member, questions about the room include you: who here can do "
+            f"something, does anyone have access to a thing, can someone check it. Answer for "
+            f"yourself first, and say plainly what you have and what you do not, before saying "
+            f"what you cannot see about the others.\n"
+            f"Each message says who sent it. Different people want different things, and what one "
+            f"person asked for does not become another's. Mind what is private to the person you "
+            f"work for: in here, anything you say is said to all of them."
+        )
+
     def _telegram_overhear(self, u: Dict[str, Any]) -> None:
         """Record a group message the assistant chose not to answer, so later turns can see it."""
         store = getattr(self.sessions, "store", None) if self.sessions else None
@@ -1760,7 +1781,9 @@ class InkboxGateway:
                     + " was asked of you]" + chr(10) + text)
         if self.sessions is None:
             return
-        await self.sessions.get(f"tg:{chat_id}").handle_inbound(text, "telegram", meta)
+        session = self.sessions.get(f"tg:{chat_id}")
+        session.room = self._room_note(u) if u["is_group"] else ""
+        await session.handle_inbound(text, "telegram", meta)
 
     async def _handle_telegram(self, request: "web.Request") -> "web.Response":
         """One Telegram update. Telegram echoes the secret we registered with the

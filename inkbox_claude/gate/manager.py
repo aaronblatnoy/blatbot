@@ -89,6 +89,7 @@ class GateSession:
         self._found_task_ids: List[int] = []      # tasks surfaced by this turn's lookup
         self._typing: Optional[asyncio.Task] = None
         self.deferred_ack: Optional[str] = None   # the writer's "on it" line, sent only if the run is slow
+        self.room: str = ""                       # set when this thread is a group chat: who is in it
 
     # -- typing indicator (iMessage) --------------------------------------
     def typing_start(self) -> None:
@@ -181,7 +182,8 @@ class GateSession:
 
     def _contact_notes(self) -> str:
         c = (self.reply_meta or {}).get("contact") or {}
-        return str(c.get("notes") or "") if isinstance(c, dict) else ""
+        notes = str(c.get("notes") or "") if isinstance(c, dict) else ""
+        return f"{self.room}\n\n{notes}".strip() if self.room else notes
 
     # -- task ledger -----------------------------------------------------------
     def task(self) -> Optional[Dict[str, Any]]:
@@ -393,11 +395,14 @@ class GateSession:
         the task's ledger. No model paraphrases the request. Claude reads the source."""
         who = "Aaron Blatnoy (the owner)" if self.is_approver() else (self._sender_name() or self._sender())
         addr = self._sender()
-        convo = "\n".join(f"[{m.get('kind')}] {str(m.get('text') or '')[:600]}" for m in history[-8:]) or "(none)"
+        # Whole messages, not clipped ones: a half-read line is worse than a missing one,
+        # and the window matches what the judgments upstream were given.
+        convo = "\n".join(f"[{m.get('kind')}] {str(m.get('text') or '')}" for m in history[-20:]) or "(none)"
         ledger = self.m.store.task_memory_for_task(int(task["id"])) or "(new task, no events yet)"
         subject = str((self.reply_meta or {}).get("subject") or "").strip()
         return (
-            f"A message arrived over {self.mode} from {who} ({addr}).\n"
+            (f"{self.room}\n\n" if self.room else "")
+            + f"A message arrived over {self.mode} from {who} ({addr}).\n"
             + (f"Subject: {subject}\n" if subject else "")
             + f"\n--- THEIR MESSAGE (verbatim) ---\n{body.strip()}\n\n"
             f"--- RECENT CONVERSATION WITH THEM ---\n{convo}\n\n"
