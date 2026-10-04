@@ -586,6 +586,14 @@ class Store:
             self._db.execute("DELETE FROM settings WHERE name=?", (name,))
             self._db.commit()
 
+    def set_scopes(self, rid: int, scopes: List[str]) -> None:
+        """Widen one request's scopes after the run reported which tool it was missing. The
+        prompt is untouched, so its hash still checks: what changed is what it may reach."""
+        with self._lock:
+            self._db.execute("UPDATE requests SET scopes_json=?, updated_at=? WHERE id=?",
+                             (json.dumps(sorted(set(scopes))), time.time(), int(rid)))
+            self._db.commit()
+
     def requests_in_state(self, state: str) -> List[Request]:
         """Every request sitting in one state. Used at startup to find runs the process
         died in the middle of."""

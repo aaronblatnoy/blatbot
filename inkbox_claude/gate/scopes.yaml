@@ -152,8 +152,11 @@ systems:
         grants:
         - tamid_analytics_write
   nyu_brightspace:
-    description: 'Aaron''s NYU Brightspace (the university''s course site): his courses, assignments, due dates,
-      grades, announcements, quizzes, discussions, course content.'
+    description: 'Aaron''s NYU Brightspace (the university''s course site), and the authority on
+      anything to do with his classes: courses, assignments, deliverables, projects, memos, papers,
+      problem sets, exams, quizzes, due dates and times, grades, announcements, discussions, course
+      content and syllabi. Any question about school work, what is due, or when something is due,
+      is answered here. A syllabus found in a drive is a stale copy; Brightspace overrides it.'
     always:
     - brightspace_read
     leaves:

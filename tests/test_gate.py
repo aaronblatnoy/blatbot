@@ -1591,6 +1591,56 @@ def test_each_thread_keeps_one_claude_session(tmp_path):
     assert ex._sessions.get("someone-else") is None, "threads do not share a session"
 
 
+def test_generosity_is_only_for_the_owner(tmp_path):
+    """Scopes are the security boundary. His own work is bounded by what he can already
+    reach, so a plausible system comes along; anyone else gets what he approved and no more."""
+    from inkbox_claude.gate import taskpick
+    assert taskpick.SCOPE_SECONDARY_MIN < taskpick.SCOPE_MIN_YES
+    systems = {"a": 0.54, "b": 0.35, "c": 0.1}
+    generous = [k for k, v in systems.items() if v >= taskpick.SCOPE_SECONDARY_MIN]
+    strict = [k for k, v in systems.items() if v >= taskpick.SCOPE_MIN_YES]
+    assert generous == ["a", "b"], "his own request reaches the plausible source"
+    assert strict == [], "a stranger's request does not widen itself"
+
+
+def test_a_tie_between_systems_grants_both(tmp_path):
+    """Nothing cleared the bar and two systems were level: that is the judgment saying it is
+    unsure, so taking one of them by sort order is a coin toss that costs the whole run."""
+    from inkbox_claude.gate import taskpick
+    systems = {"tamid_workspace": 0.54, "nyu_brightspace": 0.54, "tamid_calendar": 0.12}
+    top = max(systems.values())
+    chosen = [k for k, v in systems.items() if v >= top - taskpick.SCOPE_TIE_MARGIN]
+    assert set(chosen) == {"tamid_workspace", "nyu_brightspace"}
+    assert "tamid_calendar" not in chosen, "something implausible is not a tie"
+
+
+def test_a_run_stopped_for_want_of_a_scope_gets_it_once(tmp_path):
+    """The run that hit the wall knows which tool it needed better than a judgment made
+    before the work started. For the owner, it is granted and tried again, once."""
+    m, sent = make_manager(tmp_path)
+    p = _jev_first(m, choice="new")
+    p.action, p.scopes = True, ["tamid_drive_read"]
+    runs = []
+
+    class E:
+        async def run(self, req, context="", prior_work="", model=None, **kw):
+            runs.append(list(req.scopes))
+            if "brightspace_read" not in req.scopes:
+                return {"ok": False, "error": "this task's scope does not include brightspace_read",
+                        "summary": "Missing: brightspace_read", "tool_calls": [], "raw": ""}
+            return {"ok": True, "summary": "Due Monday 11:00 AM.", "tool_calls": ["bs_whats_due"], "raw": "ok"}
+    m.jev_agent = None
+    m.executor = E()
+    m.router.next = RouterOutput(reply="On it.", task="new", task_title="x")
+    async def go():
+        await m.get("aaron").handle_inbound("when is deliverable 2 due", "imessage", approver_meta())
+        await asyncio.sleep(0.2)
+    asyncio.run(go())
+    assert len(runs) == 2, "it should be given what it said it needed and run again"
+    assert "brightspace_read" in runs[1]
+    assert m.store.get_request(1).state == "done"
+
+
 def test_a_run_that_calls_no_tool_is_not_done(tmp_path):
     """A request exists because a tool was needed. "Already answered, no action needed",
     with nothing looked up, is the failure that reads most like a success."""

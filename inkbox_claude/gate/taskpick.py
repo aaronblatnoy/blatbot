@@ -91,6 +91,8 @@ from . import settings as _settings
 
 SCOPE_MIN_YES = float(os.getenv("TYPESAFE_SCOPE_MIN_YES") or 0.6)
 SCOPE_SECONDARY_MIN = float(os.getenv("TYPESAFE_SCOPE_SECONDARY_MIN") or 0.3)
+# How close to the best a system may be and still count as tied with it.
+SCOPE_TIE_MARGIN = float(os.getenv("TYPESAFE_SCOPE_TIE_MARGIN") or 0.25)
 
 
 # Who the assistant is in a room full of people. Not a rule about when to talk: it is
@@ -330,7 +332,7 @@ class TaskPicker:
         logger.info("scope judgment: %s | top=%s", chosen, sorted(probs.items(), key=lambda kv: -kv[1])[:5])
         return {"scopes": chosen, "probabilities": probs, "reason": "ok"}
 
-    async def judge_scopes_tree(self, *, prompt: str, summary: str) -> Dict[str, Any]:
+    async def judge_scopes_tree(self, *, prompt: str, summary: str, generous: bool = False) -> Dict[str, Any]:
         """Scopes as a two-level tree. Level 1: which SYSTEMS the task touches (a yes/no
         per system, seven at most). Level 2, only for the systems chosen: read or write,
         and which channel. Each judgment is a small question over a few options; the
@@ -381,18 +383,30 @@ class TaskPicker:
             return {"scopes": None, "probabilities": {}, "reason": f"error: {exc}"}
         systems = {k: answers.get(f"sys::{k}", 0.0) for k in SCOPE_TREE_SYSTEMS}
         wants_change = answers.get("wants_change", 0.0) >= 0.5
-        chosen_systems = [k for k, v in systems.items() if v >= SCOPE_MIN_YES]
-        # Secondary systems: plausible but not certain. Granting them costs nothing now
-        # that the agent picks tools by system; missing them loses the right source.
-        secondary = [k for k, v in systems.items() if SCOPE_SECONDARY_MIN <= v < SCOPE_MIN_YES]
-        if chosen_systems and secondary:
-            chosen_systems += secondary
+        # Scopes are the security boundary, so how wide they open depends on whose request
+        # this is. The owner's own work is bounded by what he can already reach himself, and
+        # being wrong about where something lives costs him the whole run, so every plausible
+        # system comes along. Anyone else gets what he approved and no more: for them a
+        # system has to clear the bar on its own, with only near-certain neighbours added.
+        # Writing is decided leaf by leaf below either way.
+        floor = SCOPE_SECONDARY_MIN if generous else SCOPE_MIN_YES
+        chosen_systems = [k for k, v in systems.items() if v >= floor]
+        if not generous:
+            secondary = [k for k, v in systems.items() if SCOPE_SECONDARY_MIN <= v < SCOPE_MIN_YES]
+            if chosen_systems and secondary:
+                chosen_systems += secondary
         if not chosen_systems:
             # A request exists, so something is needed: take the likeliest system when it is
             # not implausible, rather than granting nothing and failing the run for want of a tool.
+            # Nothing cleared the bar, which means the judgment was unsure, and a near-tie is
+            # that uncertainty showing. Picking one of two equals by whichever sorted first is
+            # a coin toss that costs the whole run when it lands wrong, so every system within
+            # reach of the top comes too: an extra read is cheap, the missing source is not.
             top, p = max(systems.items(), key=lambda kv: kv[1])
-            if p >= 0.4:
-                chosen_systems = [top]
+            if p >= (0.25 if generous else 0.4):
+                # A near-tie is the judgment saying it is unsure; picking one of two equals
+                # by sort order is a coin toss that costs the run when it lands wrong.
+                chosen_systems = [k for k, v in systems.items() if v >= p - SCOPE_TIE_MARGIN]
         logger.info("scope tree: systems %s wants_change=%.2f | top=%s", chosen_systems, answers.get("wants_change", 0.0),
                     sorted(systems.items(), key=lambda kv: -kv[1])[:4])
         probs: Dict[str, float] = {}

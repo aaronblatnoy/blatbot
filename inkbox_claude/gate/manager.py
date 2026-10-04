@@ -596,7 +596,8 @@ class GateSession:
         res = {"scopes": None}
         if strict and hasattr(picker, "judge_scopes_tree"):
             # Systems first, then read/write and channel within each: a few options per question.
-            res = await picker.judge_scopes_tree(prompt=out.request.prompt, summary=out.request.summary)
+            res = await picker.judge_scopes_tree(prompt=out.request.prompt, summary=out.request.summary,
+                                                 generous=self.is_approver())
         if res.get("scopes") is None:
             res = await picker.judge_scopes(
                 prompt=out.request.prompt, summary=out.request.summary,  # prompt is the source-built one by now
@@ -1614,6 +1615,31 @@ class GateSessionManager:
         return False
 
     # -- executor --------------------------------------------------------------
+    async def _grant_what_it_asked_for(self, req: Request, status: Dict[str, Any], context: str,
+                                       model: Optional[str]) -> Dict[str, Any]:
+        """A run that stops because it was not given the tool it needed has diagnosed itself
+        better than any judgment could. The scopes were a guess made before the work began;
+        this is the work reporting what the guess missed.
+
+        For the owner's own requests the named scope is granted and the run repeated once.
+        For anyone else the scopes are what he approved, so it is reported rather than widened."""
+        if status.get("confirm") or status.get("ok"):
+            return status
+        said = f"{status.get('summary') or ''}\n{status.get('error') or ''}\n{status.get('raw') or ''}"
+        wanted = [sc for sc in SCOPES if sc not in req.scopes and re.search(
+            r"\b" + re.escape(sc) + r"\b", said)]
+        if not wanted or not _owner_request(self, req):
+            return status
+        grown = list(req.scopes) + wanted
+        logger.info("[gate] #%s stopped for want of %s; granting and running again",
+                    req.id, ", ".join(wanted))
+        self.store.set_scopes(req.id, grown)
+        again = self.store.get_request(req.id) or req
+        out = await self.executor.run(again, context=context, model=model,
+                                      from_owner=True)
+        out["widened_scopes"] = wanted
+        return out
+
     async def _insist_it_actually_ran(self, req: Request, status: Dict[str, Any], context: str,
                                       model: Optional[str]) -> Dict[str, Any]:
         """A request exists because a tool was needed. Reporting success without having
@@ -1649,6 +1675,7 @@ class GateSessionManager:
             model = await self._pick_model(req)
             status = await self.executor.run(req, context=context, model=model,
                                              from_owner=_owner_request(self, req))
+            status = await self._grant_what_it_asked_for(req, status, context, model)
             return await self._insist_it_actually_ran(req, status, context, model)
         status = await self.jev_agent.run(req, context=context)
         logger.info("[gate] jev agent #%s: ok=%s steps=%s jev=%s prose=%s %ss",
