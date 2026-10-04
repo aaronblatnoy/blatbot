@@ -1357,7 +1357,10 @@ def test_long_unverified_result_sends_the_rewrite_not_a_dump(tmp_path):
         await asyncio.sleep(0.2)
     asyncio.run(go())
     last = [t for _, t, *_ in sent][-1]
-    assert last.startswith("Open slots Thursday") and "could not fully verify" not in last
+    # Twice unsupported: the drafted answer is not passed off as fact, and the tool output is
+    # not dumped in its place. The sender is told plainly, and offered a fresh run.
+    assert not last.startswith("Open slots Thursday")
+    assert "could not put an answer together" in last and "try again" in last
     assert "Done via Jev agent" not in last and "get_events" not in last
 
 

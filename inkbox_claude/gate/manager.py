@@ -450,7 +450,12 @@ class GateSession:
             "Work out what they are asking for, or what this message makes possible on the task (for example, "
             "information the task was waiting for), and do it with your tools. Do only what the message and the "
             "task call for; do not invent extra steps. If something essential is missing, stop and say exactly "
-            "what is missing instead of guessing."
+            "what is missing instead of guessing.\n\n"
+            "The task record is background, not an answer. An earlier run on this task answered an earlier "
+            "question, and the world has moved since: do the work again now and report what you find this time. "
+            "Never close by saying the answer was already given, or that no action is needed because the record "
+            "holds one. If you genuinely cannot run the lookup, say that, rather than repeating what the record "
+            "says as though you had just checked."
         )
 
     async def decide(self, *, body: str, message: str, prior: List[Dict[str, Any]], mode: str,
@@ -1027,11 +1032,18 @@ class GateSession:
             # answers (free slots from a list of events, a count from rows) score low
             # on literal support even when they are right.
             return reply2
-        logger.warning("[gate %s] rewrite still not grounded (p=%.2f); sending the rewrite", self.chat_id, p2)
+        # Twice unsupported. Sending it anyway is the one thing worse than saying nothing:
+        # it is a confident answer the check already judged to be unbacked. Hand over what
+        # the run actually produced, and say plainly that it did not answer the question.
+        logger.warning("[gate %s] rewrite still not grounded (p=%.2f); refusing to pass it off",
+                       self.chat_id, p2)
         body = _result_bodies(results)
-        if len(body) <= 1500:
-            return body                                   # short enough to show as is
-        return reply2
+        if body.strip() and len(body) <= 1500:
+            return body
+        # Too long to hand over raw, and dumping tool output is not an answer either.
+        return ("I could not put an answer together from what came back, and I am not going to "
+                "guess at one. The full result is on the task. Tell me to try again and I will "
+                "run it fresh.")
 
     async def handle_followup(self, body: str, inbound_id: Optional[int] = None) -> bool:
         """Re-decide a message that was received while a request was running. The
