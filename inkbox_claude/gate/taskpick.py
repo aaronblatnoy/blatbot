@@ -454,31 +454,18 @@ class TaskPicker:
         body = {"state": state, "model": self.model, "questions": {"reply": {
             "type": "noul",
             "instructions": {
-                "question": "The assistant is a member of this group chat and sees everything said in it. "
-                            "`message` does not say its name. Reading the room, is this message for the "
-                            "assistant?",
+                "question": "The assistant is one of the people in this group chat and sees everything said "
+                            "in it. `message` does not say its name. Should the assistant be the one to "
+                            "speak next?",
                 "guidance": [
-                    "Judge it the way a person sitting in the room would. You can tell when something is "
-                    "aimed at you and when two other people are talking: who was last spoken to, who was "
-                    "asked, and whose turn it now is.",
-                    "A question or an instruction puts the turn on whoever it was aimed at. If that is you, "
-                    "answering is not optional, and it does not matter whether the question is about work, "
-                    "about you, or just friendly. A statement, a reaction or an aside puts the turn on "
-                    "nobody.",
-                    "Work out who 'you' means from what came just before. The one who spoke last, or the one "
-                    "who can actually do the thing being asked for, is usually the one being addressed.",
-                    "When a message closes an exchange rather than opening one, the turn is over and nothing "
-                    "more is wanted. Thanks, agreement and sign-offs end a conversation; treating one as an "
-                    "opening restarts something that had finished.",
-                    "Being able to help is not a reason to speak. Cutting into a conversation that was going "
-                    "fine without you is worse than staying out of it, and no group owes you a part in every "
-                    "exchange.",
-                    "The two mistakes are not symmetric, but neither is free: barging in where you were not "
-                    "wanted is rude, and sitting silent when someone was plainly talking to you is worse.",
+                    "Judge it as anyone in that seat would, from the conversation in front of you. Knowing "
+                    "when a room is talking to you is ordinary social sense; there is no checklist for it.",
+                    "Speaking when you were not meant to is an intrusion. Staying silent when you were is a "
+                    "failure. Neither is free.",
                 ],
             },
-            "criteria": {"true": "A person in the assistant's seat would take this as theirs to answer.",
-                         "false": "A person in the assistant's seat would let someone else have it."},
+            "criteria": {"true": "The assistant is the one being talked to, and it is its turn.",
+                         "false": "This belongs to the others, or wants nothing from the assistant."},
         }}}
         try:
             async with httpx.AsyncClient(timeout=self.timeout) as client:
