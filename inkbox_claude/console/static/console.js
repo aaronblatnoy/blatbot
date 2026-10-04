@@ -8,6 +8,8 @@ const state = {
   requests: [],
   tasks: [],
   health: null,
+  settings: [],
+  settingStatus: {},
   selectedPerson: null,
   selectedWaiting: 0,
   requestFilter: 'all',
@@ -90,7 +92,7 @@ function scopeChips(scopes = []) {
 async function loadSnapshot({ quiet = false } = {}) {
   const endpoints = [
     ['overview', '/overview'], ['people', '/people'], ['roles', '/roles'], ['scopes', '/scopes'],
-    ['tasks', '/tasks'], ['health', '/health'],
+    ['tasks', '/tasks'], ['health', '/health'], ['settings', '/settings'],
   ];
   try {
     const baseResults = await Promise.all(endpoints.map(async ([key, path]) => [key, await api(path)]));
@@ -114,7 +116,7 @@ async function loadSnapshot({ quiet = false } = {}) {
 }
 
 function renderUnavailable() {
-  for (const selector of ['#waiting-list', '#people-list', '#tasks-list', '#health-content']) {
+  for (const selector of ['#waiting-list', '#people-list', '#tasks-list', '#health-content', '#settings-list']) {
     const target = $(selector);
     if (target && !target.children.length) target.innerHTML = '<div class="empty-state">Data is not available yet.</div>';
   }
@@ -126,6 +128,7 @@ function renderAll() {
   renderRoles();
   renderTasks();
   renderHealth();
+  renderSettings();
 }
 
 function pendingRequests() {
@@ -464,6 +467,102 @@ async function refreshTasks() {
   catch (error) { showNotice(`Tasks not refreshed: ${error.message}`, 'error'); }
 }
 
+const settingSaveTimers = new Map();
+
+function isSeriousSetting(setting) {
+  const description = `${setting.name} ${setting.label} ${setting.help}`.toLowerCase();
+  return setting.kind === 'bool' && setting.group === 'Safety'
+    && /outbound|send|message/.test(description) && /preview|review|approval|confirm|before|shown/.test(description);
+}
+
+function settingControl(setting) {
+  const value = setting.value;
+  if (setting.kind === 'bool') {
+    return `<label class="setting-toggle"><input type="checkbox" data-setting-control data-setting-kind="bool" ${value ? 'checked' : ''}><span class="toggle-track" aria-hidden="true"><span></span></span><span>${value ? 'On' : 'Off'}</span></label>`;
+  }
+  if (setting.kind === 'number') {
+    const bounds = `${setting.min == null ? '' : ` min="${escapeHTML(setting.min)}"`}${setting.max == null ? '' : ` max="${escapeHTML(setting.max)}"`} step="${escapeHTML(setting.step ?? 1)}"`;
+    return `<div class="number-control"><input type="range" data-setting-control data-setting-kind="number"${bounds} value="${escapeHTML(value)}" aria-label="${escapeHTML(setting.label)} slider"><input type="number" data-setting-control data-setting-kind="number"${bounds} value="${escapeHTML(value)}" aria-label="${escapeHTML(setting.label)} value"></div>`;
+  }
+  if (setting.kind === 'choice') {
+    return `<select data-setting-control data-setting-kind="choice" aria-label="${escapeHTML(setting.label)}">${(setting.choices || []).map(choice => `<option value="${escapeHTML(choice)}" ${choice === value ? 'selected' : ''}>${escapeHTML(choice)}</option>`).join('')}</select>`;
+  }
+  return `<textarea data-setting-control data-setting-kind="text" rows="1" aria-label="${escapeHTML(setting.label)}">${escapeHTML(value ?? '')}</textarea>`;
+}
+
+function renderSettings() {
+  const host = $('#settings-list');
+  host.setAttribute('aria-busy', 'false');
+  if (!state.settings.length) {
+    host.innerHTML = '<div class="empty-state">No settings are available.</div>';
+    return;
+  }
+  const groups = state.settings.reduce((map, setting) => {
+    const group = setting.group || 'Other';
+    if (!map.has(group)) map.set(group, []);
+    map.get(group).push(setting);
+    return map;
+  }, new Map());
+  host.innerHTML = [...groups.entries()].map(([group, settings], groupIndex) => `<section class="settings-group" aria-labelledby="settings-group-${groupIndex}">
+    <h3 id="settings-group-${groupIndex}">${escapeHTML(group)}</h3>
+    <div class="settings-panel">${settings.map(setting => {
+      const serious = isSeriousSetting(setting);
+      const status = state.settingStatus[setting.name];
+      return `<div class="setting-row${serious ? ' is-serious' : ''}" data-setting-name="${escapeHTML(setting.name)}">
+        <div class="setting-copy">
+          <div class="setting-label">${escapeHTML(setting.label)}${serious ? '<span class="serious-mark">Serious</span>' : ''}</div>
+          <div class="setting-help">${escapeHTML(setting.help || '')}</div>
+          <code class="setting-name">${escapeHTML(setting.name)}</code>
+        </div>
+        <div class="setting-value">
+          ${settingControl(setting)}
+          <div class="setting-meta">
+            <span class="setting-source source-${escapeHTML(setting.source)}">${escapeHTML(setting.source)}</span>
+            ${setting.source === 'console' || setting.value !== setting.default ? '<button class="button button-danger setting-reset" type="button" data-reset-setting>Reset</button>' : ''}
+            <span class="setting-save-state${status?.type === 'error' ? ' is-error' : ''}" role="status">${escapeHTML(status?.text || '')}</span>
+          </div>
+        </div>
+      </div>`;
+    }).join('')}</div>
+  </section>`).join('');
+  $$('textarea[data-setting-control]', host).forEach(growSettingTextarea);
+}
+
+function growSettingTextarea(textarea) {
+  textarea.style.height = 'auto';
+  textarea.style.height = `${textarea.scrollHeight + 2}px`;
+}
+
+function scheduleSettingSave(setting, value, delay) {
+  clearTimeout(settingSaveTimers.get(setting.name));
+  state.settingStatus[setting.name] = { type: 'saving', text: 'Saving…' };
+  const row = $(`[data-setting-name="${CSS.escape(setting.name)}"]`);
+  const status = $('.setting-save-state', row);
+  if (status) { status.textContent = 'Saving…'; status.classList.remove('is-error'); }
+  settingSaveTimers.set(setting.name, setTimeout(() => saveSetting(setting, value), delay));
+}
+
+async function saveSetting(setting, value) {
+  clearTimeout(settingSaveTimers.get(setting.name));
+  settingSaveTimers.delete(setting.name);
+  try {
+    const result = await post('/settings', { name: setting.name, value });
+    state.settings = result.settings || state.settings;
+    state.settingStatus[setting.name] = { type: 'saved', text: 'Saved' };
+    renderSettings();
+    showNotice(`Saved ${setting.label}.`);
+  } catch (error) {
+    state.settingStatus[setting.name] = { type: 'error', text: error.message };
+    renderSettings();
+    showNotice(`${setting.label} not saved: ${error.message}`, 'error', 8000);
+  }
+}
+
+async function refreshSettings() {
+  try { state.settings = await api('/settings'); renderSettings(); }
+  catch (error) { showNotice(`Settings not refreshed: ${error.message}`, 'error'); }
+}
+
 function connectEvents() {
   clearTimeout(state.reconnectTimer);
   state.eventSource?.close();
@@ -478,6 +577,7 @@ function connectEvents() {
     try { await refreshPermissions(); } catch (error) { showNotice(`Permissions not refreshed: ${error.message}`, 'error'); }
   });
   source.addEventListener('health.changed', refreshHealth);
+  source.addEventListener('settings.changed', refreshSettings);
   source.onerror = async () => {
     source.close();
     if (state.eventSource !== source) return;
@@ -538,6 +638,11 @@ document.addEventListener('click', event => {
   const closeButton = event.target.closest('[data-close-dialog]');
   if (closeButton) $(`#${closeButton.dataset.closeDialog}`).close();
   if (event.target.closest('[data-open-shortcuts]')) $('#shortcuts-dialog').showModal();
+  const resetSetting = event.target.closest('[data-reset-setting]');
+  if (resetSetting) {
+    const setting = state.settings.find(item => item.name === resetSetting.closest('[data-setting-name]').dataset.settingName);
+    if (setting) saveSetting(setting, null);
+  }
 });
 
 document.addEventListener('submit', event => {
@@ -547,6 +652,22 @@ document.addEventListener('submit', event => {
 });
 
 document.addEventListener('change', event => {
+  if (event.target.matches('[data-setting-control]')) {
+    const row = event.target.closest('[data-setting-name]');
+    const setting = state.settings.find(item => item.name === row.dataset.settingName);
+    if (!setting) return;
+    if (setting.kind === 'number' || setting.kind === 'text') return;
+    const value = setting.kind === 'bool' ? event.target.checked : setting.kind === 'number' ? Number(event.target.value) : event.target.value;
+    if (isSeriousSetting(setting) && setting.value === true && value === false
+      && !window.confirm('Turn this off? Outbound messages will be sent without being shown to you first.')) {
+      event.target.checked = true;
+      const label = event.target.closest('.setting-toggle')?.querySelector('span:last-child');
+      if (label) label.textContent = 'On';
+      return;
+    }
+    if (setting.kind === 'bool') event.target.closest('.setting-toggle').querySelector('span:last-child').textContent = value ? 'On' : 'Off';
+    saveSetting(setting, value);
+  }
   if (event.target.matches('#person-form select[name="role"], #person-form input[name="scopes"]')) {
     const form = event.target.form;
     const current = state.people.find(person => person.key === state.selectedPerson) || { __new: true };
@@ -556,6 +677,21 @@ document.addEventListener('change', event => {
       __new: !state.selectedPerson,
       key: data.get('key'), person: data.get('person'), role: data.get('role'), note: data.get('note'), scopes: data.getAll('scopes'),
     });
+  }
+});
+
+document.addEventListener('input', event => {
+  if (!event.target.matches('[data-setting-control]')) return;
+  const row = event.target.closest('[data-setting-name]');
+  const setting = state.settings.find(item => item.name === row.dataset.settingName);
+  if (!setting) return;
+  if (setting.kind === 'number') {
+    $$('input', row).forEach(input => { if (input !== event.target) input.value = event.target.value; });
+    scheduleSettingSave(setting, Number(event.target.value), 350);
+  }
+  if (setting.kind === 'text') {
+    growSettingTextarea(event.target);
+    scheduleSettingSave(setting, event.target.value, 600);
   }
 });
 

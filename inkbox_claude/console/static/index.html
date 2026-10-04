@@ -20,6 +20,7 @@
       <a href="#permissions">Permissions</a>
       <a href="#tasks">Tasks</a>
       <a href="#health">Health</a>
+      <a href="#settings">Settings</a>
     </nav>
     <div class="connection" aria-live="polite">
       <span id="stream-dot" class="stream-dot is-connecting"></span>
@@ -121,6 +122,16 @@
         <button id="refresh-health" class="button button-quiet" type="button">Refresh</button>
       </div>
       <div id="health-content" aria-busy="true"></div>
+    </section>
+
+    <section id="settings" class="section" aria-labelledby="settings-title">
+      <div class="section-heading">
+        <div>
+          <h2 id="settings-title">Settings</h2>
+          <p class="section-summary">Knobs that change how the assistant behaves.</p>
+        </div>
+      </div>
+      <div id="settings-list" class="settings-list" aria-live="polite" aria-busy="true"></div>
     </section>
   </main>
 
