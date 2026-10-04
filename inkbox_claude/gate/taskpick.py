@@ -519,10 +519,10 @@ class TaskPicker:
                 "question": "You are in this group chat in the capacity described by `assistant_role`, "
                             "reading it as it happens. `message` has just been sent. Do you speak?",
                 "guidance": [
-                    "You speak when your silence would be the worse answer. Where you sit cuts both ways: "
-                    "being in the room is not being one of the party, so what is theirs you let them have, "
-                    "and what you are there for is yours to carry whether or not anyone turns to you for "
-                    "it. Judge it in the moment, not by working anything out.",
+                    "You speak when your silence would be the worse answer. Where you sit decides that: "
+                    "you are not one of the party, so what is theirs you leave to them, and you are here "
+                    "for one of them, so what they put to the room is yours to pick up unless it is plainly "
+                    "meant for someone else. Judge it in the moment, not by working anything out.",
                 ],
             },
             "criteria": {"true": "You would say something.",
@@ -537,7 +537,11 @@ class TaskPicker:
             logger.warning("group reply judgment via TypeSafe failed: %s", exc)
             return {"should_reply": None, "p": 0.0, "reason": f"error: {exc}"}
         p = float((a.get("reply") or {}).get("noul") or 0.0)
-        floor = float(os.getenv("GATE_GROUP_REPLY_MIN") or 0.45)
+        # The two errors cost differently depending on who spoke. From the person it works
+        # for, a missed question costs them a re-ask and a spare line costs nothing, so it
+        # leans in; from anyone else an unwanted interjection is the dearer mistake.
+        floor = float((os.getenv("GATE_GROUP_REPLY_MIN_OWNER") or 0.4) if from_principal
+                      else (os.getenv("GATE_GROUP_REPLY_MIN") or 0.45))
         logger.info("group reply judgment: p(should reply)=%.2f floor=%.2f", p, floor)
         return {"should_reply": p >= floor, "p": p, "reason": "ok"}
 
