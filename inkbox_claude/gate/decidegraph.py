@@ -251,12 +251,16 @@ async def finalize(state: DecideState, config: RunnableConfig) -> Dict[str, Any]
             # Silence reads as being ignored; ask the one question that resolves it.
             logger.info("[gate %s] writer still promised an action; asking instead of going silent", s.chat_id)
             out.reply = "Do you want me to go ahead with that? Say yes and I will."
-    if state["needs_action"] and out.reply and s.is_approver() and state["mode"] in ("imessage", "telegram"):
+    # Both suppressions below exist because a result is coming. They key on the request
+    # itself, not on the intent to act: when the gate asked instead of acting there is no
+    # run behind the silence, and swallowing the question leaves the sender with nothing.
+    running = out.request is not None
+    if running and out.reply and s.is_approver() and state["mode"] in ("imessage", "telegram"):
         # The typing indicator shows the work. The writer's acknowledgement is kept aside and
         # sent only if the run turns out to be slow (GateSessionManager._ack_if_slow).
         s.deferred_ack = out.reply if is_ack else None
         out.reply = None
-    if state["needs_action"] and out.reply and not is_ack:
+    if running and out.reply and not is_ack:
         logger.info("[gate %s] dropped a %d-word reply written alongside a request; result will follow",
                     s.chat_id, len(out.reply.split()))
         out.reply = None

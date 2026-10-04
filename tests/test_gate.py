@@ -1514,6 +1514,8 @@ def test_a_request_nobody_could_act_on_asks_instead_of_running(tmp_path):
     asyncio.run(go())
     assert m.store.get_request(1) is None
     assert m.router.calls and m.router.calls[0].get("ask") is True
+    # The question has to reach the sender: nothing is running behind the silence.
+    assert any("What would you like me to check?" in str(row) for row in sent), sent
 
 
 def test_a_clear_request_still_runs(tmp_path):
