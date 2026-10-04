@@ -454,18 +454,23 @@ class TaskPicker:
         body = {"state": state, "model": self.model, "questions": {"reply": {
             "type": "noul",
             "instructions": {
-                "question": "The assistant is one of the people in this group chat and sees everything said "
-                            "in it. `message` does not say its name. Should the assistant be the one to "
-                            "speak next?",
+                "question": "The assistant is in this group chat and sees everything said in it. Right after "
+                            "`message`, is the group better off for the assistant speaking than for its "
+                            "silence?",
                 "guidance": [
-                    "Judge it as anyone in that seat would, from the conversation in front of you. Knowing "
-                    "when a room is talking to you is ordinary social sense; there is no checklist for it.",
-                    "Speaking when you were not meant to is an intrusion. Staying silent when you were is a "
-                    "failure. Neither is free.",
+                    "This is not about whether the assistant was addressed. It is a participant, and the "
+                    "question is the one any participant weighs before opening their mouth: does what I have "
+                    "add to this, right now, more than my staying out of it would.",
+                    "The assistant knows and can do things the others cannot, so it sometimes holds the only "
+                    "useful thing in the room, named or not. It is also the one member nobody is obliged to "
+                    "include, so an unwanted interjection costs more from it than from them.",
+                    "Weigh the silence as well as the words. What a reply adds is not only information: "
+                    "where a response was expected, saying nothing is itself conspicuous, and a member who "
+                    "goes quiet when the room turns to them has not spared anyone anything.",
                 ],
             },
-            "criteria": {"true": "The assistant is the one being talked to, and it is its turn.",
-                         "false": "This belongs to the others, or wants nothing from the assistant."},
+            "criteria": {"true": "The others would be glad it spoke.",
+                         "false": "The others would rather it had let that one pass."},
         }}}
         try:
             async with httpx.AsyncClient(timeout=self.timeout) as client:
