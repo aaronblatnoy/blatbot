@@ -88,6 +88,7 @@ try:
     from .tools import build_inkbox_mcp_server
     from .webhook_providers import match_provider
     from . import telegram
+    from .gate import rooms
 except ImportError:  # pragma: no cover - direct local import/test fallback
     from a2a_delegations import find_by_task as find_a2a_delegation
     from config import (
@@ -119,6 +120,7 @@ except ImportError:  # pragma: no cover - direct local import/test fallback
     from tools import build_inkbox_mcp_server
     from webhook_providers import match_provider
     import telegram
+    from gate import rooms
 
 logger = logging.getLogger(__name__)
 
@@ -1735,26 +1737,39 @@ class InkboxGateway:
             lines = list(self._tg_recent.get(chat_id) or [])
         return "\n".join(lines[-limit:][:-1] if lines else [])
 
-    def _room_note(self, u: Dict[str, Any]) -> str:
-        """What the assistant needs to know about being in a group rather than a DM. Not a
-        rule about when to talk, which the gate decides: a description of the room, so that
-        questions about who is here, and what is said in front of whom, come out right."""
-        me = os.getenv("TELEGRAM_BOT_NAME") or "Blatbot"
-        title = u.get("group_title") or "a group"
-        return (
-            f"--- WHERE YOU ARE ---\n"
-            f"This is a group chat on Telegram called \"{title}\". It has several people in it "
-            f"and you, {me}, are one of its members, not an outside service they are calling.\n"
-            f"Everything you say is read by everyone in the room, and you see everything they say "
-            f"to each other, including messages not meant for you.\n"
-            f"Because you are a member, questions about the room include you: who here can do "
-            f"something, does anyone have access to a thing, can someone check it. Answer for "
-            f"yourself first, and say plainly what you have and what you do not, before saying "
-            f"what you cannot see about the others.\n"
-            f"Each message says who sent it. Different people want different things, and what one "
-            f"person asked for does not become another's. Mind what is private to the person you "
-            f"work for: in here, anything you say is said to all of them."
-        )
+    def _seen_in(self, chat_id: str, limit: int = 60) -> List[str]:
+        """Who has spoken in this thread, from the record. Any channel: the stored lines are
+        written as "Name: what they said", so the names are the membership we actually know."""
+        store = getattr(self.sessions, "store", None) if self.sessions else None
+        names: List[str] = []
+        if store is None:
+            return names
+        try:
+            for row in store.history(chat_id, limit):
+                if row.get("kind") != "inbound":
+                    continue
+                head = str(row.get("text") or "").split(":", 1)[0].strip()
+                if head and len(head) <= 40 and "\n" not in head and head not in names:
+                    names.append(head)
+        except Exception as exc:
+            logger.warning("[bridge] could not read who is in %s: %s", chat_id, exc)
+        return names
+
+    def _set_room(self, session: Any, *, chat_id: str, channel: str, is_group: bool,
+                  title: str = "", members: Optional[List[str]] = None) -> None:
+        """Tell a session whether it is in a room, and who is in it. Direct threads clear it."""
+        if not is_group:
+            session.room = ""
+            return
+        known = [m for m in (members or []) if m]
+        for name in self._seen_in(chat_id):
+            if name not in known:
+                known.append(name)
+        session.room = rooms.room_note(
+            channel=channel, title=title,
+            me=os.getenv("TELEGRAM_BOT_NAME") or (self.cfg.agent_name if hasattr(self.cfg, "agent_name") else "") or "Blatbot",
+            members=known,
+            principal=(self.cfg.approver_name if hasattr(self.cfg, "approver_name") else "") or "")
 
     def _telegram_overhear(self, u: Dict[str, Any]) -> None:
         """Record a group message the assistant chose not to answer, so later turns can see it."""
@@ -1782,7 +1797,8 @@ class InkboxGateway:
         if self.sessions is None:
             return
         session = self.sessions.get(f"tg:{chat_id}")
-        session.room = self._room_note(u) if u["is_group"] else ""
+        self._set_room(session, chat_id=f"tg:{chat_id}", channel="Telegram", is_group=u["is_group"],
+                       title=u.get("group_title") or "", members=[name] if name else [])
         await session.handle_inbound(text, "telegram", meta)
 
     async def _handle_telegram(self, request: "web.Request") -> "web.Response":
@@ -2765,7 +2781,10 @@ class InkboxGateway:
         }
         # A fresh inbound starts a fresh logical reply — reset its failed-send budget.
         self._clear_outbound_failures("imessage", conversation_id, sender, chat_id=chat_id)
-        await self.sessions.get(chat_id).handle_inbound(body, "imessage", meta)
+        session = self.sessions.get(chat_id)
+        self._set_room(session, chat_id=chat_id, channel="iMessage", is_group=bool(is_group),
+                       members=list(participants or []))
+        await session.handle_inbound(body, "imessage", meta)
         return web.json_response({"ok": True})
 
     async def _on_imessage_reaction_received(self, envelope: Dict[str, Any]) -> "web.Response":

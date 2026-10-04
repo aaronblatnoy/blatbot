@@ -1518,6 +1518,22 @@ def test_a_request_nobody_could_act_on_asks_instead_of_running(tmp_path):
     assert any("What would you like me to check?" in str(row) for row in sent), sent
 
 
+def test_the_room_note_works_for_any_group(tmp_path):
+    """Nothing in it is particular to one chat, one channel, or one set of people."""
+    from inkbox_claude.gate.rooms import room_note
+    a = room_note(channel="Telegram", title="TAMID Quant", me="Blatbot",
+                  members=["Rick", "Gabri", "Romi"], principal="Aaron")
+    assert "TAMID Quant" in a and "Rick, Gabri and Romi" in a and "Aaron's assistant" in a
+    b = room_note(channel="WhatsApp", title="Sunday ride", me="Helper", members=["Dana"])
+    assert "Sunday ride" in b and "The people in it are Dana," in b and "Helper" in b
+    # With nothing known it still says the one thing that matters.
+    c = room_note(channel="")
+    assert "one of its members" in c and "read by everyone in the room" in c
+    # The assistant never lists itself among the others.
+    d = room_note(channel="Telegram", me="Blatbot", members=["Blatbot", "Sean"])
+    assert "The people in it are Sean," in d
+
+
 def test_a_group_thread_tells_the_executor_where_it_is(tmp_path):
     """In a group the prompt describes the room, so questions about who is here include it."""
     m, sent = make_manager(tmp_path)
