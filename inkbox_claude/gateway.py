@@ -1682,7 +1682,7 @@ class InkboxGateway:
         if picker is None:
             logger.debug("[bridge] telegram group: no judge available, staying quiet")
             return
-        recent = "\n".join((self._tg_recent.get(chat_id) or [])[:-1])
+        recent = self._telegram_history(chat_id)
         try:
             verdict = await picker.judge_group_reply(
                 message=u["text"], sender=u["name"] or u["from_id"],
@@ -1692,13 +1692,57 @@ class InkboxGateway:
             logger.warning("[bridge] telegram group judgment failed: %s", exc)
             return
         if not verdict.get("should_reply"):
-            # Log what was passed over, so the threshold can be tuned against real messages.
+            # Heard but not answered. It still goes in the record: a member of a group knows
+            # what was said while they were quiet, and the next message often refers back to it.
+            self._telegram_overhear(u)
             logger.info("[bridge] telegram group: staying quiet (p=%.2f) on %s: %s",
                         verdict.get("p") or 0.0, u["name"] or u["from_id"], u["text"])
             return
         logger.info("[bridge] telegram group: answering unaddressed message (p=%.2f)",
                     verdict.get("p") or 0.0)
         await self._telegram_dispatch(u)
+
+    def _telegram_history(self, chat_id: str, limit: int = 40) -> str:
+        """The conversation as it stands, for judging whether to speak into it. Read from the
+        store so it survives a restart and holds everything the assistant heard, answered or
+        not; the in-memory buffer is only a fallback for a chat with nothing recorded yet."""
+        store = getattr(self.sessions, "store", None) if self.sessions else None
+        lines: List[str] = []
+        if store is not None:
+            try:
+                for row in store.history(f"tg:{chat_id}", limit):
+                    if row.get("kind") not in ("inbound", "outbound"):
+                        continue  # bookkeeping notes were never said out loud in the chat
+                    text = (row.get("text") or "").strip()
+                    if text.startswith("[telegram group:"):
+                        # Drop the framing the executor is given; the history wants the words said.
+                        head, _, rest = text.partition("]")
+                        who = ""
+                        for part in head.split("|"):
+                            if part.strip().startswith("from:"):
+                                who = part.split(":", 1)[1].strip()
+                        text = f"{who}: {rest.strip()}" if who else rest.strip()
+                    if not text:
+                        continue
+                    if row.get("kind") == "outbound":
+                        text = f"{os.getenv('TELEGRAM_BOT_NAME') or 'Blatbot'}: {text}"
+                    lines.append(text)
+            except Exception as exc:
+                logger.warning("[bridge] could not read telegram history: %s", exc)
+        if not lines:
+            lines = list(self._tg_recent.get(chat_id) or [])
+        return "\n".join(lines[-limit:][:-1] if lines else [])
+
+    def _telegram_overhear(self, u: Dict[str, Any]) -> None:
+        """Record a group message the assistant chose not to answer, so later turns can see it."""
+        store = getattr(self.sessions, "store", None) if self.sessions else None
+        if store is None:
+            return
+        try:
+            store.add_message(f"tg:{u['chat_id']}", "inbound",
+                              f"{u['name'] or u['from_id']}: {u['text']}", "telegram")
+        except Exception as exc:
+            logger.warning("[bridge] could not record overheard group message: %s", exc)
 
     async def _telegram_dispatch(self, u: Dict[str, Any]) -> None:
         """Hand one Telegram message to its session, with the group framing applied."""

@@ -92,6 +92,16 @@ SCOPE_MIN_YES = float(os.getenv("TYPESAFE_SCOPE_MIN_YES") or 0.6)
 SCOPE_SECONDARY_MIN = float(os.getenv("TYPESAFE_SCOPE_SECONDARY_MIN") or 0.3)
 
 
+# Who the assistant is in a room full of people. Not a rule about when to talk: it is
+# what any participant knows about their own standing and reach before deciding to speak.
+_DEFAULT_ROLE = (
+    "Executive assistant to one member of this chat. Works on their behalf across their "
+    "email, calendar, contacts, files and the organisations they run, can look things up "
+    "and act in those systems, and holds the record of the work it has been given. The "
+    "others in the room have none of that reach."
+)
+
+
 class TaskPicker:
     def __init__(self, api_key: Optional[str] = None, model: Optional[str] = None,
                  min_confidence: Optional[float] = None, timeout: float = 20.0):
@@ -447,18 +457,17 @@ class TaskPicker:
                  "recent_messages": recent, "assistant_name": bot_name or "Blatbot",
                  # Who the assistant is in this room. Without it, "is this mine to answer?"
                  # has no referent and the judgment is guessing at its own job.
-                 "assistant_role": role or (os.getenv("GATE_ASSISTANT_ROLE") or
-                                            "A personal assistant to one member of this group, able to look "
-                                            "things up, run errands against their accounts and systems, and "
-                                            "answer questions about itself and its work.")}
+                 "assistant_role": role or (os.getenv("GATE_ASSISTANT_ROLE") or _DEFAULT_ROLE)}
         body = {"state": state, "model": self.model, "questions": {"reply": {
             "type": "noul",
             "instructions": {
-                "question": "You are in this group chat, reading it as it happens. `message` has just been "
-                            "sent. Do you speak?",
+                "question": "You are in this group chat in the capacity described by `assistant_role`, "
+                            "reading it as it happens. `message` has just been sent. Do you speak?",
                 "guidance": [
-                    "You speak when your silence would be the worse answer. Judge it in the moment, the "
-                    "way you would in any room, not by working anything out.",
+                    "You speak when your silence would be the worse answer. Where you sit cuts both ways: "
+                    "being in the room is not being one of the party, so what is theirs you let them have, "
+                    "and what you are there for is yours to carry whether or not anyone turns to you for "
+                    "it. Judge it in the moment, not by working anything out.",
                 ],
             },
             "criteria": {"true": "You would say something.",
@@ -473,7 +482,7 @@ class TaskPicker:
             logger.warning("group reply judgment via TypeSafe failed: %s", exc)
             return {"should_reply": None, "p": 0.0, "reason": f"error: {exc}"}
         p = float((a.get("reply") or {}).get("noul") or 0.0)
-        floor = float(os.getenv("GATE_GROUP_REPLY_MIN") or 0.5)
+        floor = float(os.getenv("GATE_GROUP_REPLY_MIN") or 0.45)
         logger.info("group reply judgment: p(should reply)=%.2f floor=%.2f", p, floor)
         return {"should_reply": p >= floor, "p": p, "reason": "ok"}
 
