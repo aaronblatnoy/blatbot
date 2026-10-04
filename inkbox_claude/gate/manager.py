@@ -100,7 +100,12 @@ class GateSession:
         who it is with: email, iMessage, SMS, Telegram and the phone are one conversation
         with the owner, so they share one thread. chat_id stays the routing key, so a reply
         still goes back out the way it came."""
-        return OWNER_THREAD if self.is_approver() else self.chat_id
+        if self.is_approver() and (self.reply_meta or {}).get("conversation_kind") != "group":
+            return OWNER_THREAD
+        # A group is its own conversation even when he is the one talking: what is said in
+        # front of other people does not belong in his private record, and a reply there
+        # must not be written from it.
+        return self.chat_id
 
     # -- typing indicator (iMessage) --------------------------------------
     def typing_start(self) -> None:

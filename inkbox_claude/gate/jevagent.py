@@ -1420,8 +1420,11 @@ def is_destructive(name: str, args: Dict[str, Any]) -> bool:
     return bool(act) and bool(_DESTRUCTIVE_RE.search(act))
 
 
-_SEND_RE = re.compile(r"(send|reply|forward|post|publish|dm|text)", re.I)
-_NOT_SEND = re.compile(r"(draft|schedule_send|list|get|read|search)", re.I)
+_SEND_RE = re.compile(r"(send|reply|forward|publish_post|publish|post_message|dm|sms|message)", re.I)
+# Reading about messages, counting them, staging one for a person to look at, or deleting
+# one already out there: none of those puts new words in front of anyone.
+_NOT_SEND = re.compile(r"(draft|stage|schedule_send|list|get|read|search|check|insight|limit|recent|"
+                       r"delete|remove|modify|settings|history|count)", re.I)
 
 
 def is_outbound_message(name: str, args: Dict[str, Any]) -> bool:

@@ -406,6 +406,13 @@ async def fill_one(item: Dict[str, Any], config: RunnableConfig) -> Dict[str, An
     return {"filled": [{"__round__": item["round"], "tool": item["tool"], "args": args, "primary": item["primary"]}]}
 
 
+def _owner_asked(req: Any) -> bool:
+    """Did this request come from the person the assistant works for? His own sends are him
+    speaking through it, so he reads them first; anyone else's request he already approved."""
+    from .manager import OWNER_THREAD
+    return getattr(req, "chat_id", "") == OWNER_THREAD or str(getattr(req, "mode", "")) in ("imessage", "voice") and bool(getattr(req, "sender", ""))
+
+
 async def guard(state: AgentState, config: RunnableConfig) -> Dict[str, Any]:
     rt = _rt(config)
     agent, judge, prose, req, box = rt["agent"], rt["judge"], rt["prose"], rt["req"], rt["box"]
@@ -425,6 +432,14 @@ async def guard(state: AgentState, config: RunnableConfig) -> Dict[str, Any]:
     if ja.sends_to_requester(choice, args, agent.protected + [req.sender, req.chat_id]):
         logger.info("jev graph: refusing %s to the requester; finishing with findings", choice)
         return {"outcome": "ok", "batch": []}
+    if ja.is_outbound_message(choice, args) and _owner_asked(req):
+        # The same rule as the other executor: words put in front of someone else are shown
+        # to the owner before they go, whichever engine composed them.
+        who = ", ".join(ja.recipients_of(args)) or "(no recipient named in the call)"
+        logger.info("jev graph: %s would reach %s; holding for the owner", choice.split("__")[-1], who)
+        return {"outcome": "confirm", "batch": [], "error": "confirmation required",
+                "confirm": {"tool": choice, "args": args, "kind": "send",
+                            "about": [f"It would go to: {who}"]}}
     if ja.is_destructive(choice, args):
         about = ja._mentions(steps, args)
         if not about:

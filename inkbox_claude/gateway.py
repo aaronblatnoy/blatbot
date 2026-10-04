@@ -1734,8 +1734,10 @@ class InkboxGateway:
             except Exception as exc:
                 logger.warning("[bridge] could not read telegram history: %s", exc)
         if not lines:
-            lines = list(self._tg_recent.get(chat_id) or [])
-        return "\n".join(lines[-limit:][:-1] if lines else [])
+            lines = list(self._tg_recent.get(chat_id) or [])[:-1]
+        # The stored history does not yet contain the message being judged, so every line
+        # of it counts. Only the in-memory fallback has already appended it.
+        return "\n".join(lines[-limit:])
 
     def _seen_in(self, chat_id: str, limit: int = 60) -> List[str]:
         """Who has spoken in this thread, from the record. Any channel: the stored lines are
@@ -1819,6 +1821,14 @@ class InkboxGateway:
         if self.sessions is None:
             return web.json_response({"ok": True, "no_sessions": True})
         chat_id, from_id, name, text = u["chat_id"], u["from_id"], u["name"], u["text"]
+        # Telegram retries an update it believes failed. Answering the same message twice
+        # is worse than answering late, so a repeat is acknowledged and dropped.
+        mark = u["update_id"] or u["message_id"]
+        if mark:
+            key = f"telegram:{mark}:{chat_id}"
+            if self._is_duplicate(key):
+                logger.info("[bridge] telegram update %s already handled; ignored", key)
+                return web.json_response({"ok": True, "duplicate": True})
         if u["is_group"]:
             recent = self._tg_recent.setdefault(chat_id, [])
             recent.append(f"{name or from_id}: {text}")

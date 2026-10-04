@@ -142,5 +142,7 @@ def parse_update(update: Dict[str, Any]) -> Optional[Dict[str, Any]]:
     kind = str(chat.get("type") or "private")
     is_group = kind in ("group", "supergroup")
     addressed = not is_group or _names_the_bot(text, msg)
-    return {"chat_id": chat_id, "from_id": str(frm.get("id") or ""), "name": name, "text": text,
+    return {"update_id": str(update.get("update_id") or ""),
+            "message_id": str(msg.get("message_id") or ""),
+            "chat_id": chat_id, "from_id": str(frm.get("id") or ""), "name": name, "text": text,
             "is_group": is_group, "group_title": str(chat.get("title") or ""), "addressed": addressed}
