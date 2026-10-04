@@ -1536,6 +1536,47 @@ def telegram_meta(user_id: str):
             "telegram_user_id": user_id, "contact": {"name": "Someone"}}
 
 
+def test_send_tools_are_taken_off_the_preapproved_list_for_the_owner(tmp_path):
+    """The permission hook is never consulted for a tool the SDK was told to allow, so a
+    send has to be withheld from that list or it goes out unseen. This is the bug that let
+    a poem reach a stranger and an email reach five people."""
+    import asyncio as _a
+    from inkbox_claude.gate.executor import Executor
+    from inkbox_claude.gate.store import Request, sha256
+
+    captured = {}
+
+    class FakeOptions(dict):
+        pass
+
+    ex = Executor(mcp_server=object(), cwd=str(tmp_path), model="sonnet")
+    req = Request(id=1, chat_id="owner", sender="+1", sender_name="Aaron", mode="imessage",
+                  subject="", original_message="send a poem", summary="send a poem",
+                  scopes=["email_send"], prompt="send a poem",
+                  prompt_sha256=sha256("send a poem"), state="approved",
+                  revision=0, status=None, raw_output="", created_at=0.0, updated_at=0.0)
+
+    import inkbox_claude.gate.executor as ex_mod
+    def fake_options(**kw):
+        captured.update(kw)
+        raise RuntimeError("stop here; the list is what matters")
+    ex_mod.ClaudeAgentOptions = fake_options
+    try:
+        _a.run(ex.run(req, from_owner=True))
+    except Exception:
+        pass
+    sends = [t for t in captured.get("allowed_tools", []) if "send" in t]
+    assert sends == [], f"a send tool was pre-approved and would never reach the hook: {sends}"
+
+    captured.clear()
+    try:
+        _a.run(ex.run(req, from_owner=False))
+    except Exception:
+        pass
+    assert any("send" in t for t in captured.get("allowed_tools", [])), \
+        "someone else's approved request must still be able to reply"
+
+
 def test_telegram_is_just_another_surface_for_permissions(tmp_path, monkeypatch):
     """A request from anyone but the owner waits for him, whichever surface it arrived on.
     Telegram identifies the sender by a numeric id Telegram stamps and the sender cannot

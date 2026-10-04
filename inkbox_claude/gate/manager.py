@@ -1177,6 +1177,32 @@ class GateSessionManager:
         conv = str(self.approver_conv or "")
         return [OWNER_THREAD] if (conv and conv in target) else [target]
 
+    async def recover_interrupted(self) -> None:
+        """A run that was in flight when the process died leaves the sender watching a
+        typing indicator that never resolves. On startup, say so on the thread it was for,
+        and offer to run it again. It is not retried on its own: a half-finished run may
+        already have changed something, and doing it twice is worse than asking."""
+        try:
+            stranded = self.store.requests_in_state("running")
+        except Exception:
+            logger.exception("[gate] could not look for interrupted runs")
+            return
+        for req in stranded:
+            try:
+                self.store.set_state(req.id, "failed",
+                                     status={"ok": False, "error": "interrupted by a restart",
+                                             "summary": "interrupted by a restart", "raw": "", "tool_calls": []})
+                self.store.set_thread(req.chat_id, "idle")
+                self.task_note(req, "failed", f"Interrupted by a restart: {req.summary}", state="open")
+                line = (f"That one stopped when I restarted, so it never finished: {req.summary}. "
+                        f"Nothing was reported back. Say the word and I will run it again.")
+                session = self.get(req.chat_id)
+                if not await session.notify_after_request(line, inbound_id=req.inbound_id):
+                    await self.send_to_approver(f"[Blatbot #{req.id}] {line}")
+                logger.info("[gate] told %s about interrupted request #%s", req.chat_id, req.id)
+            except Exception:
+                logger.exception("[gate] could not report interrupted request #%s", req.id)
+
     async def send_to_approver(self, text: str) -> None:
         conv = self.approver_conv
         await self.send(f"imessage:{conv}", text, "imessage", {"conversation_id": conv})

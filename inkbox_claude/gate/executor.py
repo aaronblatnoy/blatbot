@@ -76,7 +76,7 @@ class Executor:
         if sha256(req.prompt) != req.prompt_sha256:
             return {"ok": False, "error": "prompt hash mismatch; refused to run", "tool_calls": []}
         allowed = tools_for(req.scopes)
-        allowed_set = set(allowed)
+        allowed_set = set(allowed)   # what this task may touch at all, send tools included
         tool_calls: List[str] = []
         texts: List[str] = []
 
@@ -86,6 +86,12 @@ class Executor:
         # assistant, and he sees it before it goes. A request that came from someone else
         # was already read and approved by him in full, so answering it needs nothing more.
         confirm_sends = bool(from_owner)
+        if confirm_sends:
+            # A tool listed in allowed_tools is pre-approved and the permission hook is never
+            # consulted for it. Sends are therefore taken off that list, which is what routes
+            # them through the hook so they can be held and shown to him first.
+            from .jevagent import is_outbound_message as _out
+            allowed = [t for t in allowed if not _out(t, {})]
 
         async def can_use(tool_name: str, input_data: Dict[str, Any], context: Any):
             if tool_name not in allowed_set:

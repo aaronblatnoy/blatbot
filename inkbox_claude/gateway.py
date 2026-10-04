@@ -885,6 +885,13 @@ class InkboxGateway:
             )
         await self._catch_up_a2a_tasks()
         await self._recover_hosted_call_completions()
+        if self.sessions is not None and hasattr(self.sessions, "recover_interrupted"):
+            # A run the last process died inside leaves someone watching a typing indicator
+            # that never resolves. Say so before serving anything new.
+            try:
+                await self.sessions.recover_interrupted()
+            except Exception:
+                logger.exception("[bridge] could not report interrupted runs")
 
         logger.info(
             "[bridge] ready — %s / %s / %s → Claude Code in %s",

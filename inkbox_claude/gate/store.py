@@ -394,6 +394,13 @@ class Store:
             ).fetchall()
         return [str(r["chat_id"]) for r in rows]
 
+    def requests_in_state(self, state: str) -> List[Request]:
+        """Every request sitting in one state. Used at startup to find runs the process
+        died in the middle of."""
+        with self._lock:
+            rows = self._db.execute("SELECT * FROM requests WHERE state=? ORDER BY id", (state,)).fetchall()
+        return [Request.from_row(r) for r in rows]
+
     def history(self, chat_id: str, limit: int = 20) -> List[Dict[str, Any]]:
         with self._lock:
             rows = self._db.execute(
