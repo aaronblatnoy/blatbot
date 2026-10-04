@@ -497,6 +497,64 @@ class Store:
             scopes += roles.get(r["role"], [])
         return {"role": role, "scopes": sorted(set(scopes)), "person": person}
 
+    def known_people(self) -> List[Dict[str, Any]]:
+        """Let the console show known contacts before the owner grants them anything."""
+        with self._lock:
+            rows = self._db.execute(
+                "SELECT key, MAX(display) AS person FROM people GROUP BY key ORDER BY person, key"
+            ).fetchall()
+        return [{"key": r["key"], "person": r["person"] or ""} for r in rows]
+
+    def console_overview(self) -> Dict[str, Any]:
+        """Keep dashboard totals accurate without loading entire operational tables."""
+        self._ensure_trust()
+        with self._lock:
+            request_rows = self._db.execute(
+                "SELECT state, COUNT(*) AS n FROM requests GROUP BY state"
+            ).fetchall()
+            task_rows = self._db.execute(
+                "SELECT state, COUNT(*) AS n FROM tasks WHERE state<>'closed' GROUP BY state"
+            ).fetchall()
+            people = self._db.execute(
+                "SELECT COUNT(*) AS n FROM (SELECT key FROM trust UNION SELECT key FROM people)"
+            ).fetchone()["n"]
+            roles = self._db.execute("SELECT COUNT(*) AS n FROM roles").fetchone()["n"]
+        return {
+            "people": int(people),
+            "roles": int(roles),
+            "requests": {str(r["state"]): int(r["n"]) for r in request_rows},
+            "tasks": {str(r["state"]): int(r["n"]) for r in task_rows},
+        }
+
+    def interrupted_request_count(self) -> int:
+        """Surface restart-interrupted work separately from ordinary failures."""
+        with self._lock:
+            row = self._db.execute(
+                "SELECT COUNT(*) AS n FROM requests WHERE state='failed' "
+                "AND (status_json LIKE '%interrupted by a restart%' "
+                "OR status_json LIKE '%interrupted by restart%')"
+            ).fetchone()
+        return int(row["n"])
+
+    def recent_requests(self, state: str = "", limit: int = 100) -> List[Request]:
+        """Give the console a bounded, newest-first request timeline."""
+        limit = max(1, min(int(limit), 500))
+        with self._lock:
+            if state:
+                rows = self._db.execute(
+                    "SELECT * FROM requests WHERE state=? ORDER BY id DESC LIMIT ?",
+                    (state, limit),
+                ).fetchall()
+            else:
+                rows = self._db.execute(
+                    "SELECT * FROM requests ORDER BY id DESC LIMIT ?", (limit,)
+                ).fetchall()
+        return [Request.from_row(r) for r in rows]
+
+    def trusted_key(key: str) -> str:
+        """Let permission editors identify the normalized row they just changed."""
+        return _trust_key(key)
+
     def requests_in_state(self, state: str) -> List[Request]:
         """Every request sitting in one state. Used at startup to find runs the process
         died in the middle of."""

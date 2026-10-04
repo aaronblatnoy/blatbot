@@ -1,0 +1,162 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="dark">
+  <title>Blatbot console</title>
+  <link rel="stylesheet" href="/console/console.css">
+</head>
+<body>
+  <a class="skip-link" href="#main">Skip to console</a>
+
+  <header class="topbar">
+    <div class="identity">
+      <span class="wordmark">BLATBOT</span>
+      <span class="environment">private console</span>
+    </div>
+    <nav aria-label="Console sections">
+      <a href="#requests">Requests <span id="nav-waiting-count" class="nav-count" hidden></span></a>
+      <a href="#permissions">Permissions</a>
+      <a href="#tasks">Tasks</a>
+      <a href="#health">Health</a>
+    </nav>
+    <div class="connection" aria-live="polite">
+      <span id="stream-dot" class="stream-dot is-connecting"></span>
+      <span id="stream-label">connecting</span>
+      <button class="key-button" type="button" data-open-shortcuts aria-label="Show keyboard shortcuts">?</button>
+    </div>
+  </header>
+
+  <div id="startup-banner" class="startup-banner" role="status" hidden>
+    <div>
+      <strong>Gate is starting.</strong>
+      <span id="startup-detail">The console will retry when the API is ready.</span>
+    </div>
+    <button id="retry-all" class="button button-quiet" type="button">Retry now</button>
+  </div>
+
+  <div id="notice" class="notice" role="status" aria-live="polite" hidden></div>
+
+  <main id="main">
+    <section id="requests" class="section waiting-section" aria-labelledby="requests-title">
+      <div class="section-heading waiting-heading">
+        <div>
+          <h1 id="requests-title">Waiting on you</h1>
+          <p id="waiting-summary" class="section-summary">Loading requests…</p>
+        </div>
+        <div id="waiting-count" class="big-count" aria-hidden="true">—</div>
+      </div>
+      <div id="waiting-list" class="waiting-list" aria-live="polite" aria-busy="true"></div>
+
+      <details class="history-block">
+        <summary>
+          <span>Request history</span>
+          <span id="history-counts" class="summary-meta">loading</span>
+        </summary>
+        <div class="filter-bar" role="group" aria-label="Filter requests">
+          <button class="filter is-active" type="button" data-request-filter="all">All</button>
+          <button class="filter" type="button" data-request-filter="running">Running</button>
+          <button class="filter" type="button" data-request-filter="done">Done</button>
+          <button class="filter" type="button" data-request-filter="failed">Failed</button>
+        </div>
+        <div id="request-history" class="request-history"></div>
+      </details>
+    </section>
+
+    <section id="permissions" class="section" aria-labelledby="permissions-title">
+      <div class="section-heading">
+        <div>
+          <h2 id="permissions-title">People &amp; permissions</h2>
+          <p class="section-summary">Role scopes run automatically. Everything else interrupts you.</p>
+        </div>
+        <div class="heading-actions">
+          <label class="search-field">
+            <span class="visually-hidden">Search people and scopes</span>
+            <span aria-hidden="true">/</span>
+            <input id="permission-search" type="search" placeholder="Find person or scope" autocomplete="off">
+          </label>
+          <button id="add-person" class="button button-primary" type="button">Add person</button>
+        </div>
+      </div>
+
+      <div class="permissions-layout">
+        <div class="people-pane">
+          <div class="pane-label"><span>People</span><span id="people-count">—</span></div>
+          <div id="people-list" class="people-list" role="listbox" aria-label="People"></div>
+        </div>
+        <div id="person-editor" class="editor-pane">
+          <div class="empty-state">Select a person to inspect their permissions.</div>
+        </div>
+      </div>
+
+      <details class="roles-block">
+        <summary>
+          <span>Roles</span>
+          <span id="roles-count" class="summary-meta">—</span>
+        </summary>
+        <p class="inline-guidance">Changing a role updates the effective permissions for every person who holds it.</p>
+        <div id="roles-list" class="roles-list"></div>
+        <button id="add-role" class="button button-quiet" type="button">Add role</button>
+      </details>
+    </section>
+
+    <section id="tasks" class="section" aria-labelledby="tasks-title">
+      <div class="section-heading">
+        <div>
+          <h2 id="tasks-title">Tasks</h2>
+          <p class="section-summary">Recent work and its recorded ledger.</p>
+        </div>
+        <button id="refresh-tasks" class="button button-quiet" type="button">Refresh</button>
+      </div>
+      <div id="tasks-list" class="task-list" aria-busy="true"></div>
+    </section>
+
+    <section id="health" class="section health-section" aria-labelledby="health-title">
+      <div class="section-heading">
+        <div>
+          <h2 id="health-title">Health</h2>
+          <p class="section-summary">Gateway status and recent operational failures.</p>
+        </div>
+        <button id="refresh-health" class="button button-quiet" type="button">Refresh</button>
+      </div>
+      <div id="health-content" aria-busy="true"></div>
+    </section>
+  </main>
+
+  <dialog id="task-dialog" class="ledger-dialog">
+    <div class="dialog-head">
+      <div>
+        <span id="ledger-id" class="mono muted"></span>
+        <h2 id="ledger-title">Task ledger</h2>
+      </div>
+      <button class="close-button" type="button" data-close-dialog="task-dialog" aria-label="Close ledger">Close</button>
+    </div>
+    <pre id="ledger-content" class="ledger-content"></pre>
+  </dialog>
+
+  <dialog id="shortcuts-dialog" class="shortcuts-dialog">
+    <div class="dialog-head">
+      <h2>Keyboard</h2>
+      <button class="close-button" type="button" data-close-dialog="shortcuts-dialog" aria-label="Close shortcuts">Close</button>
+    </div>
+    <dl class="shortcut-list">
+      <div><dt><kbd>/</kbd></dt><dd>Search people and scopes</dd></div>
+      <div><dt><kbd>j</kbd> <kbd>k</kbd></dt><dd>Move through waiting requests</dd></div>
+      <div><dt><kbd>y</kbd></dt><dd>Approve the selected request</dd></div>
+      <div><dt><kbd>n</kbd></dt><dd>Reject the selected request</dd></div>
+      <div><dt><kbd>?</kbd></dt><dd>Show this reference</dd></div>
+      <div><dt><kbd>Esc</kbd></dt><dd>Close a dialog</dd></div>
+    </dl>
+  </dialog>
+
+  <template id="scope-group-template">
+    <fieldset class="scope-group">
+      <legend></legend>
+      <div class="scope-options"></div>
+    </fieldset>
+  </template>
+
+  <script type="module" src="/console/console.js"></script>
+</body>
+</html>

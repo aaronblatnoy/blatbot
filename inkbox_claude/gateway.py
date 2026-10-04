@@ -906,6 +906,12 @@ class InkboxGateway:
     async def _start_http_server(self) -> None:
         app = web.Application()
         app.router.add_get("/health", self._handle_health)
+        try:
+            from .console import register as register_console
+            register_console(app, self)
+            logger.info("[bridge] console at /console")
+        except Exception:
+            logger.exception("[bridge] console registration failed; serving without it")
         app.router.add_post(DEFAULT_WEBHOOK_PATH, self._handle_webhook)
         app.router.add_post(telegram.WEBHOOK_PATH, self._handle_telegram)
         app.router.add_get(INKBOX_WS_PATH, self._handle_call_ws)
