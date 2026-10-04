@@ -1167,7 +1167,8 @@ class GateSessionManager:
         from .. import telegram as _tg
         self.approver_telegram_id = _tg.approver_id()
         self.voice_vocabulary = str(os.getenv("GATE_VOICE_VOCABULARY") or DEFAULT_VOICE_VOCABULARY).strip()
-        self.voice_trust_approver = str(_settings.raw("GATE_VOICE_TRUST_APPROVER") or "").strip().lower() in ("1", "true", "yes")
+        # read per turn, not captured here: the console can change it between messages
+        self._voice_trust_override: Optional[bool] = None
         self.sessions: Dict[str, GateSession] = {}
         self._expiry_task: Optional[asyncio.Task] = None
         try:
@@ -1191,6 +1192,19 @@ class GateSessionManager:
             self._expiry_task.cancel()
 
     # -- approver channel ----------------------------------------------------
+    @property
+    def voice_trust_approver(self) -> bool:
+        """Whether a call from the owner's number acts directly. Read when the call happens,
+        so turning it off in the console applies to the next call rather than the next boot."""
+        if self._voice_trust_override is not None:
+            return self._voice_trust_override
+        return bool(_settings.get("GATE_VOICE_TRUST_APPROVER"))
+
+    @voice_trust_approver.setter
+    def voice_trust_approver(self, value: bool) -> None:
+        """Set directly only by tests, which need a fixed answer rather than a live one."""
+        self._voice_trust_override = bool(value)
+
     async def send(self, target: str, text: str, mode: str, meta: Dict[str, Any], *,
                    chat_id: str = "", role: str = "notice", reply_to: Optional[int] = None,
                    record: bool = True) -> None:
@@ -1602,13 +1616,13 @@ class GateSessionManager:
         fallback["jev_attempt"] = {k: status.get(k) for k in ("error", "tool_calls", "jev_calls", "prose_calls", "seconds", "steps", "raw")}
         return fallback
 
-    SLOW_ACK_AFTER_S = float(_settings.raw("GATE_SLOW_ACK_AFTER_S") or 7.0)
+    SLOW_ACK_AFTER_S = 7.0      # the default; the live value is read per run below
 
     async def _ack_if_slow(self, session: "GateSession", req: Request) -> None:
         """A request that is still running after a few seconds gets one short, casual line
         so the wait does not read as silence. A fast one gets its answer and nothing else."""
         try:
-            await asyncio.sleep(self.SLOW_ACK_AFTER_S)
+            await asyncio.sleep(float(_settings.get("GATE_SLOW_ACK_AFTER_S") or self.SLOW_ACK_AFTER_S))
         except asyncio.CancelledError:
             return
         if self.store.get_request(req.id).state != "running":
@@ -1628,8 +1642,8 @@ class GateSessionManager:
         except Exception:
             logger.debug("[gate] slow ack failed", exc_info=True)
 
-    STRONG_MODEL = _settings.raw("GATE_STRONG_MODEL") or "opus"
-    FAST_MODEL = _settings.raw("GATE_FAST_MODEL") or "sonnet"
+    STRONG_MODEL = "opus"       # defaults; the live values are read per request below
+    FAST_MODEL = "sonnet"
 
     async def _pick_model(self, req: Request) -> str:
         """Claude Code runs the request; Jev decides which Claude: the strongest model for
@@ -1637,9 +1651,10 @@ class GateSessionManager:
         for a lookup or a single plain change."""
         picker = self.task_picker
         if picker is None or not hasattr(picker, "judge_complexity"):
-            return self.FAST_MODEL
+            return _settings.get("GATE_FAST_MODEL") or self.FAST_MODEL
         res = await picker.judge_complexity(prompt=req.prompt, summary=req.summary, scopes=list(req.scopes))
-        model = self.STRONG_MODEL if res.get("complex") else self.FAST_MODEL
+        model = (_settings.get("GATE_STRONG_MODEL") or self.STRONG_MODEL) if res.get("complex") \
+            else (_settings.get("GATE_FAST_MODEL") or self.FAST_MODEL)
         logger.info("[gate] #%s model: %s (p(complex)=%.2f)", req.id, model, float(res.get("p") or 0.0))
         return model
 

@@ -51,7 +51,7 @@ KNOBS: List[Dict[str, Any]] = [
              "waits for a yes by text. Turn this on to act on calls from your number directly."},
 
     # -- how it runs ----------------------------------------------------------
-    {"name": "GATE_EXECUTOR", "kind": "choice", "default": "claude", "choices": ["claude", "jev"],
+    {"restart": True, "name": "GATE_EXECUTOR", "kind": "choice", "default": "claude", "choices": ["claude", "jev"],
      "group": "Engine", "label": "Which engine does the work",
      "help": "claude is Claude Code, slower and broader. jev is the typed-judgment agent, "
              "faster and cheaper but narrower."},
@@ -61,13 +61,13 @@ KNOBS: List[Dict[str, Any]] = [
     {"name": "GATE_FAST_MODEL", "kind": "choice", "default": "sonnet",
      "choices": ["opus", "sonnet", "haiku"], "group": "Engine",
      "label": "Model for ordinary requests", "help": "Used for everything else."},
-    {"name": "GATE_TASK_PICKER", "kind": "choice", "default": "jev", "choices": ["jev", "router"],
+    {"restart": True, "name": "GATE_TASK_PICKER", "kind": "choice", "default": "jev", "choices": ["jev", "router"],
      "group": "Engine", "label": "Who picks which task a message belongs to",
      "help": "jev uses typed judgments; router asks the writing model."},
-    {"name": "GATE_DECIDE_GRAPH", "kind": "bool", "default": True, "group": "Engine",
+    {"restart": True, "name": "GATE_DECIDE_GRAPH", "kind": "bool", "default": True, "group": "Engine",
      "label": "Use the decision graph",
      "help": "Off falls back to the older straight-line path. A way out if the graph misbehaves."},
-    {"name": "GATE_EXECUTOR_FALLBACK", "kind": "bool", "default": True, "group": "Engine",
+    {"restart": True, "name": "GATE_EXECUTOR_FALLBACK", "kind": "bool", "default": True, "group": "Engine",
      "label": "Fall back to Claude when the fast engine gives up",
      "help": "Only applies when the engine above is jev."},
 ]
@@ -138,7 +138,8 @@ def describe() -> List[Dict[str, Any]]:
         name = spec["name"]
         source = "console" if db.get(name) not in (None, "") else (
             "environment" if os.getenv(name) not in (None, "") else "default")
-        out.append({**spec, "value": get(name), "source": source})
+        out.append({**spec, "value": get(name), "source": source,
+                    "restart": bool(spec.get("restart"))})
     return out
 
 

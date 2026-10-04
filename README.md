@@ -2,9 +2,9 @@
 
 A personal AI assistant that many people can reach, and only one person can command.
 
-Blatbot has its own email address, phone number, iMessage line, and Telegram account. Anyone can write to it or call it. It answers on my behalf, keeps track of what each person asked for, and can act on my calendar, inbox, and documents. The catch that makes this safe: when someone other than me asks it to *do* something, nothing happens until I approve the exact action, by replying to a text or clicking it in the console.
+Blatbot has its own email address, phone number, iMessage line, and Telegram account. Anyone can write to it or call it. It answers on my behalf, keeps track of what each person asked for, and can act on my calendar, inbox, and documents. The catch that makes this safe: when someone asks it to *do* something, nothing happens until I approve the exact action, by replying to a text or clicking it in the console. The exception is someone I have deliberately given a role to, and only for the scopes that role carries.
 
-A surface is how a message arrived, not who it is with. The same person reaching me by email, text, Telegram and the phone is one conversation, written down once.
+A surface is how a message arrived, not who it is with. Everything I send or am sent, on any surface, is one conversation written down once. Other people share a record wherever Inkbox resolves them to the same contact; Telegram is still kept separately.
 
 > **Built on Inkbox.** This project is a fork of [inkbox-ai/claude-code-plugin](https://github.com/inkbox-ai/claude-code-plugin), the Inkbox bridge that gives a Claude Code agent a mailbox, a phone number, SMS, iMessage, and a tunnel. All of the transport (receiving webhooks, sending messages, carrying call audio) is Inkbox's work. This fork adds the layer on top: typed judgments that decide each turn, a reply writer, an approval gate, a task ledger, a tool-calling agent that runs without a chat model, and a phone surface. The `main` branch is Inkbox's code, untouched. The `blatbot` branch is this project. [See exactly what was added.](https://github.com/aaronblatnoy/blatbot/compare/main...blatbot) Inkbox's original README is kept at [docs/inkbox-plugin-README.md](docs/inkbox-plugin-README.md).
 
@@ -68,10 +68,10 @@ So the real question is not "can the model do the task." It is "who is allowed t
  │ DECIDE   TypeSafe Jev. Each answer is a pick from a list or a probability,        │
  │          never free text. About 0.2 s each.                                       │
  │                                                                                   │
- │  1  which task?      state: the message, last 6 turns, each candidate task's      │
+ │  1  which task?      state: the message, last 8 stored messages, each candidate's │
  │                      id, title, where it stands, people, age. Choice over them    │
  │                      + new_task + no_task. Under 0.55 confidence: abstain.        │
- │  2  needs a tool?    state: message, turns, the task from 1. Noul. p ≥ 0.5 ──> a  │
+ │  2  needs a tool?    state: message, turns, the task from 1. Noul. ≥0.65 yes, ≤0.35 no;  │
  │                      request is built; else the reply writer answers in words.    │
  │  3  what happened?   event kind: asked / provided info / confirmed / changed /    │
  │                      declined / progress / conversation                           │
@@ -87,7 +87,7 @@ So the real question is not "can the model do the task." It is "who is allowed t
  │      was created and will run /  │   │           + the conversation so far          │
  │      will be shown to Aaron" or  │   │           + this task's record               │
  │      "no action"), the ledger,   │   │ summary = the task's title                   │
- │      the conversation            │   │ scopes  = Jev, one yes/no per scope          │
+ │      the conversation            │   │ scopes  = Jev over a tree of systems          │
  │ out: the words sent back, and a  │   │           (calendar, email send, Drive read, │
  │      title for a brand-new task  │   │           site admin, ...) granted at 0.6,   │
  │ cannot: create a request, call   │   │           plus every scope this task's       │
@@ -112,12 +112,21 @@ So the real question is not "can the model do the task." It is "who is allowed t
                   │                     └──────────────────────┬───────────────────────┘
                   │                                            v  approved
                   │  ┌────────────────────────────────────────────────────────────────┐
-                  │  │ AGENT   Jev judgments + code. No chat model drives the loop.  │
+                  │  │ EXECUTOR   Claude Code by default (see below), running the     │
+                  │  │            hash-checked prompt with only the granted tools.     │
+                  │  │            Jev picks Opus or Sonnet per request.                │
+                  │  │                                                                │
+                  │  │   denied at the tool call, in code, whichever engine runs:      │
+                  │  │     a tool outside the scopes · anything destructive ·          │
+                  │  │     a message to the requester · a send to anyone else when     │
+                  │  │     the owner asked for it (held, shown to him, his yes runs it)│
+                  │  │                                                                │
+                  │  │ ALTERNATIVE   Jev judgments + code. No chat model drives it.   │
                   │  │                                                                │
                   │  │  hash of the prompt re-checked ──> mismatch: refuse            │
                   │  │  tools = only what the scopes map to; schemas read live        │
                   │  │                                                                │
-                  │  │  ┌─ loop, at most 8 steps ─────────────────────────────────┐  │
+                  │  │  ┌─ loop, at most 12 steps (JEV_AGENT_MAX_STEPS) ──────────┐  │
                   │  │  │ done?        yes/no over goal + steps so far   ≥0.6 stop│  │
                   │  │  │ next tool    Choice over the allowed tools + give up    │  │
                   │  │  │ arguments    ONE batched request, per argument:         │  │
@@ -145,10 +154,11 @@ So the real question is not "can the model do the task." It is "who is allowed t
                   │  │  ends:  OK with every result in full                           │
                   │  │         FAILED: give up, a tool failed twice, an argument      │
                   │  │         could not be filled, step limit                        │
-                  │  │  FAILED and nothing written ──> Claude Code runs the same     │
+                  │  │  FAILED, gave up, or findings that do not answer the goal, │
                   │  │         prompt inside this same call: an escalation, not a    │
                   │  │         second execution; ONE status leaves, nothing is       │
                   │  │         delivered for the Jev attempt                          │
+                  │  │  (this loop runs only when the engine is set to jev)           │
                   │  │  FAILED after a write ──> stop, report; never retried         │
                   │  └──────────────────────────────┬─────────────────────────────────┘
                   │                                 v
@@ -160,7 +170,7 @@ So the real question is not "can the model do the task." It is "who is allowed t
  │  the reply writer phrases the result; Jev checks every claim against the results  │
  │  (unsupported: rewritten from the results only, else the raw result is sent)      │
  │  executors cannot message the requester (denied at the tool call, in code)        │
- │  someone else's task: the owner gets a one-line done/failed note                  │
+ │  someone else's task: the owner gets a done/failed note with the result                   │
  │  phone: the result goes back to the voice agent as tool output; it says it        │
  └───────────────────────────────────────────────────────────────────────────────────┘
 ```
@@ -218,7 +228,7 @@ call, no Anthropic call. About 12 s including a cold MCP server start; 5 s warm.
 
 Jev (TypeSafe's System One model) never writes text. Each call is a question over a JSON
 state and returns a pick with probabilities, or a probability of yes. Code owns every
-threshold and every consequence. This is the complete list.
+threshold and every consequence. These were the judgments at the time of writing; several have been added since, including whether a request can be acted on as it stands, whether to speak in a group, whether a drafted reply promises work, which model a request needs, and how to search the ledger.
 
 | # | when | state it sees | question | answers | code does |
 |---|---|---|---|---|---|
@@ -244,8 +254,9 @@ threshold and every consequence. This is the complete list.
 Jev's ceiling is about 32k input tokens per request. A judgment state under that goes
 in raw. Over it, code replaces the largest value with a structural digest (kind, size,
 keys, counts, header lines, how many ids and addresses it holds), largest first, until
-it fits. Only the judgment is shrunk; the full results still reach the prose model, the
-reply model, and the owner.
+it fits. Only the judgment is shrunk. The whole result reaches the prose and
+reply models up to 60k characters, and goal-relevant evidence above that; the full text is
+always kept in the request record.
 
 Anything not on this list is either code (hashing, permissions, the send guard, the
 loop limit, calling the tool) or DeepSeek writing words: the reply to the sender, a
@@ -256,10 +267,10 @@ subject, a search query).
 
 These are the decisions the whole thing rests on.
 
-1. **The models that read strangers' messages have no tools.** A typed-judgment model decides which task a message belongs to and whether anything needs doing; a text model writes the reply. Neither can call a tool. The judgment model cannot even produce free text: its answers are a choice from a list or a probability.
+1. **The models that decide and reply before approval have no tools.** A typed-judgment model decides which task a message belongs to and whether anything needs doing; a text model writes the reply. Neither can call a tool. The judgment model cannot even produce free text: its answers are a choice from a list or a probability.
 2. **The gate is code, not a prompt.** Whether a request runs is decided by comparing the sender against the owner's iMessage thread, his Telegram user id, or his phone number, and against the roles he has granted. No wording in a message can change that comparison. An email that claims to be from the owner, even from the owner's real address, is not the owner.
 3. **No model paraphrases a request.** What runs is built by code: the sender's exact words, the recent conversation, and the task's record. The owner approves that, sees the tools it will get, and it is hashed when stored and checked again before execution.
-4. **Every task gets the smallest set of tools that covers it.** Scopes map to tool lists, chosen by one yes/no judgment per scope. A tool outside the granted scopes is denied at call time, in code, and so is any send aimed at the person who asked: the gate delivers results itself, once.
+4. **Every task gets a deliberately narrow set of tools, enforced as a hard maximum.** Scopes are chosen by a judgment over a tree of systems and leaves, widened on purpose in two ways: a task inherits the scopes its earlier requests had, and a secondary system can be included. The result is a ceiling, not a guess: A tool outside the granted scopes is denied at call time, in code, and so is any send aimed at the person who asked: the gate delivers results itself, once.
 5. **A task is a unit of work, not a person.** One person can have several tasks; a task can involve several people, each reachable by email, phone, and iMessage. Every inbound message is assigned to a task before anything else happens, and every request is written to one. The ledger is full-text searchable and loaded before every turn, which is what lets the assistant pick a task back up hours later.
 6. **The phone is a surface, not a second brain.** The voice model runs the conversation and is deliberately told nothing about the system behind it. When something real is needed it hands off, and that hand-off enters the same gateway as a text message, under the same rules. A caller who talks the voice model into something gains nothing, because the gate still checks the real caller number.
 7. **The assistant never claims work it has not done.** Replies can only report an action as complete when the ledger shows it completed.
@@ -269,7 +280,7 @@ These are the decisions the whole thing rests on.
 11. **Nothing goes out to another person without me seeing it, including when I asked for it.** A message the owner asks to have sent is him speaking to someone through the assistant, so the send is held at the tool boundary, the whole draft comes back with every recipient and the text verbatim, and only his yes releases that exact call. A request from anyone else was already read and approved by him in full, so answering it is untouched. The hold is enforced by withholding send tools from the pre-approved list, because a tool the runtime has been told to allow never reaches a permission hook.
 12. **Everyone starts with no permissions.** A role names a level of trust and the scopes it carries; a person is trusted by handle, so the same person is recognised by email, phone, Telegram id or name. A request whose scopes fall entirely inside what they were given runs immediately; anything outside it still waits. Trusting someone with the calendar does not let them send mail.
 13. **A surface is how a message arrived, not who it is with.** Email, iMessage, SMS, Telegram and the phone are one conversation with the owner, written to one record, so a notice sent on one is visible from another. A reply still goes back out the way it came. A group chat is its own conversation even when he is the one talking, because what is said in front of other people does not belong in his private record.
-14. **In a group it decides whether to speak, and that decision is only for groups.** A direct message is always answered. In a group, a message naming it is answered; one that does not goes to a single judgment asking whether its silence would be the worse answer, and an undecided or failed judgment stays quiet. It hears everything either way, and records what it chose not to answer, so a later follow-up has something to refer back to.
+14. **In a group it decides whether to speak, and that decision is only for groups, and today only on Telegram.** A direct message is always answered. In a Telegram group, a message naming it is answered; one that does not goes to a single judgment asking whether its silence would be the worse answer, and an undecided or failed judgment stays quiet. It hears everything either way, and records what it chose not to answer, so a later follow-up has something to refer back to.
 15. **An interrupted run is reported, not forgotten.** A run the process died inside leaves someone watching a typing indicator that never resolves. On startup each one is named on its own thread and offered again. It is not retried on its own, because a half-finished run may already have changed something.
 16. **Tools are called by code, not by a chat model.** The agent that runs an approved request is a loop of typed judgments: is the goal met, which tool next, which of the values already in play fills each argument. Dates come from the clock, ids from earlier results. A text model is called only for text that must be composed, such as an email body. Claude Code remains as a fallback for what the loop cannot do, and only when nothing has been written yet.
 
@@ -285,6 +296,28 @@ These are the decisions the whole thing rests on.
 
 If I had sent the same request from my own iMessage thread, steps 3 to 5 would run immediately with no approval.
 
+## Which engine runs the work
+
+Two executors exist, and the running one is a setting.
+
+**Claude Code is the default today.** It runs the hash-checked prompt with only the granted
+tools, and a judgment picks Opus or Sonnet per request, so most work lands on Sonnet and only
+a request judged hard gets the expensive model.
+
+**The Jev agent is the alternative.** A loop of typed judgments that picks the tool and fills
+each argument from values already in play, calling MCP tools directly with no chat model
+driving it. A text model is asked only for text that must be composed.
+
+They were measured against each other on fifteen read-only requests: Jev correct on thirteen
+at about 7.6 s each, Claude Code correct on eleven at about 17 s and roughly $0.17 a request.
+Jev is faster and far cheaper; Claude Code is more reliable on anything it has not seen before.
+Reliability won, so the engine is `claude`. Switch it in the console under Settings, Engine; it is
+read when the process starts, so it applies after a restart.
+
+The safety rules do not depend on which one runs. A tool outside the granted scopes, anything
+destructive, a message to the requester, and an outbound send the owner asked for are all
+refused at the tool call in both engines.
+
 ## The console
 
 A private web console on the tailnet, mounted inside the gateway at `/console`. It exists so
@@ -299,8 +332,8 @@ permissions are something I can see rather than something I remember.
 - **Tasks** with their ledgers, and **health**: the tunnel, uptime, interrupted runs, recent
   errors.
 - **Settings.** The knobs that change how it behaves, grouped by what they affect, each with a
-  plain label and a sentence of what it does. A change takes effect on the next turn, not the
-  next restart. The registry is the whole surface, so a value out of range is refused with the
+  plain label and a sentence of what it does. Most take effect on the next turn; the four that are read when the process starts say so
+  on the control itself. The registry is the whole surface, so a value out of range is refused with the
   reason and a name not in it is refused outright: no key or path can be edited by a mis-click.
 
 It mounts inside the gateway rather than beside it, so the database keeps one writer. It holds
@@ -310,7 +343,7 @@ No build step, no framework, nothing fetched from the network at runtime.
 
 ## What is in this fork
 
-Everything custom lives in one folder plus one file.
+The custom code spans the gate package, the console package, the Telegram and voice surfaces, the scope registry, and the tests.
 
 | Path | What it is |
 |---|---|
@@ -318,8 +351,10 @@ Everything custom lives in one folder plus one file.
 | `inkbox_claude/gate/router.py` | The reply writer (DeepSeek): told the decision, writes only the words sent back; also the ledger query planner |
 | `inkbox_claude/gate/store.py` | SQLite: the task ledger, requests and their states, threads |
 | `inkbox_claude/gate/taskpick.py` | The typed judgments (TypeSafe Jev): which task, whether action is needed, which scopes, what the message did to the task |
-| `inkbox_claude/gate/jevagent.py` | The executor: a loop of typed judgments that picks tools and selects arguments, calls MCP tools directly, prose only on demand |
-| `inkbox_claude/gate/executor.py` | The Claude Code fallback for a hash-checked prompt, tools limited to the scopes |
+| `inkbox_claude/gate/jevagent.py` | The alternative executor: a loop of typed judgments that picks tools and selects arguments, calls MCP tools directly, prose only on demand |
+| `inkbox_claude/gate/executor.py` | The Claude Code executor, the default: a hash-checked prompt, tools limited to the scopes, and the hook that holds an outbound send |
+| `inkbox_claude/gate/scopes.yaml`, `scopes.resolved.json` | The scope registry and the tool lists resolved from the live MCP servers; `scopes_cli.py` lists, checks and re-syncs them |
+| `inkbox_claude/gate/hosttools.py` | In-process tools the executor always has: host status, and exact filtering and counting over a result it already gathered |
 | `inkbox_claude/gate/scopes.py` | Scope names mapped to tool lists, including a headless browser (Playwright over MCP) as read-only and interactive scopes, and the send-to-requester guard |
 | `inkbox_claude/gate/decidegraph.py` | The gateway turn as a LangGraph: the judgments in parallel, the reply writer, the request, and the join that keeps the words and the work agreeing |
 | `inkbox_claude/gate/jevgraph.py` | The executor as a graph: collect, judge, act, repeat |
@@ -341,14 +376,15 @@ Start with Inkbox's own setup, which creates the agent identity and installs the
 # Turn on the gate
 INKBOX_MODE=gate
 
-# The reply writer and prose model. Any OpenAI-compatible chat model works; DeepSeek is the default.
+# The reply writer and prose model. The primary is DeepSeek's OpenAI-compatible API; the
+# timeout fallback is separately configurable (ROUTER_FALLBACK_*).
 DEEPSEEK_API_KEY=
 
 # The judgment model (TypeSafe Jev). Without it, DeepSeek decides tasks and
 # proposes requests, and Claude Code runs them.
 TYPESAFE_API_KEY=
-GATE_EXECUTOR=jev              # jev (default when the key is set) or claude
-GATE_EXECUTOR_FALLBACK=claude  # or none
+GATE_EXECUTOR=claude           # claude (what runs today) or jev; also in the console
+GATE_EXECUTOR_FALLBACK=claude  # or none; only used when the engine is jev
 GATE_SEARCH_URL=http://127.0.0.1:8888/search   # a local SearXNG; web search runs through the browser against it
 
 # Who the owner is. These values are the entire trust boundary.
@@ -378,18 +414,21 @@ GATE_OWNER_GOOGLE_ACCOUNT=
 
 Put your own standing instructions (tone, signature, house rules) in `standing.md` next to the `.env`. The router reads it fresh on every turn, so you can change the assistant's behavior by editing a text file.
 
-Open the console at `http://<your-host>:8771/console`, over a private network only. Anything listed in its Settings panel can be changed there instead of in the `.env`, and takes effect on the next turn; the database wins over the environment for those. Permissions live only in the console: everyone starts with none.
+Open the console at `http://<your-host>:8767/console` (the bridge port, `INKBOX_BRIDGE_PORT`), over a private network only. Anything listed in its Settings panel can be changed there instead of in the `.env`, and the database wins over the environment for those. Most apply on the next turn; which engine runs, which task picker, the decision graph and the engine fallback are read at startup and the console says so. Permissions live only in the console: everyone starts with none.
 
 Run the tests with `pytest tests`.
 
 ### Speed
 
-Measured on the deployed box, executor time from approval to result. Claude Code, 29 requests: median 18 s, range 6 to 56 s. Jev agent: site and roster reads 1.5 to 6 s; calendar and inbox questions 5 s; a multi-hop sheet question (find the form, its responses sheet, the right tab, read it) about 10 s; a web lookup that opens and reads a page 4 to 12 s. Escalation to Claude Code is the last resort and now starts from the agent's findings. Details and the per-request table are in [docs/blatbot-architecture.md](docs/blatbot-architecture.md).
+Measured on the deployed box, executor time from approval to result. Claude Code, the engine in use, 29 requests: median 18 s, range 6 to 56 s. Jev agent: site and roster reads 1.5 to 6 s; calendar and inbox questions 5 s; a multi-hop sheet question (find the form, its responses sheet, the right tab, read it) about 10 s; a web lookup that opens and reads a page 4 to 12 s. Escalation to Claude Code is the last resort and now starts from the agent's findings. Details and the per-request table are in [docs/blatbot-architecture.md](docs/blatbot-architecture.md).
 
 ### Honest caveats
 
+- **Gate mode needs the source tree.** The scope registry is read from `gate/scopes.yaml` at import, and that file is not in the package manifest, so a built wheel will not start in gate mode.
 - **The scope map is wired to my setup.** `scopes.py` references the specific Google Workspace tool servers I run. To use this yourself, edit that file to point at your own tools. Making this configurable is the next piece of work.
 - **Some prompts still say "Blatbot" and "Aaron."** The persona and a few rules are written for me. They are being moved into config.
+- **The safety classes are name-based.** Whether a tool is destructive, or sends to a person, is decided by its name and arguments against a maintained pattern, not by understanding what it does. A newly added tool with an unfamiliar name can slip past the hold until the pattern is updated.
+- **A name is not a principal.** A person can be trusted by email, phone, Telegram id or name. Only the first three are stamped by a provider; a display name is whatever its owner types, so granting scopes to a name is not safe.
 - **Caller ID is not authentication.** Trusting a phone number on voice calls is a convenience with a known weakness, which is why it is a separate switch.
 - **It is a single-owner design.** One assistant, one person who can approve. Other people can be given roles, but only the owner grants them. It is not a multi-tenant service.
 - **The console has no auth of its own.** It is safe because it is only reachable on a private network. Do not put it on the public internet as it stands.

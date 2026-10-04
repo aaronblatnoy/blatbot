@@ -408,9 +408,12 @@ async def fill_one(item: Dict[str, Any], config: RunnableConfig) -> Dict[str, An
 
 def _owner_asked(req: Any) -> bool:
     """Did this request come from the person the assistant works for? His own sends are him
-    speaking through it, so he reads them first; anyone else's request he already approved."""
+    speaking through it, so he reads them first; anyone else's request he already approved.
+
+    The test is the thread it was created on, the same one the other executor uses. Guessing
+    from the surface was wrong: a stranger's approved iMessage request is not his."""
     from .manager import OWNER_THREAD
-    return getattr(req, "chat_id", "") == OWNER_THREAD or str(getattr(req, "mode", "")) in ("imessage", "voice") and bool(getattr(req, "sender", ""))
+    return getattr(req, "chat_id", "") == OWNER_THREAD
 
 
 async def guard(state: AgentState, config: RunnableConfig) -> Dict[str, Any]:
@@ -432,7 +435,8 @@ async def guard(state: AgentState, config: RunnableConfig) -> Dict[str, Any]:
     if ja.sends_to_requester(choice, args, agent.protected + [req.sender, req.chat_id]):
         logger.info("jev graph: refusing %s to the requester; finishing with findings", choice)
         return {"outcome": "ok", "batch": []}
-    if ja.is_outbound_message(choice, args) and _owner_asked(req):
+    from .settings import get as _setting
+    if ja.is_outbound_message(choice, args) and _owner_asked(req) and bool(_setting("GATE_CONFIRM_SENDS")):
         # The same rule as the other executor: words put in front of someone else are shown
         # to the owner before they go, whichever engine composed them.
         who = ", ".join(ja.recipients_of(args)) or "(no recipient named in the call)"
