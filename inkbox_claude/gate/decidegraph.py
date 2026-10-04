@@ -125,7 +125,10 @@ def after_join(state: DecideState, config: RunnableConfig) -> List[str]:
         # The request is built anyway and held: if the writer, reading the whole thread,
         # commits to doing it instead, finalize keeps the request so the words are true.
         logger.info("[gate %s] asking before acting (p=%.2f)", s.chat_id, state["p_actionable"])
-    if not (state["needs_action"] and state["mode"] == "voice"):
+    # On a call the writer is normally skipped, because the voice model holds the line and
+    # the result is spoken. When the request cannot be run as it stands, the question is the
+    # whole point, so the writer runs and asks it.
+    if not (state["needs_action"] and state["mode"] == "voice") or not state["actionable"]:
         branches.append("write_reply")
     if state["needs_action"] or gm._names_a_task(state["task_choice"]):
         branches.append("attach_task")

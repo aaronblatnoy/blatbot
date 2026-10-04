@@ -881,9 +881,9 @@ class Store:
     def task_event(self, task_id: int, kind: str, text: str, *, chat_id: str = "",
                    request_id: Optional[int] = None, state: Optional[str] = None,
                    title: Optional[str] = None) -> None:
+        # Whole, always. The ledger is the only record of what happened on a task, and a
+        # cut here is permanent: no later reader can recover what was removed.
         text = (text or "").strip()
-        if len(text) > 700:
-            text = text[:700] + "..."
         now = time.time()
         with self._lock:
             self._db.execute(
