@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import time
 from pathlib import Path
 from typing import Any, Awaitable, Callable, Dict
@@ -65,8 +66,28 @@ def _endpoint(
     return wrapped
 
 
+def _asset_version(name: str) -> str:
+    """A short fingerprint of an asset's current bytes, used to bust browser caches."""
+    path = _STATIC / name
+    try:
+        return hashlib.sha256(path.read_bytes()).hexdigest()[:10]
+    except OSError:
+        return "0"
+
+
 async def index(_request: web.Request) -> web.StreamResponse:
-    return web.FileResponse(_STATIC / "index.html")
+    """Serve the shell with its assets stamped by content.
+
+    The stylesheet and script are referenced with the hash of what they currently hold, so
+    a deploy changes their URLs and no browser can answer from a copy of the old ones. The
+    shell itself must never be cached, or it would keep handing out the stamps it was
+    built with.
+    """
+    html = (_STATIC / "index.html").read_text(encoding="utf-8")
+    for name in ("console.css", "console.js"):
+        html = html.replace(f"/console/{name}", f"/console/{name}?v={_asset_version(name)}")
+    return web.Response(text=html, content_type="text/html",
+                        headers={"Cache-Control": "no-store"})
 
 
 async def get_overview(request: web.Request) -> web.StreamResponse:
@@ -140,7 +161,10 @@ def _asset(name: str, content_type: str):
         path = _STATIC / name
         if not path.is_file():
             raise web.HTTPNotFound()
-        return web.FileResponse(path, headers={"Content-Type": content_type})
+        # Revalidate every time: the stamped URL makes a hit cheap, and a console that
+        # serves yesterday's stylesheet is worse than one that asks.
+        return web.FileResponse(path, headers={"Content-Type": content_type,
+                                               "Cache-Control": "no-cache"})
     return handler
 
 
