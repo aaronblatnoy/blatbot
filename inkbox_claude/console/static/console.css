@@ -56,7 +56,11 @@ a { color: inherit; }
 nav { display: flex; align-items: stretch; height: 48px; }
 nav a { display: flex; align-items: center; gap: 6px; padding: 0 13px; color: var(--muted); text-decoration: none; border-bottom: 2px solid transparent; }
 nav a:hover { color: var(--text); border-bottom-color: var(--rule-strong); }
+nav a[aria-current="page"] { color: var(--text); border-bottom-color: var(--accent); }
 .nav-count { min-width: 18px; padding: 0 5px; color: var(--ink); background: var(--waiting); border-radius: 9px; font: 700 11px/18px var(--mono); text-align: center; }
+.mobile-nav { display: none; }
+.mobile-request-status { align-items: center; gap: 4px; color: var(--muted); font: 11px var(--mono); }
+.mobile-request-status:not([hidden]) { display: flex; }
 .connection { justify-self: end; display: flex; align-items: center; gap: 7px; color: var(--muted); font: 12px var(--mono); }
 .stream-dot { width: 7px; height: 7px; border-radius: 50%; background: var(--failed); }
 .stream-dot.is-live { background: var(--done); }
@@ -64,7 +68,7 @@ nav a:hover { color: var(--text); border-bottom-color: var(--rule-strong); }
 .key-button { width: 26px; height: 26px; margin-left: 8px; color: var(--muted); background: transparent; border: 1px solid var(--rule); }
 
 main { width: min(1500px, 100%); margin: 0 auto; }
-.section { padding: 34px 28px 40px; border-bottom: 1px solid var(--rule); scroll-margin-top: 48px; }
+.section { min-height: calc(100vh - 48px); padding: 34px 28px 40px; }
 .section-heading { display: flex; align-items: flex-end; justify-content: space-between; gap: 24px; margin-bottom: 20px; }
 h1, h2, h3, p { margin-top: 0; }
 h1, h2 { margin-bottom: 4px; font-size: 22px; line-height: 1.2; letter-spacing: -.025em; }
@@ -242,8 +246,11 @@ kbd { display: inline-block; min-width: 24px; padding: 2px 5px; border: 1px soli
 
 @media (max-width: 760px) {
   html { scroll-behavior: auto; }
-  .topbar { grid-template-columns: 1fr auto; padding: 0 14px; }
+  .topbar { grid-template-columns: auto minmax(0, 1fr) auto; padding: 0 14px; }
   .environment, nav { display: none; }
+  .mobile-nav { justify-self: center; display: flex; align-items: center; gap: 7px; }
+  .mobile-nav select { width: min(118px, 30vw); height: 32px; padding: 0 24px 0 8px; color: var(--text); background: var(--panel); border: 1px solid var(--rule-strong); }
+  #stream-label { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0, 0, 0, 0); white-space: nowrap; }
   .section { padding: 26px 14px 32px; }
   .section-heading { align-items: stretch; flex-direction: column; gap: 12px; }
   .waiting-heading { flex-direction: row; align-items: center; }

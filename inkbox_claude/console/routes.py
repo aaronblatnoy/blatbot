@@ -158,6 +158,12 @@ def register(app: web.Application, gateway: Any) -> None:
     app["console.gateway"] = gateway
     app.router.add_get("/console", index)
     app.router.add_get("/console/", index)
+    # One page per screen, each with its own URL. The shell decides what to render from the
+    # path, so every one of these has to reach it: typed in, reloaded on, linked to.
+    for page in ("permissions", "tasks", "health", "settings", "requests"):
+        app.router.add_get(f"/console/{page}", index)
+        app.router.add_get(f"/console/{page}/", index)
+    app.router.add_get("/console/tasks/{task_id}", index)
     app.router.add_get("/console/api/overview", _endpoint(get_overview))
     app.router.add_get("/console/api/people", _endpoint(get_people))
     app.router.add_post("/console/api/people", _endpoint(post_people, mutation=True))

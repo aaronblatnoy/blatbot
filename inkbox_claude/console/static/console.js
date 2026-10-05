@@ -18,6 +18,19 @@ const state = {
   reconnectTimer: null,
   reconnectAttempt: 0,
   noticeTimer: null,
+  activeView: 'requests',
+  taskId: null,
+  loaded: Object.create(null),
+  invalidated: Object.create(null),
+  taskLedgers: new Map(),
+};
+
+const VIEW_PATHS = {
+  requests: '/console/',
+  permissions: '/console/permissions',
+  tasks: '/console/tasks',
+  health: '/console/health',
+  settings: '/console/settings',
 };
 
 const $ = (selector, root = document) => root.querySelector(selector);
@@ -89,19 +102,52 @@ function scopeChips(scopes = []) {
     : '<span class="muted">no scopes</span>';
 }
 
-async function loadSnapshot({ quiet = false } = {}) {
-  const endpoints = [
-    ['overview', '/overview'], ['people', '/people'], ['roles', '/roles'], ['scopes', '/scopes'],
-    ['tasks', '/tasks'], ['health', '/health'], ['settings', '/settings'],
-  ];
+function routeFromPath(pathname = location.pathname) {
+  const path = pathname.replace(/\/+$/, '') || '/console';
+  if (path === '/console') return { view: 'requests', taskId: null };
+  if (path === '/console/permissions') return { view: 'permissions', taskId: null };
+  if (path === '/console/tasks') return { view: 'tasks', taskId: null };
+  if (path.startsWith('/console/tasks/')) {
+    const encodedId = path.slice('/console/tasks/'.length);
+    try { return { view: 'tasks', taskId: decodeURIComponent(encodedId) }; }
+    catch { return { view: 'tasks', taskId: encodedId }; }
+  }
+  if (path === '/console/health') return { view: 'health', taskId: null };
+  if (path === '/console/settings') return { view: 'settings', taskId: null };
+  return { view: 'requests', taskId: null, unknown: true };
+}
+
+function updateWaitingCount() {
+  const count = pendingRequests().length;
+  const navBadge = $('#nav-waiting-count');
+  navBadge.hidden = !count;
+  navBadge.textContent = count;
+  $('#mobile-request-status').hidden = !count;
+  $('#mobile-waiting-count').textContent = count;
+  $('#waiting-count').textContent = count;
+  $('#waiting-summary').textContent = count ? `${count} request${count === 1 ? '' : 's'} need a decision.` : 'No decisions are waiting.';
+}
+
+async function refreshWaitingCount() {
+  const pending = await api('/requests?state=pending');
+  state.requests = [...pending, ...state.requests.filter(request => request.state !== 'pending')]
+    .sort((a, b) => new Date(b.created_at) - new Date(a.created_at));
+  updateWaitingCount();
+}
+
+async function loadView(view = state.activeView, { force = false } = {}) {
+  if (!force && state.loaded[view] && !state.invalidated[view]) {
+    if (view === 'tasks' && state.taskId) await openTask(state.taskId);
+    return;
+  }
   try {
-    const baseResults = await Promise.all(endpoints.map(async ([key, path]) => [key, await api(path)]));
-    const requestResults = await Promise.all(['pending', 'running', 'done', 'failed'].map(requestState => api(`/requests?state=${encodeURIComponent(requestState)}`)));
-    for (const [key, value] of baseResults) state[key] = value;
-    state.requests = requestResults.flat().sort((a, b) => new Date(b.created_at) - new Date(a.created_at));
+    if (view === 'requests') await refreshRequests({ throwOnError: true });
+    if (view === 'permissions') await refreshPermissions({ throwOnError: true });
+    if (view === 'tasks') await refreshTasks({ throwOnError: true });
+    if (view === 'health') await refreshHealth({ throwOnError: true });
+    if (view === 'settings') await refreshSettings({ throwOnError: true });
     setStarting(false);
-    renderAll();
-    if (!quiet) showNotice('Console refreshed.');
+    if (view === 'tasks' && state.taskId) await openTask(state.taskId);
   } catch (error) {
     if (error.status === 503) {
       setStarting(true, error.message || 'The console will retry when the API is ready.');
@@ -110,9 +156,17 @@ async function loadSnapshot({ quiet = false } = {}) {
       return;
     }
     setStarting(false);
-    showNotice(`Could not load console: ${error.message}`, 'error', 0);
+    showNotice(`Could not load ${view}: ${error.message}`, 'error', 0);
     renderUnavailable();
   }
+}
+
+async function loadSnapshot({ quiet = false } = {}) {
+  state.invalidated[state.activeView] = true;
+  const loads = [loadView(state.activeView, { force: true })];
+  if (state.activeView !== 'requests') loads.push(refreshWaitingCount());
+  await Promise.all(loads);
+  if (!quiet) showNotice('Console refreshed.');
 }
 
 function renderUnavailable() {
@@ -120,15 +174,6 @@ function renderUnavailable() {
     const target = $(selector);
     if (target && !target.children.length) target.innerHTML = '<div class="empty-state">Data is not available yet.</div>';
   }
-}
-
-function renderAll() {
-  renderRequests();
-  renderPeople();
-  renderRoles();
-  renderTasks();
-  renderHealth();
-  renderSettings();
 }
 
 function pendingRequests() {
@@ -139,10 +184,7 @@ function renderRequests() {
   const waiting = pendingRequests();
   state.selectedWaiting = Math.max(0, Math.min(state.selectedWaiting, waiting.length - 1));
   const count = waiting.length;
-  $('#waiting-count').textContent = count;
-  $('#waiting-summary').textContent = count ? `${count} request${count === 1 ? '' : 's'} need a decision.` : 'No decisions are waiting.';
-  $('#nav-waiting-count').hidden = !count;
-  $('#nav-waiting-count').textContent = count;
+  updateWaitingCount();
   $('#waiting-list').setAttribute('aria-busy', 'false');
   $('#waiting-list').innerHTML = count
     ? waiting.map((request, index) => requestCard(request, index)).join('')
@@ -216,7 +258,7 @@ async function decide(requestId, decision, note) {
   }
 }
 
-async function refreshRequests() {
+async function refreshRequests({ throwOnError = false } = {}) {
   try {
     const [overview, ...requests] = await Promise.all([
       api('/overview'),
@@ -224,8 +266,11 @@ async function refreshRequests() {
     ]);
     state.overview = overview;
     state.requests = requests.flat().sort((a, b) => new Date(b.created_at) - new Date(a.created_at));
+    state.loaded.requests = true;
+    state.invalidated.requests = false;
     renderRequests();
   } catch (error) {
+    if (throwOnError) throw error;
     showNotice(`Request status could not be refreshed: ${error.message}`, 'error');
   }
 }
@@ -353,10 +398,17 @@ async function deletePerson(key) {
   } catch (error) { showNotice(`Person not deleted: ${error.message}`, 'error'); }
 }
 
-async function refreshPermissions() {
-  const [people, roles, scopes] = await Promise.all([api('/people'), api('/roles'), api('/scopes')]);
-  state.people = people; state.roles = roles; state.scopes = scopes;
-  renderPeople(); renderRoles();
+async function refreshPermissions({ throwOnError = false } = {}) {
+  try {
+    const [people, roles, scopes] = await Promise.all([api('/people'), api('/roles'), api('/scopes')]);
+    state.people = people; state.roles = roles; state.scopes = scopes;
+    state.loaded.permissions = true;
+    state.invalidated.permissions = false;
+    renderPeople(); renderRoles();
+  } catch (error) {
+    if (throwOnError) throw error;
+    showNotice(`Permissions not refreshed: ${error.message}`, 'error');
+  }
 }
 
 function renderRoles() {
@@ -428,11 +480,18 @@ function renderTasks() {
 async function openTask(taskId) {
   const dialog = $('#task-dialog');
   $('#ledger-id').textContent = taskId;
+  if (!dialog.open) dialog.showModal();
+  const cached = state.taskLedgers.get(taskId);
+  if (cached) {
+    $('#ledger-title').textContent = cached.title || 'Task ledger';
+    $('#ledger-content').textContent = cached.ledger || 'No ledger entries recorded.';
+    return;
+  }
   $('#ledger-title').textContent = 'Loading ledger…';
   $('#ledger-content').textContent = '';
-  dialog.showModal();
   try {
     const task = await api(`/tasks/${encodeURIComponent(taskId)}`);
+    state.taskLedgers.set(taskId, task);
     $('#ledger-title').textContent = task.title || 'Task ledger';
     $('#ledger-content').textContent = task.ledger || 'No ledger entries recorded.';
   } catch (error) {
@@ -457,14 +516,28 @@ function renderHealth() {
   </div>`;
 }
 
-async function refreshHealth() {
-  try { state.health = await api('/health'); renderHealth(); }
-  catch (error) { showNotice(`Health not refreshed: ${error.message}`, 'error'); }
+async function refreshHealth({ throwOnError = false } = {}) {
+  try {
+    state.health = await api('/health');
+    state.loaded.health = true; state.invalidated.health = false;
+    renderHealth();
+  }
+  catch (error) {
+    if (throwOnError) throw error;
+    showNotice(`Health not refreshed: ${error.message}`, 'error');
+  }
 }
 
-async function refreshTasks() {
-  try { state.tasks = await api('/tasks'); renderTasks(); }
-  catch (error) { showNotice(`Tasks not refreshed: ${error.message}`, 'error'); }
+async function refreshTasks({ throwOnError = false } = {}) {
+  try {
+    state.tasks = await api('/tasks');
+    state.loaded.tasks = true; state.invalidated.tasks = false;
+    renderTasks();
+  }
+  catch (error) {
+    if (throwOnError) throw error;
+    showNotice(`Tasks not refreshed: ${error.message}`, 'error');
+  }
 }
 
 const settingSaveTimers = new Map();
@@ -558,9 +631,16 @@ async function saveSetting(setting, value) {
   }
 }
 
-async function refreshSettings() {
-  try { state.settings = await api('/settings'); renderSettings(); }
-  catch (error) { showNotice(`Settings not refreshed: ${error.message}`, 'error'); }
+async function refreshSettings({ throwOnError = false } = {}) {
+  try {
+    state.settings = await api('/settings');
+    state.loaded.settings = true; state.invalidated.settings = false;
+    renderSettings();
+  }
+  catch (error) {
+    if (throwOnError) throw error;
+    showNotice(`Settings not refreshed: ${error.message}`, 'error');
+  }
 }
 
 function connectEvents() {
@@ -571,27 +651,60 @@ function connectEvents() {
   state.eventSource = source;
   source.onopen = () => { state.reconnectAttempt = 0; setStreamState('live'); };
   source.addEventListener('ping', () => setStreamState('live'));
-  source.addEventListener('request.created', refreshRequests);
-  source.addEventListener('request.state_changed', refreshRequests);
-  source.addEventListener('permissions.changed', async () => {
-    try { await refreshPermissions(); } catch (error) { showNotice(`Permissions not refreshed: ${error.message}`, 'error'); }
-  });
-  source.addEventListener('health.changed', refreshHealth);
-  source.addEventListener('settings.changed', refreshSettings);
+  source.addEventListener('request.created', handleRequestEvent);
+  source.addEventListener('request.state_changed', handleRequestEvent);
+  source.addEventListener('permissions.changed', () => invalidateView('permissions', refreshPermissions));
+  source.addEventListener('health.changed', () => invalidateView('health', refreshHealth));
+  source.addEventListener('settings.changed', () => invalidateView('settings', refreshSettings));
   source.onerror = async () => {
     source.close();
     if (state.eventSource !== source) return;
     setStreamState('offline');
+    Object.keys(VIEW_PATHS).forEach(view => { state.invalidated[view] = true; });
     await loadSnapshot({ quiet: true });
     const delay = Math.min(30000, 1000 * (2 ** state.reconnectAttempt++)) + Math.floor(Math.random() * 500);
     state.reconnectTimer = setTimeout(connectEvents, delay);
   };
 }
 
+function invalidateView(view, refresh) {
+  state.invalidated[view] = true;
+  if (state.activeView === view) refresh();
+}
+
+function handleRequestEvent() {
+  state.invalidated.requests = true;
+  if (state.activeView === 'requests') refreshRequests();
+  else refreshWaitingCount().catch(error => showNotice(`Waiting count not refreshed: ${error.message}`, 'error'));
+}
+
 function setStreamState(streamState) {
   const dot = $('#stream-dot');
   dot.className = `stream-dot${streamState === 'live' ? ' is-live' : streamState === 'connecting' ? ' is-connecting' : ''}`;
   $('#stream-label').textContent = streamState;
+}
+
+function applyRoute({ replaceUnknown = false } = {}) {
+  const route = routeFromPath();
+  if (route.unknown && replaceUnknown) history.replaceState(null, '', VIEW_PATHS.requests);
+  state.activeView = route.view;
+  state.taskId = route.taskId;
+  $$('[data-view]').forEach(section => { section.hidden = section.dataset.view !== route.view; });
+  $$('nav [data-route]').forEach(link => {
+    if (link.dataset.route === route.view) link.setAttribute('aria-current', 'page');
+    else link.removeAttribute('aria-current');
+  });
+  $('#mobile-route').value = VIEW_PATHS[route.view];
+  document.title = `${route.view[0].toUpperCase()}${route.view.slice(1)} · Blatbot console`;
+  const taskDialog = $('#task-dialog');
+  if (!route.taskId && taskDialog.open) taskDialog.close();
+  window.scrollTo({ top: 0, behavior: 'auto' });
+  loadView(route.view);
+}
+
+function navigate(path, { replace = false } = {}) {
+  history[replace ? 'replaceState' : 'pushState'](null, '', path);
+  applyRoute();
 }
 
 function moveWaiting(direction) {
@@ -609,6 +722,12 @@ function isTypingTarget(target) {
 }
 
 document.addEventListener('click', event => {
+  const routeLink = event.target.closest('nav a[data-route]');
+  if (routeLink && !event.metaKey && !event.ctrlKey && !event.shiftKey && !event.altKey) {
+    event.preventDefault();
+    navigate(routeLink.pathname);
+    return;
+  }
   const waitingCard = event.target.closest('[data-waiting-index]');
   if (waitingCard) {
     state.selectedWaiting = Number(waitingCard.dataset.waitingIndex);
@@ -634,7 +753,7 @@ document.addEventListener('click', event => {
   const deleteRoleButton = event.target.closest('[data-delete-role]');
   if (deleteRoleButton) deleteRole(deleteRoleButton.closest('[data-role-name]').dataset.roleName);
   const taskButton = event.target.closest('[data-task-id]');
-  if (taskButton) openTask(taskButton.dataset.taskId);
+  if (taskButton) navigate(`/console/tasks/${encodeURIComponent(taskButton.dataset.taskId)}`);
   const closeButton = event.target.closest('[data-close-dialog]');
   if (closeButton) $(`#${closeButton.dataset.closeDialog}`).close();
   if (event.target.closest('[data-open-shortcuts]')) $('#shortcuts-dialog').showModal();
@@ -697,8 +816,9 @@ document.addEventListener('input', event => {
 
 document.addEventListener('keydown', event => {
   if (event.key === '?' && !isTypingTarget(event.target)) { event.preventDefault(); $('#shortcuts-dialog').showModal(); return; }
-  if (event.key === '/' && !isTypingTarget(event.target)) { event.preventDefault(); $('#permission-search').focus(); return; }
+  if (event.key === '/' && state.activeView === 'permissions' && !isTypingTarget(event.target)) { event.preventDefault(); $('#permission-search').focus(); return; }
   if (isTypingTarget(event.target) || $('dialog[open]')) return;
+  if (state.activeView !== 'requests') return;
   if (event.key === 'j') { event.preventDefault(); moveWaiting(1); }
   if (event.key === 'k') { event.preventDefault(); moveWaiting(-1); }
   if ((event.key === 'y' || event.key === 'n') && pendingRequests().length) {
@@ -720,12 +840,18 @@ $$('[data-request-filter]').forEach(button => button.addEventListener('click', (
   $$('[data-request-filter]').forEach(item => item.classList.toggle('is-active', item === button));
   renderRequests();
 }));
+$('#mobile-route').addEventListener('change', event => navigate(event.target.value));
 $('#retry-all').addEventListener('click', () => loadSnapshot());
 $('#refresh-tasks').addEventListener('click', refreshTasks);
 $('#refresh-health').addEventListener('click', refreshHealth);
 $$('dialog').forEach(dialog => dialog.addEventListener('click', event => {
   if (event.target === dialog) dialog.close();
 }));
+$('#task-dialog').addEventListener('close', () => {
+  if (state.taskId) navigate(VIEW_PATHS.tasks, { replace: true });
+});
+window.addEventListener('popstate', applyRoute);
 
-loadSnapshot({ quiet: true });
+applyRoute({ replaceUnknown: true });
+if (state.activeView !== 'requests') refreshWaitingCount().catch(error => showNotice(`Waiting count not loaded: ${error.message}`, 'error'));
 connectEvents();

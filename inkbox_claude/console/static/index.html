@@ -16,12 +16,23 @@
       <span class="environment">private console</span>
     </div>
     <nav aria-label="Console sections">
-      <a href="#requests">Requests <span id="nav-waiting-count" class="nav-count" hidden></span></a>
-      <a href="#permissions">Permissions</a>
-      <a href="#tasks">Tasks</a>
-      <a href="#health">Health</a>
-      <a href="#settings">Settings</a>
+      <a href="/console/" data-route="requests" aria-current="page">Requests <span id="nav-waiting-count" class="nav-count" hidden></span></a>
+      <a href="/console/permissions" data-route="permissions">Permissions</a>
+      <a href="/console/tasks" data-route="tasks">Tasks</a>
+      <a href="/console/health" data-route="health">Health</a>
+      <a href="/console/settings" data-route="settings">Settings</a>
     </nav>
+    <label class="mobile-nav">
+      <span class="visually-hidden">Console page</span>
+      <select id="mobile-route" aria-label="Console page">
+        <option value="/console/">Requests</option>
+        <option value="/console/permissions">Permissions</option>
+        <option value="/console/tasks">Tasks</option>
+        <option value="/console/health">Health</option>
+        <option value="/console/settings">Settings</option>
+      </select>
+      <span id="mobile-request-status" class="mobile-request-status" hidden>Req <span id="mobile-waiting-count" class="nav-count"></span></span>
+    </label>
     <div class="connection" aria-live="polite">
       <span id="stream-dot" class="stream-dot is-connecting"></span>
       <span id="stream-label">connecting</span>
@@ -40,7 +51,7 @@
   <div id="notice" class="notice" role="status" aria-live="polite" hidden></div>
 
   <main id="main">
-    <section id="requests" class="section waiting-section" aria-labelledby="requests-title">
+    <section id="requests" class="section waiting-section" data-view="requests" aria-labelledby="requests-title">
       <div class="section-heading waiting-heading">
         <div>
           <h1 id="requests-title">Waiting on you</h1>
@@ -65,7 +76,7 @@
       </details>
     </section>
 
-    <section id="permissions" class="section" aria-labelledby="permissions-title">
+    <section id="permissions" class="section" data-view="permissions" aria-labelledby="permissions-title" hidden>
       <div class="section-heading">
         <div>
           <h2 id="permissions-title">People &amp; permissions</h2>
@@ -102,7 +113,7 @@
       </details>
     </section>
 
-    <section id="tasks" class="section" aria-labelledby="tasks-title">
+    <section id="tasks" class="section" data-view="tasks" aria-labelledby="tasks-title" hidden>
       <div class="section-heading">
         <div>
           <h2 id="tasks-title">Tasks</h2>
@@ -113,7 +124,7 @@
       <div id="tasks-list" class="task-list" aria-busy="true"></div>
     </section>
 
-    <section id="health" class="section health-section" aria-labelledby="health-title">
+    <section id="health" class="section health-section" data-view="health" aria-labelledby="health-title" hidden>
       <div class="section-heading">
         <div>
           <h2 id="health-title">Health</h2>
@@ -124,7 +135,7 @@
       <div id="health-content" aria-busy="true"></div>
     </section>
 
-    <section id="settings" class="section" aria-labelledby="settings-title">
+    <section id="settings" class="section" data-view="settings" aria-labelledby="settings-title" hidden>
       <div class="section-heading">
         <div>
           <h2 id="settings-title">Settings</h2>
