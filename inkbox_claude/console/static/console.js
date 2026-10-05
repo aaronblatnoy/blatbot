@@ -68,7 +68,10 @@ function escapeHTML(value = '') {
 
 function formatTime(value) {
   if (!value) return 'unknown';
-  const date = new Date(value);
+  // The API stamps times as unix SECONDS; Date wants milliseconds. Without this every
+  // timestamp in the console renders as January 1970, which is what it used to do.
+  const number = Number(value);
+  const date = new Date(Number.isFinite(number) && number > 0 && number < 1e12 ? number * 1000 : value);
   if (Number.isNaN(date.getTime())) return String(value);
   return new Intl.DateTimeFormat(undefined, { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit', second: '2-digit' }).format(date);
 }
@@ -125,6 +128,8 @@ function updateWaitingCount() {
   $('#mobile-request-status').hidden = !count;
   $('#mobile-waiting-count').textContent = count;
   $('#waiting-count').textContent = count;
+  // Amber means something needs you, so a zero is not amber.
+  $('#waiting-count').classList.toggle('is-zero', !count);
   $('#waiting-summary').textContent = count ? `${count} request${count === 1 ? '' : 's'} need a decision.` : 'No decisions are waiting.';
 }
 
@@ -328,7 +333,7 @@ function renderPersonEditor(draft = null) {
       <label class="field">Role
         <select name="role">
           <option value="">No role</option>
-          ${state.roles.map(role => `<option value="${escapeHTML(role.name)}" ${role.name === person.role ? 'selected' : ''}>${escapeHTML(role.name)} · ${role.scopes.length} scopes</option>`).join('')}
+          ${state.roles.map(role => `<option value="${escapeHTML(role.name)}" ${role.name === person.role ? 'selected' : ''}>${escapeHTML(role.name)} (${role.scopes.length} scopes)</option>`).join('')}
         </select>
       </label>
       <label class="field">Note
@@ -336,8 +341,8 @@ function renderPersonEditor(draft = null) {
       </label>
     </div>
     <div class="consequence">
-      <div><span class="consequence-label auto">Runs without asking · ${effective.size}</span><div class="scope-plain-list">${effective.size ? [...effective].sort().map(escapeHTML).join('<br>') : 'Nothing'}</div></div>
-      <div><span class="consequence-label ask">Still asks you · ${interrupted.length}</span><div class="scope-plain-list">${interrupted.length ? interrupted.sort().map(escapeHTML).join('<br>') : 'Nothing'}</div></div>
+      <div><span class="consequence-label auto">Runs without asking (${effective.size})</span><div class="scope-plain-list">${effective.size ? [...effective].sort().map(escapeHTML).join('<br>') : 'Nothing'}</div></div>
+      <div><span class="consequence-label ask">Still asks you (${interrupted.length})</span><div class="scope-plain-list">${interrupted.length ? interrupted.sort().map(escapeHTML).join('<br>') : 'Nothing'}</div></div>
     </div>
     <div class="scope-editor-title"><h3>Extra scopes</h3><p>Checked here in addition to the role.</p></div>
     <div class="scope-groups">${renderScopeGroups(extras, inherited)}</div>
@@ -415,7 +420,7 @@ function renderRoles() {
   $('#roles-count').textContent = `${state.roles.length} configured`;
   $('#roles-list').innerHTML = state.roles.length ? state.roles.map(role => `<div class="role-row" data-role-name="${escapeHTML(role.name)}">
     <div><span class="role-name">${escapeHTML(role.name)}</span><div class="muted">${escapeHTML(role.note || 'No note')}</div></div>
-    <div class="role-scopes">${role.scopes.length ? role.scopes.map(escapeHTML).join(' · ') : 'No scopes'}</div>
+    <div class="role-scopes">${role.scopes.length ? role.scopes.map(escapeHTML).join(', ') : 'No scopes'}</div>
     <div class="mono muted">${role.people_count} ${role.people_count === 1 ? 'person' : 'people'}</div>
     <div><button class="button button-quiet" type="button" data-edit-role>Edit</button></div>
   </div>`).join('') : '<div class="empty-state">No roles configured. People default to no permissions.</div>';
@@ -473,7 +478,8 @@ function renderTasks() {
     <span class="summary">${escapeHTML(task.title || 'Untitled task')}</span>
     <span class="state state-${escapeHTML(task.state)}">${escapeHTML(task.state)}</span>
     <time datetime="${escapeHTML(task.updated_at || '')}">${escapeHTML(formatTime(task.updated_at))}</time>
-    <span class="participant-list">${escapeHTML((task.participants || []).join(', '))}</span>
+    <span class="participant-list">${escapeHTML((task.participants || []).map(person =>
+      typeof person === 'string' ? person : (person.display || person.key || '')).filter(Boolean).join(', '))}</span>
   </button>`).join('') : '<div class="empty-state">No recent tasks.</div>';
 }
 
@@ -503,16 +509,23 @@ async function openTask(taskId) {
 function renderHealth() {
   $('#health-content').setAttribute('aria-busy', 'false');
   if (!state.health) return;
-  const interrupted = state.health.interrupted || [];
-  const errors = state.health.errors || [];
+  // The API names these interrupted_runs / recent_errors / uptime_seconds, and reports the
+  // tunnel as an object. Reading the wrong names is why this panel said [object Object].
+  const interruptedRaw = state.health.interrupted ?? state.health.interrupted_runs ?? [];
+  const interrupted = Array.isArray(interruptedRaw) ? interruptedRaw : [];
+  const interruptedCount = Array.isArray(interruptedRaw) ? interruptedRaw.length : Number(interruptedRaw) || 0;
+  const errors = state.health.errors || state.health.recent_errors || [];
+  const tunnel = state.health.tunnel;
+  const tunnelUp = tunnel === 'up' || tunnel === true || (tunnel && tunnel.connected === true);
+  const tunnelWhere = tunnel && typeof tunnel === 'object' ? (tunnel.url || tunnel.mode || '') : '';
   $('#health-content').innerHTML = `<dl class="health-grid">
-    <div class="health-stat"><dt>Tunnel</dt><dd class="state-${state.health.tunnel === 'up' || state.health.tunnel === true ? 'done' : 'failed'}">${escapeHTML(String(state.health.tunnel))}</dd></div>
-    <div class="health-stat"><dt>Uptime</dt><dd>${escapeHTML(formatDuration(state.health.uptime_s))}</dd></div>
+    <div class="health-stat"><dt>Tunnel</dt><dd class="state-${tunnelUp ? 'done' : 'failed'}">${tunnelUp ? 'up' : 'down'}${tunnelWhere ? `<span class="muted"> ${escapeHTML(tunnelWhere)}</span>` : ''}</dd></div>
+    <div class="health-stat"><dt>Uptime</dt><dd>${escapeHTML(formatDuration(state.health.uptime_s ?? state.health.uptime_seconds))}</dd></div>
     <div class="health-stat"><dt>Last restart</dt><dd>${escapeHTML(formatTime(state.health.last_restart))}</dd></div>
   </dl>
   <div class="health-columns">
-    <div><h3>Interrupted runs · ${interrupted.length}</h3><ul class="health-list">${interrupted.length ? interrupted.map(item => `<li>${escapeHTML(typeof item === 'string' ? item : JSON.stringify(item))}</li>`).join('') : '<li>None</li>'}</ul></div>
-    <div><h3>Recent errors · ${errors.length}</h3><ul class="health-list">${errors.length ? errors.map(item => `<li>${escapeHTML(typeof item === 'string' ? item : JSON.stringify(item))}</li>`).join('') : '<li>None</li>'}</ul></div>
+    <div><h3>Interrupted runs (${interruptedCount})</h3><ul class="health-list">${interrupted.length ? interrupted.map(item => `<li>${escapeHTML(typeof item === 'string' ? item : JSON.stringify(item))}</li>`).join('') : `<li>${interruptedCount ? `${interruptedCount === 1 ? '1 run was' : `${interruptedCount} runs were`} cut off by a restart.` : 'None'}</li>`}</ul></div>
+    <div><h3>Recent errors (${errors.length})</h3><ul class="health-list">${errors.length ? errors.map(item => `<li>${escapeHTML(typeof item === 'string' ? item : JSON.stringify(item))}</li>`).join('') : '<li>None</li>'}</ul></div>
   </div>`;
 }
 
