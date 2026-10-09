@@ -387,7 +387,8 @@ def schedules_global(store: Store, payload: Dict[str, Any]) -> Dict[str, Any]:
 
 
 def task(store: Store, task_id: int) -> Optional[Dict[str, Any]]:
-    row = store.task_with_events(int(task_id), limit=100)
+    # The ledger is shown whole. The limit is only a guard against a runaway table.
+    row = store.task_with_events(int(task_id), limit=100000)
     return dict(row) if row else None
 
 

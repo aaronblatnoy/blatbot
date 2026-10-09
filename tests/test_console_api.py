@@ -426,3 +426,15 @@ def test_thread_counterparts_are_senders_not_conversation_ids(tmp_path):
     store.set_thread("owner", "idle", mode="imessage", meta={})
     handles = {row["handle"] for row in store.thread_counterparts()}
     assert handles == {"+15551230000"}
+
+
+def test_task_detail_returns_every_ledger_event(tmp_path):
+    from inkbox_claude.console import api
+    from inkbox_claude.gate.store import Store
+    store = Store(str(tmp_path / "gate.db"))
+    task = store.create_task("long running")
+    for n in range(150):
+        store.task_event(task["id"], "note", f"event {n}", chat_id="c")
+    detail = api.task(store, task["id"])
+    assert len(detail["events"]) == 150
+    assert detail["events"][0]["text"] == "event 0" and detail["events"][-1]["text"] == "event 149"
