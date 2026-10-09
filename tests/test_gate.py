@@ -1985,3 +1985,30 @@ def test_still_ungrounded_reply_to_a_stranger_never_leaks_the_raw_result(tmp_pat
     for leaked in ("send tool", "scope", "aaron approved", "permitted", "deliver the reply myself"):
         assert leaked not in final.lower()
     assert "let aaron" in final.lower() or "told aaron" in final.lower()
+
+
+def test_vault_scope_reads_notes_and_stays_inside_the_vault(tmp_path, monkeypatch):
+    from inkbox_claude.gate.scopes import tools_for
+    from inkbox_claude.gate import hosttools
+    from inkbox_claude.gate.jevagent import is_write_tool, is_destructive
+    tools = tools_for(["vault_read"])
+    assert tools[:3] == ["mcp__host__vault_search", "mcp__host__vault_read", "mcp__host__vault_list"]
+    assert not any(is_write_tool(t) or is_destructive(t, {}) for t in tools[:3])
+    vault = tmp_path / "vault"
+    (vault / "Projects").mkdir(parents=True)
+    (vault / ".obsidian").mkdir()
+    (vault / "Projects" / "Blatbot.md").write_text("# Blatbot\nThe gateway runs on black-sky.\nPort 8771.\n")
+    (vault / "Home.md").write_text("Start here.\n")
+    (vault / ".obsidian" / "hidden.md").write_text("gateway config\n")
+    (tmp_path / "secret.md").write_text("gateway password\n")
+    monkeypatch.setenv("BLATBOT_VAULT_DIR", str(vault))
+    assert hosttools.vault_list({}).splitlines() == ["2 notes", "Home.md", "Projects/Blatbot.md"]
+    found = hosttools.vault_search({"query": "Gateway black-sky"})
+    assert found.splitlines() == ["1 of 2 notes contain 'gateway black-sky'", "## Projects/Blatbot.md",
+                                  "2: The gateway runs on black-sky."]
+    assert hosttools.vault_search({"query": "password"}).startswith("0 of 2")
+    assert "Port 8771." in hosttools.vault_read({"path": "Projects/Blatbot.md"})
+    assert "Port 8771." in hosttools.vault_read({"path": "blatbot"})          # by title
+    assert hosttools.vault_read({"path": "../secret.md"}).startswith("ERROR")
+    assert hosttools.vault_read({"path": ".obsidian/hidden.md"}).startswith("ERROR")
+    assert hosttools.vault_list({"folder": "../"}).startswith("ERROR")

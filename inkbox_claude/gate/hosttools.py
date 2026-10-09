@@ -5,7 +5,9 @@ from __future__ import annotations
 
 import ast
 import asyncio
+import os
 import re
+from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 COMMANDS: Dict[str, list] = {
@@ -52,7 +54,19 @@ def sdk_server(continue_state: Optional[Dict[str, Any]] = None) -> Any:
     async def _host_status(args: Dict[str, Any]) -> Dict[str, Any]:
         return {"content": [{"type": "text", "text": await host_status(args)}]}
 
-    tools = [_host_status]
+    @tool("vault_search", VAULT_SEARCH_DESCRIPTION, VAULT_SEARCH_SCHEMA)
+    async def _vault_search(args: Dict[str, Any]) -> Dict[str, Any]:
+        return {"content": [{"type": "text", "text": vault_search(args)}]}
+
+    @tool("vault_read", VAULT_READ_DESCRIPTION, VAULT_READ_SCHEMA)
+    async def _vault_read(args: Dict[str, Any]) -> Dict[str, Any]:
+        return {"content": [{"type": "text", "text": vault_read(args)}]}
+
+    @tool("vault_list", VAULT_LIST_DESCRIPTION, VAULT_LIST_SCHEMA)
+    async def _vault_list(args: Dict[str, Any]) -> Dict[str, Any]:
+        return {"content": [{"type": "text", "text": vault_list(args)}]}
+
+    tools = [_host_status, _vault_search, _vault_read, _vault_list]
     if continue_state is not None:
         @tool("schedule_continue", SCHEDULE_CONTINUE_DESCRIPTION, SCHEDULE_CONTINUE_SCHEMA)
         async def _schedule_continue(args: Dict[str, Any]) -> Dict[str, Any]:
@@ -166,3 +180,114 @@ def rows_where(args: Dict[str, Any], facts: Dict[str, Any]) -> str:
     if len(matches) > 80:
         out.append(f"... and {len(matches) - 80} more matching rows")
     return "\n".join(out)
+
+
+# ---------------------------------------------------------------------------
+# The vault: Aaron's Obsidian second brain, a folder of markdown notes synced to
+# this machine. Read-only here, and confined to the folder: a path that resolves
+# outside it is refused.
+# ---------------------------------------------------------------------------
+
+VAULT_SEARCH_DESCRIPTION = (
+    "SEARCH AARON'S SECOND BRAIN (his Obsidian vault of notes: projects, areas, people, decisions, preferences, "
+    "daily notes) for notes whose title or text contains every word of the query. Returns each matching note's "
+    "path and its matching lines. Read-only. Follow with vault_read for a whole note."
+)
+VAULT_SEARCH_SCHEMA = {"type": "object", "required": ["query"], "properties": {
+    "query": {"type": "string", "description": "words a note must contain (case-insensitive, all of them); a name, a project, a topic"},
+    "folder": {"type": "string", "description": "only look under this vault folder, e.g. Projects/Blatbot; omit for the whole vault"},
+}}
+VAULT_READ_DESCRIPTION = (
+    "READ ONE NOTE IN FULL from Aaron's second brain (his Obsidian vault): give the note's path as vault_search "
+    "or vault_list printed it, or its title. Read-only."
+)
+VAULT_READ_SCHEMA = {"type": "object", "required": ["path"], "properties": {
+    "path": {"type": "string", "description": "the note's path inside the vault, e.g. Projects/Blatbot.md, or its title"},
+}}
+VAULT_LIST_DESCRIPTION = (
+    "LIST THE NOTES in Aaron's second brain (his Obsidian vault), all of them or those under one folder. "
+    "Returns paths. Read-only."
+)
+VAULT_LIST_SCHEMA = {"type": "object", "properties": {
+    "folder": {"type": "string", "description": "a vault folder, e.g. Projects or Daily; omit for the whole vault"},
+}}
+
+
+def vault_dir() -> Path:
+    return Path(os.getenv("BLATBOT_VAULT_DIR") or (Path.home() / "vault")).resolve()
+
+
+def _vault_path(rel: str) -> Path:
+    """A path inside the vault, or ValueError. Dot-directories (.obsidian, .git) are not notes."""
+    root = vault_dir()
+    p = (root / str(rel or "").strip().lstrip("/")).resolve()
+    if p != root and root not in p.parents:
+        raise ValueError("that path is outside the vault")
+    if any(part.startswith(".") for part in p.relative_to(root).parts):
+        raise ValueError("that path is not a note")
+    return p
+
+
+def _vault_notes(folder: str = "") -> List[Path]:
+    base = _vault_path(folder)
+    if not base.is_dir():
+        raise ValueError(f"no vault folder named {folder!r}")
+    root = vault_dir()
+    return sorted(p for p in base.rglob("*.md")
+                  if p.is_file() and not any(part.startswith(".") for part in p.relative_to(root).parts))
+
+
+def vault_list(args: Dict[str, Any]) -> str:
+    try:
+        notes = _vault_notes(str(args.get("folder") or ""))
+    except ValueError as exc:
+        return f"ERROR: {exc}"
+    root = vault_dir()
+    return "\n".join([f"{len(notes)} notes"] + [str(p.relative_to(root)) for p in notes])
+
+
+def vault_read(args: Dict[str, Any]) -> str:
+    rel = str(args.get("path") or "").strip()
+    if not rel:
+        return "ERROR: a note path is required"
+    root = vault_dir()
+    try:
+        p = _vault_path(rel)
+        if not p.is_file() and not rel.lower().endswith(".md"):
+            p = _vault_path(rel + ".md")
+        if not p.is_file():
+            # A bare title: every note with that file name, wherever it sits.
+            want = Path(rel).name.lower().removesuffix(".md")
+            hits = [n for n in _vault_notes() if n.stem.lower() == want]
+            if len(hits) > 1:
+                return "Several notes have that title; read one by path:\n" + "\n".join(str(n.relative_to(root)) for n in hits)
+            if not hits:
+                return f"ERROR: no note at {rel!r}. Use vault_search or vault_list to find it."
+            p = hits[0]
+    except ValueError as exc:
+        return f"ERROR: {exc}"
+    return f"# {p.relative_to(root)}\n\n" + p.read_text(encoding="utf-8", errors="replace")
+
+
+def vault_search(args: Dict[str, Any]) -> str:
+    words = [w for w in str(args.get("query") or "").lower().split() if w]
+    if not words:
+        return "ERROR: a query is required"
+    try:
+        notes = _vault_notes(str(args.get("folder") or ""))
+    except ValueError as exc:
+        return f"ERROR: {exc}"
+    root = vault_dir()
+    out: List[str] = []
+    found = 0
+    for p in notes:
+        rel = str(p.relative_to(root))
+        text = p.read_text(encoding="utf-8", errors="replace")
+        hay = rel.lower() + "\n" + text.lower()
+        if not all(w in hay for w in words):
+            continue
+        found += 1
+        out.append(f"## {rel}")
+        out += [f"{i}: {ln.strip()}" for i, ln in enumerate(text.splitlines(), 1)
+                if any(w in ln.lower() for w in words)]
+    return "\n".join([f"{found} of {len(notes)} notes contain {' '.join(words)!r}"] + out)

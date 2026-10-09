@@ -250,6 +250,9 @@ def sends_to_requester(tool_name: str, args: dict, protected: list) -> bool:
 # descriptions. Tools not listed fall back to the server's description.
 TOOL_PURPOSE: Dict[str, str] = {
     "mcp__host__rows_where": "COUNT OR FILTER ROWS of a result ALREADY GATHERED (a sheet read, a calendar list, search hits) by a text they contain, optionally within one column. Exact counts; the matching rows come back. Use it after a read, never instead of one.",
+    "mcp__host__vault_search": "SEARCH AARON'S SECOND BRAIN (his Obsidian vault of notes) for notes containing every word of a query: what he has written down about a project, a person, a decision, a preference. Read-only.",
+    "mcp__host__vault_read": "READ ONE VAULT NOTE IN FULL by the path vault_search or vault_list printed, or by title. Read-only.",
+    "mcp__host__vault_list": "LIST THE NOTES in Aaron's vault, all or under one folder (Projects, Areas, Daily, Reference, Inbox, Archive). Read-only.",
     "mcp__host__host_status": "WHAT IS RUNNING ON BLACK-SKY (the server Blatbot runs on): containers, services, uptime, disk, memory, GPUs. Read-only.",
     # web
     "mcp__playwright__browser_search": "SEARCH THE PUBLIC WEB (last resort for facts that live OUTSIDE Aaron's own systems): a person's LinkedIn or employer, an outside organization's leadership, an article, a public page. Not for anything that lives in TAMID/SJBA sheets, forms, rosters, calendars or inboxes; use those tools first.",

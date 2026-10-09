@@ -16,7 +16,16 @@ where_things_live:
 - A task that only reads never needs a write capability; a task that changes something needs the write capability
   of that system, not a browser.
 - '''black sky'' / ''black-sky'' is the server: containers, services, uptime. Not the web.'
+- 'What Aaron has written down for himself (notes on his projects, people, decisions, preferences, how something
+  was set up, daily notes): his second brain, the Obsidian vault. Not Drive, not the public web.'
 systems:
+  second_brain:
+    description: 'Aaron''s second brain (''the vault'', ''Obsidian'', ''my notes''): his own markdown notes on projects,
+      areas, people, decisions, preferences, reference material and daily notes. Not Google Drive, not an inbox,
+      not the public web.'
+    always:
+    - vault_read
+    leaves: {}
   tamid_workspace:
     description: 'TAMID''s Google Drive, Sheets, Docs, Forms or the TAMID Gmail inbox ({ORG_ACCOUNT}): rosters,
       schedules, trackers, applications, form responses, emails TAMID sent or received.'
@@ -422,6 +431,14 @@ scopes:
     - mcp__playwright__browser_find
     - mcp__playwright__browser_wait_for
     - mcp__playwright__browser_navigate_back
+  vault_read:
+    description: 'search and read Aaron''s second brain (his Obsidian vault of personal notes on projects, people,
+      decisions, preferences, daily notes). Read-only; cannot add or change a note. Not Drive, not the web.'
+    read: true
+    tools:
+    - mcp__host__vault_search
+    - mcp__host__vault_read
+    - mcp__host__vault_list
   host_read:
     description: 'see what is running on the server Blatbot itself runs on (black-sky): containers, services, uptime,
       disk, memory, GPUs. Read-only status only; no commands, no changes.'

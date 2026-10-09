@@ -212,6 +212,7 @@ class TaskPicker:
                     "and delete any of those; replace headshots and flyers.",
                     "Public web: search, open a page, read and find text on it, click, type and fill forms.",
                     "The black-sky server: what is running (containers, services, uptime, disk, memory, GPUs).",
+                    "Aaron's second brain (his Obsidian vault of notes): search notes, read a note, list notes.",
                     "TAMID's Instagram and LinkedIn: account, recent posts, insights, audience; stage and publish posts.",
                     "TAMID's Google Analytics property: dimensions, metrics, key events, streams, access; change them.",
                     "Aaron's NYU Brightspace: courses, assignments, due dates, grades, announcements, discussions, "
@@ -243,6 +244,8 @@ class TaskPicker:
                     "Public web: 'look up X', 'who is the president of Y', 'find Z's LinkedIn', 'confirm that "
                     "roster on their site'.",
                     "Server: 'what's running on black sky', 'is the gateway up', 'how much disk is left'.",
+                    "Notes: 'what do my notes say about X', 'check the vault for Y', 'what did I write about Z', "
+                    "'look it up in my second brain'.",
                     "Social: 'what did we post last', 'how did the recruitment post do', 'how many followers', "
                     "'post this to instagram', 'draft a linkedin post about X'.",
                     "School: 'what's due this week', 'did I get a grade on X', 'any new announcements in Y', "

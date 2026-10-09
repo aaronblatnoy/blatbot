@@ -99,6 +99,9 @@ SEARCH_URL = os.getenv("GATE_SEARCH_URL") or "http://127.0.0.1:8888/search"
 VIRTUAL_TOOLS: Dict[str, Dict[str, Any]] = {
     "mcp__host__host_status": {"description": hosttools.DESCRIPTION, "schema": hosttools.SCHEMA},
     "mcp__host__rows_where": {"description": hosttools.ROWS_WHERE_DESCRIPTION, "schema": hosttools.ROWS_WHERE_SCHEMA},
+    "mcp__host__vault_search": {"description": hosttools.VAULT_SEARCH_DESCRIPTION, "schema": hosttools.VAULT_SEARCH_SCHEMA},
+    "mcp__host__vault_read": {"description": hosttools.VAULT_READ_DESCRIPTION, "schema": hosttools.VAULT_READ_SCHEMA},
+    "mcp__host__vault_list": {"description": hosttools.VAULT_LIST_DESCRIPTION, "schema": hosttools.VAULT_LIST_SCHEMA},
     "mcp__host__schedule_continue": {"description": hosttools.SCHEDULE_CONTINUE_DESCRIPTION,
                                       "schema": hosttools.SCHEDULE_CONTINUE_SCHEMA},
     # A web search done THROUGH the browser: the Playwright server opens the local
@@ -290,6 +293,12 @@ class ToolBox:
             return await hosttools.host_status(args)
         if name == "mcp__host__rows_where":
             return hosttools.rows_where(args, getattr(self, "facts", None) or {})
+        if name == "mcp__host__vault_search":
+            return hosttools.vault_search(args)
+        if name == "mcp__host__vault_read":
+            return hosttools.vault_read(args)
+        if name == "mcp__host__vault_list":
+            return hosttools.vault_list(args)
         if name == "mcp__host__schedule_continue":
             return hosttools.schedule_continue(args)
         server, short = split_tool(name)
