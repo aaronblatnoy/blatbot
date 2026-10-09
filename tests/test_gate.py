@@ -1906,3 +1906,82 @@ def test_voice_result_is_phrased_for_speech_not_raw(tmp_path):
     assert "Done via Jev agent" not in out
     spoken = [r for r in m.store.history("p1", limit=20) if r["kind"] == "outbound" and r["mode"] == "voice"]
     assert spoken and spoken[-1]["text"] == out
+
+
+# --- Defect regression tests: a stranger's plain capability question must not become an
+# approval request, and a failed/ungrounded result for a stranger must never leak internal
+# run text (tools, scopes, approval, failure detail). ---
+
+def test_stranger_exact_tie_in_grey_band_does_not_create_a_request(tmp_path):
+    """A message that is genuinely 50/50 on needing a tool (the regression: 'Do you have
+    access to his GitHub?' scored exactly p=0.50) must not become an approval request for
+    anyone but Aaron. A coin flip at the midpoint would otherwise create a request Aaron
+    has to be texted about that can never be answered, because the sender already has
+    their answer in words."""
+    m, sent = make_manager(tmp_path)
+    p = _jev_first(m, choice="none")
+
+    async def judge_action(**kw):
+        return {"needs_action": None, "p": 0.5, "reason": "undecided"}
+    p.judge_action = judge_action
+    m.router.next = RouterOutput(reply="I cannot confirm anything about Aaron's accounts.",
+                                 task=None, request=None)
+    asyncio.run(m.get("c1").handle_inbound("Do you have access to his GitHub?", "email", stranger_meta()))
+    assert m.store.pending() == []
+    assert any("cannot confirm" in s[1] for s in sent)
+
+
+def test_owner_exact_tie_in_grey_band_still_leans_to_action(tmp_path):
+    """The owner side of the same tie-break is unchanged: acting costs him seconds, so the
+    midpoint still leans to building a request for him."""
+    m, sent = make_manager(tmp_path)
+    p = _jev_first(m, choice="new")
+
+    async def judge_action(**kw):
+        return {"needs_action": None, "p": 0.5, "reason": "undecided"}
+    p.judge_action = judge_action
+    p.scopes = ["web"]
+    m.router.next = RouterOutput(reply=None, task="new", task_title="x")
+
+    async def go():
+        await m.get("aaron").handle_inbound("check something", "imessage", approver_meta())
+        await asyncio.sleep(0.05)
+    asyncio.run(go())
+    assert m.store.get_request(1) is not None
+    assert m.executor.ran == [1]
+
+
+def test_still_ungrounded_reply_to_a_stranger_never_leaks_the_raw_result(tmp_path):
+    """The actual regression from 2026-10-07: Aaron approved a stranger's request, the run
+    FAILED, and the grounding check refused the reply twice. The fallback must never hand
+    the stranger the run's own words (which named tools, scopes and approval) -- only a
+    neutral line revealing nothing. (Aaron himself still gets the raw detail: see
+    test_still_ungrounded_reply_falls_back_to_the_raw_result.)"""
+    m, sent = make_manager(tmp_path)
+    p = _jev_first(m, choice="new")
+    p.action, p.scopes = True, ["web"]
+
+    async def judge_grounded(**kw):
+        return {"grounded": False, "p": 0.1, "reason": "ok"}
+    p.judge_grounded = judge_grounded
+    failure_text = ("Aaron approved answering this specific question, so I'll reply confirming access "
+                    "without sharing details.\nThe send tool isn't permitted within this task's scope, "
+                    "so I could not deliver the reply myself.")
+    m.executor.result = {"ok": False, "error": failure_text, "tool_calls": [], "raw": failure_text}
+    m.router.next = RouterOutput(reply="I'll confirm that with Aaron and get back to you shortly.",
+                                 task="new", task_title="GitHub access question")
+    m.router.next_note = RouterOutput(reply=failure_text, task="T1")
+    asyncio.run(m.get("c1").handle_inbound("Do you have access to his GitHub?", "email", stranger_meta()))
+    rid = m.store.pending()[0].id
+
+    async def go():
+        await m.get("aaron").handle_inbound("yes", "imessage", approver_meta())
+        await asyncio.sleep(0.2)
+    asyncio.run(go())
+    assert m.store.get_request(rid).state == "failed"
+    outbound = [t for _, t, mode, *_ in sent if mode == "email"]
+    assert outbound
+    final = outbound[-1]
+    for leaked in ("send tool", "scope", "aaron approved", "permitted", "deliver the reply myself"):
+        assert leaked not in final.lower()
+    assert "let aaron" in final.lower() or "told aaron" in final.lower()

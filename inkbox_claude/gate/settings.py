@@ -49,6 +49,9 @@ KNOBS: List[Dict[str, Any]] = [
      "label": "Trust my voice on the phone",
      "help": "Caller ID can be faked, so by default a spoken request from your number still "
              "waits for a yes by text. Turn this on to act on calls from your number directly."},
+    {"name": "GATE_SCHEDULES_PAUSED", "kind": "bool", "default": False, "group": "Safety",
+     "label": "Pause every schedule",
+     "help": "Stops new scheduled runs from starting. Existing runs keep going."},
 
     # -- how it runs ----------------------------------------------------------
     {"restart": True, "name": "GATE_EXECUTOR", "kind": "choice", "default": "claude", "choices": ["claude", "jev"],

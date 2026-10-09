@@ -44,6 +44,7 @@ class DecideState(TypedDict, total=False):
     reply: Optional[str]
     task_title: Optional[str]
     task_summary: Optional[str]
+    schedule: Any
     # the request path's outputs (code + Jev)
     task: Optional[Dict[str, Any]]
     request: Any                    # RouterRequest or None
@@ -83,8 +84,12 @@ async def judge_action(state: DecideState, config: RunnableConfig) -> Dict[str, 
     p = float(act.get("p") or 0.0)
     if needs is None:
         # Grey band. For the owner, acting costs seconds and not acting costs a re-ask,
-        # so lean to action; for anyone else a request means an approval text to Aaron.
-        needs = p >= (0.4 if s.is_approver() else 0.5)
+        # so lean to action; for anyone else a request means an approval text to Aaron,
+        # so the tie goes the other way. p==0.5 is the single most uncertain value the
+        # judgment can return, so it must not be the one value that tips a stranger's
+        # plain question into an approval request that can never be answered in words
+        # again: the exact midpoint stays "no" for anyone but the owner.
+        needs = p >= 0.4 if s.is_approver() else p > 0.5
     return {"needs_action": bool(needs), "p_action": p}
 
 
@@ -148,7 +153,8 @@ async def write_reply(state: DecideState, config: RunnableConfig) -> Dict[str, A
                                  action=state["needs_action"] and state["actionable"],
                                  action_task=(peek or {}).get("title") or "",
                                  ask=bool(state["needs_action"] and not state["actionable"]))
-    return {"reply": out.reply, "task_title": out.task_title, "task_summary": out.task_summary}
+    return {"reply": out.reply, "task_title": out.task_title, "task_summary": out.task_summary,
+            "schedule": out.schedule}
 
 
 # ----------------------------------------------------------------------------- the request (code + Jev)
@@ -225,7 +231,8 @@ async def finalize(state: DecideState, config: RunnableConfig) -> Dict[str, Any]
     from . import manager as gm
     from .router import RouterOutput
     out = RouterOutput(reply=state.get("reply"), task=state["task_choice"], task_title=state.get("task_title"),
-                       task_summary=state.get("task_summary"), request=state.get("request") if state["needs_action"] else None)
+                       task_summary=state.get("task_summary"), schedule=state.get("schedule"),
+                       request=state.get("request") if state["needs_action"] else None)
     asking = bool(state["needs_action"] and not state["actionable"])
     picker = s.m.task_picker
     verdict = (await picker.judge_reply(reply=out.reply, message=state["message"])
@@ -330,7 +337,8 @@ async def decide(session: Any, *, body: str, message: str, prior: List[Dict[str,
     """Run one message through the graph. Returns (RouterOutput, task or None)."""
     initial: DecideState = {"body": body, "message": message, "prior": prior, "mode": mode, "memory": memory,
                             "found": found, "task_choice": None, "pick": "", "needs_action": False, "p_action": 0.0,
-                            "reply": None, "task_title": None, "task_summary": None, "task": None, "request": None,
+                            "reply": None, "task_title": None, "task_summary": None, "schedule": None,
+                            "task": None, "request": None,
                             "out": None}
     final = await graph().ainvoke(initial, config={"configurable": {"session": session}})
     return final["out"], final.get("task")

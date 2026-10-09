@@ -99,6 +99,8 @@ SEARCH_URL = os.getenv("GATE_SEARCH_URL") or "http://127.0.0.1:8888/search"
 VIRTUAL_TOOLS: Dict[str, Dict[str, Any]] = {
     "mcp__host__host_status": {"description": hosttools.DESCRIPTION, "schema": hosttools.SCHEMA},
     "mcp__host__rows_where": {"description": hosttools.ROWS_WHERE_DESCRIPTION, "schema": hosttools.ROWS_WHERE_SCHEMA},
+    "mcp__host__schedule_continue": {"description": hosttools.SCHEDULE_CONTINUE_DESCRIPTION,
+                                      "schema": hosttools.SCHEDULE_CONTINUE_SCHEMA},
     # A web search done THROUGH the browser: the Playwright server opens the local
     # SearXNG results page (which queries Google/Bing server-side, so no bot walls)
     # and reads it. Two browser calls, one tool from the agent's point of view.
@@ -288,6 +290,8 @@ class ToolBox:
             return await hosttools.host_status(args)
         if name == "mcp__host__rows_where":
             return hosttools.rows_where(args, getattr(self, "facts", None) or {})
+        if name == "mcp__host__schedule_continue":
+            return hosttools.schedule_continue(args)
         server, short = split_tool(name)
         if server == "inkbox":
             from mcp import types as mt
@@ -805,6 +809,8 @@ class JevAgent:
             return {"ok": False, "error": "prompt hash mismatch; refused to run", "tool_calls": []}
         judge, prose = Judge(), Prose(self.router)
         allowed = tools_for(req.scopes)
+        if req.schedule_kind == "continue":
+            allowed.append("mcp__host__schedule_continue")
         started = time.time()
         steps: List[Dict[str, Any]] = []
         facts: Dict[str, Any] = {"request": req.original_message, "task_context": context,
@@ -1382,14 +1388,19 @@ class JevAgent:
         raw = "\n".join(lines + full + tail)
         summary = "\n".join(lines + brief + tail)
         wrote = any(s["ok"] and is_write_tool(s["tool"]) for s in steps)
-        return {"ok": ok, "summary": summary, "raw": raw, "tool_calls": [s["tool"] for s in steps], "wrote": wrote, "partial": partial,
+        status = {"ok": ok, "summary": summary, "raw": raw, "tool_calls": [s["tool"] for s in steps], "wrote": wrote, "partial": partial,
                 "steps": [{"tool": s["tool"], "args": s["args"], "ok": s["ok"]} for s in steps],
                 "error": error or None, "engine": "jev", "jev_calls": judge.calls, "prose_calls": prose.calls,
                 "seconds": round(time.time() - started, 1), "probs": probs}
+        continued = next((s for s in reversed(steps)
+                          if s["ok"] and s["tool"] == "mcp__host__schedule_continue"), None)
+        if continued is not None:
+            status["continue"] = dict(continued["args"])
+        return status
 
 
 
-_WRITE_RE = re.compile(r"(send|create|update|modify|delete|manage|append|publish|place_call|move|set_|replace|import|insert|format|resize|run_script|reply|complete|fail"
+_WRITE_RE = re.compile(r"(send|create|update|modify|delete|manage|append|publish|place_call|move|set_|replace|import|insert|format|resize|run_script|reply|complete|fail|schedule_continue"
                        r"|browser_click|browser_type|browser_fill_form|browser_select_option|browser_press_key|browser_drag|browser_drop|browser_file_upload|browser_handle_dialog)", re.I)
 
 

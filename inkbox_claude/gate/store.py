@@ -101,6 +101,34 @@ CREATE TABLE IF NOT EXISTS task_events (
   created_at REAL NOT NULL
 );
 CREATE INDEX IF NOT EXISTS task_events_task ON task_events(task_id, id);
+CREATE TABLE IF NOT EXISTS schedules (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  chat_id TEXT NOT NULL,
+  task_id INTEGER NOT NULL,
+  title TEXT NOT NULL,
+  prompt TEXT NOT NULL,
+  prompt_sha256 TEXT NOT NULL,
+  kind TEXT NOT NULL,
+  cron TEXT,
+  run_at REAL,
+  timezone TEXT NOT NULL DEFAULT 'America/New_York',
+  scopes_json TEXT NOT NULL,
+  report_mode TEXT NOT NULL DEFAULT 'always',
+  state TEXT NOT NULL DEFAULT 'proposed',
+  next_run REAL,
+  last_run REAL,
+  last_request_id INTEGER,
+  run_count INTEGER NOT NULL DEFAULT 0,
+  max_runs INTEGER NOT NULL DEFAULT 20,
+  deadline REAL,
+  notes TEXT NOT NULL DEFAULT '[]',
+  revision INTEGER NOT NULL DEFAULT 0,
+  consecutive_failures INTEGER NOT NULL DEFAULT 0,
+  last_outcome TEXT NOT NULL DEFAULT '',
+  created_at REAL NOT NULL,
+  updated_at REAL NOT NULL
+);
+CREATE INDEX IF NOT EXISTS schedules_due ON schedules(state, next_run);
 """
 
 TASK_MEMORY_AGE = 21 * 24 * 3600    # finished tasks older than this are not shown
@@ -239,6 +267,8 @@ class Request:
     created_at: float
     updated_at: float
     inbound_id: Optional[int] = None
+    schedule_id: Optional[int] = None
+    schedule_kind: str = ""
 
     @classmethod
     def from_row(cls, r: sqlite3.Row) -> "Request":
@@ -252,6 +282,56 @@ class Request:
             status=json.loads(r["status_json"]) if r["status_json"] else None,
             raw_output=r["raw_output"], created_at=r["created_at"], updated_at=r["updated_at"],
             inbound_id=(int(r["inbound_id"]) if "inbound_id" in r.keys() and r["inbound_id"] else None),
+            schedule_id=(int(r["schedule_id"]) if "schedule_id" in r.keys() and r["schedule_id"] else None),
+            schedule_kind=(str(r["schedule_kind"] or "") if "schedule_kind" in r.keys() else ""),
+        )
+
+
+@dataclass
+class Schedule:
+    id: int
+    chat_id: str
+    task_id: int
+    title: str
+    prompt: str
+    prompt_sha256: str
+    kind: str
+    cron: str
+    run_at: Optional[float]
+    timezone: str
+    scopes: List[str]
+    report_mode: str
+    state: str
+    next_run: Optional[float]
+    last_run: Optional[float]
+    last_request_id: Optional[int]
+    run_count: int
+    max_runs: int
+    deadline: Optional[float]
+    notes: List[str]
+    revision: int
+    consecutive_failures: int
+    last_outcome: str
+    created_at: float
+    updated_at: float
+
+    @classmethod
+    def from_row(cls, r: sqlite3.Row) -> "Schedule":
+        return cls(
+            id=int(r["id"]), chat_id=str(r["chat_id"]), task_id=int(r["task_id"]),
+            title=str(r["title"]), prompt=str(r["prompt"]), prompt_sha256=str(r["prompt_sha256"]),
+            kind=str(r["kind"]), cron=str(r["cron"] or ""),
+            run_at=float(r["run_at"]) if r["run_at"] is not None else None,
+            timezone=str(r["timezone"]), scopes=json.loads(r["scopes_json"] or "[]"),
+            report_mode=str(r["report_mode"]), state=str(r["state"]),
+            next_run=float(r["next_run"]) if r["next_run"] is not None else None,
+            last_run=float(r["last_run"]) if r["last_run"] is not None else None,
+            last_request_id=int(r["last_request_id"]) if r["last_request_id"] else None,
+            run_count=int(r["run_count"]), max_runs=int(r["max_runs"]),
+            deadline=float(r["deadline"]) if r["deadline"] is not None else None,
+            notes=list(json.loads(r["notes"] or "[]")), revision=int(r["revision"]),
+            consecutive_failures=int(r["consecutive_failures"]), last_outcome=str(r["last_outcome"] or ""),
+            created_at=float(r["created_at"]), updated_at=float(r["updated_at"]),
         )
 
 
@@ -278,6 +358,10 @@ class Store:
                 self._db.execute("ALTER TABLE requests ADD COLUMN task_id INTEGER")
             if "inbound_id" not in cols:
                 self._db.execute("ALTER TABLE requests ADD COLUMN inbound_id INTEGER")
+            if "schedule_id" not in cols:
+                self._db.execute("ALTER TABLE requests ADD COLUMN schedule_id INTEGER")
+            if "schedule_kind" not in cols:
+                self._db.execute("ALTER TABLE requests ADD COLUMN schedule_kind TEXT NOT NULL DEFAULT ''")
             mcols = {r["name"] for r in self._db.execute("PRAGMA table_info(messages)")}
             if "reply_to" not in mcols:
                 # Every outbound is linked to the inbound it answers and typed ack|answer,
@@ -503,7 +587,68 @@ class Store:
             rows = self._db.execute(
                 "SELECT key, MAX(display) AS person FROM people GROUP BY key ORDER BY person, key"
             ).fetchall()
-        return [{"key": r["key"], "person": r["person"] or ""} for r in rows]
+        merged: Dict[str, Dict[str, Any]] = {
+            r["key"]: {"key": r["key"], "person": r["person"] or "", "channels": [], "last_seen": 0.0}
+            for r in rows
+        }
+        for row in self.synced_people():
+            entry = merged.setdefault(row["key"], {
+                "key": row["key"], "person": "", "channels": [], "last_seen": 0.0,
+            })
+            if row.get("person") and (not entry["person"] or len(row["person"]) > len(entry["person"])):
+                entry["person"] = row["person"]
+            entry["channels"] = sorted(set(entry.get("channels") or []) | set(row.get("channels") or []))
+            entry["last_seen"] = max(entry.get("last_seen") or 0.0, row.get("last_seen") or 0.0)
+        return sorted(merged.values(), key=lambda r: ((r.get("person") or "").lower(), r["key"]))
+
+    def _ensure_synced_people(self) -> None:
+        with self._lock:
+            self._db.executescript("""
+                CREATE TABLE IF NOT EXISTS synced_people (
+                  key TEXT PRIMARY KEY,
+                  person TEXT NOT NULL DEFAULT '',
+                  channels TEXT NOT NULL DEFAULT '[]',
+                  last_seen REAL NOT NULL DEFAULT 0
+                );
+            """)
+            self._db.commit()
+
+    def remember_synced_people(self, rows: List[Dict[str, Any]]) -> None:
+        """Merge directory rows from an Inkbox sync. Never touches trust or roles."""
+        self._ensure_synced_people()
+        with self._lock:
+            for row in rows:
+                self._db.execute(
+                    "INSERT INTO synced_people(key,person,channels,last_seen) VALUES(?,?,?,?) "
+                    "ON CONFLICT(key) DO UPDATE SET "
+                    "person=CASE WHEN length(excluded.person) > length(synced_people.person) "
+                    "THEN excluded.person ELSE synced_people.person END, "
+                    "channels=excluded.channels, "
+                    "last_seen=MAX(synced_people.last_seen, excluded.last_seen)",
+                    (row["key"], row.get("person") or "", json.dumps(row.get("channels") or []),
+                     float(row.get("last_seen") or 0)),
+                )
+            self._db.commit()
+
+    def synced_people(self) -> List[Dict[str, Any]]:
+        self._ensure_synced_people()
+        with self._lock:
+            rows = self._db.execute("SELECT * FROM synced_people").fetchall()
+        return [{"key": r["key"], "person": r["person"],
+                 "channels": json.loads(r["channels"] or "[]"), "last_seen": r["last_seen"]} for r in rows]
+
+    def thread_counterparts(self) -> List[Dict[str, Any]]:
+        """Every handle with a thread in this database, for the sync to union in even when
+        the Inkbox directory API did not surface it."""
+        # A thread's chat_id is a conversation id, not a person. The handle the person
+        # wrote from is the sender recorded on the thread; threads without one are skipped.
+        with self._lock:
+            rows = self._db.execute(
+                "SELECT DISTINCT json_extract(meta_json, '$.sender') AS handle, mode AS channel "
+                "FROM threads WHERE meta_json IS NOT NULL AND json_valid(meta_json)"
+            ).fetchall()
+        return [{"handle": r["handle"], "name": "", "channel": r["channel"] or "thread"}
+                for r in rows if str(r["handle"] or "").strip()]
 
     def console_overview(self) -> Dict[str, Any]:
         """Keep dashboard totals accurate without loading entire operational tables."""
@@ -551,6 +696,7 @@ class Store:
                 ).fetchall()
         return [Request.from_row(r) for r in rows]
 
+    @staticmethod
     def trusted_key(key: str) -> str:
         """Let permission editors identify the normalized row they just changed."""
         return _trust_key(key)
@@ -685,7 +831,8 @@ class Store:
     # -- requests --------------------------------------------------------
     def create_request(self, *, chat_id: str, sender: str, sender_name: str, mode: str, subject: str,
                        original_message: str, summary: str, scopes: List[str], prompt: str,
-                       state: str, task_id: int, inbound_id: Optional[int] = None) -> Request:
+                       state: str, task_id: int, inbound_id: Optional[int] = None,
+                       schedule_id: Optional[int] = None, schedule_kind: str = "") -> Request:
         """Create a request. ``task_id`` is mandatory: a request is always part of a task."""
         if not task_id:
             raise TaskRequired("a request must belong to a task")
@@ -695,9 +842,11 @@ class Store:
                 raise TaskRequired(f"task T{task_id} does not exist")
             cur = self._db.execute(
                 "INSERT INTO requests(chat_id,sender,sender_name,mode,subject,original_message,summary,"
-                "scopes_json,prompt,prompt_sha256,state,created_at,updated_at,task_id,inbound_id) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                "scopes_json,prompt,prompt_sha256,state,created_at,updated_at,task_id,inbound_id,schedule_id,schedule_kind) "
+                "VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
                 (chat_id, sender, sender_name, mode, subject, original_message, summary,
-                 json.dumps(scopes), prompt, sha256(prompt), state, now, now, task_id, inbound_id),
+                 json.dumps(scopes), prompt, sha256(prompt), state, now, now, task_id, inbound_id,
+                 schedule_id, schedule_kind),
             )
             self._db.commit()
             rid = cur.lastrowid
@@ -769,6 +918,89 @@ class Store:
             )
             self._db.commit()
         return self.get_request(rid)  # type: ignore[return-value]
+
+    # -- schedules ------------------------------------------------------
+    def create_schedule(self, *, chat_id: str, task_id: int, title: str, prompt: str,
+                        kind: str, scopes: List[str], timezone: str, report_mode: str,
+                        cron: str = "", run_at: Optional[float] = None,
+                        next_run: Optional[float] = None, max_runs: int = 20,
+                        deadline: Optional[float] = None) -> Schedule:
+        now = time.time()
+        with self._lock:
+            cur = self._db.execute(
+                "INSERT INTO schedules(chat_id,task_id,title,prompt,prompt_sha256,kind,cron,run_at,timezone,"
+                "scopes_json,report_mode,state,next_run,max_runs,deadline,created_at,updated_at) "
+                "VALUES(?,?,?,?,?,?,?,?,?,?,?,'proposed',?,?,?,?,?)",
+                (chat_id, task_id, title, prompt, sha256(prompt), kind, cron or None, run_at, timezone,
+                 json.dumps(sorted(set(scopes))), report_mode, next_run, max_runs, deadline, now, now),
+            )
+            self._db.commit()
+        return self.get_schedule(int(cur.lastrowid))  # type: ignore[return-value]
+
+    def get_schedule(self, schedule_id: int) -> Optional[Schedule]:
+        with self._lock:
+            row = self._db.execute("SELECT * FROM schedules WHERE id=?", (int(schedule_id),)).fetchone()
+        return Schedule.from_row(row) if row else None
+
+    def schedules(self, states: Optional[List[str]] = None) -> List[Schedule]:
+        with self._lock:
+            if states:
+                marks = ",".join("?" for _ in states)
+                rows = self._db.execute(
+                    f"SELECT * FROM schedules WHERE state IN ({marks}) ORDER BY id DESC", states).fetchall()
+            else:
+                rows = self._db.execute("SELECT * FROM schedules ORDER BY id DESC").fetchall()
+        return [Schedule.from_row(r) for r in rows]
+
+    def due_schedules(self, now: float) -> List[Schedule]:
+        with self._lock:
+            rows = self._db.execute(
+                "SELECT * FROM schedules WHERE state='active' AND next_run IS NOT NULL "
+                "AND next_run<=? ORDER BY next_run,id", (now,)).fetchall()
+        return [Schedule.from_row(r) for r in rows]
+
+    def request_running_for_schedule(self, schedule_id: int) -> Optional[Request]:
+        with self._lock:
+            row = self._db.execute(
+                "SELECT * FROM requests WHERE schedule_id=? AND state IN ('pending','approved','running') "
+                "ORDER BY id DESC LIMIT 1", (int(schedule_id),)).fetchone()
+        return Request.from_row(row) if row else None
+
+    def pending_requests_for_schedule(self, schedule_id: int) -> List[Request]:
+        with self._lock:
+            rows = self._db.execute(
+                "SELECT * FROM requests WHERE schedule_id=? AND state='pending' ORDER BY id",
+                (int(schedule_id),)).fetchall()
+        return [Request.from_row(row) for row in rows]
+
+    def update_schedule(self, schedule_id: int, **changes: Any) -> Schedule:
+        allowed = {"title", "prompt", "prompt_sha256", "kind", "cron", "run_at", "timezone", "scopes",
+                   "scopes_json", "report_mode", "state", "next_run", "last_run", "last_request_id",
+                   "run_count", "max_runs", "deadline", "notes", "revision", "consecutive_failures",
+                   "last_outcome"}
+        bad = set(changes) - allowed
+        if bad:
+            raise ValueError(f"unknown schedule columns: {sorted(bad)}")
+        if not changes:
+            return self.get_schedule(schedule_id)  # type: ignore[return-value]
+        if "prompt" in changes:
+            changes["prompt_sha256"] = sha256(str(changes["prompt"]))
+        if "scopes" in changes:
+            changes["scopes_json"] = json.dumps(sorted(set(changes.pop("scopes"))))
+        if "notes" in changes and not isinstance(changes["notes"], str):
+            changes["notes"] = json.dumps(changes["notes"], ensure_ascii=False)
+        changes["updated_at"] = time.time()
+        sets = ", ".join(f"{name}=?" for name in changes)
+        with self._lock:
+            self._db.execute(f"UPDATE schedules SET {sets} WHERE id=?", (*changes.values(), int(schedule_id)))
+            self._db.commit()
+        return self.get_schedule(schedule_id)  # type: ignore[return-value]
+
+    def delete_schedule(self, schedule_id: int) -> bool:
+        with self._lock:
+            cur = self._db.execute("DELETE FROM schedules WHERE id=?", (int(schedule_id),))
+            self._db.commit()
+        return bool(cur.rowcount)
 
     # -- tasks -----------------------------------------------------------
     def create_task(self, title: str, participants: Optional[List[Any]] = None) -> Dict[str, Any]:

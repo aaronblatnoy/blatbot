@@ -9,6 +9,7 @@ from typing import Any, Dict, List, Optional
 
 from ..gate.scopes import SCOPES, SCOPE_SYSTEM
 from ..gate.store import Request, Store
+from ..gate.schedules import cadence as schedule_cadence, next_three as schedule_next_three
 from . import events
 
 REQUEST_STATES = frozenset(
@@ -98,17 +99,42 @@ def people(store: Store) -> List[Dict[str, Any]]:
             "role": "",
             "scopes": [],
             "note": "",
+            "channels": row.get("channels") or [],
+            "last_seen": row.get("last_seen") or 0.0,
         }
         for row in store.known_people()
     }
     for row in store.trusted():
-        by_key[row["key"]] = dict(row)
+        merged = dict(by_key.get(row["key"], {}))
+        merged.update(row)
+        by_key[row["key"]] = merged
     out = []
     for row in by_key.values():
         role_scopes = roles_by_name.get(row.get("role") or "", {}).get("scopes", [])
-        row["effective_scopes"] = sorted(set(role_scopes) | set(row.get("scopes") or []))
+        effective = sorted(set(role_scopes) | set(row.get("scopes") or []))
+        row["effective_scopes"] = effective
+        read_count = sum(1 for name in effective if _scope_kind(name, SCOPES.get(name, {})) == "read")
+        write_count = sum(1 for name in effective if _scope_kind(name, SCOPES.get(name, {})) in ("write", "send"))
+        row["scope_counts"] = {"read": read_count, "write": write_count, "total": len(effective)}
+        row["has_send"] = any(_scope_kind(name, SCOPES.get(name, {})) == "send" for name in effective)
         out.append(row)
     return sorted(out, key=lambda row: ((row.get("person") or "").lower(), row["key"]))
+
+
+def people_count(store: Store) -> int:
+    return len(people(store))
+
+
+def people_sync(store: Store, client: Any) -> Dict[str, Any]:
+    from . import sync as _sync
+    result = _sync.sync_people(store, client)
+    events.publish("people.synced", result)
+    return result
+
+
+def people_last_sync(store: Store) -> Dict[str, Any]:
+    from . import sync as _sync
+    return _sync.last_sync(store)
 
 
 def upsert_person(store: Store, payload: Dict[str, Any]) -> Dict[str, Any]:
@@ -133,13 +159,70 @@ def delete_person(store: Store, payload: Dict[str, Any]) -> Dict[str, Any]:
     return {"ok": True, "key": key}
 
 
+def _scope_kind(name: str, spec: Dict[str, Any]) -> str:
+    """read | write | send. Everything in SCOPES is read or write already (`read` bool);
+    a scope is "send" instead of plain "write" when it can make Blatbot speak as itself
+    (its tools end in _send, or its own name says so) -- that is the one category the
+    console calls out with a standing warning, because a person who holds it can have
+    Blatbot send a message Aaron never saw."""
+    if spec.get("read"):
+        return "read"
+    tools = [str(t).lower() for t in (spec.get("tools") or [])]
+    if "send" in name.lower() or any(t.endswith("_send") or "_send_" in t for t in tools):
+        return "send"
+    return "write"
+
+
+def _scope_detail(name: str) -> Dict[str, Any]:
+    spec = SCOPES.get(name, {})
+    return {
+        "name": name,
+        "purpose": spec.get("purpose") or spec.get("description") or name,
+        "tools_count": len(spec.get("tools") or []),
+        "group": SCOPE_SYSTEM.get(name, "other"),
+        "kind": _scope_kind(name, spec),
+    }
+
+
+_SEND_WARNING = (
+    "People in this role can have Blatbot send messages without Aaron seeing them first."
+)
+
+
+def _role_members(store: Store, name: str) -> List[Dict[str, Any]]:
+    return [
+        {"key": row["key"], "person": row.get("person") or row["key"]}
+        for row in store.trusted()
+        if (row.get("role") or "") == name
+    ]
+
+
+def _role_model(store: Store, row: Dict[str, Any], people_rows: Optional[List[Dict[str, Any]]] = None) -> Dict[str, Any]:
+    scope_names = row.get("scopes") or []
+    details = [_scope_detail(name) for name in scope_names]
+    read_scopes = [d for d in details if d["kind"] == "read"]
+    write_scopes = [d for d in details if d["kind"] in ("write", "send")]
+    has_send = any(d["kind"] == "send" for d in details)
+    members = [
+        {"key": r["key"], "person": r.get("person") or r["key"]}
+        for r in (people_rows if people_rows is not None else store.trusted())
+        if (r.get("role") or "") == row["name"]
+    ]
+    return {
+        "name": row["name"],
+        "note": row.get("note") or "",
+        "scopes": scope_names,
+        "read_scopes": read_scopes,
+        "write_scopes": write_scopes,
+        "members": members,
+        "people_count": len(members),
+        "warning": _SEND_WARNING if has_send else "",
+    }
+
+
 def roles(store: Store) -> List[Dict[str, Any]]:
-    counts: Dict[str, int] = {}
-    for person in store.trusted():
-        role = person.get("role") or ""
-        if role:
-            counts[role] = counts.get(role, 0) + 1
-    return [dict(row, people_count=counts.get(row["name"], 0)) for row in store.roles()]
+    people_rows = store.trusted()
+    return [_role_model(store, row, people_rows) for row in store.roles()]
 
 
 def upsert_role(store: Store, payload: Dict[str, Any]) -> Dict[str, Any]:
@@ -157,16 +240,33 @@ def delete_role(store: Store, payload: Dict[str, Any]) -> Dict[str, Any]:
     return {"ok": True, "name": name}
 
 
+def add_role_member(store: Store, payload: Dict[str, Any]) -> Dict[str, Any]:
+    name = _required_text(payload.get("name"), "name").lower()
+    key = _required_text(payload.get("key"), "key")
+    if not any(row["name"] == name for row in store.roles()):
+        raise ValidationError(f"no such role: {name}")
+    existing = next((row for row in store.trusted() if row["key"] == store.trusted_key(key)), None)
+    person = _text(payload.get("person"), "person") or (existing or {}).get("person", "") or key
+    scopes = (existing or {}).get("scopes") or []
+    note = (existing or {}).get("note") or ""
+    store.set_trust(key, person=person, role=name, scopes=scopes, note=note)
+    events.publish("permissions.changed", {"kind": "role", "name": name, "member_added": key})
+    return next(item for item in roles(store) if item["name"] == name)
+
+
+def remove_role_member(store: Store, payload: Dict[str, Any]) -> Dict[str, Any]:
+    name = _required_text(payload.get("name"), "name").lower()
+    key = _required_text(payload.get("key"), "key")
+    existing = next((row for row in store.trusted() if row["key"] == store.trusted_key(key)), None)
+    if existing and (existing.get("role") or "") == name:
+        store.set_trust(key, person=existing.get("person") or "", role="",
+                         scopes=existing.get("scopes") or [], note=existing.get("note") or "")
+    events.publish("permissions.changed", {"kind": "role", "name": name, "member_removed": key})
+    return next(item for item in roles(store) if item["name"] == name)
+
+
 def scopes() -> List[Dict[str, Any]]:
-    return [
-        {
-            "name": name,
-            "purpose": spec.get("purpose") or spec.get("description") or name,
-            "tools_count": len(spec.get("tools") or []),
-            "group": SCOPE_SYSTEM.get(name, "other"),
-        }
-        for name, spec in SCOPES.items()
-    ]
+    return [_scope_detail(name) for name in SCOPES]
 
 
 def requests(store: Store, state: str = "") -> List[Dict[str, Any]]:
@@ -203,6 +303,87 @@ async def decide_request(manager: Any, payload: Dict[str, Any]) -> Dict[str, Any
 
 def tasks(store: Store) -> List[Dict[str, Any]]:
     return [dict(row) for row in store.recent_tasks(limit=50)]
+
+
+def schedules(store: Store) -> Dict[str, Any]:
+    rows = []
+    for schedule in store.schedules():
+        rows.append({
+            "id": schedule.id, "task_id": schedule.task_id, "title": schedule.title,
+            "prompt": schedule.prompt, "kind": schedule.kind, "cron": schedule.cron,
+            "run_at": schedule.run_at, "timezone": schedule.timezone,
+            "scopes": list(schedule.scopes), "report_mode": schedule.report_mode,
+            "state": schedule.state, "next_run": schedule.next_run,
+            "next_three": schedule_next_three(schedule), "last_run": schedule.last_run,
+            "last_outcome": schedule.last_outcome, "run_count": schedule.run_count,
+            "max_runs": schedule.max_runs, "deadline": schedule.deadline,
+            "notes": list(schedule.notes), "revision": schedule.revision,
+            "cadence": schedule_cadence(schedule),
+        })
+    paused = str(store.settings().get("GATE_SCHEDULES_PAUSED", "0")).lower() in {"1", "true", "yes", "on"}
+    return {"global_paused": paused, "schedules": rows}
+
+
+async def create_schedule(manager: Any, payload: Dict[str, Any]) -> Dict[str, Any]:
+    title = _required_text(payload.get("title"), "title")
+    prompt = _required_text(payload.get("prompt"), "prompt")
+    task_id = payload.get("task_id")
+    if task_id in (None, ""):
+        task_id = manager.store.create_task(title)["id"]
+    try:
+        task_id = int(task_id)
+    except (TypeError, ValueError):
+        raise ValidationError("task_id must be an integer") from None
+    spec = {k: payload.get(k) for k in ("kind", "cron", "run_at", "timezone", "report_mode",
+                                        "max_runs", "deadline")}
+    spec.update(title=title, prompt=prompt)
+    try:
+        schedule = await manager.schedules.propose(owner=True, chat_id="owner", task_id=task_id,
+                                                   spec=spec, scopes=_scopes(payload.get("scopes")))
+    except ValueError as exc:
+        raise ValidationError(str(exc)) from exc
+    events.publish("schedules.changed", {"id": schedule.id, "state": schedule.state})
+    return schedules(manager.store)
+
+
+async def edit_schedule(manager: Any, payload: Dict[str, Any]) -> Dict[str, Any]:
+    try:
+        schedule_id = int(payload.get("id"))
+    except (TypeError, ValueError):
+        raise ValidationError("id must be an integer") from None
+    changes = {k: payload[k] for k in ("title", "prompt", "kind", "cron", "run_at", "timezone",
+                                                  "report_mode", "max_runs", "deadline", "scopes") if k in payload}
+    if "scopes" in changes:
+        changes["scopes"] = _scopes(changes["scopes"])
+    try:
+        schedule = await manager.schedules.edit(schedule_id, owner=True, changes=changes)
+    except ValueError as exc:
+        raise ValidationError(str(exc)) from exc
+    events.publish("schedules.changed", {"id": schedule.id, "state": schedule.state})
+    return schedules(manager.store)
+
+
+async def schedule_action(manager: Any, payload: Dict[str, Any]) -> Dict[str, Any]:
+    try:
+        schedule_id = int(payload.get("id"))
+    except (TypeError, ValueError):
+        raise ValidationError("id must be an integer") from None
+    action = _required_text(payload.get("action"), "action")
+    try:
+        schedule = await manager.schedules.action(schedule_id, action, owner=True)
+    except ValueError as exc:
+        raise ValidationError(str(exc)) from exc
+    events.publish("schedules.changed", {"id": schedule.id, "action": action})
+    return schedules(manager.store)
+
+
+def schedules_global(store: Store, payload: Dict[str, Any]) -> Dict[str, Any]:
+    paused = payload.get("paused")
+    if not isinstance(paused, bool):
+        raise ValidationError("paused must be true or false")
+    store.set_setting("GATE_SCHEDULES_PAUSED", "1" if paused else "0")
+    events.publish("schedules.changed", {"global_paused": paused})
+    return schedules(store)
 
 
 def task(store: Store, task_id: int) -> Optional[Dict[str, Any]]:

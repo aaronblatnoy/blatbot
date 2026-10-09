@@ -263,6 +263,11 @@ class TaskPicker:
                 "count_as_no": [
                     "Thanks, greetings, acknowledgements, small talk.",
                     "A question about the assistant itself or about what it will do, answerable in words.",
+                    "'Do you have access to X', 'can you get into Y', 'what can you reach/see', 'what do you "
+                    "have access to' about Aaron's own accounts, tools or data: a question about the "
+                    "assistant's own capabilities, not a request to go check, open or fetch anything. It is "
+                    "answered by saying what the assistant will or will not share, in words, even when X "
+                    "names a real system (his GitHub, his email, his calendar).",
                     "A question already answered by facts in `conversation_so_far`: rephrasing, filtering or "
                     "reformatting what was just delivered ('without Dylan and Sean', 'same thing but shorter').",
                     "A clarification on a task whose next step has NOT run yet and still cannot run.",

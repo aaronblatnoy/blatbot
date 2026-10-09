@@ -755,6 +755,7 @@ class InkboxGateway:
         self.cfg = cfg
         self._inkbox: Any = None
         self._identity: Any = None
+        self.inkbox_directory_client: Any = None
         self._tunnel: Any = None
         self._public_url: str = ""
         self._public_host: str = ""
@@ -841,6 +842,17 @@ class InkboxGateway:
         }
         if identity_info["email"]:
             self._self_addresses.add(identity_info["email"].lower())
+
+        # Console people-sync reads this at startup; it's never required for a
+        # gateway run that doesn't carry the console, so a failure here must not
+        # take the gateway down.
+        try:
+            from .console.directory import build_directory_client
+
+            self.inkbox_directory_client = build_directory_client(self._inkbox, self._identity)
+        except Exception:
+            logger.exception("console: failed to build Inkbox directory client")
+            self.inkbox_directory_client = None
 
         # Local webhook server first, so the tunnel has something to hit.
         await self._start_http_server()

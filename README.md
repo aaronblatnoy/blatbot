@@ -281,7 +281,7 @@ These are the decisions the whole thing rests on.
 12. **Everyone starts with no permissions.** A role names a level of trust and the scopes it carries; a person is trusted by handle, so the same person is recognised by email, phone, Telegram id or name. A request whose scopes fall entirely inside what they were given runs immediately; anything outside it still waits. Trusting someone with the calendar does not let them send mail.
 13. **A surface is how a message arrived, not who it is with.** Email, iMessage, SMS, Telegram and the phone are one conversation with the owner, written to one record, so a notice sent on one is visible from another. A reply still goes back out the way it came. A group chat is its own conversation even when he is the one talking, because what is said in front of other people does not belong in his private record.
 14. **In a group it decides whether to speak, and that decision is only for groups, and today only on Telegram.** A direct message is always answered. In a Telegram group, a message naming it is answered; one that does not goes to a single judgment asking whether its silence would be the worse answer, and an undecided or failed judgment stays quiet. It hears everything either way, and records what it chose not to answer, so a later follow-up has something to refer back to.
-15. **An interrupted run is reported, not forgotten.** A run the process died inside leaves someone watching a typing indicator that never resolves. On startup each one is named on its own thread and offered again. It is not retried on its own, because a half-finished run may already have changed something.
+15. **An interrupted run is reported, not forgotten.** A run the process died inside leaves someone watching a typing indicator that never resolves. On startup an ordinary run is named on its own thread and offered again. A scheduled run is completed as a failed schedule run and reported to the owner. Neither is retried on its own, because a half-finished run may already have changed something.
 16. **Tools are called by code, not by a chat model.** The agent that runs an approved request is a loop of typed judgments: is the goal met, which tool next, which of the values already in play fills each argument. Dates come from the clock, ids from earlier results. A text model is called only for text that must be composed, such as an email body. Claude Code remains as a fallback for what the loop cannot do, and only when nothing has been written yet.
 
 ## A worked example
@@ -320,12 +320,16 @@ refused at the tool call in both engines.
 
 ## The console
 
-A private web console on the tailnet, mounted inside the gateway at `/console`. It exists so
-permissions are something I can see rather than something I remember.
+A private web console, reachable only over the tailnet. It exists so permissions are
+something I can see rather than something I remember.
 
 - **People and permissions.** Pick a person, give them a role, tick extra scopes. For each
   one it spells out what runs on its own and what still interrupts me. Adding a person means
-  adding a handle: an email, a phone, a Telegram id, or a name.
+  adding a handle: an email, a phone, a Telegram id, or a name. "Refresh from Inkbox" pages
+  every channel the agent identity has ever spoken on (`console/sync.py` via
+  `console/directory.py`'s real `InkboxSDKDirectoryClient`) and folds the results into the
+  people list by the same handle-normalization trust keys use, without ever touching trust
+  or role assignment on its own.
 - **Requests.** What is waiting on me at the top, with the sender, the surface, the scopes and
   their full message, approved or rejected inline. That calls the same command a `#N yes` text
   does, so a yes cannot come to mean two different things.
@@ -336,10 +340,101 @@ permissions are something I can see rather than something I remember.
   on the control itself. The registry is the whole surface, so a value out of range is refused with the
   reason and a name not in it is refused outright: no key or path can be edited by a mis-click.
 
-It mounts inside the gateway rather than beside it, so the database keeps one writer. It holds
-no state of its own, and it is not a database editor: everything it changes goes through the
-same commands the messaging surfaces use. Live updates are server-sent events and plain DOM.
-No build step, no framework, nothing fetched from the network at runtime.
+### Split architecture: this repo is the API only
+
+The console's HTML/CSS/JS now live in a **separate frontend repo**,
+[`blatbot-console`](https://github.com/aaronblatnoy/blatbot-console) (plain HTML/CSS/JS, no
+build step, no framework), served by its own tiny static server on its own port. This repo
+(`inkbox_claude/console/`) mounts only `/console/api/*` and `/console/events` -- no page
+routes, no static asset routes. The gateway's public tunnel hostname does **not** serve any
+`/console` path at all anymore; the console (both the page and the API) is reachable only at
+the gateway's Tailscale address, never at the public hostname.
+
+- `inkbox_claude/console/routes.py` -- `register(app, gateway)` mounts the API and the event
+  stream on an existing `aiohttp.web.Application`.
+- `inkbox_claude/console/access.py` -- `tailnet_gate` (peer must be in `100.64.0.0/10`, else
+  404, never 403) and `cors_gate` (the Origin on a mutation must be the console's own origin
+  or one named in `CONSOLE_ALLOWED_ORIGINS`). Both run on every `/console/api/*` and
+  `/console/events` request, read or write.
+- `inkbox_claude/console/sync.py` + `directory.py` -- the people sync and the real Inkbox SDK
+  paging client behind it.
+- `inkbox_claude/console/events.py` -- the server-sent-event hub for live refresh hints; sets
+  its own CORS header before `response.prepare()`, since a streaming response's headers are
+  already flushed by the time the `cors_gate` middleware would otherwise add one.
+
+It holds no state of its own, and it is not a database editor: everything it changes goes
+through the same commands the messaging surfaces use.
+
+**`CONSOLE_ALLOWED_ORIGINS`** (env var on this process) must list the frontend's own origin,
+e.g. `CONSOLE_ALLOWED_ORIGINS=http://100.64.0.10:8793`, or every mutation from the frontend
+is refused with "cross-origin mutation rejected" even though reads still work. This is on top
+of, not instead of, `tailnet_gate`: an allowed Origin header from a non-tailnet peer still
+gets a 404 before the Origin check ever runs.
+
+**`scripts/count_inkbox_people.py`** runs only the collection step the console's people-sync
+uses (paging every Inkbox channel, then the same dedupe key `sync_people` uses) and prints
+counts per channel plus a distinct total -- no names, numbers, or addresses, and no write to
+the gate database. Run it yourself against the real account
+(`INKBOX_API_KEY=... INKBOX_IDENTITY=... .venv/bin/python scripts/count_inkbox_people.py`); it
+is intentionally not run by the test suite or by any Claude Code session in this repo.
+
+### Deploying both sides on the same box
+
+1. This process (the backend) keeps running as it always has, bound to the box's Tailscale
+   address, with `CONSOLE_ALLOWED_ORIGINS` set to the frontend's origin.
+2. The frontend (`blatbot-console`) runs as its own static file server (`serve.py`) under its
+   own systemd user unit (`systemd/blatbot-console-frontend.service` in that repo), with
+   `BIND_HOST` set to the same Tailscale address and its own port (8793 by convention, chosen
+   to avoid every other port already in use on black-sky). `static/config.js` in that repo
+   points at this backend's `/console/api` and `/console/events` on its Tailscale address.
+3. There is a rerunnable end-to-end check in `blatbot-console/e2e/` that boots both sides
+   against a throwaway store and the real backend code, and checks every page, the role/member
+   CRUD, the Inkbox refresh, the live event stream, and both the tailnet gate and the
+   cross-origin gate -- see that repo's README.
+
+A private web console on the tailnet, never the public tunnel: live updates are server-sent
+events and plain DOM, no build step, no framework, nothing fetched from the network at
+runtime on either side.
+
+## Schedules and continuing work
+
+Aaron can ask Blatbot in his private thread to do something once at an absolute
+time, on a recurring five-field cron cadence, or as continuing work. The same
+forms are available on the console's Schedules page. Creating a schedule does
+not run it. It enters the ordinary approval queue with the exact prompt, frozen
+scopes, report mode, cadence rendered from the stored specification, and the
+next three fire times computed in its IANA timezone. Only Aaron may create,
+edit, pause, resume, run, or delete a schedule. An edit to its prompt, scopes,
+cadence, or limits returns it to the approval queue.
+
+A due schedule creates a normal request on its task and sends that request
+through the existing executor, grounding, delivery, and ledger paths. Schedule
+approval covers later sends and writes inside the approved scopes, but a delete,
+cancel, replacement, or other destructive call still stops for Aaron's yes.
+Scheduled requests do not receive the extra read scopes normally granted to an
+owner request, and a failed run cannot grant itself a missing scope.
+
+Recurring schedules use a dependency-free cron parser with numbers, wildcards,
+lists, ranges, and steps. Day-of-month and day-of-week use the standard cron OR
+rule. Times that do not exist during a daylight-saving change are skipped, and
+a repeated local time fires once. Downtime collapses missed slots into one run.
+The manager checks every 30 seconds, isolates errors by schedule, skips an
+overlapping firing with a ledger note, honors a global pause, and pauses a
+schedule after three consecutive failed runs.
+
+Report mode `always` reports every run. Report mode `changed` reports failed
+runs and runs with a successful write, but not read-only runs or the
+`schedule_continue` wake-up itself. A failed final once run and every final
+continue run are always reported. If a held destructive call is declined or
+expires, the run closes without counting as a failure; recurring schedules
+keep their already-computed next firing.
+
+A continue schedule may use the `schedule_continue` host tool to set its next
+wake-up and leave a progress note. The next run receives all notes in full. The
+tool exists only for requests created by a continue schedule. A run that does
+not call it closes the schedule. Continue schedules have an approval-time run
+limit and deadline, defaulting to 20 runs and seven days, and wake-ups must be at
+least five minutes apart.
 
 ## What is in this fork
 
@@ -350,6 +445,7 @@ The custom code spans the gate package, the console package, the Telegram and vo
 | `inkbox_claude/gate/manager.py` | The core: a session per person, the owner trust check, approval commands, the phone surface |
 | `inkbox_claude/gate/router.py` | The reply writer (DeepSeek): told the decision, writes only the words sent back; also the ledger query planner |
 | `inkbox_claude/gate/store.py` | SQLite: the task ledger, requests and their states, threads |
+| `inkbox_claude/gate/schedules.py`, `cron.py` | Schedule approval, firing, continuation bounds, and timezone-aware cron calculation |
 | `inkbox_claude/gate/taskpick.py` | The typed judgments (TypeSafe Jev): which task, whether action is needed, which scopes, what the message did to the task |
 | `inkbox_claude/gate/jevagent.py` | The alternative executor: a loop of typed judgments that picks tools and selects arguments, calls MCP tools directly, prose only on demand |
 | `inkbox_claude/gate/executor.py` | The Claude Code executor, the default: a hash-checked prompt, tools limited to the scopes, and the hook that holds an outbound send |
@@ -360,10 +456,10 @@ The custom code spans the gate package, the console package, the Telegram and vo
 | `inkbox_claude/gate/jevgraph.py` | The executor as a graph: collect, judge, act, repeat |
 | `inkbox_claude/gate/rooms.py` | What it means to be in a group chat, for any channel |
 | `inkbox_claude/gate/settings.py` | The knobs the owner may turn, read from the database first and the environment second |
-| `inkbox_claude/console/` | The console: read models, routes, the server-sent event hub, and three static files |
+| `inkbox_claude/console/` | The console API only (`/console/api/*`, `/console/events`): read models, routes, the tailnet/CORS access gate, the server-sent event hub, and the Inkbox people sync. The page itself lives in the separate `blatbot-console` frontend repo. |
 | `inkbox_claude/telegram.py` | Telegram as a surface: webhook, send, typing, and whether a group message was addressed to it |
 | `inkbox_claude/live.py` | The phone bridge for OpenAI GPT-Live, using client delegation |
-| `tests/test_gate.py`, `tests/test_jevagent.py`, `tests/test_live.py` | Tests, including scripted judgments and simulated phone calls with fake sockets |
+| `tests/test_gate.py`, `tests/test_schedules.py`, `tests/test_jevagent.py`, `tests/test_live.py` | Tests, including schedules, scripted judgments, and simulated phone calls with fake sockets |
 | `docs/blatbot-architecture.md` | Longer design notes and the Live versus Realtime comparison |
 
 The remaining edits are small hooks inside Inkbox's `gateway.py`, `realtime.py`, `config.py`, `tools.py`, and `sessions.py` that plug the gate in. The compare link above shows all of it.
@@ -414,7 +510,14 @@ GATE_OWNER_GOOGLE_ACCOUNT=
 
 Put your own standing instructions (tone, signature, house rules) in `standing.md` next to the `.env`. The router reads it fresh on every turn, so you can change the assistant's behavior by editing a text file.
 
-Open the console at `http://<your-host>:8767/console` (the bridge port, `INKBOX_BRIDGE_PORT`), over a private network only. Anything listed in its Settings panel can be changed there instead of in the `.env`, and the database wins over the environment for those. Most apply on the next turn; which engine runs, which task picker, the decision graph and the engine fallback are read at startup and the console says so. Permissions live only in the console: everyone starts with none.
+Open the console frontend (the separate `blatbot-console` repo's own static server, e.g.
+`http://<your-tailnet-host>:8793/console/`), pointed via `static/config.js` at this gateway's
+`/console/api` on the same Tailscale address, with that frontend's origin added to
+`CONSOLE_ALLOWED_ORIGINS` here. The public tunnel does not serve `/console` at all. Anything
+listed in Settings can be changed there instead of in the `.env`, and the database wins over
+the environment for those. Most apply on the next turn; which engine runs, which task picker,
+the decision graph and the engine fallback are read at startup and the console says so.
+Permissions live only in the console: everyone starts with none.
 
 Run the tests with `pytest tests`.
 

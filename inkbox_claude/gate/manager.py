@@ -20,9 +20,10 @@ from .executor import Executor
 from . import settings as _settings
 from .jevagent import JevAgent, enabled as jev_agent_enabled
 from .taskpick import TaskPicker, enabled as jev_enabled
-from .router import Router, RouterOutput
+from .router import Router, RouterOutput, RouterRequest
 from .scopes import SCOPES
 from .store import Person, Request, Store, TaskRequired, task_key
+from .schedules import ScheduleService
 
 logger = logging.getLogger(__name__)
 
@@ -509,7 +510,11 @@ class GateSession:
                                         router_said_action=None)
         needs_action = act.get("needs_action")
         if needs_action is None:
-            needs_action = float(act.get("p") or 0.0) >= 0.5
+            p_act = float(act.get("p") or 0.0)
+            # Same tie-break as the decide graph: the exact midpoint leans to action for
+            # the owner (cheap to over-act), and away from it for anyone else (a tie
+            # would otherwise become an approval request nobody can resolve).
+            needs_action = p_act >= 0.4 if approver else p_act > 0.5
         logger.info("[gate %s] jev-first: task=%s action=%s (p=%.2f)", self.chat_id, task_choice, needs_action,
                     float(act.get("p") or 0.0))
         out = await self.m.router.route(history=prior, message=message, mode=mode, sender=self._sender(),
@@ -585,7 +590,8 @@ class GateSession:
                         self.chat_id, res["p"], out.request.summary)
             out.request = None
 
-    async def jev_scopes(self, out: RouterOutput, strict: bool = False) -> None:
+    async def jev_scopes(self, out: RouterOutput, strict: bool = False,
+                         owner_generous: bool = True) -> None:
         """Replace the router's scope list with Jev's judgment when it yields a
         non-empty set. Empty or unavailable: the router's list stands. Code never
         lets this widen beyond the fixed scope map, since pydantic already
@@ -596,8 +602,10 @@ class GateSession:
         res = {"scopes": None}
         if strict and hasattr(picker, "judge_scopes_tree"):
             # Systems first, then read/write and channel within each: a few options per question.
-            res = await picker.judge_scopes_tree(prompt=out.request.prompt, summary=out.request.summary,
-                                                 generous=self.is_approver())
+            res = await picker.judge_scopes_tree(
+                prompt=out.request.prompt, summary=out.request.summary,
+                generous=self.is_approver() and owner_generous,
+            )
         if res.get("scopes") is None:
             res = await picker.judge_scopes(
                 prompt=out.request.prompt, summary=out.request.summary,  # prompt is the source-built one by now
@@ -609,12 +617,13 @@ class GateSession:
             # Generous by design: reads cost nothing (destructive calls need the owner's
             # yes, sends to the requester are refused), so the owner's requests get every
             # read scope, and writes are granted on a lower bar than the strict judgment.
-            if self.is_approver():
+            if self.is_approver() and owner_generous:
                 # The tree already chose with the owner's full picture; every extra read scope
                 # only widens the agent's option list and pulls in sources the goal never named.
                 chosen = list(dict.fromkeys(chosen + [k for k, v in probs.items() if v >= 0.5]))
             if not chosen:
-                top = [k for k, v in sorted(probs.items(), key=lambda kv: -kv[1])[:2] if v >= 0.25]
+                limit = 2 if owner_generous else 1
+                top = [k for k, v in sorted(probs.items(), key=lambda kv: -kv[1])[:limit] if v >= 0.25]
                 chosen = top or ["web"]
             logger.info("[gate %s] scopes granted: %s", self.chat_id, chosen)
         if not chosen:
@@ -933,6 +942,24 @@ class GateSession:
         else:
             out, task = await self.decide(body=body, message=message, prior=prior, mode=self.mode,
                                           memory=memory, found=found)
+        if not system_note and out.schedule is not None:
+            if not approver:
+                out.request = None
+                out.schedule = None
+                return await self.send_to_sender("Only Aaron can create or change a schedule.", role="answer")
+            if task is None:
+                task = self.m.store.create_task(out.schedule.title)
+                self._ensure_inbound_on_task(task, body)
+            schedule_request = RouterOutput(request=RouterRequest(
+                prompt=out.schedule.prompt, scopes=["web"], summary=out.schedule.title,
+            ))
+            await self.jev_scopes(schedule_request, strict=True, owner_generous=False)
+            scopes = list(schedule_request.request.scopes) if schedule_request.request is not None else ["web"]
+            await self.m.schedules.propose(
+                owner=True, chat_id=self.record_id, task_id=int(task["id"]),
+                spec=out.schedule.model_dump(), scopes=scopes, mode=self.mode,
+            )
+            return True
         sent_reply = False
         if out.reply:
             # Alongside a request the reply is an acknowledgement; on its own, or when
@@ -1036,10 +1063,17 @@ class GateSession:
             # on literal support even when they are right.
             return reply2
         # Twice unsupported. Sending it anyway is the one thing worse than saying nothing:
-        # it is a confident answer the check already judged to be unbacked. Hand over what
-        # the run actually produced, and say plainly that it did not answer the question.
+        # it is a confident answer the check already judged to be unbacked.
         logger.warning("[gate %s] rewrite still not grounded (p=%.2f); refusing to pass it off",
                        self.chat_id, p2)
+        if not approver:
+            # Someone other than Aaron never sees the run's own words: no mention of
+            # tools, scopes, approval or why it failed. Aaron gets the full result
+            # separately (the note this call was given, in full, on his own thread).
+            return ("I do not have an answer ready for that right now. I have let Aaron "
+                    "know, and he will follow up if there is more to share.")
+        # For Aaron: hand over what the run actually produced, and say plainly that
+        # it did not answer the question.
         body = _result_bodies(results)
         if body.strip() and len(body) <= 1500:
             return body
@@ -1205,9 +1239,12 @@ class GateSessionManager:
         # read per turn, not captured here: the console can change it between messages
         self._voice_trust_override: Optional[bool] = None
         self.sessions: Dict[str, GateSession] = {}
+        self.schedules = ScheduleService(self)
         self._expiry_task: Optional[asyncio.Task] = None
+        self._schedule_task: Optional[asyncio.Task] = None
         try:
             self._expiry_task = asyncio.get_running_loop().create_task(self._expiry_loop())
+            self._schedule_task = asyncio.get_running_loop().create_task(self._schedule_loop())
         except RuntimeError:
             pass
 
@@ -1225,6 +1262,8 @@ class GateSessionManager:
     async def close_all(self) -> None:
         if self._expiry_task:
             self._expiry_task.cancel()
+        if self._schedule_task:
+            self._schedule_task.cancel()
 
     # -- approver channel ----------------------------------------------------
     @property
@@ -1281,6 +1320,13 @@ class GateSessionManager:
                                              "summary": "interrupted by a restart", "raw": "", "tool_calls": []})
                 self.store.set_thread(req.chat_id, "idle")
                 self.task_note(req, "failed", f"Interrupted by a restart: {req.summary}", state="open")
+                if req.schedule_id:
+                    await self.schedules.finished(
+                        req, {"ok": False, "error": "interrupted by a restart",
+                              "summary": "interrupted by a restart", "raw": "", "tool_calls": []},
+                    )
+                    logger.info("[gate] reported interrupted scheduled request #%s", req.id)
+                    continue
                 line = (f"That one stopped when I restarted, so it never finished: {req.summary}. "
                         f"Nothing was reported back. Say the word and I will run it again.")
                 session = self.get(req.chat_id)
@@ -1522,7 +1568,10 @@ class GateSessionManager:
         self.store.set_state(req.id, "done" if ok else "failed", status=status, raw_output=status.get("raw"))
         self.store.set_thread(req.chat_id, "idle")
         result = _clean_result(status.get("summary") or status.get("error") or "")
-        self.task_note(req, "done" if ok else "failed", f"{req.summary} -> {result}", state="done" if ok else "failed")
+        self.task_note(req, "done" if ok else "failed", f"{req.summary} -> {result}",
+                       state="open" if req.schedule_id else ("done" if ok else "failed"))
+        if await self.schedules.finished(req, status):
+            return
         session = self.get(req.chat_id)
         note = f"Task #{req.id} {'done' if ok else 'FAILED'}: {req.summary}\nResult:\n{result}"
         replied = await session.notify_after_request(note, inbound_id=req.inbound_id)
@@ -1544,6 +1593,8 @@ class GateSessionManager:
         if req.state not in ("pending",):
             # Someone already answered this one. Say so rather than acting again.
             return {"ok": False, "error": f"#{req.id} is already {req.state}", "state": req.state}
+        if self.schedules.is_proposal_request(req):
+            return await self.schedules.decide_proposal(req, decision, note)
         d = (decision or "").strip().lower()
         confirm = (req.status or {}).get("confirm") or {}
         if d in ("yes", "y", "ok", "approve", "run", "go"):
@@ -1564,7 +1615,10 @@ class GateSessionManager:
             kind = "rejected" if confirm else "declined"
             self.task_note(req, "rejected", f"{actor} {kind}: {req.summary}", state="open")
             if confirm:
-                await self.send_to_approver(f"Left alone. Nothing was changed for #{req.id}.")
+                if req.schedule_id:
+                    await self.schedules.held_ended(req, "declined")
+                else:
+                    await self.send_to_approver(f"Left alone. Nothing was changed for #{req.id}.")
             else:
                 await self.send_to_approver(f"Dropped #{req.id}.")
                 asyncio.create_task(self.get(req.chat_id).notify_after_request(
@@ -1582,6 +1636,8 @@ class GateSessionManager:
 
     async def handle_approver_command(self, session: GateSession, text: str) -> bool:
         """Parse Aaron's reply as a gate command. Returns True if consumed."""
+        if await self.schedules.command(text, owner=session.is_approver()):
+            return True
         if await self.handle_task_command(session, text):
             return True
         pending = self.store.pending()
@@ -1628,7 +1684,7 @@ class GateSessionManager:
         said = f"{status.get('summary') or ''}\n{status.get('error') or ''}\n{status.get('raw') or ''}"
         wanted = [sc for sc in SCOPES if sc not in req.scopes and re.search(
             r"\b" + re.escape(sc) + r"\b", said)]
-        if not wanted or not _owner_request(self, req):
+        if not wanted or not _owner_request(self, req) or req.schedule_id:
             return status
         grown = list(req.scopes) + wanted
         logger.info("[gate] #%s stopped for want of %s; granting and running again",
@@ -1657,7 +1713,7 @@ class GateSessionManager:
                   "answered before, answer it again now by looking, and report what you find this "
                   "time. If a tool you need is not available to you, say which one and stop.")
         again = await self.executor.run(req, context=insist, model=model,
-                                        from_owner=_owner_request(self, req))
+                                        from_owner=_owner_request(self, req) and not req.schedule_id)
         if again.get("tool_calls") or again.get("confirm"):
             return again
         return {**again, "ok": False,
@@ -1674,7 +1730,7 @@ class GateSessionManager:
         if not self.jev_agent:
             model = await self._pick_model(req)
             status = await self.executor.run(req, context=context, model=model,
-                                             from_owner=_owner_request(self, req))
+                                             from_owner=_owner_request(self, req) and not req.schedule_id)
             status = await self._grant_what_it_asked_for(req, status, context, model)
             return await self._insist_it_actually_ran(req, status, context, model)
         status = await self.jev_agent.run(req, context=context)
@@ -1698,7 +1754,7 @@ class GateSessionManager:
         logger.info("[gate] jev agent gave up on #%s (%s); falling back to claude code", req.id, status.get("error"))
         findings = status.get("raw") or ""
         fallback = await self.executor.run(req, context=context, prior_work=findings,
-                                           from_owner=_owner_request(self, req))
+                                           from_owner=_owner_request(self, req) and not req.schedule_id)
         fallback["escalated"] = True
         fallback["jev_attempt"] = {k: status.get(k) for k in ("error", "tool_calls", "jev_calls", "prose_calls", "seconds", "steps", "raw")}
         return fallback
@@ -1798,7 +1854,10 @@ class GateSessionManager:
         outcome = "done" if ok else "FAILED"
         result = _clean_result(status.get("summary") or status.get("error") or "")
         self.task_note(req, "done" if ok else "failed", f"{req.summary} -> {result}",
-                       state="done" if ok else "failed")
+                       state="open" if req.schedule_id else ("done" if ok else "failed"))
+        if await self.schedules.finished(req, status):
+            session.typing_stop()
+            return ""
         if not notify:
             self.store.add_message(req.chat_id, "system", f"Task #{req.id} {outcome}: {req.summary}\nResult:\n{result}")
             return f"{'Done' if ok else 'That failed'}. {result}"
@@ -1845,14 +1904,33 @@ class GateSessionManager:
         return out
 
     # -- expiry ----------------------------------------------------------------
+    async def _expire_pending(self) -> None:
+        for req in self.store.expire_older_than(EXPIRE_SECONDS):
+            self.store.set_thread(req.chat_id, "idle")
+            if self.schedules.is_proposal_request(req):
+                self.schedules.proposal_expired(req)
+                await self.send_to_approver(
+                    f"[Blatbot #{req.id}] expired after 24h with no answer: {req.summary}")
+            elif req.schedule_id and (req.status or {}).get("confirm"):
+                await self.schedules.held_ended(req, "expired")
+            else:
+                await self.send_to_approver(
+                    f"[Blatbot #{req.id}] expired after 24h with no answer: {req.summary}")
+            self.store.add_message(req.chat_id, "system", f"Task #{req.id} expired unanswered: {req.summary}")
+            self.task_note(req, "expired", f"Expired after 24h with no answer from Aaron: {req.summary}", state="open")
+
     async def _expiry_loop(self) -> None:
         while True:
             await asyncio.sleep(300)
             try:
-                for req in self.store.expire_older_than(EXPIRE_SECONDS):
-                    self.store.set_thread(req.chat_id, "idle")
-                    await self.send_to_approver(f"[Blatbot #{req.id}] expired after 24h with no answer: {req.summary}")
-                    self.store.add_message(req.chat_id, "system", f"Task #{req.id} expired unanswered: {req.summary}")
-                    self.task_note(req, "expired", f"Expired after 24h with no answer from Aaron: {req.summary}", state="open")
+                await self._expire_pending()
             except Exception:
                 logger.exception("expiry loop error")
+
+    async def _schedule_loop(self) -> None:
+        while True:
+            await asyncio.sleep(30)
+            try:
+                await self.schedules.tick()
+            except Exception:
+                logger.exception("schedule loop error")

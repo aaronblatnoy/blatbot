@@ -285,7 +285,7 @@ def test_sends_to_requester_guard():
     from inkbox_claude.gate.scopes import sends_to_requester
     prot = ["e3b9cc0b-conv", "+1 (407) 808-8771"]
     assert sends_to_requester("mcp__inkbox__inkbox_send_imessage", {"conversation_id": "e3b9cc0b-conv", "body": "x"}, prot)
-    assert sends_to_requester("mcp__inkbox__inkbox_send_sms", {"to": "14078088771"}, prot)
+    assert sends_to_requester("mcp__inkbox__inkbox_send_sms", {"to": "15550100003"}, prot)
     assert sends_to_requester("mcp__inkbox__inkbox_send_email", {"to": ["Cand@nyu.edu"]}, ["cand@nyu.edu"])
     assert not sends_to_requester("mcp__inkbox__inkbox_send_sms", {"to": "+15550100001"}, prot)
     assert not sends_to_requester("mcp__inkbox__inkbox_get_imessage_conversation", {"conversation_id": "e3b9cc0b-conv"}, prot)
@@ -300,7 +300,7 @@ def test_agent_refuses_to_message_requester(agent, monkeypatch):
     judge = ScriptedJudge([lst, send, "c2"])           # c2 = the requester's own number (c0, c1 are the account emails)
     prose = ScriptedProse()
     _patch(monkeypatch, box, judge, prose, [lst, send])
-    r = _req("text me at 407-808-8771 my coffee chats from last week"); r.sender = "+14078088771"
+    r = _req("text me at 407-808-8771 my coffee chats from last week"); r.sender = "+15550100003"
     st = asyncio.run(agent.run(r))
     assert st["ok"] and [c[0] for c in box.calls] == [lst], box.calls     # the send never happened
 
@@ -549,8 +549,8 @@ def _strings(v):
 def test_browser_search_reads_results_off_the_search_page():
     from inkbox_claude.gate.jevagent import ToolBox
     snap = ('### Page\n- Page URL: http://127.0.0.1:8888/search?q=x&format=json\n### Snapshot\n```yaml\n- generic [active] [ref=e1]: ' + json.dumps(json.dumps({"results": [
-        {"title": "Sean Parnell - Student at New York University | LinkedIn", "url": "https://www.linkedin.com/in/seanparnelll",
-         "content": "Sean Parnell. Student at New York University.  TAMID at NYU Co-President."},
+        {"title": "Sam Parker - Student at New York University | LinkedIn", "url": "https://www.linkedin.com/in/samparker",
+         "content": "Sam Parker. Student at New York University.  TAMID at NYU Co-President."},
         {"title": "Executive Board - TAMID Group at NYU", "url": "https://www.nyutamid.org/our-board", "content": ""}]})) + '\n```')
     class Box(ToolBox):
         def __init__(self): self.calls = []
@@ -558,9 +558,9 @@ def test_browser_search_reads_results_off_the_search_page():
             self.calls.append((name, args))
             return "" if name.endswith("navigate") else snap
     b = Box()
-    out = asyncio.run(b._browser_search("Sean Parnell TAMID NYU"))
-    assert b.calls[0][0].endswith("browser_navigate") and "q=Sean%20Parnell%20TAMID%20NYU" in b.calls[0][1]["url"]
-    assert "1. Sean Parnell - Student at New York University | LinkedIn" in out and "url: https://www.linkedin.com/in/seanparnelll" in out
+    out = asyncio.run(b._browser_search("Sam Parker TAMID NYU"))
+    assert b.calls[0][0].endswith("browser_navigate") and "q=Sean%20Parker%20TAMID%20NYU" in b.calls[0][1]["url"]
+    assert "1. Sam Parker - Student at New York University | LinkedIn" in out and "url: https://www.linkedin.com/in/samparker" in out
     assert "Co-President" in out and "127.0.0.1" not in out and "2. Executive Board" in out
 
 

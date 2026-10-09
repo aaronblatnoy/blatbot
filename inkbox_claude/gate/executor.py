@@ -52,6 +52,19 @@ EXECUTOR_SYSTEM = (
     "and make the very last line exactly STATUS: OK or STATUS: FAILED."
 )
 
+ORDINARY_DESTRUCTIVE_DENIAL = (
+    "Deleting, cancelling or replacing anything requires Aaron's confirmation, which only the gateway can ask "
+    "for. Report exactly what you would change (name, time, id) in your status and stop."
+)
+
+
+def destructive_policy(req: Request, tool_name: str, input_data: Dict[str, Any]) -> tuple[Optional[Dict[str, Any]], str]:
+    if not req.schedule_id:
+        return None, ORDINARY_DESTRUCTIVE_DENIAL
+    return ({"tool": tool_name, "args": dict(input_data or {})},
+            "Deleting, cancelling or replacing anything requires Aaron's confirmation, "
+            "which the gateway will ask for. Stop now.")
+
 
 class Executor:
     def __init__(self, *, mcp_server: Any, cwd: str, model: str = "sonnet", timeout_s: float = 600.0,
@@ -78,12 +91,21 @@ class Executor:
         if sha256(req.prompt) != req.prompt_sha256:
             return {"ok": False, "error": "prompt hash mismatch; refused to run", "tool_calls": []}
         allowed = tools_for(req.scopes)
+        if req.schedule_kind == "continue":
+            allowed.append("mcp__host__schedule_continue")
         allowed_set = set(allowed)   # what this task may touch at all, send tools included
+        if req.schedule_id:
+            # Every scheduled write reaches the hook. The schedule pre-approves ordinary
+            # writes and sends, while delete-like calls are parked for Aaron's yes.
+            from .jevagent import is_write_tool as _is_write
+            allowed = [tool for tool in allowed if not _is_write(tool)]
         tool_calls: List[str] = []
         texts: List[str] = []
 
         protected = self.protected + [req.sender, req.chat_id]
         self.held_send = None
+        held_destructive: Optional[Dict[str, Any]] = None
+        continue_state: Optional[Dict[str, Any]] = {} if req.schedule_kind == "continue" else None
         # A message the owner asked to have sent is him speaking to someone through the
         # assistant, and he sees it before it goes. A request that came from someone else
         # was already read and approved by him in full, so answering it needs nothing more.
@@ -109,9 +131,9 @@ class Executor:
                     "route to send it. Put the whole thing in your final status, exactly as you would send "
                     "it: every recipient, every cc, the subject, and the full text, then stop."))
             if is_destructive(tool_name, input_data or {}):
-                return PermissionResultDeny(message="Deleting, cancelling or replacing anything requires Aaron's "
-                                                    "confirmation, which only the gateway can ask for. Report exactly "
-                                                    "what you would change (name, time, id) in your status and stop.")
+                nonlocal held_destructive
+                held_destructive, message = destructive_policy(req, tool_name, input_data or {})
+                return PermissionResultDeny(message=message)
             if sends_to_requester(tool_name, input_data or {}, protected):
                 # Enforced, not just prompted: the gateway delivers the result to whoever asked.
                 return PermissionResultDeny(message="Do not message the requester; the gateway delivers your "
@@ -146,7 +168,7 @@ class Executor:
             setting_sources=["user", "project"],
             permission_mode="default",
             allowed_tools=allowed,
-            mcp_servers={"inkbox": self.mcp_server, "host": hosttools.sdk_server()},
+            mcp_servers={"inkbox": self.mcp_server, "host": hosttools.sdk_server(continue_state)},
             # One conversation per thread, continued rather than restarted. A request is a
             # turn in it, so what was looked up an hour ago is still in view and a follow-up
             # does not arrive as a stranger's first sentence.
@@ -202,4 +224,10 @@ class Executor:
             out["confirm"] = {"tool": self.held_send["tool"], "args": self.held_send["args"],
                               "about": [f"It would go to: {self.held_send['to']}"], "kind": "send"}
             out["ok"] = False
+        elif held_destructive is not None:
+            out["confirm"] = {"tool": held_destructive["tool"], "args": held_destructive["args"],
+                              "about": [raw or req.original_message], "kind": "destructive"}
+            out["ok"] = False
+        if continue_state:
+            out["continue"] = dict(continue_state)
         return out

@@ -96,6 +96,34 @@ class TaskQueryOutput(BaseModel):
     reason: Optional[str] = None
 
 
+class ScheduleProposal(BaseModel):
+    """A schedule extracted during the existing reply-writing call."""
+    model_config = {"extra": "forbid"}
+    title: str = Field(min_length=1)
+    prompt: str = Field(min_length=1)
+    kind: str
+    cron: Optional[str] = None
+    run_at: Optional[str] = None
+    timezone: str = "America/New_York"
+    report_mode: str = "always"
+    max_runs: int = Field(default=20, ge=1)
+    deadline: Optional[str] = None
+
+    @field_validator("kind")
+    @classmethod
+    def _kind(cls, value: str) -> str:
+        if value not in {"once", "recurring", "continue"}:
+            raise ValueError("kind must be once, recurring, or continue")
+        return value
+
+    @field_validator("report_mode")
+    @classmethod
+    def _report_mode(cls, value: str) -> str:
+        if value not in {"always", "changed"}:
+            raise ValueError("report_mode must be always or changed")
+        return value
+
+
 class RouterOutput(BaseModel):
     # Written FIRST when phrasing a result: what the results establish, what follows
     # from them, what stays unknown. Never sent; it makes the reply a conclusion
@@ -110,6 +138,7 @@ class RouterOutput(BaseModel):
     # One or two plain sentences: what this task is and where it stands after this
     # turn. Stored on the task and shown as "Where it stands" next time.
     task_summary: Optional[str] = None
+    schedule: Optional[ScheduleProposal] = None
 
 
 class Router:
@@ -144,7 +173,7 @@ class Router:
             "Available task scopes (choose the minimal set):\n"
             f"{scope_lines}\n\n"
             "Respond with ONLY a JSON object, no prose, of the form:\n"
-            '{"reasoning": string or null, "reply": string or null, "request": null or {"prompt": string, "scopes": [string], "summary": string, "counterpart": string or null}}\n'
+            '{"reasoning": string or null, "reply": string or null, "request": null or {"prompt": string, "scopes": [string], "summary": string, "counterpart": string or null}, "schedule": null or {"title": string, "prompt": string, "kind": "once"|"recurring"|"continue", "cron": string|null, "run_at": ISO datetime|null, "timezone": IANA timezone, "report_mode": "always"|"changed", "max_runs": integer, "deadline": ISO datetime|null}}\n'
             "- reply: what to send back to the sender now, or null to send nothing.\n"
             "- request.counterpart: the email (preferred), phone, or full name of the person the task is\n"
             "  about, when it concerns someone other than the sender; null otherwise.\n"
@@ -196,6 +225,11 @@ class Router:
             "  locations, exact message bodies to send). The assistant has no memory of this conversation.\n"
             "- request.summary: one short line for Aaron describing the task.\n"
             "- Only create a request when a tool action is actually needed.\n"
+            "- SCHEDULES: only when the sender is Aaron and he asks for work at a future time, on a cadence, "
+            "or as continuing work, fill schedule. For recurring use a standard five-field cron expression. "
+            "For once use an absolute ISO datetime. For continue, prompt is the exact work each run should "
+            "continue, max_runs defaults to 20 and deadline defaults to seven days from NOW. Never fill "
+            "schedule for anyone except Aaron. A schedule is proposed for his approval and does not run now.\n"
             "- You have no memory of what tools can or cannot do. NEVER tell anyone a capability is missing, "
             "broken, or unavailable, and never rely on past failure notes in the history; tools get fixed. "
             "If information is needed (who emailed, what is on a calendar, a phone number, a file), "
@@ -277,7 +311,8 @@ class Router:
                         "texts (vary it: not the same opener every time, no formula), or null if nothing needs saying. "
                         if is_approver else
                         " and will be shown to Aaron for approval; tell the sender you will confirm with Aaron. ") +
-                       "Do not describe steps or claim anything is done. Do NOT output a request.\n\n")
+                       "Do not describe steps or claim anything is done. Do NOT output a request. If Aaron asked "
+                       "for future, recurring or continuing unattended work, fill schedule even though request is null.\n\n")
         elif action is False:
             decided = ("DECIDED: no tool action will be taken for this message. Answer in words from TASK MEMORY "
                        "and NOW, or acknowledge. Do NOT output a request.\n"

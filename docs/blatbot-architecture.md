@@ -168,8 +168,68 @@ delegates. From the gateway down, the path is identical for all channels.
  │ except the short recent-task summary at call pickup                           │
  └───────────────────────────────────────────────────────────────────────────────┘
 
-  HOUSEKEEPING   watchdog restarts on stale log (~35 min) · expiry sweep
+  HOUSEKEEPING   watchdog restarts on stale log (~35 min) · expiry sweep · schedule sweep every 30 s
 ```
+
+## Schedules are request sources
+
+The scheduler does not execute tools. `GateSessionManager` owns one schedule
+loop beside the approval-expiry loop. Every 30 seconds it selects active rows
+whose `next_run` is due and asks `ScheduleService` to mint an approved request
+on the schedule's task. From there the request takes the normal path through
+`execute`: prompt hash check, frozen scopes, executor, destructive-action hold,
+grounded report, and task ledger. Requests carry `schedule_id` and
+`schedule_kind`, which is also how the continue-only host tool stays absent from
+ordinary requests.
+
+```
+owner text or console
+        |
+        v
+schedule row: proposed + ordinary pending approval request
+        |
+        | owner yes
+        v
+schedule row: active, exact prompt and scopes frozen
+        |
+        | next_run <= now
+        v
+ordinary approved request tagged with schedule_id
+        |
+        v
+existing execute path and task ledger
+```
+
+There are three kinds in one `schedules` table:
+
+- `once` stores one absolute `run_at`, fires, then closes.
+- `recurring` stores a five-field cron expression and an IANA timezone. The
+  parser accepts numbers, wildcards, lists, ranges, and steps. Day-of-month and
+  day-of-week use the standard OR rule. UTC-minute search skips nonexistent
+  local times and ignores the second fold of repeated local times.
+- `continue` injects `mcp__host__schedule_continue` into only that run. The tool
+  accepts a delay of at least five minutes and a full progress note. Notes are
+  included in later prompts. No tool call means the work is finished. The
+  approval fixes `max_runs` and `deadline`, defaulting to 20 and seven days.
+
+At mint time a recurring schedule advances from the current clock, not from
+every missed slot, so downtime creates one run. An existing pending destructive
+confirmation, approved request, or running request counts as overlap; the firing
+is skipped and recorded. One schedule's exception is caught inside the loop.
+The `GATE_SCHEDULES_PAUSED` setting stops all new firings, and three consecutive
+failed runs pause the individual schedule and notify Aaron.
+
+Schedule approval covers sends and writes in the stored scopes. It does not
+cover destructive calls. Scheduled owner work is deliberately passed to the
+executor without the ordinary owner's send preview and without either owner
+scope widening path. A missing scope is reported and the run stops.
+
+`always` reports every run. `changed` reports only failures and successful
+writes other than `schedule_continue`. A failed final once run and every final
+continue run are reported regardless of mode. Declining or allowing a held
+destructive call to expire closes a once or continue run as done without adding
+a failure; a recurring schedule keeps its next firing. Restart recovery sends
+an interrupted scheduled request through the same failed-run completion path.
 
 ## Text / email vs phone
 
@@ -209,10 +269,11 @@ delegates. From the gateway down, the path is identical for all channels.
 | Executor (Claude Code) | `inkbox_claude/gate/executor.py` |
 | Executor (Jev agent, `GATE_EXECUTOR=jev`) | `inkbox_claude/gate/jevagent.py` |
 | Ledger and requests schema | `inkbox_claude/gate/store.py` |
+| Schedule lifecycle and cron | `inkbox_claude/gate/schedules.py`, `inkbox_claude/gate/cron.py` |
 | Voice bridge, prompt, tool schema | `inkbox_claude/realtime.py` |
 | Voice persona | `_BLATBOT_VOICE` in `inkbox_claude/config.py` |
 | Per-call notes for the voice agent | `GateSession.voice_briefing` |
-| Tests | `tests/test_gate.py` |
+| Tests | `tests/test_gate.py`, `tests/test_schedules.py` |
 | Env (`~/.inkbox-claude/.env`) | `INKBOX_VOICE_STACK`, `INKBOX_REALTIME_ENABLED`, `OPENAI_API_KEY`, `INKBOX_REALTIME_VOICE`, `GATE_VOICE_TRUST_APPROVER`, `GATE_VOICE_VOCABULARY`, `INKBOX_APPROVER_PHONE` |
 
 ## Deciding a turn: Jev first, the router only writes
@@ -358,8 +419,10 @@ the earlier result lines that mention those argument values (the event title and
 time, the row). `GateSessionManager.ask_confirmation` parks the request as pending
 with that record and texts the owner the exact action. `#N yes` runs
 `JevAgent.perform` on that one call and finishes the request; `#N no` marks it
-rejected and changes nothing. Claude Code is denied destructive calls outright and
-told to report what it would change. Every agent report opens with
+rejected and changes nothing. For ordinary requests Claude Code is denied
+destructive calls outright and told to report what it would change. For a
+scheduled request it parks the exact call for the same owner confirmation.
+Every agent report opens with
 `WRITES PERFORMED:` listing each write's tool and arguments, or "none".
 
 Background: on 2026-09-29 a request to cancel one interview deleted a different

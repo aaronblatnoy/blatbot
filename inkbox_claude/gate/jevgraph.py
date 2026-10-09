@@ -413,7 +413,7 @@ def _owner_asked(req: Any) -> bool:
     The test is the thread it was created on, the same one the other executor uses. Guessing
     from the surface was wrong: a stranger's approved iMessage request is not his."""
     from .manager import OWNER_THREAD
-    return getattr(req, "chat_id", "") == OWNER_THREAD
+    return getattr(req, "chat_id", "") == OWNER_THREAD and not getattr(req, "schedule_id", None)
 
 
 async def guard(state: AgentState, config: RunnableConfig) -> Dict[str, Any]:
@@ -624,6 +624,8 @@ async def run(agent: "ja.JevAgent", req: Any, context: str = "") -> Dict[str, An
     judge, prose = ja.Judge(), ja.Prose(agent.router)
     started = time.time()
     allowed = ja.tools_for(req.scopes)
+    if req.schedule_kind == "continue":
+        allowed.append("mcp__host__schedule_continue")
     background = req.prompt if req.prompt != req.original_message else ""
     facts: Dict[str, Any] = {"request": req.original_message, "task_context": context, "background": background,
                              **ja._now_facts(), "accounts": {"org_google": ja.ORG_ACCOUNT, "owner_google": ja.OWNER_ACCOUNT}}

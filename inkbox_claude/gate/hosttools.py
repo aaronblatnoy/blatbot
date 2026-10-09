@@ -44,7 +44,7 @@ async def host_status(args: Dict[str, Any]) -> str:
     return "\n\n".join(f"## {p}\n{o}" for p, o in zip(parts, outs))
 
 
-def sdk_server() -> Any:
+def sdk_server(continue_state: Optional[Dict[str, Any]] = None) -> Any:
     """The same tool as an in-process MCP server for the Claude Code executor."""
     from claude_agent_sdk import create_sdk_mcp_server, tool
 
@@ -52,7 +52,17 @@ def sdk_server() -> Any:
     async def _host_status(args: Dict[str, Any]) -> Dict[str, Any]:
         return {"content": [{"type": "text", "text": await host_status(args)}]}
 
-    return create_sdk_mcp_server(name="host", version="1.0.0", tools=[_host_status])
+    tools = [_host_status]
+    if continue_state is not None:
+        @tool("schedule_continue", SCHEDULE_CONTINUE_DESCRIPTION, SCHEDULE_CONTINUE_SCHEMA)
+        async def _schedule_continue(args: Dict[str, Any]) -> Dict[str, Any]:
+            text = schedule_continue(args)
+            continue_state.clear()
+            continue_state.update({"delay_minutes": int(args["delay_minutes"]), "note": str(args["note"]).strip()})
+            return {"content": [{"type": "text", "text": text}]}
+
+        tools.append(_schedule_continue)
+    return create_sdk_mcp_server(name="host", version="1.0.0", tools=tools)
 
 
 # ---------------------------------------------------------------------------
@@ -72,6 +82,31 @@ ROWS_WHERE_SCHEMA = {"type": "object", "required": ["result_key", "contains"], "
     "column": {"type": "string", "description": "for sheet rows: only match inside this column (header name); omit to match anywhere"},
     "also_contains": {"type": "string", "description": "a second text the same row must also contain; omit if none"},
 }}
+
+SCHEDULE_CONTINUE_DESCRIPTION = (
+    "SET THE NEXT WAKE-UP for this continuing scheduled job and leave a progress note. "
+    "Call this only when more work remains. If it is not called, the continuing schedule ends."
+)
+SCHEDULE_CONTINUE_SCHEMA = {
+    "type": "object", "required": ["delay_minutes", "note"], "properties": {
+        "delay_minutes": {"type": "integer", "minimum": 5,
+                          "description": "whole minutes from now until the next run; at least 5"},
+        "note": {"type": "string", "description": "progress so far and what the next run should continue"},
+    },
+}
+
+
+def schedule_continue(args: Dict[str, Any]) -> str:
+    try:
+        delay = int(args.get("delay_minutes"))
+    except (TypeError, ValueError) as exc:
+        raise ValueError("delay_minutes must be a whole number") from exc
+    note = str(args.get("note") or "").strip()
+    if delay < 5:
+        raise ValueError("the next wake-up must be at least 5 minutes away")
+    if not note:
+        raise ValueError("a progress note is required")
+    return f"Next wake-up requested in {delay} minutes. Progress note:\n{note}"
 
 _ROW_RE = re.compile(r"^\s*Row\s+(\d+):\s*(\[.*\])\s*$")
 
