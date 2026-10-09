@@ -435,3 +435,95 @@ def overview(gateway: Any, store: Store) -> Dict[str, Any]:
         "health": health(gateway, store),
         "waiting": waiting,
     }
+
+
+def _request_summary(request: Request) -> Dict[str, Any]:
+    """A trimmed request shape for the home page: no original message, no raw tool
+    output -- just what a calm overview needs to show and link to."""
+    return {
+        "id": request.id,
+        "sender": request.sender_name or request.sender,
+        "surface": request.mode,
+        "summary": request.summary or "",
+        "state": request.state,
+        "created_at": request.created_at,
+        "updated_at": request.updated_at,
+    }
+
+
+def home(gateway: Any, store: Store) -> Dict[str, Any]:
+    """Everything the Home page shows, already shaped, counted, sorted and worded.
+    No message bodies and no secrets: summaries, names, handles, channels, states,
+    counts and timestamps only."""
+    gateway_health = health(gateway, store)
+
+    pending = store.pending()  # oldest first
+    oldest = pending[0] if pending else None
+    needs_you = {
+        "count": len(pending),
+        "oldest": _request_summary(oldest) if oldest else None,
+    }
+
+    running = store.recent_requests(state="running", limit=50)
+    right_now = {
+        "running_count": len(running),
+        "running": [_request_summary(r) for r in running[:5]],
+        "gateway_up": True,  # this response itself proves the gate answered
+        "tunnel_connected": bool(gateway_health["tunnel"]["connected"]),
+    }
+
+    recent = store.recent_requests(limit=8)  # newest first
+    recent_activity = [_request_summary(r) for r in recent]
+
+    schedules_data = schedules(store)
+    now = time.time()
+    upcoming = sorted(
+        (
+            {
+                "id": s["id"],
+                "title": s["title"],
+                "cadence": s["cadence"],
+                "next_run": s["next_run"],
+                "state": s["state"],
+            }
+            for s in schedules_data["schedules"]
+            if s.get("next_run") and s["next_run"] >= now and s["state"] == "active"
+        ),
+        key=lambda s: s["next_run"],
+    )[:5]
+    coming_up = {
+        "schedules_paused": schedules_data["global_paused"],
+        "next": upcoming,
+    }
+
+    people_rows = people(store)
+    role_rows = roles(store)
+    people_summary = {
+        "total": len(people_rows),
+        "with_role": sum(1 for row in people_rows if row.get("role")),
+        "roles": [{"name": r["name"], "members": r["people_count"]} for r in role_rows],
+        "last_sync": people_last_sync(store),
+    }
+
+    contacts = sorted(
+        (row for row in people_rows if (row.get("last_seen") or 0) and row["key"] not in {"", None}),
+        key=lambda row: -(row.get("last_seen") or 0),
+    )[:6]
+    recent_contacts = [
+        {
+            "key": row["key"],
+            "person": row.get("person") or row["key"],
+            "channels": row.get("channels") or [],
+            "last_seen": row.get("last_seen") or 0,
+        }
+        for row in contacts
+    ]
+
+    return {
+        "needs_you": needs_you,
+        "right_now": right_now,
+        "recent_activity": recent_activity,
+        "coming_up": coming_up,
+        "people": people_summary,
+        "recent_contacts": recent_contacts,
+    }

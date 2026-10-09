@@ -301,6 +301,124 @@ async def test_event_stream_sets_cors_header_for_allowed_origin(monkeypatch):
         resp.close()
 
 
+# ---------------------------------------------------------------------------
+# Home: the dashboard's single shaped endpoint
+# ---------------------------------------------------------------------------
+
+class FakeGateway:
+    """Enough of the real gateway for api.health()/api.home() to read."""
+
+    def __init__(self, started_at=1_700_000_000.0, public_url="", tunnel=None):
+        self._console_started_at = started_at
+        self._public_url = public_url
+        self._tunnel = tunnel
+
+
+def test_home_empty_state(tmp_path):
+    store = make_store(tmp_path)
+    gateway = FakeGateway()
+
+    result = api.home(gateway, store)
+
+    assert result["needs_you"] == {"count": 0, "oldest": None}
+    assert result["right_now"]["running_count"] == 0
+    assert result["right_now"]["running"] == []
+    assert result["right_now"]["gateway_up"] is True
+    assert result["recent_activity"] == []
+    assert result["coming_up"] == {"schedules_paused": False, "next": []}
+    assert result["people"]["total"] == 0
+    assert result["people"]["with_role"] == 0
+    assert result["people"]["roles"] == []
+    assert result["people"]["last_sync"] == {"at": None, "counts": {}, "failed": []}
+    assert result["recent_contacts"] == []
+    # No message bodies or secrets anywhere in the shape.
+    assert "original_message" not in str(result["needs_you"])
+
+
+def test_home_needs_you_is_the_oldest_pending_request(tmp_path):
+    store = make_store(tmp_path)
+    gateway = FakeGateway()
+    task_id = store.create_task("Help Alex")["id"]
+    first = store.create_request(
+        chat_id="c1", sender="a@example.com", sender_name="Alex", mode="email",
+        subject="", original_message="please do X", summary="Do X", scopes=[],
+        prompt="do X", state="pending", task_id=task_id,
+    )
+    store.create_request(
+        chat_id="c2", sender="b@example.com", sender_name="Bo", mode="sms",
+        subject="", original_message="please do Y", summary="Do Y", scopes=[],
+        prompt="do Y", state="pending", task_id=task_id,
+    )
+
+    result = api.home(gateway, store)
+
+    assert result["needs_you"]["count"] == 2
+    assert result["needs_you"]["oldest"]["id"] == first.id
+    assert result["needs_you"]["oldest"]["summary"] == "Do X"
+    assert "original_message" not in result["needs_you"]["oldest"]
+
+
+def test_home_people_and_roles_summary(tmp_path):
+    store = make_store(tmp_path)
+    gateway = FakeGateway()
+    store.set_role("comms", ["inbox_read", "email_send"], note="")
+    store.set_trust("mia@example.edu", person="Mia", role="comms")
+    store.set_trust("stranger@example.com", person="Stranger", role="")
+
+    result = api.home(gateway, store)
+
+    assert result["people"]["total"] == 2
+    assert result["people"]["with_role"] == 1
+    roles_by_name = {r["name"]: r["members"] for r in result["people"]["roles"]}
+    assert roles_by_name["comms"] == 1
+
+
+def test_home_coming_up_lists_only_active_future_schedules(tmp_path):
+    import time as _time
+
+    store = make_store(tmp_path)
+    gateway = FakeGateway()
+    task_id = store.create_task("Weekly report")["id"]
+    schedule = store.create_schedule(
+        chat_id="owner", task_id=task_id, title="Weekly report", prompt="do the report",
+        kind="recurring", scopes=[], timezone="America/New_York", report_mode="always",
+        cron="0 9 * * 1-5", next_run=_time.time() + 3600,
+    )
+    store.update_schedule(schedule.id, state="active")
+    # A paused schedule with a future run must not appear in "coming up".
+    other_task = store.create_task("Paused job")["id"]
+    paused = store.create_schedule(
+        chat_id="owner", task_id=other_task, title="Paused job", prompt="do the thing",
+        kind="once", scopes=[], timezone="America/New_York", report_mode="always",
+        run_at=_time.time() + 7200, next_run=_time.time() + 7200,
+    )
+    store.update_schedule(paused.id, state="paused")
+
+    result = api.home(gateway, store)
+
+    assert result["coming_up"]["schedules_paused"] is False
+    assert len(result["coming_up"]["next"]) == 1
+    assert result["coming_up"]["next"][0]["title"] == "Weekly report"
+    assert "cron" not in result["coming_up"]["next"][0]  # worded cadence, not raw cron
+
+
+def test_home_recent_contacts_excludes_people_never_seen(tmp_path):
+    store = make_store(tmp_path)
+    gateway = FakeGateway()
+    store.remember_synced_people([
+        {"key": "+15551230000", "person": "Theo", "channels": ["sms"], "last_seen": 1_700_000_000.0},
+        {"key": "dana@example.com", "person": "Dana", "channels": [], "last_seen": 0.0},
+    ])
+
+    result = api.home(gateway, store)
+
+    keys = {c["key"] for c in result["recent_contacts"]}
+    assert "+15551230000" in keys
+    assert "dana@example.com" not in keys
+    for contact in result["recent_contacts"]:
+        assert "message" not in contact and "text" not in contact
+
+
 def test_thread_counterparts_are_senders_not_conversation_ids(tmp_path):
     from inkbox_claude.gate.store import Store
     store = Store(str(tmp_path / "gate.db"))

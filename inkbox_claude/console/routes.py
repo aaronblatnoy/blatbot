@@ -75,6 +75,11 @@ async def get_overview(request: web.Request) -> web.StreamResponse:
     return _json(api.overview(request.app["console.gateway"], manager.store))
 
 
+async def get_home(request: web.Request) -> web.StreamResponse:
+    manager = _manager(request)
+    return _json(api.home(request.app["console.gateway"], manager.store))
+
+
 async def get_people(request: web.Request) -> web.StreamResponse:
     store = _manager(request).store
     return _json({
@@ -202,6 +207,7 @@ def register(app: web.Application, gateway: Any) -> None:
     app.middlewares.append(access.tailnet_gate)
     app.middlewares.append(access.cors_gate)
     app.router.add_get("/console/api/overview", _endpoint(get_overview))
+    app.router.add_get("/console/api/home", _endpoint(get_home))
     app.router.add_get("/console/api/people", _endpoint(get_people))
     app.router.add_post("/console/api/people", _endpoint(post_people, mutation=True))
     app.router.add_post("/console/api/people/delete", _endpoint(post_people_delete, mutation=True))
@@ -228,7 +234,7 @@ def register(app: web.Application, gateway: Any) -> None:
     app.router.add_post("/console/api/settings", _endpoint(post_settings, mutation=True))
     app.router.add_get("/console/events", get_events)
     for path in (
-        "/console/api/overview", "/console/api/people", "/console/api/people/sync",
+        "/console/api/overview", "/console/api/home", "/console/api/people", "/console/api/people/sync",
         "/console/api/roles", "/console/api/roles/delete", "/console/api/roles/members/add",
         "/console/api/roles/members/remove", "/console/api/scopes", "/console/api/requests",
         "/console/api/requests/decide", "/console/api/tasks", "/console/api/health",
