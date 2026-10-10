@@ -335,6 +335,17 @@ class Schedule:
         )
 
 
+def role_names(value: Any) -> List[str]:
+    """The roles held by one trust row. A person can hold several; they are kept in the
+    one `role` column separated by commas."""
+    out: List[str] = []
+    for part in str(value or "").split(","):
+        name = " ".join(part.split()).lower()
+        if name and name not in out:
+            out.append(name)
+    return out
+
+
 def _trust_key(value: str) -> str:
     """One handle, normalised. A phone is its digits, anything else is lowercase text, so
     the same person matches whether they arrive as +1 (555) 010-0001 or 15550100001."""
@@ -543,7 +554,7 @@ class Store:
                 "INSERT INTO trust(key,person,role,scopes,note,updated_at) VALUES(?,?,?,?,?,?) "
                 "ON CONFLICT(key) DO UPDATE SET person=excluded.person, role=excluded.role, "
                 "scopes=excluded.scopes, note=excluded.note, updated_at=excluded.updated_at",
-                (_trust_key(key), person, (role or "").strip().lower(),
+                (_trust_key(key), person, ", ".join(role_names(role)),
                  json.dumps(sorted(set(scopes or []))), note, time.time()))
             self._db.commit()
 
@@ -578,7 +589,8 @@ class Store:
             role = role or r["role"]
             person = person or r["person"]
             scopes += json.loads(r["scopes"] or "[]")
-            scopes += roles.get(r["role"], [])
+            for name in role_names(r["role"]):
+                scopes += roles.get(name, [])
         return {"role": role, "scopes": sorted(set(scopes)), "person": person}
 
     def known_people(self) -> List[Dict[str, Any]]:

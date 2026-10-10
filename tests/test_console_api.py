@@ -438,3 +438,17 @@ def test_task_detail_returns_every_ledger_event(tmp_path):
     detail = api.task(store, task["id"])
     assert len(detail["events"]) == 150
     assert detail["events"][0]["text"] == "event 0" and detail["events"][-1]["text"] == "event 149"
+
+
+def test_person_can_hold_two_roles(tmp_path):
+    store = Store(str(tmp_path / "gate.db"))
+    store.set_role("ops", ["inbox_read"])
+    store.set_role("club", ["calendar_read"])
+    api.add_role_member(store, {"name": "ops", "key": "sam@example.edu", "person": "Sam"})
+    api.add_role_member(store, {"name": "club", "key": "sam@example.edu"})
+    assert store.trust_for(["sam@example.edu"])["scopes"] == ["calendar_read", "inbox_read"]
+    by_name = {r["name"]: r for r in api.roles(store)}
+    assert by_name["ops"]["people_count"] == 1 and by_name["club"]["people_count"] == 1
+    api.remove_role_member(store, {"name": "ops", "key": "sam@example.edu"})
+    assert store.trust_for(["sam@example.edu"])["scopes"] == ["calendar_read"]
+    assert {r["name"]: r["people_count"] for r in api.roles(store)} == {"ops": 0, "club": 1}

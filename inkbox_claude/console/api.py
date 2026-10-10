@@ -8,7 +8,7 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 from ..gate.scopes import SCOPES, SCOPE_SYSTEM
-from ..gate.store import Request, Store
+from ..gate.store import Request, Store, role_names
 from ..gate.schedules import cadence as schedule_cadence, next_three as schedule_next_three
 from . import events
 
@@ -110,7 +110,8 @@ def people(store: Store) -> List[Dict[str, Any]]:
         by_key[row["key"]] = merged
     out = []
     for row in by_key.values():
-        role_scopes = roles_by_name.get(row.get("role") or "", {}).get("scopes", [])
+        role_scopes = [s for name in role_names(row.get("role"))
+                       for s in roles_by_name.get(name, {}).get("scopes", [])]
         effective = sorted(set(role_scopes) | set(row.get("scopes") or []))
         row["effective_scopes"] = effective
         read_count = sum(1 for name in effective if _scope_kind(name, SCOPES.get(name, {})) == "read")
@@ -193,7 +194,7 @@ def _role_members(store: Store, name: str) -> List[Dict[str, Any]]:
     return [
         {"key": row["key"], "person": row.get("person") or row["key"]}
         for row in store.trusted()
-        if (row.get("role") or "") == name
+        if name in role_names(row.get("role"))
     ]
 
 
@@ -206,7 +207,7 @@ def _role_model(store: Store, row: Dict[str, Any], people_rows: Optional[List[Di
     members = [
         {"key": r["key"], "person": r.get("person") or r["key"]}
         for r in (people_rows if people_rows is not None else store.trusted())
-        if (r.get("role") or "") == row["name"]
+        if row["name"] in role_names(r.get("role"))
     ]
     return {
         "name": row["name"],
@@ -249,7 +250,8 @@ def add_role_member(store: Store, payload: Dict[str, Any]) -> Dict[str, Any]:
     person = _text(payload.get("person"), "person") or (existing or {}).get("person", "") or key
     scopes = (existing or {}).get("scopes") or []
     note = (existing or {}).get("note") or ""
-    store.set_trust(key, person=person, role=name, scopes=scopes, note=note)
+    held = role_names((existing or {}).get("role"))
+    store.set_trust(key, person=person, role=", ".join(held + [name]), scopes=scopes, note=note)
     events.publish("permissions.changed", {"kind": "role", "name": name, "member_added": key})
     return next(item for item in roles(store) if item["name"] == name)
 
@@ -258,8 +260,9 @@ def remove_role_member(store: Store, payload: Dict[str, Any]) -> Dict[str, Any]:
     name = _required_text(payload.get("name"), "name").lower()
     key = _required_text(payload.get("key"), "key")
     existing = next((row for row in store.trusted() if row["key"] == store.trusted_key(key)), None)
-    if existing and (existing.get("role") or "") == name:
-        store.set_trust(key, person=existing.get("person") or "", role="",
+    if existing and name in role_names(existing.get("role")):
+        kept = [r for r in role_names(existing.get("role")) if r != name]
+        store.set_trust(key, person=existing.get("person") or "", role=", ".join(kept),
                          scopes=existing.get("scopes") or [], note=existing.get("note") or "")
     events.publish("permissions.changed", {"kind": "role", "name": name, "member_removed": key})
     return next(item for item in roles(store) if item["name"] == name)
