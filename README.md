@@ -278,7 +278,7 @@ These are the decisions the whole thing rests on.
 9. **Nothing is deleted, cancelled or replaced without the owner's yes, even when the owner asked.** The agent stops before a destructive call, texts the exact action and what it refers to (the event's title and time, the row), and performs that one call only on "#N yes". Claude Code cannot make such calls at all. Every result report opens with the writes performed, or "none".
 10. **No confident wrong answers.** A result reply is checked by a judgment against the retrieved results before it is sent: names, titles, numbers, dates and "current" claims must appear in the results, or the reply is rewritten from the results only, or replaced by the raw result. In the agent, a web search result is a lead, not an answer; the page is opened and read before the run can end.
 11. **Nothing goes out to another person without me seeing it, including when I asked for it.** A message the owner asks to have sent is him speaking to someone through the assistant, so the send is held at the tool boundary, the whole draft comes back with every recipient and the text verbatim, and only his yes releases that exact call. A request from anyone else was already read and approved by him in full, so answering it is untouched. The hold is enforced by withholding send tools from the pre-approved list, because a tool the runtime has been told to allow never reaches a permission hook.
-12. **Everyone starts with no permissions.** A role names a level of trust and the scopes it carries; a person is trusted by handle, so the same person is recognised by email, phone, Telegram id or name. A request whose scopes fall entirely inside what they were given runs immediately; anything outside it still waits. Trusting someone with the calendar does not let them send mail.
+12. **Everyone starts with no permissions.** A person is one record with any number of contacts inside it: emails, phone numbers, Telegram ids. A role names a level of trust and the scopes it carries, and a person can hold several; their scopes are the union. A message arriving on any of a person's contacts resolves to that one person. A contact matches on its kind as well as its value, so a Telegram id never passes for a phone number with the same digits, and a display name never grants anything. Two different people's contacts on one message grant nothing. A request whose scopes fall entirely inside what the person was given runs immediately; anything outside it still waits. Trusting someone with the calendar does not let them send mail.
 13. **A surface is how a message arrived, not who it is with.** Email, iMessage, SMS, Telegram and the phone are one conversation with the owner, written to one record, so a notice sent on one is visible from another. A reply still goes back out the way it came. A group chat is its own conversation even when he is the one talking, because what is said in front of other people does not belong in his private record.
 14. **In a group it decides whether to speak, and that decision is only for groups, and today only on Telegram.** A direct message is always answered. In a Telegram group, a message naming it is answered; one that does not goes to a single judgment asking whether its silence would be the worse answer, and an undecided or failed judgment stays quiet. It hears everything either way, and records what it chose not to answer, so a later follow-up has something to refer back to.
 15. **An interrupted run is reported, not forgotten.** A run the process died inside leaves someone watching a typing indicator that never resolves. On startup an ordinary run is named on its own thread and offered again. A scheduled run is completed as a failed schedule run and reported to the owner. Neither is retried on its own, because a half-finished run may already have changed something.
@@ -323,13 +323,23 @@ refused at the tool call in both engines.
 A private web console, reachable only over the tailnet. It exists so permissions are
 something I can see rather than something I remember.
 
-- **People and permissions.** Pick a person, give them a role, tick extra scopes. For each
-  one it spells out what runs on its own and what still interrupts me. Adding a person means
-  adding a handle: an email, a phone, a Telegram id, or a name. "Refresh from Inkbox" pages
-  every channel the agent identity has ever spoken on (`console/sync.py` via
-  `console/directory.py`'s real `InkboxSDKDirectoryClient`) and folds the results into the
-  people list by the same handle-normalization trust keys use, without ever touching trust
-  or role assignment on its own.
+- **People.** One entry per person, with their contacts listed inside it. Create a person, rename
+  them, tick the roles they hold, add or remove a contact, move a contact to someone else, or
+  merge a duplicate into another person. Contacts seen in traffic or in the Inkbox sync that
+  belong to nobody yet are listed separately until they are assigned. People are never merged
+  because two names look alike; a merge is always an explicit action.
+- **Roles.** Each role shows the scopes it grants, split into read and write, and its members,
+  one row per person. The role editor adds and removes scopes from a pick list grouped by
+  system. A role that carries a send scope is called out, because it lets Blatbot speak for
+  that person without me seeing the message first.
+- **Scopes.** The decision tree the gate walks, drawn left to right: system, then the question
+  asked (or "always"), then the scopes a yes grants, then the tools inside each scope, with the
+  roles that hold each scope.
+- **Permissions.** Per person: what runs on its own and what still interrupts me, with extra
+  scopes on top of their roles. "Refresh from Inkbox" pages every channel the agent identity
+  has ever spoken on (`console/sync.py` via `console/directory.py`'s real
+  `InkboxSDKDirectoryClient`) and records what it finds as unassigned contacts, without ever
+  touching a person, a role or a permission on its own.
 - **Requests.** What is waiting on me at the top, with the sender, the surface, the scopes and
   their full message, approved or rejected inline. That calls the same command a `#N yes` text
   does, so a yes cannot come to mean two different things.
@@ -436,6 +446,34 @@ not call it closes the schedule. Continue schedules have an approval-time run
 limit and deadline, defaulting to 20 runs and seven days, and wake-ups must be at
 least five minutes apart.
 
+## Where the data lives
+
+Nothing the assistant knows is kept in the console, and nothing is kept in a file beside the
+backend. The console holds layout and wording only and asks the API for everything else,
+including the list of contact types and the assistant's own picture. The API reads and writes
+one database.
+
+- **The database is Postgres.** Set `GATE_DB_PATH` to a `postgresql://` URL and the store opens
+  it; every table the gate uses lives there: threads, messages, requests, tasks and their
+  events, people and contacts, roles, schedules, settings. Mine is a Coolify-managed Postgres
+  published on a loopback-only port, so the backend on the same host can reach it and nothing
+  else can.
+- **SQLite still works.** Leave `GATE_DB_PATH` unset, or point it at a file, and the same store
+  runs on SQLite. That is what the tests use by default and what a first local run uses.
+- **Moving an existing store.** `python -m inkbox_claude.gate.migrate_to_postgres --sqlite
+  <gate.db> --pg-dsn <url>` copies everything across with ids preserved. Stop the gateway
+  first, run it, compare the printed counts, set `GATE_DB_PATH`, start the gateway. Going back
+  is the same setting pointed at the file.
+- **Search.** Task search is SQLite FTS5 on a file and a `tsvector` with a GIN index on
+  Postgres. Both honour quoted phrases and `OR`, require every other word, and match the last
+  word of a term as a prefix; on Postgres punctuation is indexed as spaces, so `venue.com`
+  finds `eve@venue.com`.
+- **Testing on Postgres.** `STORE_BACKEND=postgres BLATBOT_TEST_PG_DSN=<url of an empty test
+  database> pytest` routes every store the tests open to its own schema in that database, so
+  the code under test is the code that runs live.
+- **Still files.** The scope registry (`gate/scopes.yaml` and its resolved tool lists), the
+  standing instructions (`standing.md`), per-request findings and logs are files on the host.
+
 ## What is in this fork
 
 The custom code spans the gate package, the console package, the Telegram and voice surfaces, the scope registry, and the tests.
@@ -444,7 +482,9 @@ The custom code spans the gate package, the console package, the Telegram and vo
 |---|---|
 | `inkbox_claude/gate/manager.py` | The core: a session per person, the owner trust check, approval commands, the phone surface |
 | `inkbox_claude/gate/router.py` | The reply writer (DeepSeek): told the decision, writes only the words sent back; also the ledger query planner |
-| `inkbox_claude/gate/store.py` | SQLite: the task ledger, requests and their states, threads |
+| `inkbox_claude/gate/store.py` | All state: the task ledger, requests and their states, threads, people and their contacts, roles, schedules, settings. Opens Postgres when given a `postgresql://` URL and SQLite when given a file path |
+| `inkbox_claude/gate/pgdb.py` | The Postgres connection behind the store: one guarded connection, rollback after a failed statement, reconnect after a dropped one |
+| `inkbox_claude/gate/migrate_to_postgres.py` | Copies a SQLite store into Postgres: read-only on the source, safe to re-run, prints row counts and a text checksum per table |
 | `inkbox_claude/gate/schedules.py`, `cron.py` | Schedule approval, firing, continuation bounds, and timezone-aware cron calculation |
 | `inkbox_claude/gate/taskpick.py` | The typed judgments (TypeSafe Jev): which task, whether action is needed, which scopes, what the message did to the task |
 | `inkbox_claude/gate/jevagent.py` | The alternative executor: a loop of typed judgments that picks tools and selects arguments, calls MCP tools directly, prose only on demand |
@@ -482,6 +522,9 @@ TYPESAFE_API_KEY=
 GATE_EXECUTOR=claude           # claude (what runs today) or jev; also in the console
 GATE_EXECUTOR_FALLBACK=claude  # or none; only used when the engine is jev
 GATE_SEARCH_URL=http://127.0.0.1:8888/search   # a local SearXNG; web search runs through the browser against it
+
+# Where the state lives. A postgresql:// URL, or a file path for SQLite (the default is gate.db in the state dir).
+GATE_DB_PATH=postgresql://blatbot:<password>@127.0.0.1:5433/blatbot
 
 # Who the owner is. These values are the entire trust boundary.
 INKBOX_APPROVER_PHONE=+15550100001
@@ -531,7 +574,7 @@ Measured on the deployed box, executor time from approval to result. Claude Code
 - **The scope map is wired to my setup.** `scopes.py` references the specific Google Workspace tool servers I run. To use this yourself, edit that file to point at your own tools. Making this configurable is the next piece of work.
 - **Some prompts still say "Blatbot" and "Aaron."** The persona and a few rules are written for me. They are being moved into config.
 - **The safety classes are name-based.** Whether a tool is destructive, or sends to a person, is decided by its name and arguments against a maintained pattern, not by understanding what it does. A newly added tool with an unfamiliar name can slip past the hold until the pattern is updated.
-- **A name is not a principal.** A person can be trusted by email, phone, Telegram id or name. Only the first three are stamped by a provider; a display name is whatever its owner types, so granting scopes to a name is not safe.
+- **A contact is only as strong as its channel.** A person is recognised by email address, phone number or Telegram id. A Telegram id is stamped by Telegram; an email sender address and a caller ID can be forged. A display name is whatever its owner types, so it is never used to recognise anyone.
 - **Caller ID is not authentication.** Trusting a phone number on voice calls is a convenience with a known weakness, which is why it is a separate switch.
 - **It is a single-owner design.** One assistant, one person who can approve. Other people can be given roles, but only the owner grants them. It is not a multi-tenant service.
 - **The console has no auth of its own.** It is safe because it is only reachable on a private network. Do not put it on the public internet as it stands.
