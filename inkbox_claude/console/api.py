@@ -101,9 +101,17 @@ def people(store: Store) -> List[Dict[str, Any]]:
             "note": "",
             "channels": row.get("channels") or [],
             "last_seen": row.get("last_seen") or 0.0,
+            "person_id": "",
         }
         for row in store.known_people()
     }
+    if hasattr(store, "find_contact") and hasattr(store, "guess_contact_kind"):
+        # Attach a person_id where the key matches an already-linked contact, so the
+        # console can group several contacts of one person on this flat view too.
+        for key, row in by_key.items():
+            contact = store.find_contact(store.guess_contact_kind(key), key)
+            if contact and contact.get("person_id"):
+                row["person_id"] = contact["person_id"]
     for row in store.trusted():
         merged = dict(by_key.get(row["key"], {}))
         merged.update(row)
@@ -157,6 +165,130 @@ def delete_person(store: Store, payload: Dict[str, Any]) -> Dict[str, Any]:
     store.drop_trust(key)
     events.publish("permissions.changed", {"kind": "person", "key": key, "deleted": True})
     return {"ok": True, "key": key}
+
+
+# -- person directory: full CRUD over persons + contacts --------------------
+# This is the model the People page's management UI drives. The flat
+# upsert_person/delete_person pair above stays for the legacy single-handle shape;
+# everything here operates on person ids and contact ids directly.
+
+_CONTACT_KINDS = {"email", "phone", "telegram", "imessage", "name", "other"}
+
+
+def _person_model(store: Store, row: Dict[str, Any]) -> Dict[str, Any]:
+    roles_by_name = {r["name"]: r for r in store.roles()}
+    role_scopes = roles_by_name.get(row.get("role") or "", {}).get("scopes", [])
+    effective = sorted(set(role_scopes) | set(row.get("scopes") or []))
+    return {
+        "id": row["id"],
+        "display": row.get("display") or "",
+        "role": row.get("role") or "",
+        "scopes": row.get("scopes") or [],
+        "effective_scopes": effective,
+        "note": row.get("note") or "",
+        "contacts": row.get("contacts") or [],
+        "created_at": row.get("created_at"),
+        "updated_at": row.get("updated_at"),
+    }
+
+
+def people_directory(store: Store) -> Dict[str, Any]:
+    """Every live person with their contacts, plus every contact seen in traffic or
+    sync that has not been attached to anyone yet."""
+    return {
+        "people": [_person_model(store, p) for p in store.list_people()],
+        "unlinked": store.unlinked_contacts(),
+    }
+
+
+def create_person_endpoint(store: Store, payload: Dict[str, Any]) -> Dict[str, Any]:
+    display = _text(payload.get("display"), "display")
+    role = _text(payload.get("role"), "role")
+    scopes = _scopes(payload.get("scopes") or [])
+    note = _text(payload.get("note"), "note")
+    row = store.create_person(display=display, role=role, scopes=scopes, note=note)
+    events.publish("people.changed", {"kind": "person", "id": row["id"], "action": "created"})
+    return _person_model(store, row)
+
+
+def update_person_endpoint(store: Store, payload: Dict[str, Any]) -> Dict[str, Any]:
+    person_id = _required_text(payload.get("id"), "id")
+    changes: Dict[str, Any] = {}
+    if "display" in payload:
+        changes["display"] = _text(payload.get("display"), "display")
+    if "role" in payload:
+        changes["role"] = _text(payload.get("role"), "role")
+    if "scopes" in payload:
+        changes["scopes"] = _scopes(payload.get("scopes") or [])
+    if "note" in payload:
+        changes["note"] = _text(payload.get("note"), "note")
+    try:
+        row = store.update_person(person_id, **changes)
+    except KeyError as exc:
+        raise ValidationError(str(exc)) from exc
+    events.publish("people.changed", {"kind": "person", "id": person_id, "action": "updated"})
+    return _person_model(store, row)
+
+
+def remove_person_endpoint(store: Store, payload: Dict[str, Any]) -> Dict[str, Any]:
+    person_id = _required_text(payload.get("id"), "id")
+    ok = store.delete_person(person_id)
+    events.publish("people.changed", {"kind": "person", "id": person_id, "action": "deleted"})
+    return {"ok": ok, "id": person_id}
+
+
+def _validate_contact_kind(kind: Any) -> str:
+    kind = _required_text(kind, "kind").lower()
+    if kind not in _CONTACT_KINDS:
+        raise ValidationError(f"unknown contact kind: {kind}")
+    return kind
+
+
+def add_contact_endpoint(store: Store, payload: Dict[str, Any]) -> Dict[str, Any]:
+    person_id = _required_text(payload.get("person_id"), "person_id")
+    kind = _validate_contact_kind(payload.get("kind"))
+    value = _required_text(payload.get("value"), "value")
+    result = store.upsert_contact(kind, value, person_id=person_id, source="manual")
+    if result["conflict"]:
+        events.publish("people.changed", {"kind": "contact", "action": "conflict",
+                                           "contact_id": result["contact"]["id"]})
+        return {"ok": False, "conflict": True, "existing_person_id": result["existing_person_id"],
+                "contact": result["contact"]}
+    events.publish("people.changed", {"kind": "contact", "person_id": person_id, "action": "added"})
+    return {"ok": True, "conflict": False, "contact": result["contact"]}
+
+
+def remove_contact_endpoint(store: Store, payload: Dict[str, Any]) -> Dict[str, Any]:
+    contact_id = _required_text(payload.get("contact_id"), "contact_id")
+    ok = store.remove_contact(contact_id)
+    events.publish("people.changed", {"kind": "contact", "contact_id": contact_id, "action": "removed"})
+    return {"ok": ok, "contact_id": contact_id}
+
+
+def move_contact_endpoint(store: Store, payload: Dict[str, Any]) -> Dict[str, Any]:
+    contact_id = _required_text(payload.get("contact_id"), "contact_id")
+    person_id = payload.get("person_id") or None
+    if person_id is not None and not isinstance(person_id, str):
+        raise ValidationError("person_id must be a string or null")
+    try:
+        row = store.move_contact(contact_id, person_id)
+    except KeyError as exc:
+        raise ValidationError(str(exc)) from exc
+    events.publish("people.changed", {"kind": "contact", "contact_id": contact_id, "action": "moved",
+                                       "person_id": person_id})
+    return {"ok": True, "contact": row}
+
+
+def link_people_endpoint(store: Store, payload: Dict[str, Any]) -> Dict[str, Any]:
+    keep_id = _required_text(payload.get("keep_id"), "keep_id")
+    merge_id = _required_text(payload.get("merge_id"), "merge_id")
+    try:
+        result = store.link_people(keep_id, merge_id)
+    except (KeyError, ValueError) as exc:
+        raise ValidationError(str(exc)) from exc
+    events.publish("people.changed", {"kind": "person", "action": "linked",
+                                       "keep_id": keep_id, "merge_id": merge_id})
+    return result
 
 
 def _scope_kind(name: str, spec: Dict[str, Any]) -> str:
