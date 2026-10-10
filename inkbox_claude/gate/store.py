@@ -13,6 +13,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
+from .pgdb import PGConnection, is_postgres_target
+
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS threads (
   chat_id TEXT PRIMARY KEY,
@@ -153,7 +155,227 @@ CREATE TABLE IF NOT EXISTS contacts (
   UNIQUE(kind, value)
 );
 CREATE INDEX IF NOT EXISTS contacts_person ON contacts(person_id);
+CREATE TABLE IF NOT EXISTS contact_kinds (
+  kind TEXT PRIMARY KEY,
+  label TEXT NOT NULL,
+  hint TEXT NOT NULL DEFAULT '',
+  addable INTEGER NOT NULL DEFAULT 1,
+  sort_order INTEGER NOT NULL DEFAULT 0
+);
 """
+
+# Postgres gets the FINAL current shape directly (every column every sqlite
+# ALTER/migrate step below would otherwise add), since a Postgres database
+# only ever starts from the migration script's already-migrated data -- the
+# ALTER-TABLE-if-column-missing dance and _migrate_person_keyed_tasks /
+# _migrate_people_model below exist solely to carry an OLD sqlite file
+# forward through this codebase's history; they do not apply to a database
+# that starts empty and is filled by the migration script in one shot.
+#
+# task_fts is no longer an FTS5 virtual table: it is a normal table plus a
+# generated tsvector column `doc` with a GIN index. query_tasks() branches on
+# self._is_pg to query it with websearch_to_tsquery/ts_rank_cd instead of
+# FTS5 MATCH/bm25 -- see the `_is_pg` branch there for the documented
+# difference in ranking and matching behaviour.
+SCHEMA_PG = """
+CREATE TABLE IF NOT EXISTS threads (
+  chat_id TEXT PRIMARY KEY,
+  state TEXT NOT NULL DEFAULT 'idle',
+  mode TEXT,
+  meta_json TEXT,
+  updated_at DOUBLE PRECISION NOT NULL
+);
+CREATE TABLE IF NOT EXISTS messages (
+  id BIGSERIAL PRIMARY KEY,
+  chat_id TEXT NOT NULL,
+  kind TEXT NOT NULL,
+  mode TEXT,
+  text TEXT NOT NULL,
+  created_at DOUBLE PRECISION NOT NULL,
+  reply_to BIGINT,
+  role TEXT
+);
+CREATE INDEX IF NOT EXISTS messages_chat ON messages(chat_id, id);
+CREATE INDEX IF NOT EXISTS messages_reply_to ON messages(reply_to);
+CREATE TABLE IF NOT EXISTS mail_ids (
+  message_id TEXT PRIMARY KEY,
+  root TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS thread_links (
+  thread_key TEXT NOT NULL,
+  chat_id TEXT NOT NULL,
+  updated_at DOUBLE PRECISION NOT NULL,
+  PRIMARY KEY (thread_key, chat_id)
+);
+CREATE TABLE IF NOT EXISTS requests (
+  id BIGSERIAL PRIMARY KEY,
+  chat_id TEXT NOT NULL,
+  sender TEXT,
+  sender_name TEXT,
+  mode TEXT,
+  subject TEXT,
+  original_message TEXT NOT NULL,
+  summary TEXT NOT NULL,
+  scopes_json TEXT NOT NULL,
+  prompt TEXT NOT NULL,
+  prompt_sha256 TEXT NOT NULL,
+  state TEXT NOT NULL,
+  revision INTEGER NOT NULL DEFAULT 0,
+  status_json TEXT,
+  raw_output TEXT,
+  created_at DOUBLE PRECISION NOT NULL,
+  updated_at DOUBLE PRECISION NOT NULL,
+  task_id BIGINT,
+  inbound_id BIGINT,
+  schedule_id BIGINT,
+  schedule_kind TEXT NOT NULL DEFAULT ''
+);
+CREATE INDEX IF NOT EXISTS requests_state ON requests(state);
+CREATE TABLE IF NOT EXISTS tasks (
+  id BIGSERIAL PRIMARY KEY,
+  key TEXT NOT NULL DEFAULT '',
+  display TEXT NOT NULL DEFAULT '',
+  title TEXT NOT NULL,
+  summary TEXT NOT NULL DEFAULT '',
+  state TEXT NOT NULL DEFAULT 'open',
+  created_at DOUBLE PRECISION NOT NULL,
+  updated_at DOUBLE PRECISION NOT NULL
+);
+CREATE INDEX IF NOT EXISTS tasks_key ON tasks(key, updated_at);
+CREATE INDEX IF NOT EXISTS tasks_state ON tasks(state, updated_at);
+CREATE TABLE IF NOT EXISTS task_participants (
+  task_id BIGINT NOT NULL,
+  key TEXT NOT NULL,
+  display TEXT NOT NULL,
+  person_id TEXT NOT NULL DEFAULT '',
+  seq BIGSERIAL,
+  PRIMARY KEY (task_id, key)
+);
+CREATE INDEX IF NOT EXISTS task_participants_key ON task_participants(key);
+CREATE INDEX IF NOT EXISTS task_participants_person ON task_participants(person_id);
+CREATE TABLE IF NOT EXISTS people (
+  person_id TEXT NOT NULL,
+  key TEXT NOT NULL,
+  display TEXT NOT NULL DEFAULT '',
+  updated_at DOUBLE PRECISION NOT NULL,
+  PRIMARY KEY (person_id, key)
+);
+CREATE INDEX IF NOT EXISTS people_key ON people(key);
+CREATE TABLE IF NOT EXISTS task_fts (
+  task_id BIGINT NOT NULL,
+  title TEXT NOT NULL DEFAULT '',
+  summary TEXT NOT NULL DEFAULT '',
+  people TEXT NOT NULL DEFAULT '',
+  events TEXT NOT NULL DEFAULT '',
+  requests TEXT NOT NULL DEFAULT '',
+  dates TEXT NOT NULL DEFAULT '',
+  doc tsvector GENERATED ALWAYS AS (
+    to_tsvector('english',
+      coalesce(title,'') || ' ' || coalesce(summary,'') || ' ' || coalesce(people,'') || ' ' ||
+      coalesce(events,'') || ' ' || coalesce(requests,'') || ' ' || coalesce(dates,''))
+  ) STORED
+);
+CREATE INDEX IF NOT EXISTS task_fts_task ON task_fts(task_id);
+CREATE INDEX IF NOT EXISTS task_fts_doc ON task_fts USING GIN(doc);
+CREATE TABLE IF NOT EXISTS task_events (
+  id BIGSERIAL PRIMARY KEY,
+  task_id BIGINT NOT NULL,
+  kind TEXT NOT NULL,
+  chat_id TEXT,
+  request_id BIGINT,
+  text TEXT NOT NULL,
+  created_at DOUBLE PRECISION NOT NULL
+);
+CREATE INDEX IF NOT EXISTS task_events_task ON task_events(task_id, id);
+CREATE TABLE IF NOT EXISTS schedules (
+  id BIGSERIAL PRIMARY KEY,
+  chat_id TEXT NOT NULL,
+  task_id BIGINT NOT NULL,
+  title TEXT NOT NULL,
+  prompt TEXT NOT NULL,
+  prompt_sha256 TEXT NOT NULL,
+  kind TEXT NOT NULL,
+  cron TEXT,
+  run_at DOUBLE PRECISION,
+  timezone TEXT NOT NULL DEFAULT 'America/New_York',
+  scopes_json TEXT NOT NULL,
+  report_mode TEXT NOT NULL DEFAULT 'always',
+  state TEXT NOT NULL DEFAULT 'proposed',
+  next_run DOUBLE PRECISION,
+  last_run DOUBLE PRECISION,
+  last_request_id BIGINT,
+  run_count INTEGER NOT NULL DEFAULT 0,
+  max_runs INTEGER NOT NULL DEFAULT 20,
+  deadline DOUBLE PRECISION,
+  notes TEXT NOT NULL DEFAULT '[]',
+  revision INTEGER NOT NULL DEFAULT 0,
+  consecutive_failures INTEGER NOT NULL DEFAULT 0,
+  last_outcome TEXT NOT NULL DEFAULT '',
+  created_at DOUBLE PRECISION NOT NULL,
+  updated_at DOUBLE PRECISION NOT NULL
+);
+CREATE INDEX IF NOT EXISTS schedules_due ON schedules(state, next_run);
+CREATE TABLE IF NOT EXISTS persons (
+  id TEXT PRIMARY KEY,
+  display TEXT NOT NULL DEFAULT '',
+  role TEXT NOT NULL DEFAULT '',
+  scopes TEXT NOT NULL DEFAULT '[]',
+  note TEXT NOT NULL DEFAULT '',
+  merged_into TEXT,
+  created_at DOUBLE PRECISION NOT NULL DEFAULT 0,
+  updated_at DOUBLE PRECISION NOT NULL DEFAULT 0
+);
+CREATE INDEX IF NOT EXISTS persons_merged ON persons(merged_into);
+CREATE TABLE IF NOT EXISTS contacts (
+  id TEXT PRIMARY KEY,
+  person_id TEXT,
+  kind TEXT NOT NULL,
+  value TEXT NOT NULL,
+  raw_value TEXT NOT NULL DEFAULT '',
+  source TEXT NOT NULL DEFAULT '',
+  last_seen DOUBLE PRECISION NOT NULL DEFAULT 0,
+  created_at DOUBLE PRECISION NOT NULL DEFAULT 0,
+  updated_at DOUBLE PRECISION NOT NULL DEFAULT 0,
+  UNIQUE(kind, value)
+);
+CREATE INDEX IF NOT EXISTS contacts_person ON contacts(person_id);
+CREATE TABLE IF NOT EXISTS roles (
+  name TEXT PRIMARY KEY, scopes TEXT NOT NULL DEFAULT '[]',
+  note TEXT NOT NULL DEFAULT '', updated_at DOUBLE PRECISION NOT NULL DEFAULT 0
+);
+CREATE TABLE IF NOT EXISTS trust (
+  key TEXT PRIMARY KEY, person TEXT NOT NULL DEFAULT '',
+  role TEXT NOT NULL DEFAULT '', scopes TEXT NOT NULL DEFAULT '[]',
+  note TEXT NOT NULL DEFAULT '', updated_at DOUBLE PRECISION NOT NULL DEFAULT 0
+);
+CREATE TABLE IF NOT EXISTS synced_people (
+  key TEXT PRIMARY KEY, person TEXT NOT NULL DEFAULT '',
+  channels TEXT NOT NULL DEFAULT '[]', last_seen DOUBLE PRECISION NOT NULL DEFAULT 0
+);
+CREATE TABLE IF NOT EXISTS settings (
+  name TEXT PRIMARY KEY, value TEXT NOT NULL DEFAULT '',
+  updated_at DOUBLE PRECISION NOT NULL DEFAULT 0
+);
+CREATE TABLE IF NOT EXISTS contact_kinds (
+  kind TEXT PRIMARY KEY,
+  label TEXT NOT NULL,
+  hint TEXT NOT NULL DEFAULT '',
+  addable BOOLEAN NOT NULL DEFAULT true,
+  sort_order INTEGER NOT NULL DEFAULT 0
+);
+"""
+
+# The ways a person can be reached, in console display order. Lives in the
+# contact_kinds table (seeded here if empty) so the console API reads it from
+# the database instead of a hard-coded list; see Store.contact_kinds().
+_CONTACT_KINDS_SEED = [
+    ("email", "Email", "name@example.com", True, 0),
+    ("phone", "Phone", "+1 555 010 0001", True, 1),
+    ("telegram", "Telegram", "Telegram user id (digits)", True, 2),
+    ("imessage", "iMessage", "phone or Apple ID email", True, 3),
+    ("other", "Other", "handle", True, 4),
+    ("name", "Name", "", False, 5),
+]
 
 TASK_MEMORY_AGE = 21 * 24 * 3600    # finished tasks older than this are not shown
 OPEN_STATES = ("open", "waiting_aaron", "running")
@@ -382,42 +604,78 @@ def _trust_key(value: str) -> str:
 
 class Store:
     def __init__(self, path: str):
-        Path(path).parent.mkdir(parents=True, exist_ok=True)
-        self._db = sqlite3.connect(path, check_same_thread=False)
-        self._db.row_factory = sqlite3.Row
+        self._is_pg = is_postgres_target(path)
+        if self._is_pg:
+            self._db = PGConnection(path)
+        else:
+            Path(path).parent.mkdir(parents=True, exist_ok=True)
+            self._db = sqlite3.connect(path, check_same_thread=False)
+            self._db.row_factory = sqlite3.Row
         self._lock = threading.Lock()
         with self._lock:
-            self._db.executescript(SCHEMA)
-            cols = {r["name"] for r in self._db.execute("PRAGMA table_info(requests)")}
-            if "task_id" not in cols:
-                self._db.execute("ALTER TABLE requests ADD COLUMN task_id INTEGER")
-            if "inbound_id" not in cols:
-                self._db.execute("ALTER TABLE requests ADD COLUMN inbound_id INTEGER")
-            if "schedule_id" not in cols:
-                self._db.execute("ALTER TABLE requests ADD COLUMN schedule_id INTEGER")
-            if "schedule_kind" not in cols:
-                self._db.execute("ALTER TABLE requests ADD COLUMN schedule_kind TEXT NOT NULL DEFAULT ''")
-            mcols = {r["name"] for r in self._db.execute("PRAGMA table_info(messages)")}
-            if "reply_to" not in mcols:
-                # Every outbound is linked to the inbound it answers and typed ack|answer,
-                # so "one answer per message" can be enforced, not just intended.
-                self._db.execute("ALTER TABLE messages ADD COLUMN reply_to INTEGER")
-                self._db.execute("ALTER TABLE messages ADD COLUMN role TEXT")
-                self._db.execute("CREATE INDEX IF NOT EXISTS messages_reply_to ON messages(reply_to)")
-            tcols = {r["name"] for r in self._db.execute("PRAGMA table_info(tasks)")}
-            if "summary" not in tcols:
-                self._db.execute("ALTER TABLE tasks ADD COLUMN summary TEXT NOT NULL DEFAULT ''")
-            pcols = {r["name"] for r in self._db.execute("PRAGMA table_info(task_participants)")}
-            if "person_id" not in pcols:
-                self._db.execute("ALTER TABLE task_participants ADD COLUMN person_id TEXT NOT NULL DEFAULT ''")
-            self._db.execute("CREATE INDEX IF NOT EXISTS task_participants_person ON task_participants(person_id)")
-            self._migrate_person_keyed_tasks()
-            self._migrate_people_model()
-            self._db.commit()
+            if self._is_pg:
+                # Postgres always gets the final current shape in one shot --
+                # see SCHEMA_PG's docstring-comment above for why the
+                # ALTER-TABLE-if-missing dance and the two one-time sqlite
+                # migrations below do not apply here.
+                self._db.executescript(SCHEMA_PG)
+                self._seed_contact_kinds_locked()
+                self._db.commit()
+            else:
+                self._db.executescript(SCHEMA)
+                cols = {r["name"] for r in self._db.execute("PRAGMA table_info(requests)")}
+                if "task_id" not in cols:
+                    self._db.execute("ALTER TABLE requests ADD COLUMN task_id INTEGER")
+                if "inbound_id" not in cols:
+                    self._db.execute("ALTER TABLE requests ADD COLUMN inbound_id INTEGER")
+                if "schedule_id" not in cols:
+                    self._db.execute("ALTER TABLE requests ADD COLUMN schedule_id INTEGER")
+                if "schedule_kind" not in cols:
+                    self._db.execute("ALTER TABLE requests ADD COLUMN schedule_kind TEXT NOT NULL DEFAULT ''")
+                mcols = {r["name"] for r in self._db.execute("PRAGMA table_info(messages)")}
+                if "reply_to" not in mcols:
+                    # Every outbound is linked to the inbound it answers and typed ack|answer,
+                    # so "one answer per message" can be enforced, not just intended.
+                    self._db.execute("ALTER TABLE messages ADD COLUMN reply_to INTEGER")
+                    self._db.execute("ALTER TABLE messages ADD COLUMN role TEXT")
+                    self._db.execute("CREATE INDEX IF NOT EXISTS messages_reply_to ON messages(reply_to)")
+                tcols = {r["name"] for r in self._db.execute("PRAGMA table_info(tasks)")}
+                if "summary" not in tcols:
+                    self._db.execute("ALTER TABLE tasks ADD COLUMN summary TEXT NOT NULL DEFAULT ''")
+                pcols = {r["name"] for r in self._db.execute("PRAGMA table_info(task_participants)")}
+                if "person_id" not in pcols:
+                    self._db.execute("ALTER TABLE task_participants ADD COLUMN person_id TEXT NOT NULL DEFAULT ''")
+                self._db.execute("CREATE INDEX IF NOT EXISTS task_participants_person ON task_participants(person_id)")
+                self._migrate_person_keyed_tasks()
+                self._migrate_people_model()
+                self._seed_contact_kinds_locked()
+                self._db.commit()
             n_tasks = self._db.execute("SELECT COUNT(*) AS n FROM tasks").fetchone()["n"]
             n_fts = self._db.execute("SELECT COUNT(*) AS n FROM task_fts").fetchone()["n"]
         if n_fts < n_tasks:
             self.reindex_all()
+
+    def _seed_contact_kinds_locked(self) -> None:
+        """Idempotent: insert the fixed contact-kind rows if the table is
+        empty. Assumes self._lock is already held and contact_kinds exists."""
+        row = self._db.execute("SELECT COUNT(*) AS n FROM contact_kinds").fetchone()
+        if int(row["n"]) > 0:
+            return
+        for kind, label, hint, addable, order in _CONTACT_KINDS_SEED:
+            self._db.execute(
+                "INSERT INTO contact_kinds(kind,label,hint,addable,sort_order) VALUES(?,?,?,?,?)",
+                (kind, label, hint, addable, order),
+            )
+
+    def contact_kinds(self) -> List[Dict[str, Any]]:
+        """The ways a person can be reached, in console display order. Read
+        from the database (contact_kinds table) instead of a hard-coded list."""
+        with self._lock:
+            rows = self._db.execute(
+                "SELECT kind, label, hint, addable FROM contact_kinds ORDER BY sort_order, kind"
+            ).fetchall()
+        return [{"kind": r["kind"], "label": r["label"], "hint": r["hint"],
+                 "addable": bool(r["addable"])} for r in rows]
 
     def _migrate_person_keyed_tasks(self) -> None:
         """One-time: tasks used to be keyed to a person. Turn each key into a
@@ -507,11 +765,22 @@ class Store:
         when no session for him is live in memory, which is the usual case overnight."""
         if not chat_id:
             return
+        # json_set is sqlite-only; Postgres's jsonb_set has a similar shape
+        # but needs the target cast to jsonb and the new value as a jsonb
+        # literal, and returns jsonb (meta_json is stored as TEXT -- see the
+        # migration note on keeping JSON columns as text -- so the result is
+        # cast back to text to match).
+        if self._is_pg:
+            set_owner_expr = (
+                "jsonb_set(COALESCE(threads.meta_json,'{}')::jsonb, '{owner}', '1', true)::text"
+            )
+        else:
+            set_owner_expr = "json_set(COALESCE(threads.meta_json,'{}'),'$.owner',1)"
         with self._lock:
             self._db.execute(
                 "INSERT INTO threads(chat_id,state,mode,meta_json,updated_at) VALUES(?,?,?,?,?) "
-                "ON CONFLICT(chat_id) DO UPDATE SET meta_json=json_set(COALESCE(threads.meta_json,'{}'),"
-                "'$.owner',1), mode=COALESCE(excluded.mode, threads.mode), updated_at=excluded.updated_at",
+                f"ON CONFLICT(chat_id) DO UPDATE SET meta_json={set_owner_expr}, "
+                "mode=COALESCE(excluded.mode, threads.mode), updated_at=excluded.updated_at",
                 (chat_id, "idle", mode or None, '{"owner": 1}', time.time()),
             )
             self._db.commit()
@@ -519,10 +788,17 @@ class Store:
     def owner_threads(self) -> List[str]:
         """Every thread known to be the owner's, newest first."""
         with self._lock:
-            rows = self._db.execute(
-                "SELECT chat_id FROM threads WHERE json_extract(COALESCE(meta_json,'{}'),'$.owner')=1 "
-                "ORDER BY updated_at DESC"
-            ).fetchall()
+            if self._is_pg:
+                rows = self._db.execute(
+                    "SELECT chat_id FROM threads WHERE "
+                    "(COALESCE(meta_json,'{}')::jsonb->>'owner') IN ('1','true') "
+                    "ORDER BY updated_at DESC"
+                ).fetchall()
+            else:
+                rows = self._db.execute(
+                    "SELECT chat_id FROM threads WHERE json_extract(COALESCE(meta_json,'{}'),'$.owner')=1 "
+                    "ORDER BY updated_at DESC"
+                ).fetchall()
         return [str(r["chat_id"]) for r in rows]
 
     # -- who may act without asking ------------------------------------------
@@ -686,6 +962,9 @@ class Store:
     def remember_synced_people(self, rows: List[Dict[str, Any]]) -> None:
         """Merge directory rows from an Inkbox sync. Never touches trust or roles."""
         self._ensure_synced_people()
+        # Scalar multi-arg MAX(a,b) is sqlite-only; Postgres needs GREATEST(a,b).
+        last_seen_expr = ("GREATEST(synced_people.last_seen, excluded.last_seen)" if self._is_pg
+                          else "MAX(synced_people.last_seen, excluded.last_seen)")
         with self._lock:
             for row in rows:
                 self._db.execute(
@@ -694,7 +973,7 @@ class Store:
                     "person=CASE WHEN length(excluded.person) > length(synced_people.person) "
                     "THEN excluded.person ELSE synced_people.person END, "
                     "channels=excluded.channels, "
-                    "last_seen=MAX(synced_people.last_seen, excluded.last_seen)",
+                    f"last_seen={last_seen_expr}",
                     (row["key"], row.get("person") or "", json.dumps(row.get("channels") or []),
                      float(row.get("last_seen") or 0)),
                 )
@@ -900,9 +1179,10 @@ class Store:
             return {"ok": False, "conflict": True, "existing_person_id": existing_pid,
                     "contact": self._contact_dict(existing)}
         new_pid = existing_pid or live_person  # attach if it was unlinked
+        last_seen_expr = "GREATEST(last_seen, ?)" if self._is_pg else "MAX(last_seen, ?)"
         self._db.execute(
             "UPDATE contacts SET person_id=?, raw_value=?, source=?, "
-            "last_seen=MAX(last_seen, ?), updated_at=? WHERE id=?",
+            f"last_seen={last_seen_expr}, updated_at=? WHERE id=?",
             (new_pid, raw_value or existing["raw_value"], source or existing["source"],
              seen, now, existing["id"]),
         )
@@ -1171,10 +1451,20 @@ class Store:
         # A thread's chat_id is a conversation id, not a person. The handle the person
         # wrote from is the sender recorded on the thread; threads without one are skipped.
         with self._lock:
-            rows = self._db.execute(
-                "SELECT DISTINCT json_extract(meta_json, '$.sender') AS handle, mode AS channel "
-                "FROM threads WHERE meta_json IS NOT NULL AND json_valid(meta_json)"
-            ).fetchall()
+            if self._is_pg:
+                # No json_valid() in Postgres; filter to parseable JSON objects
+                # with a regex (well-formed enough to rule out plain strings)
+                # instead of a try/cast per row.
+                rows = self._db.execute(
+                    "SELECT DISTINCT (meta_json::jsonb->>'sender') AS handle, mode AS channel "
+                    "FROM threads WHERE meta_json IS NOT NULL AND meta_json ~ '^\\s*\\{' "
+                    "AND (meta_json::jsonb->>'sender') IS NOT NULL"
+                ).fetchall()
+            else:
+                rows = self._db.execute(
+                    "SELECT DISTINCT json_extract(meta_json, '$.sender') AS handle, mode AS channel "
+                    "FROM threads WHERE meta_json IS NOT NULL AND json_valid(meta_json)"
+                ).fetchall()
         return [{"handle": r["handle"], "name": "", "channel": r["channel"] or "thread"}
                 for r in rows if str(r["handle"] or "").strip()]
 
@@ -1612,6 +1902,9 @@ class Store:
                 person = Person(person_id=r["person_id"], display=display or r["display"] or str(who),
                                 keys=self.person_keys(person.keys[0]))
         self.remember_person(person)
+        # instr(a,b) is sqlite-only; Postgres's strpos(a,b) has the same
+        # "0 means not found" semantics, so only the function name changes.
+        no_at_fn = "strpos" if self._is_pg else "instr"
         with self._lock:
             for k in person.keys:
                 if not k:
@@ -1619,7 +1912,7 @@ class Store:
                 self._db.execute(
                     "INSERT INTO task_participants(task_id,key,display,person_id) VALUES(?,?,?,?) "
                     "ON CONFLICT(task_id,key) DO UPDATE SET "
-                    "display=CASE WHEN excluded.display<>'' AND instr(excluded.display,'@')=0 THEN excluded.display ELSE task_participants.display END, "
+                    f"display=CASE WHEN excluded.display<>'' AND {no_at_fn}(excluded.display,'@')=0 THEN excluded.display ELSE task_participants.display END, "
                     "person_id=CASE WHEN excluded.person_id<>'' THEN excluded.person_id ELSE task_participants.person_id END",
                     (task_id, k, person.display or k, person.person_id),
                 )
@@ -1631,8 +1924,13 @@ class Store:
             t = self._db.execute("SELECT * FROM tasks WHERE id=?", (task_id,)).fetchone()
             if not t:
                 return None
+            # sqlite orders by its implicit rowid (insertion order); Postgres
+            # has no equivalent, so task_participants carries an explicit
+            # `seq` serial column in SCHEMA_PG for the same ordering.
+            order_col = "seq" if self._is_pg else "rowid"
             ps = self._db.execute(
-                "SELECT key, display, person_id FROM task_participants WHERE task_id=? ORDER BY rowid", (task_id,)
+                f"SELECT key, display, person_id FROM task_participants WHERE task_id=? ORDER BY {order_col}",
+                (task_id,),
             ).fetchall()
         d = dict(t)
         # One entry per person: keys sharing a person_id are grouped.
@@ -1808,25 +2106,53 @@ class Store:
         if ids:
             where.append(f"t.id IN ({','.join('?' * len(ids))})"); args += [int(i) for i in ids]
         if date_from or date_to:
-            # the dates column holds ISO dates; a task matches if any date falls in range
+            # the dates column holds space-separated ISO dates; a task matches if
+            # any date falls in range. sqlite splits the string via a json_each
+            # hack; Postgres has a direct equivalent in regexp_split_to_table.
             lo, hi = (date_from or "0000-01-01"), (date_to or "9999-12-31")
-            where.append("EXISTS (SELECT 1 FROM task_fts f WHERE f.task_id=t.id AND f.dates<>'' AND EXISTS ("
-                         "SELECT 1 FROM json_each('[\"' || replace(f.dates,' ','\",\"') || '\"]') d "
-                         "WHERE d.value BETWEEN ? AND ?))")
+            if self._is_pg:
+                where.append("EXISTS (SELECT 1 FROM task_fts f WHERE f.task_id=t.id AND f.dates<>'' AND EXISTS ("
+                             "SELECT 1 FROM regexp_split_to_table(f.dates, ' ') AS d(value) "
+                             "WHERE d.value BETWEEN ? AND ?))")
+            else:
+                where.append("EXISTS (SELECT 1 FROM task_fts f WHERE f.task_id=t.id AND f.dates<>'' AND EXISTS ("
+                             "SELECT 1 FROM json_each('[\"' || replace(f.dates,' ','\",\"') || '\"]') d "
+                             "WHERE d.value BETWEEN ? AND ?))")
             args += [lo, hi]
         fts_join, rank_col = "", "0 AS rank"
+        # rank_col's own placeholder (Postgres only) must come FIRST in the
+        # rows query's param list, since it sits in the SELECT clause before
+        # WHERE -- it is never used by the COUNT query, which has no rank_col.
+        rank_args: List[Any] = []
         if (text or "").strip():
             fts_join = "JOIN task_fts f ON f.task_id=t.id"
-            where.append("task_fts MATCH ?")
-            args.append(_fts_query(text))
-            rank_col = "bm25(task_fts, 0.0, 10.0, 6.0, 4.0, 2.0, 2.0, 1.0) AS rank"
+            if self._is_pg:
+                # websearch_to_tsquery parses quoted phrases and OR itself from
+                # plain text, so the raw query goes in unprocessed -- _fts_query's
+                # FTS5-syntax quoting/prefix-star is sqlite-only and skipped here.
+                # KNOWN DIFFERENCE: FTS5's prefix matching (e.g. "cater" also
+                # matching "caterer") has no equivalent in websearch_to_tsquery;
+                # Postgres relies on its English stemmer instead, so a bare
+                # unstemmed prefix a few characters short of a real word may not
+                # match the way it does under sqlite.
+                where.append("f.doc @@ websearch_to_tsquery('english', ?)")
+                args.append(text)
+                # Rank is negated so the existing "ORDER BY rank" (ascending =
+                # best first, matching bm25's convention) still picks the best
+                # match first under ts_rank_cd, where higher is better.
+                rank_col = "-ts_rank_cd(f.doc, websearch_to_tsquery('english', ?)) AS rank"
+                rank_args.append(text)
+            else:
+                where.append("task_fts MATCH ?")
+                args.append(_fts_query(text))
+                rank_col = "bm25(task_fts, 0.0, 10.0, 6.0, 4.0, 2.0, 2.0, 1.0) AS rank"
         sql_where = " AND ".join(where) if where else "1"
         with self._lock:
             total = self._db.execute(f"SELECT COUNT(*) AS n FROM tasks t {fts_join} WHERE {sql_where}", args).fetchone()["n"]
             rows = self._db.execute(
                 f"SELECT t.id, t.updated_at, t.state, {rank_col} FROM tasks t {fts_join} WHERE {sql_where} "
                 f"ORDER BY rank, CASE WHEN t.state IN ('open','waiting_aaron','running') THEN 0 ELSE 1 END, t.updated_at DESC LIMIT ?",
-                (*args, max(1, min(int(limit), 50))),
+                (*rank_args, *args, max(1, min(int(limit), 50))),
             ).fetchall()
         return {"tasks": [self.task_with_events(int(r["id"]), limit=6) for r in rows], "total": int(total)}
 
