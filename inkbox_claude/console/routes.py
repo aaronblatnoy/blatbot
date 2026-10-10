@@ -11,6 +11,7 @@ import time
 from typing import Any, Awaitable, Callable, Dict
 from urllib.parse import urlsplit
 
+import aiohttp
 from aiohttp import web
 
 from . import access, api, events
@@ -109,6 +110,33 @@ async def post_people_sync(request: web.Request) -> web.StreamResponse:
     # console request (or webhook delivery) for its duration.
     result = await asyncio.to_thread(api.people_sync, _manager(request).store, client)
     return _json(result)
+
+
+# -- the assistant's own picture ---------------------------------------------
+_AVATAR_TTL = 3600.0
+_avatar_cache: Dict[str, Any] = {"at": 0.0, "body": b"", "type": ""}
+
+
+async def get_avatar(request: web.Request) -> web.StreamResponse:
+    """Blatbot's profile picture, fetched from its Inkbox identity and held for an hour,
+    so the console shows the real one without keeping a copy of its own."""
+    now = time.time()
+    if not _avatar_cache["body"] or now - _avatar_cache["at"] > _AVATAR_TTL:
+        cfg = request.app["console.gateway"].cfg
+        base = str(getattr(cfg, "base_url", "") or "https://inkbox.ai").rstrip("/")
+        url = f"{base}/api/v1/identities/{cfg.identity}/avatar"
+        try:
+            async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=15)) as session:
+                async with session.get(url, headers={"X-API-Key": cfg.api_key}) as upstream:
+                    if upstream.status == 200:
+                        _avatar_cache.update(at=now, body=await upstream.read(),
+                                             type=upstream.headers.get("Content-Type", "image/jpeg"))
+        except Exception:
+            pass
+    if not _avatar_cache["body"]:
+        raise web.HTTPNotFound()
+    return web.Response(body=_avatar_cache["body"], content_type=_avatar_cache["type"].split(";")[0],
+                        headers={"Cache-Control": "private, max-age=3600"})
 
 
 # -- person directory endpoints ---------------------------------------------
@@ -254,6 +282,7 @@ def register(app: web.Application, gateway: Any) -> None:
     app.middlewares.append(access.cors_gate)
     app.router.add_get("/console/api/overview", _endpoint(get_overview))
     app.router.add_get("/console/api/home", _endpoint(get_home))
+    app.router.add_get("/console/api/avatar", _endpoint(get_avatar))
     app.router.add_get("/console/api/people", _endpoint(get_people))
     app.router.add_post("/console/api/people", _endpoint(post_people, mutation=True))
     app.router.add_post("/console/api/people/delete", _endpoint(post_people_delete, mutation=True))

@@ -217,12 +217,27 @@ def _person_model(store: Store, row: Dict[str, Any]) -> Dict[str, Any]:
     }
 
 
+# The ways a person can be reached, in the order the console offers them. The console
+# holds no list of its own: labels and input hints come from here. "name" exists as a
+# stored kind for display names seen in traffic but is not something a person is reached
+# on, so it cannot be added by hand.
+CONTACT_KINDS: List[Dict[str, Any]] = [
+    {"kind": "email", "label": "Email", "hint": "name@example.com", "addable": True},
+    {"kind": "phone", "label": "Phone", "hint": "+1 555 010 0001", "addable": True},
+    {"kind": "telegram", "label": "Telegram", "hint": "Telegram user id (digits)", "addable": True},
+    {"kind": "imessage", "label": "iMessage", "hint": "phone or Apple ID email", "addable": True},
+    {"kind": "other", "label": "Other", "hint": "handle", "addable": True},
+    {"kind": "name", "label": "Name", "hint": "", "addable": False},
+]
+
+
 def people_directory(store: Store) -> Dict[str, Any]:
     """Every live person with their contacts, plus every contact seen in traffic or
     sync that has not been attached to anyone yet."""
     return {
         "people": [_person_model(store, p) for p in store.list_people()],
         "unlinked": store.unlinked_contacts(),
+        "contact_kinds": CONTACT_KINDS,
     }
 
 

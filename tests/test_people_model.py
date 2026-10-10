@@ -412,3 +412,9 @@ def test_scopes_breakdown_carries_the_decision_tree(store):
         assert [l["name"] for l in leaves] == list(SCOPE_TREE_LEAVES[system])
         for leaf in leaves:
             assert leaf["question"] and all(name in SCOPES for name in leaf["grants"])
+
+
+def test_directory_carries_the_contact_kinds_the_console_offers(store):
+    kinds = console_api.people_directory(store)["contact_kinds"]
+    assert [k["kind"] for k in kinds if k["addable"]] == ["email", "phone", "telegram", "imessage", "other"]
+    assert all(k["label"] for k in kinds)
