@@ -195,7 +195,11 @@ def delete_person(store: Store, payload: Dict[str, Any]) -> Dict[str, Any]:
 # upsert_person/delete_person pair above stays for the legacy single-handle shape;
 # everything here operates on person ids and contact ids directly.
 
-_CONTACT_KINDS = {"email", "phone", "telegram", "imessage", "name", "other"}
+def _person_display(store: Store, person_id: Optional[str]) -> str:
+    if not person_id:
+        return ""
+    row = store.get_person(person_id)
+    return (row or {}).get("display") or person_id
 
 
 def _person_model(store: Store, row: Dict[str, Any]) -> Dict[str, Any]:
@@ -269,24 +273,46 @@ def remove_person_endpoint(store: Store, payload: Dict[str, Any]) -> Dict[str, A
     return {"ok": ok, "id": person_id}
 
 
-def _validate_contact_kind(kind: Any) -> str:
+def _validate_contact_kind(store: Store, kind: Any, *, require_addable: bool = False) -> str:
     kind = _required_text(kind, "kind").lower()
-    if kind not in _CONTACT_KINDS:
+    known = store.known_contact_kind(kind)
+    if known is None:
         raise ValidationError(f"unknown contact kind: {kind}")
+    if require_addable and not known["addable"]:
+        raise ValidationError(f"{kind} is not a kind that can be added by hand")
     return kind
 
 
 def add_contact_endpoint(store: Store, payload: Dict[str, Any]) -> Dict[str, Any]:
     person_id = _required_text(payload.get("person_id"), "person_id")
-    kind = _validate_contact_kind(payload.get("kind"))
+    kind = _validate_contact_kind(store, payload.get("kind"), require_addable=True)
     value = _required_text(payload.get("value"), "value")
     result = store.upsert_contact(kind, value, person_id=person_id, source="manual")
     if result["conflict"]:
         events.publish("people.changed", {"kind": "contact", "action": "conflict",
                                            "contact_id": result["contact"]["id"]})
         return {"ok": False, "conflict": True, "existing_person_id": result["existing_person_id"],
+                "existing_person_display": _person_display(store, result["existing_person_id"]),
                 "contact": result["contact"]}
     events.publish("people.changed", {"kind": "contact", "person_id": person_id, "action": "added"})
+    return {"ok": True, "conflict": False, "contact": result["contact"]}
+
+
+def update_contact_endpoint(store: Store, payload: Dict[str, Any]) -> Dict[str, Any]:
+    contact_id = _required_text(payload.get("contact_id"), "contact_id")
+    kind = _validate_contact_kind(store, payload.get("kind"), require_addable=True) if payload.get("kind") else None
+    value = _text(payload.get("value"), "value") if "value" in payload else None
+    if value == "":
+        raise ValidationError("value is required")
+    try:
+        result = store.update_contact(contact_id, kind=kind, value=value)
+    except KeyError as exc:
+        raise ValidationError(str(exc)) from exc
+    if result["conflict"]:
+        return {"ok": False, "conflict": True, "existing_person_id": result["existing_person_id"],
+                "existing_person_display": _person_display(store, result["existing_person_id"]),
+                "contact": result["contact"]}
+    events.publish("people.changed", {"kind": "contact", "contact_id": contact_id, "action": "updated"})
     return {"ok": True, "conflict": False, "contact": result["contact"]}
 
 
@@ -410,6 +436,18 @@ def upsert_role(store: Store, payload: Dict[str, Any]) -> Dict[str, Any]:
     store.set_role(name, _scopes(payload.get("scopes")), _text(payload.get("note"), "note"))
     row = next(item for item in roles(store) if item["name"] == name)
     events.publish("permissions.changed", {"kind": "role", "name": name})
+    return row
+
+
+def rename_role_endpoint(store: Store, payload: Dict[str, Any]) -> Dict[str, Any]:
+    old_name = _required_text(payload.get("name"), "name").lower()
+    new_name = _required_text(payload.get("new_name"), "new_name").lower()
+    try:
+        store.rename_role(old_name, new_name)
+    except (KeyError, ValueError) as exc:
+        raise ValidationError(str(exc)) from exc
+    row = next(item for item in roles(store) if item["name"] == new_name)
+    events.publish("permissions.changed", {"kind": "role", "name": new_name, "renamed_from": old_name})
     return row
 
 

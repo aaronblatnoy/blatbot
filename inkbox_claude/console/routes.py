@@ -168,6 +168,11 @@ async def post_people_contact_move(request: web.Request) -> web.StreamResponse:
     return _json(api.move_contact_endpoint(_manager(request).store, await _payload(request)))
 
 
+async def post_people_contact_update(request: web.Request) -> web.StreamResponse:
+    result = api.update_contact_endpoint(_manager(request).store, await _payload(request))
+    return _json(result, status=409 if result.get("conflict") else 200)
+
+
 async def post_people_link(request: web.Request) -> web.StreamResponse:
     return _json(api.link_people_endpoint(_manager(request).store, await _payload(request)))
 
@@ -182,6 +187,10 @@ async def post_roles(request: web.Request) -> web.StreamResponse:
 
 async def post_roles_delete(request: web.Request) -> web.StreamResponse:
     return _json(api.delete_role(_manager(request).store, await _payload(request)))
+
+
+async def post_roles_rename(request: web.Request) -> web.StreamResponse:
+    return _json(api.rename_role_endpoint(_manager(request).store, await _payload(request)))
 
 
 async def post_roles_members_add(request: web.Request) -> web.StreamResponse:
@@ -294,10 +303,12 @@ def register(app: web.Application, gateway: Any) -> None:
     app.router.add_post("/console/api/people/contact/add", _endpoint(post_people_contact_add, mutation=True))
     app.router.add_post("/console/api/people/contact/remove", _endpoint(post_people_contact_remove, mutation=True))
     app.router.add_post("/console/api/people/contact/move", _endpoint(post_people_contact_move, mutation=True))
+    app.router.add_post("/console/api/people/contact/update", _endpoint(post_people_contact_update, mutation=True))
     app.router.add_post("/console/api/people/link", _endpoint(post_people_link, mutation=True))
     app.router.add_get("/console/api/roles", _endpoint(get_roles))
     app.router.add_post("/console/api/roles", _endpoint(post_roles, mutation=True))
     app.router.add_post("/console/api/roles/delete", _endpoint(post_roles_delete, mutation=True))
+    app.router.add_post("/console/api/roles/rename", _endpoint(post_roles_rename, mutation=True))
     app.router.add_post("/console/api/roles/members/add", _endpoint(post_roles_members_add, mutation=True))
     app.router.add_post("/console/api/roles/members/remove", _endpoint(post_roles_members_remove, mutation=True))
     app.router.add_post("/console/api/roles/scopes/add", _endpoint(post_roles_scopes_add, mutation=True))
@@ -323,8 +334,8 @@ def register(app: web.Application, gateway: Any) -> None:
         "/console/api/overview", "/console/api/home", "/console/api/people", "/console/api/people/sync",
         "/console/api/people/directory", "/console/api/people/create", "/console/api/people/update",
         "/console/api/people/remove", "/console/api/people/contact/add", "/console/api/people/contact/remove",
-        "/console/api/people/contact/move", "/console/api/people/link",
-        "/console/api/roles", "/console/api/roles/delete", "/console/api/roles/members/add",
+        "/console/api/people/contact/move", "/console/api/people/contact/update", "/console/api/people/link",
+        "/console/api/roles", "/console/api/roles/delete", "/console/api/roles/rename", "/console/api/roles/members/add",
         "/console/api/roles/members/remove", "/console/api/roles/scopes/add", "/console/api/roles/scopes/remove",
         "/console/api/scopes", "/console/api/scopes/breakdown", "/console/api/requests",
         "/console/api/requests/decide", "/console/api/tasks", "/console/api/health",

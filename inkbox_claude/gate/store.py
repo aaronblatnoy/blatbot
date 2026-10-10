@@ -697,6 +697,16 @@ class Store:
                 (kind, label, hint, addable, order),
             )
 
+    def known_contact_kind(self, kind: str) -> Optional[Dict[str, Any]]:
+        """One contact_kinds row by kind, or None. Validation against the database
+        truth, not a hard-coded set."""
+        with self._lock:
+            r = self._db.execute(
+                "SELECT kind, label, hint, addable FROM contact_kinds WHERE kind=?", (kind,)
+            ).fetchone()
+        return {"kind": r["kind"], "label": r["label"], "hint": r["hint"],
+                "addable": bool(r["addable"])} if r else None
+
     def contact_kinds(self) -> List[Dict[str, Any]]:
         """The ways a person can be reached, in console display order. Read
         from the database (contact_kinds table) instead of a hard-coded list."""
@@ -864,10 +874,61 @@ class Store:
             self._db.commit()
 
     def drop_role(self, name: str) -> None:
+        name = name.strip().lower()
         self._ensure_trust()
         with self._lock:
-            self._db.execute("DELETE FROM roles WHERE name=?", (name.strip().lower(),))
+            self._db.execute("DELETE FROM roles WHERE name=?", (name,))
+            self._strip_role_locked(name)
             self._db.commit()
+
+    def _strip_role_locked(self, name: str) -> None:
+        """Remove one role name from every person/trust row that holds it, so a
+        deleted role does not leave a dangling name in their comma list. Assumes
+        self._lock is already held."""
+        now = time.time()
+        for table, pk in (("persons", "id"), ("trust", "key")):
+            rows = self._db.execute(f"SELECT {pk} AS pk, role FROM {table}").fetchall()
+            for r in rows:
+                names = role_names(r["role"])
+                if name in names:
+                    kept = [n for n in names if n != name]
+                    self._db.execute(f"UPDATE {table} SET role=?, updated_at=? WHERE {pk}=?",
+                                      (", ".join(kept), now, r["pk"]))
+
+    def rename_role(self, old_name: str, new_name: str) -> Dict[str, Any]:
+        """Rename a role, rewriting it on every person/trust row that holds it so
+        they keep the role (and its scopes) under its new name."""
+        old_name = (old_name or "").strip().lower()
+        new_name = (new_name or "").strip().lower()
+        if not new_name:
+            raise ValueError("new name is required")
+        self._ensure_trust()
+        with self._lock:
+            existing = self._db.execute("SELECT * FROM roles WHERE name=?", (old_name,)).fetchone()
+            if existing is None:
+                raise KeyError(f"no such role: {old_name}")
+            if old_name != new_name:
+                clash = self._db.execute("SELECT 1 FROM roles WHERE name=?", (new_name,)).fetchone()
+                if clash:
+                    raise ValueError(f"a role named {new_name} already exists")
+                now = time.time()
+                self._db.execute(
+                    "INSERT INTO roles(name,scopes,note,updated_at) VALUES(?,?,?,?)",
+                    (new_name, existing["scopes"], existing["note"], now))
+                self._db.execute("DELETE FROM roles WHERE name=?", (old_name,))
+                for table, pk in (("persons", "id"), ("trust", "key")):
+                    rows = self._db.execute(f"SELECT {pk} AS pk, role FROM {table}").fetchall()
+                    for r in rows:
+                        names = role_names(r["role"])
+                        if old_name in names:
+                            names = [new_name if n == old_name else n for n in names]
+                            self._db.execute(f"UPDATE {table} SET role=?, updated_at=? WHERE {pk}=?",
+                                              (", ".join(names), now, r["pk"]))
+            self._db.commit()
+        row = next((r for r in self.roles() if r["name"] == new_name), None)
+        if row is None:
+            raise KeyError(f"no such role: {new_name}")
+        return row
 
     def roles(self) -> List[Dict[str, Any]]:
         self._ensure_trust()
@@ -1141,8 +1202,11 @@ class Store:
         with self._lock:
             self._db.execute("UPDATE contacts SET person_id=NULL, updated_at=? WHERE person_id=?",
                               (time.time(), live))
+            # Anyone merged into the person being deleted is deleted too, not resurrected:
+            # merged_into=NULL would bring them back to the list with whatever stale
+            # role/scopes they held before the merge, which nobody asked for.
+            self._db.execute("DELETE FROM persons WHERE merged_into=?", (live,))
             self._db.execute("DELETE FROM persons WHERE id=?", (live,))
-            self._db.execute("UPDATE persons SET merged_into=NULL WHERE merged_into=?", (live,))
             self._db.commit()
         return True
 
@@ -1224,6 +1288,35 @@ class Store:
         with self._lock:
             return self._upsert_contact_locked(kind, raw_value, person_id=person_id,
                                                 source=source, last_seen=last_seen)
+
+    def update_contact(self, contact_id: str, *, kind: Optional[str] = None,
+                        value: Optional[str] = None) -> Dict[str, Any]:
+        """Change a contact's type and/or value in place, so a correction keeps the
+        row's id, source and last_seen instead of a remove-then-add losing them. Checks
+        the (kind, value) collision BEFORE writing anything, so a clash never deletes
+        the original."""
+        with self._lock:
+            existing = self._db.execute("SELECT * FROM contacts WHERE id=?", (contact_id,)).fetchone()
+            if existing is None:
+                raise KeyError(f"no such contact: {contact_id}")
+            new_kind = kind if kind is not None else existing["kind"]
+            raw_value = value if value is not None else existing["raw_value"]
+            norm = self.normalize_contact_value(raw_value) if value is not None else existing["value"]
+            if new_kind != existing["kind"] or norm != existing["value"]:
+                clash = self._db.execute(
+                    "SELECT * FROM contacts WHERE kind=? AND value=? AND id<>?",
+                    (new_kind, norm, contact_id),
+                ).fetchone()
+                if clash:
+                    return {"ok": False, "conflict": True,
+                            "existing_person_id": clash["person_id"],
+                            "contact": self._contact_dict(clash)}
+            self._db.execute(
+                "UPDATE contacts SET kind=?, value=?, raw_value=?, updated_at=? WHERE id=?",
+                (new_kind, norm, raw_value, time.time(), contact_id),
+            )
+            self._db.commit()
+        return {"ok": True, "conflict": False, "contact": self.get_contact(contact_id)}
 
     def get_contact(self, contact_id: str) -> Optional[Dict[str, Any]]:
         r = self._db.execute("SELECT * FROM contacts WHERE id=?", (contact_id,)).fetchone()

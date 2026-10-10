@@ -11,7 +11,7 @@ import os
 
 import pytest
 
-from inkbox_claude.gate.store import Store
+from inkbox_claude.gate.store import Store, role_names
 from inkbox_claude.console import api as console_api
 
 
@@ -418,3 +418,120 @@ def test_directory_carries_the_contact_kinds_the_console_offers(store):
     kinds = console_api.people_directory(store)["contact_kinds"]
     assert [k["kind"] for k in kinds if k["addable"]] == ["email", "phone", "telegram", "imessage", "other"]
     assert all(k["label"] for k in kinds)
+
+
+# -- contact update -----------------------------------------------------------
+
+def test_update_contact_changes_value_and_kind(store):
+    p = store.create_person(display="Sam Parker")
+    added = store.add_contact(p["id"], "email", "sam@example.com")
+    contact_id = added["contact"]["id"]
+    result = store.update_contact(contact_id, value="sam2@example.com")
+    assert result["ok"] is True
+    assert result["contact"]["id"] == contact_id
+    assert result["contact"]["value"] == "sam2@example.com"
+    # source and id are kept, only the fields given change.
+    assert store.get_contact(contact_id)["source"] == "manual"
+
+
+def test_update_contact_checks_collision_before_changing_anything(store):
+    p1 = store.create_person(display="A")
+    p2 = store.create_person(display="B")
+    store.add_contact(p1["id"], "email", "shared@example.com")
+    added2 = store.add_contact(p2["id"], "email", "other@example.com")
+    contact_id = added2["contact"]["id"]
+    result = store.update_contact(contact_id, value="shared@example.com")
+    assert result["ok"] is False
+    assert result["conflict"] is True
+    assert result["existing_person_id"] == p1["id"]
+    # Nothing changed: p2's contact is still "other@example.com".
+    assert store.get_contact(contact_id)["value"] == "other@example.com"
+
+
+def test_update_contact_endpoint_reports_existing_person_display(store):
+    p1 = console_api.create_person_endpoint(store, {"display": "Taken Person"})
+    p2 = console_api.create_person_endpoint(store, {"display": "B"})
+    console_api.add_contact_endpoint(store, {"person_id": p1["id"], "kind": "email", "value": "shared@example.com"})
+    added2 = console_api.add_contact_endpoint(
+        store, {"person_id": p2["id"], "kind": "email", "value": "other@example.com"}
+    )
+    contact_id = added2["contact"]["id"]
+    result = console_api.update_contact_endpoint(store, {"contact_id": contact_id, "value": "shared@example.com"})
+    assert result["ok"] is False
+    assert result["conflict"] is True
+    assert result["existing_person_id"] == p1["id"]
+    assert result["existing_person_display"] == "Taken Person"
+
+
+def test_update_contact_endpoint_rejects_non_addable_kind(store):
+    p = console_api.create_person_endpoint(store, {"display": "A"})
+    added = console_api.add_contact_endpoint(store, {"person_id": p["id"], "kind": "email", "value": "a@example.com"})
+    with pytest.raises(console_api.ValidationError):
+        console_api.update_contact_endpoint(store, {"contact_id": added["contact"]["id"], "kind": "name"})
+
+
+def test_update_contact_endpoint_rejects_empty_value(store):
+    p = console_api.create_person_endpoint(store, {"display": "A"})
+    added = console_api.add_contact_endpoint(store, {"person_id": p["id"], "kind": "email", "value": "a@example.com"})
+    with pytest.raises(console_api.ValidationError):
+        console_api.update_contact_endpoint(store, {"contact_id": added["contact"]["id"], "value": ""})
+
+
+def test_add_contact_endpoint_reports_existing_person_display(store):
+    p1 = console_api.create_person_endpoint(store, {"display": "Taken Person"})
+    p2 = console_api.create_person_endpoint(store, {"display": "B"})
+    console_api.add_contact_endpoint(store, {"person_id": p1["id"], "kind": "email", "value": "shared@example.com"})
+    result = console_api.add_contact_endpoint(store, {"person_id": p2["id"], "kind": "email", "value": "shared@example.com"})
+    assert result["existing_person_display"] == "Taken Person"
+
+
+# -- role rename --------------------------------------------------------------
+
+def test_rename_role_rewrites_name_on_every_person_who_holds_it(store):
+    store.set_role("partner", ["calendar"], "note")
+    p1 = store.create_person(display="A", role="partner")
+    p2 = store.create_person(display="B", role="partner, other")
+    store.set_role("other", [], "")
+    row = console_api.rename_role_endpoint(store, {"name": "partner", "new_name": "ally"})
+    assert row["name"] == "ally"
+    assert row["scopes"] == ["calendar"]
+    assert role_names(store.get_person(p1["id"])["role"]) == ["ally"]
+    assert set(role_names(store.get_person(p2["id"])["role"])) == {"ally", "other"}
+    assert not any(r["name"] == "partner" for r in store.roles())
+
+
+def test_rename_role_refuses_existing_name(store):
+    store.set_role("partner", [], "")
+    store.set_role("ally", [], "")
+    with pytest.raises(console_api.ValidationError):
+        console_api.rename_role_endpoint(store, {"name": "partner", "new_name": "ally"})
+
+
+def test_rename_role_refuses_empty_new_name(store):
+    store.set_role("partner", [], "")
+    with pytest.raises(console_api.ValidationError):
+        console_api.rename_role_endpoint(store, {"name": "partner", "new_name": ""})
+
+
+# -- role delete strips the name from holders, person delete cascades merges --
+
+def test_delete_role_removes_name_from_every_holder(store):
+    store.set_role("partner", ["calendar"], "")
+    p = store.create_person(display="A", role="partner, other")
+    store.set_role("other", [], "")
+    console_api.delete_role(store, {"name": "partner"})
+    assert role_names(store.get_person(p["id"])["role"]) == ["other"]
+
+
+def test_delete_person_also_deletes_who_merged_into_them(store):
+    keep = store.create_person(display="Keep", role="partner")
+    store.set_role("partner", [], "")
+    merged = store.create_person(display="Merged", role="other")
+    store.set_role("other", [], "")
+    store.link_people(keep["id"], merged["id"])
+    assert store.get_person(merged["id"]) is not None  # still visible for review
+
+    store.delete_person(keep["id"])
+    assert store.get_person(keep["id"]) is None
+    # The merged person does not come back to life with their old role.
+    assert store.get_person(merged["id"]) is None
