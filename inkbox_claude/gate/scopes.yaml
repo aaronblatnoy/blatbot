@@ -18,6 +18,8 @@ where_things_live:
 - '''black sky'' / ''black-sky'' is the server: containers, services, uptime. Not the web.'
 - 'What Aaron has written down for himself (notes on his projects, people, decisions, preferences, how something
   was set up, daily notes): his second brain, the Obsidian vault. Not Drive, not the public web.'
+- 'US pension and benefit plans, their Form 5500 filings, plan assets, trustees, investment managers, consultants
+  and other service providers: the pension filings database (public Department of Labor data). Not the public web.'
 systems:
   second_brain:
     description: 'Aaron''s second brain (''the vault'', ''Obsidian'', ''my notes''): his own markdown notes on projects,
@@ -197,6 +199,13 @@ systems:
         grants:
         - coolify_vox_control
         - coolify_vox_read
+  pension_filings:
+    description: 'The pension filings database: public US Department of Labor Form 5500 annual reports for
+      private-sector pension and benefit plans (plan years 2023 and 2024). Plans, sponsors, assets, participants,
+      investment managers, consultants, custodians, fees, manager changes and plan events. Read-only. No state or city pension funds, no private or client data.'
+    always:
+    - pension_filings_read
+    leaves: {}
 scopes:
   calendar:
     description: 'TAMID calendar: read and write the club''s Google Calendar (org@example.org; interviews, club
@@ -661,3 +670,11 @@ scopes:
     - application
     - database
     - service
+  pension_filings_read:
+    description: 'query the pension filings database (public Department of Labor Form 5500 data): search plans, read
+      one plan and its history, find service providers and their client plans, find lookalike plans, search plan
+      events and funds, map consultants, run a read-only SQL query'
+    read: true
+    server: pension-filings
+    include:
+    - '*'

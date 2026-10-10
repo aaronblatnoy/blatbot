@@ -219,6 +219,9 @@ class TaskPicker:
                     "content; submit, post, mark complete.",
                     "Coolify (black-sky and Vox): apps, services, databases, deployments, logs, env vars; deploy, "
                     "restart, stop.",
+                    "The pension filings database (public Department of Labor Form 5500 data): search pension "
+                    "plans, read a plan's assets, managers and consultants, find a provider's client plans, "
+                    "find lookalike plans, search plan events.",
                 ],
                 "count_as_yes": [
                     "The sender asks for anything to be done, made, fetched, booked, moved, cancelled, sent, "
@@ -241,6 +244,8 @@ class TaskPicker:
                     "through the site', 'take X off the board page', 'swap the headshot'.",
                     "Contacts and messaging: 'text X that ...', 'email X the list', 'what's X's number', "
                     "'add a note to X's contact'.",
+                    "Pension filings: 'which pension plans use X as consultant', 'find plans like Y', "
+                    "'who manages the Z pension fund', 'union pension plans over 500 million in New York'.",
                     "Public web: 'look up X', 'who is the president of Y', 'find Z's LinkedIn', 'confirm that "
                     "roster on their site'.",
                     "Server: 'what's running on black sky', 'is the gateway up', 'how much disk is left'.",
