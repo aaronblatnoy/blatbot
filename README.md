@@ -349,17 +349,17 @@ something I can see rather than something I remember.
 ```
   PAGE          WHAT IT ASKS THE API FOR                       WHAT IT CAN CHANGE
  ┌───────────┬───────────────────────────────────────────────┬───────────────────────────────┐
- │ Home      │ /home          waiting, running, recent        │ nothing                       │
- │ Requests  │ /requests      who, surface, scopes, message   │ approve, reject, edit         │
- │ People    │ /people/directory   persons, contacts, kinds   │ create, rename, roles,        │
+ │ Home      │ /home          waiting, running, recent       │ nothing                       │
+ │ Requests  │ /requests      who, surface, scopes, message  │ approve, reject, edit         │
+ │ People    │ /people/directory   persons, contacts, kinds  │ create, rename, roles,        │
  │           │                                               │ add / move / remove contact,  │
  │           │                                               │ merge a duplicate             │
- │ Roles     │ /roles  /scopes     scopes and members         │ scopes of a role, members     │
- │ Scopes    │ /scopes/breakdown   the decision tree          │ nothing                       │
- │ Tasks     │ /tasks  /tasks/{id} ledger and events          │ nothing                       │
- │ Schedules │ /schedules     cadence, next runs              │ pause, resume, edit           │
- │ Health    │ /health        tunnel, uptime, errors          │ nothing                       │
- │ Settings  │ /settings      the owner's knobs               │ one value at a time           │
+ │ Roles     │ /roles  /scopes     scopes and members        │ scopes of a role, members     │
+ │ Scopes    │ /scopes/breakdown   the decision tree         │ nothing                       │
+ │ Tasks     │ /tasks  /tasks/{id} ledger and events         │ nothing                       │
+ │ Schedules │ /schedules     cadence, next runs             │ pause, resume, edit           │
+ │ Health    │ /health        tunnel, uptime, errors         │ nothing                       │
+ │ Settings  │ /settings      the owner's knobs              │ one value at a time           │
  └───────────┴───────────────────────────────────────────────┴───────────────────────────────┘
         every change publishes an event on /console/events, and open pages redraw from the API
 ```
