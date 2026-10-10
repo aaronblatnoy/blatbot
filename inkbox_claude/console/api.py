@@ -91,6 +91,11 @@ def _request_model(request: Request) -> Dict[str, Any]:
 
 
 def people(store: Store) -> List[Dict[str, Any]]:
+    """One entry per person. `store.trusted()` is one row per CONTACT (a trusted
+    person with two phones is two rows there); this groups those back into one row
+    per person_id, with every contact they hold listed under `keys`. A directory
+    contact nobody has linked to a person yet still stands alone, under its own key,
+    until the owner attaches or promotes it."""
     roles_by_name = {row["name"]: row for row in store.roles()}
     by_key: Dict[str, Dict[str, Any]] = {
         row["key"]: {
@@ -101,15 +106,40 @@ def people(store: Store) -> List[Dict[str, Any]]:
             "note": "",
             "channels": row.get("channels") or [],
             "last_seen": row.get("last_seen") or 0.0,
+            "person_id": "",
         }
         for row in store.known_people()
     }
+    if hasattr(store, "find_contact") and hasattr(store, "guess_contact_kind"):
+        # Attach a person_id where the key matches an already-linked contact, so the
+        # console can group several contacts of one person on this flat view too.
+        for key, row in by_key.items():
+            contact = store.find_contact(store.guess_contact_kind(key), key)
+            if contact and contact.get("person_id"):
+                row["person_id"] = contact["person_id"]
     for row in store.trusted():
         merged = dict(by_key.get(row["key"], {}))
         merged.update(row)
         by_key[row["key"]] = merged
-    out = []
+
+    grouped: Dict[str, Dict[str, Any]] = {}
+    order: List[str] = []
     for row in by_key.values():
+        pid = row.get("person_id") or f"__key__{row['key']}"
+        if pid not in grouped:
+            g = dict(row)
+            g["keys"] = [row["key"]]
+            grouped[pid] = g
+            order.append(pid)
+        else:
+            g = grouped[pid]
+            g["keys"].append(row["key"])
+            g["channels"] = sorted(set(g.get("channels") or []) | set(row.get("channels") or []))
+            g["last_seen"] = max(g.get("last_seen") or 0.0, row.get("last_seen") or 0.0)
+
+    out = []
+    for pid in order:
+        row = grouped[pid]
         role_scopes = [s for name in role_names(row.get("role"))
                        for s in roles_by_name.get(name, {}).get("scopes", [])]
         effective = sorted(set(role_scopes) | set(row.get("scopes") or []))
@@ -160,6 +190,132 @@ def delete_person(store: Store, payload: Dict[str, Any]) -> Dict[str, Any]:
     return {"ok": True, "key": key}
 
 
+# -- person directory: full CRUD over persons + contacts --------------------
+# This is the model the People page's management UI drives. The flat
+# upsert_person/delete_person pair above stays for the legacy single-handle shape;
+# everything here operates on person ids and contact ids directly.
+
+_CONTACT_KINDS = {"email", "phone", "telegram", "imessage", "name", "other"}
+
+
+def _person_model(store: Store, row: Dict[str, Any]) -> Dict[str, Any]:
+    roles_by_name = {r["name"]: r for r in store.roles()}
+    role_scopes = [s for name in role_names(row.get("role"))
+                   for s in roles_by_name.get(name, {}).get("scopes", [])]
+    effective = sorted(set(role_scopes) | set(row.get("scopes") or []))
+    return {
+        "id": row["id"],
+        "display": row.get("display") or "",
+        "role": row.get("role") or "",
+        "roles": role_names(row.get("role")),
+        "scopes": row.get("scopes") or [],
+        "effective_scopes": effective,
+        "note": row.get("note") or "",
+        "contacts": row.get("contacts") or [],
+        "created_at": row.get("created_at"),
+        "updated_at": row.get("updated_at"),
+    }
+
+
+def people_directory(store: Store) -> Dict[str, Any]:
+    """Every live person with their contacts, plus every contact seen in traffic or
+    sync that has not been attached to anyone yet."""
+    return {
+        "people": [_person_model(store, p) for p in store.list_people()],
+        "unlinked": store.unlinked_contacts(),
+    }
+
+
+def create_person_endpoint(store: Store, payload: Dict[str, Any]) -> Dict[str, Any]:
+    display = _text(payload.get("display"), "display")
+    role = _text(payload.get("role"), "role")
+    scopes = _scopes(payload.get("scopes") or [])
+    note = _text(payload.get("note"), "note")
+    row = store.create_person(display=display, role=role, scopes=scopes, note=note)
+    events.publish("people.changed", {"kind": "person", "id": row["id"], "action": "created"})
+    return _person_model(store, row)
+
+
+def update_person_endpoint(store: Store, payload: Dict[str, Any]) -> Dict[str, Any]:
+    person_id = _required_text(payload.get("id"), "id")
+    changes: Dict[str, Any] = {}
+    if "display" in payload:
+        changes["display"] = _text(payload.get("display"), "display")
+    if "role" in payload:
+        changes["role"] = _text(payload.get("role"), "role")
+    if "scopes" in payload:
+        changes["scopes"] = _scopes(payload.get("scopes") or [])
+    if "note" in payload:
+        changes["note"] = _text(payload.get("note"), "note")
+    try:
+        row = store.update_person(person_id, **changes)
+    except KeyError as exc:
+        raise ValidationError(str(exc)) from exc
+    events.publish("people.changed", {"kind": "person", "id": person_id, "action": "updated"})
+    return _person_model(store, row)
+
+
+def remove_person_endpoint(store: Store, payload: Dict[str, Any]) -> Dict[str, Any]:
+    person_id = _required_text(payload.get("id"), "id")
+    ok = store.delete_person(person_id)
+    events.publish("people.changed", {"kind": "person", "id": person_id, "action": "deleted"})
+    return {"ok": ok, "id": person_id}
+
+
+def _validate_contact_kind(kind: Any) -> str:
+    kind = _required_text(kind, "kind").lower()
+    if kind not in _CONTACT_KINDS:
+        raise ValidationError(f"unknown contact kind: {kind}")
+    return kind
+
+
+def add_contact_endpoint(store: Store, payload: Dict[str, Any]) -> Dict[str, Any]:
+    person_id = _required_text(payload.get("person_id"), "person_id")
+    kind = _validate_contact_kind(payload.get("kind"))
+    value = _required_text(payload.get("value"), "value")
+    result = store.upsert_contact(kind, value, person_id=person_id, source="manual")
+    if result["conflict"]:
+        events.publish("people.changed", {"kind": "contact", "action": "conflict",
+                                           "contact_id": result["contact"]["id"]})
+        return {"ok": False, "conflict": True, "existing_person_id": result["existing_person_id"],
+                "contact": result["contact"]}
+    events.publish("people.changed", {"kind": "contact", "person_id": person_id, "action": "added"})
+    return {"ok": True, "conflict": False, "contact": result["contact"]}
+
+
+def remove_contact_endpoint(store: Store, payload: Dict[str, Any]) -> Dict[str, Any]:
+    contact_id = _required_text(payload.get("contact_id"), "contact_id")
+    ok = store.remove_contact(contact_id)
+    events.publish("people.changed", {"kind": "contact", "contact_id": contact_id, "action": "removed"})
+    return {"ok": ok, "contact_id": contact_id}
+
+
+def move_contact_endpoint(store: Store, payload: Dict[str, Any]) -> Dict[str, Any]:
+    contact_id = _required_text(payload.get("contact_id"), "contact_id")
+    person_id = payload.get("person_id") or None
+    if person_id is not None and not isinstance(person_id, str):
+        raise ValidationError("person_id must be a string or null")
+    try:
+        row = store.move_contact(contact_id, person_id)
+    except KeyError as exc:
+        raise ValidationError(str(exc)) from exc
+    events.publish("people.changed", {"kind": "contact", "contact_id": contact_id, "action": "moved",
+                                       "person_id": person_id})
+    return {"ok": True, "contact": row}
+
+
+def link_people_endpoint(store: Store, payload: Dict[str, Any]) -> Dict[str, Any]:
+    keep_id = _required_text(payload.get("keep_id"), "keep_id")
+    merge_id = _required_text(payload.get("merge_id"), "merge_id")
+    try:
+        result = store.link_people(keep_id, merge_id)
+    except (KeyError, ValueError) as exc:
+        raise ValidationError(str(exc)) from exc
+    events.publish("people.changed", {"kind": "person", "action": "linked",
+                                       "keep_id": keep_id, "merge_id": merge_id})
+    return result
+
+
 def _scope_kind(name: str, spec: Dict[str, Any]) -> str:
     """read | write | send. Everything in SCOPES is read or write already (`read` bool);
     a scope is "send" instead of plain "write" when it can make Blatbot speak as itself
@@ -174,14 +330,18 @@ def _scope_kind(name: str, spec: Dict[str, Any]) -> str:
     return "write"
 
 
-def _scope_detail(name: str) -> Dict[str, Any]:
+def _scope_detail(name: str, *, roles_holding: Optional[Dict[str, List[str]]] = None) -> Dict[str, Any]:
     spec = SCOPES.get(name, {})
     return {
         "name": name,
+        "description": spec.get("description") or name,
         "purpose": spec.get("purpose") or spec.get("description") or name,
+        "tools": list(spec.get("tools") or []),
         "tools_count": len(spec.get("tools") or []),
         "group": SCOPE_SYSTEM.get(name, "other"),
         "kind": _scope_kind(name, spec),
+        "read": _scope_kind(name, spec) == "read",
+        "roles": sorted((roles_holding or {}).get(name, [])),
     }
 
 
@@ -190,12 +350,24 @@ _SEND_WARNING = (
 )
 
 
+def _dedupe_members_by_person(rows: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """`store.trusted()` is one row per CONTACT; a role's member list must be one row
+    per PERSON, with every contact they hold shown inside that one entry -- never a
+    second entry for the same person because they have a second phone or Telegram id."""
+    by_person: Dict[str, Dict[str, Any]] = {}
+    order: List[str] = []
+    for r in rows:
+        person_id = r.get("person_id") or r["key"]  # legacy rows with no person_id stand alone
+        if person_id not in by_person:
+            by_person[person_id] = {"key": r["key"], "person": r.get("person") or r["key"], "keys": []}
+            order.append(person_id)
+        by_person[person_id]["keys"].append(r["key"])
+    return [by_person[pid] for pid in order]
+
+
 def _role_members(store: Store, name: str) -> List[Dict[str, Any]]:
-    return [
-        {"key": row["key"], "person": row.get("person") or row["key"]}
-        for row in store.trusted()
-        if name in role_names(row.get("role"))
-    ]
+    rows = [row for row in store.trusted() if name in role_names(row.get("role"))]
+    return _dedupe_members_by_person(rows)
 
 
 def _role_model(store: Store, row: Dict[str, Any], people_rows: Optional[List[Dict[str, Any]]] = None) -> Dict[str, Any]:
@@ -204,11 +376,11 @@ def _role_model(store: Store, row: Dict[str, Any], people_rows: Optional[List[Di
     read_scopes = [d for d in details if d["kind"] == "read"]
     write_scopes = [d for d in details if d["kind"] in ("write", "send")]
     has_send = any(d["kind"] == "send" for d in details)
-    members = [
-        {"key": r["key"], "person": r.get("person") or r["key"]}
-        for r in (people_rows if people_rows is not None else store.trusted())
+    matching = [
+        r for r in (people_rows if people_rows is not None else store.trusted())
         if row["name"] in role_names(r.get("role"))
     ]
+    members = _dedupe_members_by_person(matching)
     return {
         "name": row["name"],
         "note": row.get("note") or "",
@@ -231,6 +403,36 @@ def upsert_role(store: Store, payload: Dict[str, Any]) -> Dict[str, Any]:
     store.set_role(name, _scopes(payload.get("scopes")), _text(payload.get("note"), "note"))
     row = next(item for item in roles(store) if item["name"] == name)
     events.publish("permissions.changed", {"kind": "role", "name": name})
+    return row
+
+
+def add_role_scope(store: Store, payload: Dict[str, Any]) -> Dict[str, Any]:
+    """Add one scope to a role without touching the rest of its scopes."""
+    name = _required_text(payload.get("name"), "name").lower()
+    scope_name = _required_text(payload.get("scope"), "scope")
+    role = next((r for r in store.roles() if r["name"] == name), None)
+    if role is None:
+        raise ValidationError(f"no such role: {name}")
+    if scope_name not in SCOPES:
+        raise ValidationError(f"unknown scope: {scope_name}")
+    scopes = sorted(set(role.get("scopes") or []) | {scope_name})
+    store.set_role(name, scopes, role.get("note") or "")
+    row = next(item for item in roles(store) if item["name"] == name)
+    events.publish("permissions.changed", {"kind": "role", "name": name, "scope_added": scope_name})
+    return row
+
+
+def remove_role_scope(store: Store, payload: Dict[str, Any]) -> Dict[str, Any]:
+    """Remove one scope from a role without touching the rest of its scopes."""
+    name = _required_text(payload.get("name"), "name").lower()
+    scope_name = _required_text(payload.get("scope"), "scope")
+    role = next((r for r in store.roles() if r["name"] == name), None)
+    if role is None:
+        raise ValidationError(f"no such role: {name}")
+    scopes = [s for s in (role.get("scopes") or []) if s != scope_name]
+    store.set_role(name, scopes, role.get("note") or "")
+    row = next(item for item in roles(store) if item["name"] == name)
+    events.publish("permissions.changed", {"kind": "role", "name": name, "scope_removed": scope_name})
     return row
 
 
@@ -268,8 +470,38 @@ def remove_role_member(store: Store, payload: Dict[str, Any]) -> Dict[str, Any]:
     return next(item for item in roles(store) if item["name"] == name)
 
 
-def scopes() -> List[Dict[str, Any]]:
-    return [_scope_detail(name) for name in SCOPES]
+def _roles_holding_scope(store: Store) -> Dict[str, List[str]]:
+    out: Dict[str, List[str]] = {}
+    for role in store.roles():
+        for scope_name in role.get("scopes") or []:
+            out.setdefault(scope_name, []).append(role["name"])
+    return out
+
+
+def scopes(store: Optional[Store] = None) -> List[Dict[str, Any]]:
+    """Every scope in the registry, flat. `store` is optional so this can still be
+    called without one; pass it to get which roles currently hold each scope."""
+    roles_holding = _roles_holding_scope(store) if store is not None else {}
+    return [_scope_detail(name, roles_holding=roles_holding) for name in SCOPES]
+
+
+def scopes_breakdown(store: Optional[Store] = None) -> List[Dict[str, Any]]:
+    """Every scope grouped by the system it belongs to (`SCOPE_TREE_SYSTEMS` in
+    scopes.py / `systems` in scopes.yaml), for the console's scopes page and for the
+    per-role scope picker -- the same grouped list drives both."""
+    from ..gate.scopes import SCOPE_TREE_SYSTEMS
+    flat = scopes(store)
+    by_system: Dict[str, List[Dict[str, Any]]] = {}
+    for detail in flat:
+        by_system.setdefault(detail["group"], []).append(detail)
+    out = []
+    for system_name in sorted(set(SCOPE_TREE_SYSTEMS) | set(by_system)):
+        out.append({
+            "system": system_name,
+            "description": SCOPE_TREE_SYSTEMS.get(system_name, ""),
+            "scopes": sorted(by_system.get(system_name, []), key=lambda d: d["name"]),
+        })
+    return out
 
 
 def requests(store: Store, state: str = "") -> List[Dict[str, Any]]:

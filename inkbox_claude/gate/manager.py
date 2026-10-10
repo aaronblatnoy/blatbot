@@ -206,9 +206,11 @@ class GateSession:
         out = [self._sender(), str(meta.get("telegram_user_id") or ""), str((c or {}).get("id") or ""),
                str((c or {}).get("name") or ""), self._sender_name()]
         tg = str(meta.get("telegram_user_id") or "")
-        if tg:
-            out.append(f"telegram:{tg}")
-        return [h for h in out if str(h or "").strip()]
+        if self.mode == "telegram":
+            # Telegram stamps the numeric id; nothing else on a Telegram message is proof of
+            # who sent it, and the bare id would read as a phone number.
+            return [f"telegram:{tg}"] if tg else []
+        return [h for h in out if str(h or "").strip() and str(h) != tg]
 
     def trust(self) -> Dict[str, Any]:
         """What this sender may have done without asking Aaron. Nothing, unless he has put

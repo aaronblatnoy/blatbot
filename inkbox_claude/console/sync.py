@@ -135,6 +135,15 @@ def sync_people(store: Any, client: InkboxDirectoryClient) -> Dict[str, Any]:
 
     if hasattr(store, "remember_synced_people"):
         store.remember_synced_people(list(merged.values()))
+    if hasattr(store, "upsert_contact") and hasattr(store, "guess_contact_kind"):
+        # Upsert each synced handle into the person-centric contacts table too:
+        # person_id=None so this can only refresh an existing contact's last_seen, or
+        # create a new UNLINKED one -- it never creates a person and never moves a
+        # contact a human already attached to someone.
+        for row in merged.values():
+            kind = store.guess_contact_kind(row["key"])
+            store.upsert_contact(kind, row["key"], person_id=None, source="sync",
+                                  last_seen=row.get("last_seen") or 0)
     if hasattr(store, "set_setting"):
         store.set_setting("people_sync_last_at", str(now))
         store.set_setting("people_sync_counts", _dumps(counts))

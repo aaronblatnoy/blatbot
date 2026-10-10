@@ -129,6 +129,30 @@ CREATE TABLE IF NOT EXISTS schedules (
   updated_at REAL NOT NULL
 );
 CREATE INDEX IF NOT EXISTS schedules_due ON schedules(state, next_run);
+CREATE TABLE IF NOT EXISTS persons (
+  id TEXT PRIMARY KEY,            -- stable generated id, never derived from a contact
+  display TEXT NOT NULL DEFAULT '',
+  role TEXT NOT NULL DEFAULT '',
+  scopes TEXT NOT NULL DEFAULT '[]',
+  note TEXT NOT NULL DEFAULT '',
+  merged_into TEXT,               -- set when this person was linked (merged) into another
+  created_at REAL NOT NULL DEFAULT 0,
+  updated_at REAL NOT NULL DEFAULT 0
+);
+CREATE INDEX IF NOT EXISTS persons_merged ON persons(merged_into);
+CREATE TABLE IF NOT EXISTS contacts (
+  id TEXT PRIMARY KEY,
+  person_id TEXT,                 -- NULL = unlinked: seen in traffic, not attached to anyone
+  kind TEXT NOT NULL,              -- email | phone | telegram | imessage | name | other
+  value TEXT NOT NULL,             -- normalised (the same normalisation as the old trust key)
+  raw_value TEXT NOT NULL DEFAULT '',  -- exactly as entered/seen, never truncated
+  source TEXT NOT NULL DEFAULT '',     -- manual | sync | traffic | migration
+  last_seen REAL NOT NULL DEFAULT 0,
+  created_at REAL NOT NULL DEFAULT 0,
+  updated_at REAL NOT NULL DEFAULT 0,
+  UNIQUE(kind, value)
+);
+CREATE INDEX IF NOT EXISTS contacts_person ON contacts(person_id);
 """
 
 TASK_MEMORY_AGE = 21 * 24 * 3600    # finished tasks older than this are not shown
@@ -388,6 +412,7 @@ class Store:
                 self._db.execute("ALTER TABLE task_participants ADD COLUMN person_id TEXT NOT NULL DEFAULT ''")
             self._db.execute("CREATE INDEX IF NOT EXISTS task_participants_person ON task_participants(person_id)")
             self._migrate_person_keyed_tasks()
+            self._migrate_people_model()
             self._db.commit()
             n_tasks = self._db.execute("SELECT COUNT(*) AS n FROM tasks").fetchone()["n"]
             n_fts = self._db.execute("SELECT COUNT(*) AS n FROM task_fts").fetchone()["n"]
@@ -546,52 +571,85 @@ class Store:
 
     def set_trust(self, key: str, *, person: str = "", role: str = "", scopes: Optional[List[str]] = None,
                   note: str = "") -> None:
-        """Trust one handle: an email, a phone, a telegram id, a name. Handles are what
-        arrive on a message, so a person is trusted once per way of reaching them."""
-        self._ensure_trust()
+        """Legacy single-handle grant, now a thin view over the person model: the handle's
+        contact is found or created, the person it is attached to (creating one if the
+        handle was unlinked) gets the role/scopes/note/display. Kept for every old caller
+        (console upsert_person, role-member add/remove) so they go through the person
+        without needing their own rewrite."""
+        norm = self.normalize_contact_value(key)
+        kind = self.guess_contact_kind(key)
         with self._lock:
+            existing = self._db.execute(
+                "SELECT * FROM contacts WHERE kind=? AND value=?", (kind, norm)
+            ).fetchone()
+            now = time.time()
+            if existing and existing["person_id"]:
+                pid = self._resolve_person(existing["person_id"])
+            else:
+                pid = self._new_id("p")
+                self._db.execute(
+                    "INSERT INTO persons(id,display,role,scopes,note,created_at,updated_at) "
+                    "VALUES(?,?,?,?,?,?,?)", (pid, person or key, "", "[]", "", now, now))
+                if existing:
+                    self._db.execute("UPDATE contacts SET person_id=?, updated_at=? WHERE id=?",
+                                      (pid, now, existing["id"]))
+                else:
+                    self._db.execute(
+                        "INSERT INTO contacts(id,person_id,kind,value,raw_value,source,last_seen,"
+                        "created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?)",
+                        (self._new_id("c"), pid, kind, norm, key, "manual", now, now, now))
             self._db.execute(
-                "INSERT INTO trust(key,person,role,scopes,note,updated_at) VALUES(?,?,?,?,?,?) "
-                "ON CONFLICT(key) DO UPDATE SET person=excluded.person, role=excluded.role, "
-                "scopes=excluded.scopes, note=excluded.note, updated_at=excluded.updated_at",
-                (_trust_key(key), person, ", ".join(role_names(role)),
-                 json.dumps(sorted(set(scopes or []))), note, time.time()))
+                "UPDATE persons SET display=?, role=?, scopes=?, note=?, updated_at=? WHERE id=?",
+                (person or self._person_row(pid).get("display") or key, ", ".join(role_names(role)),
+                 json.dumps(sorted(set(scopes or []))), note, now, pid))
             self._db.commit()
 
     def drop_trust(self, key: str) -> None:
-        self._ensure_trust()
+        """Legacy single-handle removal: detach and delete that one contact. If it was
+        the person's only contact, the person goes too; otherwise the person (and its
+        remaining contacts) stays, with role/scopes left as they were."""
+        norm = self.normalize_contact_value(key)
+        kind = self.guess_contact_kind(key)
         with self._lock:
-            self._db.execute("DELETE FROM trust WHERE key=?", (_trust_key(key),))
+            existing = self._db.execute(
+                "SELECT * FROM contacts WHERE kind=? AND value=?", (kind, norm)
+            ).fetchone()
+            if existing is None:
+                return
+            pid = existing["person_id"]
+            self._db.execute("DELETE FROM contacts WHERE id=?", (existing["id"],))
+            if pid:
+                remaining = self._db.execute(
+                    "SELECT COUNT(*) AS n FROM contacts WHERE person_id=?", (pid,)
+                ).fetchone()["n"]
+                if remaining == 0:
+                    self._db.execute("DELETE FROM persons WHERE id=?", (pid,))
+                    self._db.execute("UPDATE persons SET merged_into=NULL WHERE merged_into=?", (pid,))
             self._db.commit()
 
     def trusted(self) -> List[Dict[str, Any]]:
-        self._ensure_trust()
+        """One row per contact of every live (non-merged) person, in the old trust-row
+        shape plus person_id/contact_id so the console can group them back into people."""
         with self._lock:
-            rows = self._db.execute("SELECT * FROM trust ORDER BY person, key").fetchall()
-        return [{"key": r["key"], "person": r["person"], "role": r["role"],
-                 "scopes": json.loads(r["scopes"] or "[]"), "note": r["note"]} for r in rows]
+            rows = self._db.execute(
+                "SELECT c.id AS contact_id, c.person_id AS person_id, c.kind AS kind, c.value AS value, "
+                "p.display AS person, p.role AS role, p.scopes AS scopes, p.note AS note "
+                "FROM contacts c JOIN persons p ON p.id = c.person_id "
+                "WHERE c.person_id IS NOT NULL AND p.merged_into IS NULL "
+                "ORDER BY p.display, c.value"
+            ).fetchall()
+        return [{"key": r["value"], "person": r["person"], "role": r["role"] or "",
+                 "scopes": json.loads(r["scopes"] or "[]"), "note": r["note"] or "",
+                 "person_id": r["person_id"], "contact_id": r["contact_id"], "contact_kind": r["kind"]}
+                for r in rows]
 
     def trust_for(self, keys: List[str]) -> Dict[str, Any]:
-        """What this sender may do without asking. Unknown handles get nothing, which is
-        the default for everyone: a person has to be put in this table to be trusted at all."""
-        self._ensure_trust()
-        wanted = [_trust_key(k) for k in keys if str(k or "").strip()]
-        if not wanted:
-            return {"role": "", "scopes": [], "person": ""}
-        marks = ",".join("?" for _ in wanted)
-        with self._lock:
-            rows = self._db.execute(f"SELECT * FROM trust WHERE key IN ({marks})", wanted).fetchall()
-            roles = {r["name"]: json.loads(r["scopes"] or "[]")
-                     for r in self._db.execute("SELECT * FROM roles").fetchall()}
-        scopes: List[str] = []
-        role, person = "", ""
-        for r in rows:
-            role = role or r["role"]
-            person = person or r["person"]
-            scopes += json.loads(r["scopes"] or "[]")
-            for name in role_names(r["role"]):
-                scopes += roles.get(name, [])
-        return {"role": role, "scopes": sorted(set(scopes)), "person": person}
+        """What this sender may do without asking, via resolve_handles. Zero or
+        conflicting matches both grant nothing -- that is the safe default for an
+        unknown sender, and the deliberate choice when two different people's handles
+        land on the same message."""
+        result = self.resolve_handles(keys)
+        return {"role": result["role"], "scopes": result["scopes"], "person": result["person"]}
 
     def known_people(self) -> List[Dict[str, Any]]:
         """Let the console show known contacts before the owner grants them anything."""
@@ -649,6 +707,464 @@ class Store:
         return [{"key": r["key"], "person": r["person"],
                  "channels": json.loads(r["channels"] or "[]"), "last_seen": r["last_seen"]} for r in rows]
 
+    # -- person-centric trust model --------------------------------------
+    # One human is a `person` row (stable id, display name, role, scopes, note).
+    # Any number of `contacts` (email/phone/telegram/imessage/name/other) point at
+    # a person; a contact with person_id=NULL was seen but never attached to anyone
+    # ("unlinked"). Role and scopes live ONLY on the person. The old trust/roles
+    # tables are left in place untouched for rollback; trusted()/set_trust()/
+    # drop_trust()/trust_for() below are now thin views over persons+contacts so
+    # every existing caller (manager.trust_for, the console role/people views, the
+    # people sync) goes through the person without having to change its own code.
+
+    @staticmethod
+    def _new_id(prefix: str) -> str:
+        import uuid
+        return f"{prefix}_{uuid.uuid4().hex[:12]}"
+
+    @staticmethod
+    def guess_contact_kind(value: str) -> str:
+        v = (value or "").strip()
+        if v.lower().startswith("telegram:"):
+            return "telegram"
+        if "@" in v:
+            return "email"
+        digits = re.sub(r"\D", "", v)
+        if len(digits) >= 7 and not any(c.isalpha() for c in v):
+            return "phone"
+        if not v:
+            return "other"
+        return "name"
+
+    @staticmethod
+    def normalize_contact_value(value: str) -> str:
+        """Same normalisation the old trust key used, so a migrated contact collides
+        with the same value a live message arrives on."""
+        v = str(value or "").strip()
+        if v.lower().startswith("telegram:"):
+            v = v.split(":", 1)[1]
+        return _trust_key(v)
+
+    @classmethod
+    def contact_value(cls, kind: str, value: str) -> str:
+        return cls.normalize_contact_value(value)
+
+    def _persons_cols(self) -> set:
+        return {r["name"] for r in self._db.execute("PRAGMA table_info(persons)")}
+
+    def _resolve_person(self, person_id: Optional[str]) -> Optional[str]:
+        """Follow merged_into to the live person a (possibly merged) id now points at."""
+        seen = set()
+        pid = person_id
+        while pid and pid not in seen:
+            seen.add(pid)
+            row = self._db.execute("SELECT merged_into FROM persons WHERE id=?", (pid,)).fetchone()
+            if row is None:
+                return None
+            if not row["merged_into"]:
+                return pid
+            pid = row["merged_into"]
+        return None
+
+    def _person_row(self, person_id: str) -> Optional[Dict[str, Any]]:
+        r = self._db.execute("SELECT * FROM persons WHERE id=?", (person_id,)).fetchone()
+        if r is None:
+            return None
+        return {
+            "id": r["id"], "display": r["display"], "role": r["role"],
+            "scopes": json.loads(r["scopes"] or "[]"), "note": r["note"],
+            "merged_into": r["merged_into"], "created_at": r["created_at"],
+            "updated_at": r["updated_at"],
+        }
+
+    def _contact_rows(self, person_id: str) -> List[Dict[str, Any]]:
+        rows = self._db.execute(
+            "SELECT * FROM contacts WHERE person_id=? ORDER BY kind, value", (person_id,)
+        ).fetchall()
+        return [self._contact_dict(r) for r in rows]
+
+    @staticmethod
+    def _contact_dict(r: sqlite3.Row) -> Dict[str, Any]:
+        return {
+            "id": r["id"], "person_id": r["person_id"], "kind": r["kind"], "value": r["value"],
+            "raw_value": r["raw_value"], "source": r["source"], "last_seen": r["last_seen"],
+            "created_at": r["created_at"], "updated_at": r["updated_at"],
+        }
+
+    def create_person(self, *, display: str = "", role: str = "", scopes: Optional[List[str]] = None,
+                       note: str = "") -> Dict[str, Any]:
+        pid = self._new_id("p")
+        now = time.time()
+        with self._lock:
+            self._db.execute(
+                "INSERT INTO persons(id,display,role,scopes,note,created_at,updated_at) "
+                "VALUES(?,?,?,?,?,?,?)",
+                (pid, display.strip(), ", ".join(role_names(role)),
+                 json.dumps(sorted(set(scopes or []))), note, now, now),
+            )
+            self._db.commit()
+        return self.get_person(pid)
+
+    def update_person(self, person_id: str, *, display: Optional[str] = None, role: Optional[str] = None,
+                       scopes: Optional[List[str]] = None, note: Optional[str] = None) -> Dict[str, Any]:
+        live = self._resolve_person(person_id)
+        if live is None:
+            raise KeyError(f"no such person: {person_id}")
+        fields, values = [], []
+        if display is not None:
+            fields.append("display=?"); values.append(display.strip())
+        if role is not None:
+            fields.append("role=?"); values.append(", ".join(role_names(role)))
+        if scopes is not None:
+            fields.append("scopes=?"); values.append(json.dumps(sorted(set(scopes))))
+        if note is not None:
+            fields.append("note=?"); values.append(note)
+        fields.append("updated_at=?"); values.append(time.time())
+        with self._lock:
+            self._db.execute(f"UPDATE persons SET {', '.join(fields)} WHERE id=?", (*values, live))
+            self._db.commit()
+        return self.get_person(live)
+
+    def delete_person(self, person_id: str) -> bool:
+        live = self._resolve_person(person_id)
+        if live is None:
+            return False
+        with self._lock:
+            self._db.execute("UPDATE contacts SET person_id=NULL, updated_at=? WHERE person_id=?",
+                              (time.time(), live))
+            self._db.execute("DELETE FROM persons WHERE id=?", (live,))
+            self._db.execute("UPDATE persons SET merged_into=NULL WHERE merged_into=?", (live,))
+            self._db.commit()
+        return True
+
+    def get_person(self, person_id: str) -> Optional[Dict[str, Any]]:
+        live = self._resolve_person(person_id)
+        if live is None:
+            return None
+        row = self._person_row(live)
+        if row is None:
+            return None
+        row["contacts"] = self._contact_rows(live)
+        return row
+
+    def list_people(self) -> List[Dict[str, Any]]:
+        """Every live person with their contacts, newest-created last; merged-away
+        persons are not listed (follow merged_into to find who absorbed them)."""
+        with self._lock:
+            rows = self._db.execute(
+                "SELECT id FROM persons WHERE merged_into IS NULL ORDER BY display, id"
+            ).fetchall()
+            out = [self.get_person(r["id"]) for r in rows]
+        return [p for p in out if p is not None]
+
+    def unlinked_contacts(self) -> List[Dict[str, Any]]:
+        with self._lock:
+            rows = self._db.execute(
+                "SELECT * FROM contacts WHERE person_id IS NULL ORDER BY kind, value"
+            ).fetchall()
+        return [self._contact_dict(r) for r in rows]
+
+    def find_contact(self, kind: str, value: str) -> Optional[Dict[str, Any]]:
+        norm = self.normalize_contact_value(value)
+        with self._lock:
+            r = self._db.execute(
+                "SELECT * FROM contacts WHERE kind=? AND value=?", (kind, norm)
+            ).fetchone()
+        return self._contact_dict(r) if r else None
+
+    def _upsert_contact_locked(self, kind: str, raw_value: str, *, person_id: Optional[str],
+                                source: str, last_seen: Optional[float]) -> Dict[str, Any]:
+        """Core of upsert_contact, assuming self._lock is already held. If the contact
+        already belongs to a DIFFERENT person than `person_id` asks for, nothing is
+        moved -- the existing owner is reported back. person_id=None (a sync or live
+        traffic call) never detaches a contact a human already assigned; it only
+        refreshes last_seen/source, or creates a new UNLINKED contact."""
+        norm = self.normalize_contact_value(raw_value)
+        now = time.time()
+        seen = float(last_seen) if last_seen is not None else now
+        live_person = self._resolve_person(person_id) if person_id else None
+        existing = self._db.execute(
+            "SELECT * FROM contacts WHERE kind=? AND value=?", (kind, norm)
+        ).fetchone()
+        if existing is None:
+            cid = self._new_id("c")
+            self._db.execute(
+                "INSERT INTO contacts(id,person_id,kind,value,raw_value,source,last_seen,"
+                "created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?)",
+                (cid, live_person, kind, norm, raw_value, source, seen, now, now),
+            )
+            self._db.commit()
+            return {"ok": True, "conflict": False, "contact": self.get_contact(cid)}
+        existing_pid = existing["person_id"]
+        if live_person and existing_pid and existing_pid != live_person:
+            return {"ok": False, "conflict": True, "existing_person_id": existing_pid,
+                    "contact": self._contact_dict(existing)}
+        new_pid = existing_pid or live_person  # attach if it was unlinked
+        self._db.execute(
+            "UPDATE contacts SET person_id=?, raw_value=?, source=?, "
+            "last_seen=MAX(last_seen, ?), updated_at=? WHERE id=?",
+            (new_pid, raw_value or existing["raw_value"], source or existing["source"],
+             seen, now, existing["id"]),
+        )
+        self._db.commit()
+        return {"ok": True, "conflict": False, "contact": self.get_contact(existing["id"])}
+
+    def upsert_contact(self, kind: str, raw_value: str, *, person_id: Optional[str] = None,
+                        source: str = "manual", last_seen: Optional[float] = None) -> Dict[str, Any]:
+        with self._lock:
+            return self._upsert_contact_locked(kind, raw_value, person_id=person_id,
+                                                source=source, last_seen=last_seen)
+
+    def get_contact(self, contact_id: str) -> Optional[Dict[str, Any]]:
+        r = self._db.execute("SELECT * FROM contacts WHERE id=?", (contact_id,)).fetchone()
+        return self._contact_dict(r) if r else None
+
+    def add_contact(self, person_id: str, kind: str, value: str, *, source: str = "manual") -> Dict[str, Any]:
+        live = self._resolve_person(person_id)
+        if live is None:
+            raise KeyError(f"no such person: {person_id}")
+        return self.upsert_contact(kind, value, person_id=live, source=source)
+
+    def remove_contact(self, contact_id: str) -> bool:
+        with self._lock:
+            cur = self._db.execute("DELETE FROM contacts WHERE id=?", (contact_id,))
+            self._db.commit()
+        return cur.rowcount > 0
+
+    def move_contact(self, contact_id: str, person_id: Optional[str]) -> Dict[str, Any]:
+        """Reassign one contact to a person (or to None, to unlink it). Always an
+        explicit action -- never inferred from a name or a shared role."""
+        live = self._resolve_person(person_id) if person_id else None
+        if person_id and live is None:
+            raise KeyError(f"no such person: {person_id}")
+        with self._lock:
+            cur = self._db.execute(
+                "UPDATE contacts SET person_id=?, updated_at=? WHERE id=?",
+                (live, time.time(), contact_id),
+            )
+            self._db.commit()
+        if cur.rowcount == 0:
+            raise KeyError(f"no such contact: {contact_id}")
+        return self.get_contact(contact_id)
+
+    def link_people(self, keep_id: str, merge_id: str) -> Dict[str, Any]:
+        """Merge merge_id into keep_id: every contact moves to keep_id, and merge_id is
+        marked merged_into keep_id (not deleted -- its original role/scopes/note stay
+        visible for the owner to review). No permission union happens: keep_id's role
+        and scopes are exactly what they were before."""
+        keep_live = self._resolve_person(keep_id)
+        merge_live = self._resolve_person(merge_id)
+        if keep_live is None:
+            raise KeyError(f"no such person: {keep_id}")
+        if merge_live is None:
+            raise KeyError(f"no such person: {merge_id}")
+        if keep_live == merge_live:
+            raise ValueError("cannot link a person to themself")
+        before = self.get_person(merge_live)
+        now = time.time()
+        with self._lock:
+            self._db.execute(
+                "UPDATE contacts SET person_id=?, updated_at=? WHERE person_id=?",
+                (keep_live, now, merge_live),
+            )
+            self._db.execute(
+                "UPDATE persons SET merged_into=?, updated_at=? WHERE id=?",
+                (keep_live, now, merge_live),
+            )
+            self._db.commit()
+        return {"ok": True, "kept": self.get_person(keep_live), "merged_person_was": before}
+
+    def resolve_handles(self, handles: List[str]) -> Dict[str, Any]:
+        """What role/scopes a message on ANY of these handles should get. Zero matching
+        persons -> nothing. Exactly one -> that person's role+scopes. More than one
+        DISTINCT person -> a real conflict (two different people's handles landed on one
+        message): grant neither, and log it loudly so it gets noticed."""
+        # A display name is whatever the sender typed, and a Telegram id is ten digits like a
+        # phone number, so a match is made on kind as well as value: a telegram contact only
+        # from a handle the gateway stamped "telegram:", an email or phone contact only from
+        # a bare address or number, and a name contact never.
+        wanted = set()
+        for h in handles:
+            h = str(h or "").strip()
+            if not h:
+                continue
+            kind = self.guess_contact_kind(h)
+            if kind in ("email", "phone", "telegram"):
+                wanted.add((kind, self.contact_value(kind, h)))
+        if not wanted:
+            return {"role": "", "scopes": [], "person": "", "person_id": "", "conflict": False}
+        clause = " OR ".join("(kind=? AND value=?)" for _ in wanted)
+        args = [x for pair in sorted(wanted) for x in pair]
+        with self._lock:
+            rows = self._db.execute(
+                f"SELECT DISTINCT person_id FROM contacts WHERE ({clause}) AND person_id IS NOT NULL",
+                args,
+            ).fetchall()
+        person_ids = {self._resolve_person(r["person_id"]) for r in rows}
+        person_ids.discard(None)
+        if not person_ids:
+            return {"role": "", "scopes": [], "person": "", "person_id": "", "conflict": False}
+        if len(person_ids) > 1:
+            logger.warning(
+                "resolve_handles: handles %s resolve to %d different people (%s) -- granting neither",
+                handles, len(person_ids), sorted(person_ids),
+            )
+            return {"role": "", "scopes": [], "person": "", "person_id": "", "conflict": True}
+        pid = next(iter(person_ids))
+        person = self._person_row(pid) or {}
+        roles = {r["name"]: json.loads(r["scopes"] or "[]")
+                 for r in self._db.execute("SELECT * FROM roles").fetchall()}
+        role = person.get("role") or ""
+        role_scopes: List[str] = []
+        for name in role_names(role):
+            role_scopes += roles.get(name, [])
+        scopes = sorted(set(person.get("scopes") or []) | set(role_scopes))
+        return {"role": role, "scopes": scopes, "person": person.get("display") or "",
+                "person_id": pid, "conflict": False}
+
+    def _migrate_people_model(self) -> None:
+        """One-time, idempotent: build persons+contacts from the legacy trust / people /
+        synced_people tables. Never drops or mutates those legacy tables; safe to re-run
+        (guarded by a settings flag, and every write below is itself an upsert on a
+        UNIQUE(kind,value) contact or a PK persons.id)."""
+        # Called from __init__ while self._lock is already held: create the legacy
+        # tables directly (no re-entrant lock acquisition) instead of calling the
+        # lazy _ensure_* helpers, which each try to take the lock themselves.
+        self._db.executescript("""
+            CREATE TABLE IF NOT EXISTS roles (
+              name TEXT PRIMARY KEY, scopes TEXT NOT NULL DEFAULT '[]',
+              note TEXT NOT NULL DEFAULT '', updated_at REAL NOT NULL DEFAULT 0
+            );
+            CREATE TABLE IF NOT EXISTS trust (
+              key TEXT PRIMARY KEY, person TEXT NOT NULL DEFAULT '',
+              role TEXT NOT NULL DEFAULT '', scopes TEXT NOT NULL DEFAULT '[]',
+              note TEXT NOT NULL DEFAULT '', updated_at REAL NOT NULL DEFAULT 0
+            );
+            CREATE TABLE IF NOT EXISTS synced_people (
+              key TEXT PRIMARY KEY, person TEXT NOT NULL DEFAULT '',
+              channels TEXT NOT NULL DEFAULT '[]', last_seen REAL NOT NULL DEFAULT 0
+            );
+            CREATE TABLE IF NOT EXISTS settings (
+              name TEXT PRIMARY KEY, value TEXT NOT NULL DEFAULT '',
+              updated_at REAL NOT NULL DEFAULT 0
+            );
+        """)
+        flag = self._db.execute(
+            "SELECT value FROM settings WHERE name='people_model_migrated_v1'"
+        ).fetchone()
+        if flag is not None:
+            return
+        now = time.time()
+        value_to_person: Dict[str, str] = {}
+        telegram_keys = set()
+        try:
+            for r in self._db.execute("SELECT key, channels FROM synced_people").fetchall():
+                if json.loads(r["channels"] or "[]") == ["telegram"]:
+                    telegram_keys.add(self.normalize_contact_value(r["key"]))
+        except sqlite3.OperationalError:
+            pass
+
+        def kind_of(key: str) -> str:
+            if self.normalize_contact_value(key) in telegram_keys:
+                return "telegram"
+            return self.guess_contact_kind(key)
+
+        # 1) trust rows -> one person per DISTINCT NON-EMPTY display name, carrying every
+        # key, role and scope of that group onto the one person; a row with no display
+        # name becomes its own person (nothing to group it by). This is reading the OLD
+        # one-row-per-handle table, where a shared display name across two rows was
+        # Aaron's only way of recording "these are the same person" -- it is the one-time
+        # migration's job to not throw that fact away. It is not the ongoing rule for the
+        # new model: resolve_handles and the console's "link people" action never merge
+        # by display name once persons/contacts exist, exactly as decided for this model.
+        trust_groups: Dict[str, List[sqlite3.Row]] = {}
+        trust_order: List[str] = []
+        for r in self._db.execute("SELECT * FROM trust ORDER BY key").fetchall():
+            name = " ".join(str(r["person"] or "").split()).strip().lower()
+            group_id = name or f"__key__{r['key']}"
+            if group_id not in trust_groups:
+                trust_groups[group_id] = []
+                trust_order.append(group_id)
+            trust_groups[group_id].append(r)
+        for group_id in trust_order:
+            members = trust_groups[group_id]
+            display = next((m["person"] for m in members if m["person"]), members[0]["key"])
+            roles_union: List[str] = []
+            scopes_union: set = set()
+            note = ""
+            for m in members:
+                for rn in role_names(m["role"]):
+                    if rn not in roles_union:
+                        roles_union.append(rn)
+                scopes_union |= set(json.loads(m["scopes"] or "[]"))
+                if m["note"] and not note:
+                    note = m["note"]
+            pid = self._new_id("p")
+            self._db.execute(
+                "INSERT INTO persons(id,display,role,scopes,note,created_at,updated_at) "
+                "VALUES(?,?,?,?,?,?,?)",
+                (pid, display, ", ".join(roles_union), json.dumps(sorted(scopes_union)), note, now, now),
+            )
+            for m in members:
+                key = m["key"]
+                norm = self.normalize_contact_value(key)
+                kind = kind_of(key)
+                self._db.execute(
+                    "INSERT OR IGNORE INTO contacts(id,person_id,kind,value,raw_value,source,"
+                    "last_seen,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?)",
+                    (self._new_id("c"), pid, kind, norm, key, "migration", now, now, now),
+                )
+                value_to_person[norm] = pid
+
+        # 2) people table: (person_id, key) pairs grouped by the Inkbox person_id. If any
+        # of a group's keys already matches a person from step 1, that group's remaining
+        # keys attach to that SAME person (an explicit, data-grounded link: the two
+        # sources already agreed these keys are one person). Otherwise a new person is
+        # made for the group.
+        groups: Dict[str, List[sqlite3.Row]] = {}
+        for r in self._db.execute("SELECT * FROM people").fetchall():
+            groups.setdefault(r["person_id"], []).append(r)
+        for _inkbox_pid, members in groups.items():
+            norms = [(self.normalize_contact_value(m["key"]), m) for m in members]
+            target = next((value_to_person[n] for n, _m in norms if n in value_to_person), None)
+            if target is None:
+                best_display = max((m["display"] or "" for _n, m in norms), key=len, default="")
+                target = self._new_id("p")
+                self._db.execute(
+                    "INSERT INTO persons(id,display,role,scopes,note,created_at,updated_at) "
+                    "VALUES(?,?,?,?,?,?,?)",
+                    (target, best_display, "", "[]", "", now, now),
+                )
+            for norm, m in norms:
+                if norm in value_to_person:
+                    continue  # already attached in step 1
+                kind = kind_of(m["key"])
+                self._db.execute(
+                    "INSERT OR IGNORE INTO contacts(id,person_id,kind,value,raw_value,source,"
+                    "last_seen,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?)",
+                    (self._new_id("c"), target, kind, norm, m["key"], "migration", now, now, now),
+                )
+                value_to_person[norm] = target
+
+        # 3) synced_people: attach only where the key ALREADY belongs to a person
+        # established by steps 1/2 (just a last_seen/source refresh); a key seen only in
+        # the sync becomes an unlinked contact, never a new person.
+        for r in self._db.execute("SELECT * FROM synced_people").fetchall():
+            norm = self.normalize_contact_value(r["key"])
+            kind = kind_of(r["key"])
+            pid = value_to_person.get(norm)
+            self._db.execute(
+                "INSERT OR IGNORE INTO contacts(id,person_id,kind,value,raw_value,source,"
+                "last_seen,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?)",
+                (self._new_id("c"), pid, kind, norm, r["key"], "migration", r["last_seen"] or 0, now, now),
+            )
+
+        self._db.execute(
+            "INSERT INTO settings(name,value,updated_at) VALUES('people_model_migrated_v1','1',?) "
+            "ON CONFLICT(name) DO NOTHING",
+            (now,),
+        )
+
     def thread_counterparts(self) -> List[Dict[str, Any]]:
         """Every handle with a thread in this database, for the sync to union in even when
         the Inkbox directory API did not surface it."""
@@ -672,8 +1188,16 @@ class Store:
             task_rows = self._db.execute(
                 "SELECT state, COUNT(*) AS n FROM tasks WHERE state<>'closed' GROUP BY state"
             ).fetchall()
+            # One entry per person: a trusted person (persons/contacts) counts once no
+            # matter how many contacts they have; an untrusted directory contact counts
+            # by its own key.
             people = self._db.execute(
-                "SELECT COUNT(*) AS n FROM (SELECT key FROM trust UNION SELECT key FROM people)"
+                "SELECT COUNT(*) AS n FROM ("
+                "  SELECT person_id AS k FROM contacts WHERE person_id IS NOT NULL"
+                "  UNION"
+                "  SELECT key FROM people WHERE key NOT IN "
+                "    (SELECT value FROM contacts WHERE person_id IS NOT NULL)"
+                ")"
             ).fetchone()["n"]
             roles = self._db.execute("SELECT COUNT(*) AS n FROM roles").fetchone()["n"]
         return {
@@ -708,10 +1232,12 @@ class Store:
                 ).fetchall()
         return [Request.from_row(r) for r in rows]
 
-    @staticmethod
-    def trusted_key(key: str) -> str:
-        """Let permission editors identify the normalized row they just changed."""
-        return _trust_key(key)
+    @classmethod
+    def trusted_key(cls, key: str) -> str:
+        """Let permission editors identify the normalized row they just changed, in
+        the same normalisation `trusted()` reports contacts under (a Telegram handle's
+        `telegram:` prefix is stripped, same as every other contact value)."""
+        return cls.normalize_contact_value(key)
 
     # -- knobs the owner turns -------------------------------------------------
     def _ensure_settings(self) -> None:
@@ -1033,7 +1559,11 @@ class Store:
         return self.get_task(tid)  # type: ignore[return-value]
 
     def remember_person(self, person: "Person") -> None:
-        """Record every key we know for a contact, so later lookups by any of them match."""
+        """Record every key we know for a contact, so later lookups by any of them match.
+        Also upserts each key into the new contacts table (person_id=None, source=
+        'traffic'): a handle already attached to someone just gets last_seen refreshed;
+        a brand-new handle shows up as an unlinked contact. Never creates a person and
+        never detaches a contact a human already assigned."""
         if not person.person_id:
             return
         now = time.time()
@@ -1045,6 +1575,8 @@ class Store:
                     "THEN excluded.display ELSE people.display END, updated_at=excluded.updated_at",
                     (person.person_id, k, person.display, now),
                 )
+                kind = self.guess_contact_kind(k)
+                self._upsert_contact_locked(kind, k, person_id=None, source="traffic", last_seen=now)
             self._db.commit()
 
     def person_keys(self, raw_key: str) -> List[str]:
