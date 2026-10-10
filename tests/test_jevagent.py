@@ -294,7 +294,7 @@ def test_scheduled_run_may_message_the_owner():
 
 def test_sends_to_requester_guard():
     from inkbox_claude.gate.scopes import sends_to_requester
-    prot = ["e3b9cc0b-conv", "+1 (407) 808-8771"]
+    prot = ["e3b9cc0b-conv", "+1 (555) 010-0003"]
     assert sends_to_requester("mcp__inkbox__inkbox_send_imessage", {"conversation_id": "e3b9cc0b-conv", "body": "x"}, prot)
     assert sends_to_requester("mcp__inkbox__inkbox_send_sms", {"to": "15550100003"}, prot)
     assert sends_to_requester("mcp__inkbox__inkbox_send_email", {"to": ["Cand@nyu.edu"]}, ["cand@nyu.edu"])
@@ -311,7 +311,7 @@ def test_agent_refuses_to_message_requester(agent, monkeypatch):
     judge = ScriptedJudge([lst, send, "c2"])           # c2 = the requester's own number (c0, c1 are the account emails)
     prose = ScriptedProse()
     _patch(monkeypatch, box, judge, prose, [lst, send])
-    r = _req("text me at 407-808-8771 my coffee chats from last week"); r.sender = "+15550100003"
+    r = _req("text me at 555-010-0003 my coffee chats from last week"); r.sender = "+15550100003"
     st = asyncio.run(agent.run(r))
     assert st["ok"] and [c[0] for c in box.calls] == [lst], box.calls     # the send never happened
 
@@ -570,7 +570,7 @@ def test_browser_search_reads_results_off_the_search_page():
             return "" if name.endswith("navigate") else snap
     b = Box()
     out = asyncio.run(b._browser_search("Sam Parker TAMID NYU"))
-    assert b.calls[0][0].endswith("browser_navigate") and "q=Sean%20Parker%20TAMID%20NYU" in b.calls[0][1]["url"]
+    assert b.calls[0][0].endswith("browser_navigate") and "q=Sam%20Parker%20TAMID%20NYU" in b.calls[0][1]["url"]
     assert "1. Sam Parker - Student at New York University | LinkedIn" in out and "url: https://www.linkedin.com/in/samparker" in out
     assert "Co-President" in out and "127.0.0.1" not in out and "2. Executive Board" in out
 
