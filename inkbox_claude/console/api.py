@@ -489,7 +489,7 @@ def scopes_breakdown(store: Optional[Store] = None) -> List[Dict[str, Any]]:
     """Every scope grouped by the system it belongs to (`SCOPE_TREE_SYSTEMS` in
     scopes.py / `systems` in scopes.yaml), for the console's scopes page and for the
     per-role scope picker -- the same grouped list drives both."""
-    from ..gate.scopes import SCOPE_TREE_SYSTEMS
+    from ..gate.scopes import SCOPE_TREE_ALWAYS, SCOPE_TREE_LEAVES, SCOPE_TREE_SYSTEMS
     flat = scopes(store)
     by_system: Dict[str, List[Dict[str, Any]]] = {}
     for detail in flat:
@@ -500,6 +500,11 @@ def scopes_breakdown(store: Optional[Store] = None) -> List[Dict[str, Any]]:
             "system": system_name,
             "description": SCOPE_TREE_SYSTEMS.get(system_name, ""),
             "scopes": sorted(by_system.get(system_name, []), key=lambda d: d["name"]),
+            # the decision tree the gate walks: scopes granted whenever the system is
+            # picked, then one branch per question with the scopes a yes grants
+            "always": list(SCOPE_TREE_ALWAYS.get(system_name, [])),
+            "leaves": [{"name": leaf, "question": question, "grants": list(grants)}
+                       for leaf, (question, grants) in SCOPE_TREE_LEAVES.get(system_name, {}).items()],
         })
     return out
 

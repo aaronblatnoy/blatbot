@@ -401,3 +401,14 @@ def test_roles_page_and_people_list_show_sean_once_not_twice(store):
     seans = [p for p in people if p.get("person") == "Sam Parker"]
     assert len(seans) == 1
     assert set(seans[0]["keys"]) == {"5550100001", "7000000001"}
+
+
+def test_scopes_breakdown_carries_the_decision_tree(store):
+    from inkbox_claude.gate.scopes import SCOPES, SCOPE_TREE_ALWAYS, SCOPE_TREE_LEAVES
+    breakdown = {g["system"]: g for g in console_api.scopes_breakdown(store)}
+    for system, always in SCOPE_TREE_ALWAYS.items():
+        assert breakdown[system]["always"] == always
+        leaves = breakdown[system]["leaves"]
+        assert [l["name"] for l in leaves] == list(SCOPE_TREE_LEAVES[system])
+        for leaf in leaves:
+            assert leaf["question"] and all(name in SCOPES for name in leaf["grants"])
