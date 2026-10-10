@@ -74,7 +74,11 @@ TABLES: List[Tuple[str, List[str], List[str], str | None]] = [
     ("trust", ["key", "person", "role", "scopes", "note", "updated_at"], ["key"], None),
     ("synced_people", ["key", "person", "channels", "last_seen"], ["key"], None),
     ("settings", ["name", "value", "updated_at"], ["name"], None),
-    ("contact_kinds", ["kind", "label", "hint", "addable", "sort_order"], ["kind"], None),
+    # contact_kinds is intentionally NOT copied: it has no write path in the
+    # app (nothing ever edits it, in sqlite or Postgres) and is seeded
+    # idempotently by Store.__init__ on whichever backend opens empty, so
+    # there is nothing in a live gate.db's copy that migrating would ever
+    # preserve beyond what the target already seeds itself.
 ]
 
 
@@ -127,9 +131,14 @@ def migrate(sqlite_path: str, pg_dsn: str) -> int:
             if not _table_exists_sqlite(src, table):
                 print(f"{table:<20} {'(missing in sqlite)':>12}")
                 continue
-            order_col = "rowid" if table in ("task_fts",) else (pk[0] if pk else "rowid")
+            # Always copy in sqlite's own insertion order (rowid), not by
+            # primary key: get_task()/task_with_events() pick a participant's
+            # "representative" key by iteration order (sqlite ORDER BY
+            # rowid, mirrored by task_participants.seq on Postgres), so
+            # copying in PK order would silently change which key displays
+            # for a person with more than one contact on a task.
             try:
-                rows = src.execute(f"SELECT * FROM {table} ORDER BY {order_col}").fetchall()
+                rows = src.execute(f"SELECT * FROM {table} ORDER BY rowid").fetchall()
             except sqlite3.OperationalError:
                 rows = src.execute(f"SELECT * FROM {table}").fetchall()
             cur.execute(f"SELECT COUNT(*) FROM {table}")
