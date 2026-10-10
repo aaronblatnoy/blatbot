@@ -245,6 +245,15 @@ def sends_to_requester(tool_name: str, args: dict, protected: list) -> bool:
     return any(_norm(str(t)) in keys for t in targets)
 
 
+def blocks_requester_send(req, tool_name: str, args: dict, protected: list) -> bool:
+    """True when a send must be refused because the gateway already delivers the result
+    to that person. A scheduled run is exempt: Aaron approved the schedule, its prompt and
+    its send scopes, so a message it sends him is the job itself, not a duplicate answer."""
+    if getattr(req, "schedule_id", None):
+        return False
+    return sends_to_requester(tool_name, args, list(protected) + [req.sender, req.chat_id])
+
+
 # What each tool is FOR, in the words a task uses. Shown to the judgment that picks
 # the next tool instead of the servers' own (often long, implementation-flavoured)
 # descriptions. Tools not listed fall back to the server's description.

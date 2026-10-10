@@ -38,7 +38,7 @@ from zoneinfo import ZoneInfo
 
 import httpx
 
-from .scopes import ORG_ACCOUNT, OWNER_ACCOUNT, TOOL_DESCRIPTIONS, TOOL_PURPOSE, sends_to_requester, tools_for
+from .scopes import ORG_ACCOUNT, OWNER_ACCOUNT, TOOL_DESCRIPTIONS, TOOL_PURPOSE, blocks_requester_send, sends_to_requester, tools_for
 from . import hosttools
 from .store import Request, sha256
 from .taskpick import TYPESAFE_URL
@@ -929,7 +929,7 @@ class JevAgent:
                         if sum(1 for s in steps if s["tool"] == choice and not s["ok"]) >= 3:
                             return self._status(False, f"could not determine arguments for {choice}", steps, judge, prose, started)
                         continue
-                    if sends_to_requester(choice, args, self.protected + [req.sender, req.chat_id]):
+                    if blocks_requester_send(req, choice, args, self.protected):
                         # The gateway delivers the answer; a send to the requester would duplicate it.
                         logger.info("jev agent: refusing %s to the requester; finishing with findings", choice)
                         break

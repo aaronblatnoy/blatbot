@@ -281,6 +281,17 @@ def test_date_range_bounds_are_picked_not_written(agent, monkeypatch):
     assert args["time_min"] < args["time_max"]
 
 
+def test_scheduled_run_may_message_the_owner():
+    from types import SimpleNamespace
+    from inkbox_claude.gate.scopes import blocks_requester_send
+    prot = ["e3b9cc0b-conv", "+15550100003"]
+    send = ("mcp__inkbox__inkbox_send_imessage", {"to": "+15550100003", "body": "a poem"})
+    asked = SimpleNamespace(sender="Aaron", chat_id="e3b9cc0b-conv", schedule_id=None)
+    scheduled = SimpleNamespace(sender="Aaron", chat_id="e3b9cc0b-conv", schedule_id=1)
+    assert blocks_requester_send(asked, *send, prot)
+    assert not blocks_requester_send(scheduled, *send, prot)
+
+
 def test_sends_to_requester_guard():
     from inkbox_claude.gate.scopes import sends_to_requester
     prot = ["e3b9cc0b-conv", "+1 (407) 808-8771"]

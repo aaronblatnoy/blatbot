@@ -432,7 +432,7 @@ async def guard(state: AgentState, config: RunnableConfig) -> Dict[str, Any]:
                            "result": "ERROR: this call needs a value (an id or item) that no gathered result contains yet; "
                                      "look the item up first"}]}
     choice, args = primary["tool"], primary["args"]
-    if ja.sends_to_requester(choice, args, agent.protected + [req.sender, req.chat_id]):
+    if ja.blocks_requester_send(req, choice, args, agent.protected):
         logger.info("jev graph: refusing %s to the requester; finishing with findings", choice)
         return {"outcome": "ok", "batch": []}
     from .settings import get as _setting

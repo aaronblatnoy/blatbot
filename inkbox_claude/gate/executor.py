@@ -25,7 +25,7 @@ from claude_agent_sdk import (
 )
 
 from .router import now_line
-from .scopes import ORG_ACCOUNT, OWNER_ACCOUNT, sends_to_requester, tools_for
+from .scopes import ORG_ACCOUNT, OWNER_ACCOUNT, blocks_requester_send, tools_for
 from . import hosttools
 from .store import Request, sha256
 
@@ -102,7 +102,6 @@ class Executor:
         tool_calls: List[str] = []
         texts: List[str] = []
 
-        protected = self.protected + [req.sender, req.chat_id]
         self.held_send = None
         held_destructive: Optional[Dict[str, Any]] = None
         continue_state: Optional[Dict[str, Any]] = {} if req.schedule_kind == "continue" else None
@@ -134,13 +133,17 @@ class Executor:
                 nonlocal held_destructive
                 held_destructive, message = destructive_policy(req, tool_name, input_data or {})
                 return PermissionResultDeny(message=message)
-            if sends_to_requester(tool_name, input_data or {}, protected):
+            if blocks_requester_send(req, tool_name, input_data or {}, self.protected):
                 # Enforced, not just prompted: the gateway delivers the result to whoever asked.
                 return PermissionResultDeny(message="Do not message the requester; the gateway delivers your "
                                                     "result. Put the answer in your final status and stop.")
             return PermissionResultAllow()
 
         system_append = EXECUTOR_SYSTEM + f"\nNow: {now_line()}. Resolve 'today', 'tomorrow', weekday names and relative dates from this.\n"
+        if req.schedule_id:
+            system_append += ("This is a run of a schedule Aaron already approved. When the task says to message "
+                              "Aaron himself, send it with the send tool: that message is the job, and the rule "
+                              "above about not messaging the requester does not apply to it.\n")
         if context.strip():
             system_append += (
                 "\n\nTASK LEDGER (read-only background on this person; the task text below is what to do):\n"
