@@ -270,9 +270,10 @@ CREATE TABLE IF NOT EXISTS task_fts (
   requests TEXT NOT NULL DEFAULT '',
   dates TEXT NOT NULL DEFAULT '',
   doc tsvector GENERATED ALWAYS AS (
-    to_tsvector('english',
+    to_tsvector('english', regexp_replace(
       coalesce(title,'') || ' ' || coalesce(summary,'') || ' ' || coalesce(people,'') || ' ' ||
-      coalesce(events,'') || ' ' || coalesce(requests,'') || ' ' || coalesce(dates,''))
+      coalesce(events,'') || ' ' || coalesce(requests,'') || ' ' || coalesce(dates,''),
+      '[^[:alnum:]]+', ' ', 'g'))
   ) STORED
 );
 CREATE INDEX IF NOT EXISTS task_fts_task ON task_fts(task_id);
@@ -476,6 +477,35 @@ def _fts_query(text: str) -> str:
             if len(w) > 1:
                 parts.append('"' + w.replace('"', '') + '"*')
     return " ".join(parts) or '""'
+
+
+def _pg_tsquery(text: str) -> str:
+    """The same search as _fts_query, written as a Postgres tsquery: quoted phrases
+    kept, OR honoured, every other word required, each word matched as a prefix. Text
+    is indexed with punctuation turned into spaces, so an address such as eve@venue.com
+    is the words eve, venue, com in order, and a search for venue.com finds it."""
+    import re
+    terms: List[str] = []
+    pending_or = False
+    for tok in re.findall(r'"[^"]+"|\S+', text or ""):
+        if tok.upper() == "OR" and terms:
+            pending_or = True
+            continue
+        words = [w for w in re.split(r"[^0-9A-Za-z\u00C0-\uFFFF]+", tok) if w]
+        if not words:
+            continue
+        quoted = tok.startswith('"') and tok.endswith('"') and len(tok) > 2
+        if quoted:
+            term = "(" + " <-> ".join(words) + ")"
+        else:
+            if len("".join(words)) < 2:
+                continue
+            term = "(" + " <-> ".join(words[:-1] + [words[-1] + ":*"]) + ")"
+        if terms:
+            terms.append("|" if pending_or else "&")
+        terms.append(term)
+        pending_or = False
+    return " ".join(terms)
 
 
 def _age(seconds: float) -> str:
@@ -2127,21 +2157,17 @@ class Store:
         if (text or "").strip():
             fts_join = "JOIN task_fts f ON f.task_id=t.id"
             if self._is_pg:
-                # websearch_to_tsquery parses quoted phrases and OR itself from
-                # plain text, so the raw query goes in unprocessed -- _fts_query's
-                # FTS5-syntax quoting/prefix-star is sqlite-only and skipped here.
-                # KNOWN DIFFERENCE: FTS5's prefix matching (e.g. "cater" also
-                # matching "caterer") has no equivalent in websearch_to_tsquery;
-                # Postgres relies on its English stemmer instead, so a bare
-                # unstemmed prefix a few characters short of a real word may not
-                # match the way it does under sqlite.
-                where.append("f.doc @@ websearch_to_tsquery('english', ?)")
-                args.append(text)
-                # Rank is negated so the existing "ORDER BY rank" (ascending =
-                # best first, matching bm25's convention) still picks the best
-                # match first under ts_rank_cd, where higher is better.
-                rank_col = "-ts_rank_cd(f.doc, websearch_to_tsquery('english', ?)) AS rank"
-                rank_args.append(text)
+                tsq = _pg_tsquery(text)
+                if tsq:
+                    where.append("f.doc @@ to_tsquery('english', ?)")
+                    args.append(tsq)
+                    # Rank is negated so the existing "ORDER BY rank" (ascending = best
+                    # first, bm25's convention) still puts the best match first under
+                    # ts_rank_cd, where higher is better.
+                    rank_col = "-ts_rank_cd(f.doc, to_tsquery('english', ?)) AS rank"
+                    rank_args.append(tsq)
+                else:
+                    where.append("1=0")
             else:
                 where.append("task_fts MATCH ?")
                 args.append(_fts_query(text))

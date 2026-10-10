@@ -123,9 +123,41 @@ class PGConnection:
                 "psycopg is not installed; cannot open a postgresql:// Store target "
                 "(pip install 'psycopg[binary]' in this venv)"
             )
-        self._conn = psycopg.connect(dsn, autocommit=False, row_factory=_hybrid_row_factory)
+        self._dsn = dsn
+        self._conn = None
+        self._connect()
+
+    def _connect(self) -> None:
+        self._conn = psycopg.connect(self._dsn, autocommit=False, row_factory=_hybrid_row_factory)
+
+    def _guard(self, run):
+        """Two things sqlite never needed. A statement that fails leaves a Postgres
+        transaction aborted, and every later statement would then fail too, so the
+        failed transaction is rolled back before the error is passed on. And the
+        server is a separate process that can restart: a dropped connection is
+        reopened and the statement run once more."""
+        try:
+            if self._conn is None or self._conn.closed or self._conn.broken:
+                self._connect()
+            return run()
+        except (psycopg.OperationalError, psycopg.InterfaceError):
+            try:
+                self._conn.close()
+            except Exception:
+                pass
+            self._connect()
+            return run()
+        except Exception:
+            try:
+                self._conn.rollback()
+            except Exception:
+                pass
+            raise
 
     def execute(self, sql: str, params: Sequence[Any] = ()) -> PGCursor:
+        return self._guard(lambda: self._execute(sql, params))
+
+    def _execute(self, sql: str, params: Sequence[Any] = ()) -> PGCursor:
         table_match = _INSERT_TABLE_RE.match(sql)
         auto_returning = bool(
             table_match
@@ -148,11 +180,13 @@ class PGConnection:
         statement boundaries and run each non-empty statement. store.py's
         scripts are plain DDL/DML with no semicolons inside string
         literals, so a naive split is safe here."""
-        with self._conn.cursor() as cur:
-            for stmt in script.split(";"):
-                stmt = stmt.strip()
-                if stmt:
-                    cur.execute(stmt)
+        def run() -> None:
+            with self._conn.cursor() as cur:
+                for stmt in script.split(";"):
+                    stmt = stmt.strip()
+                    if stmt:
+                        cur.execute(stmt)
+        self._guard(run)
 
     def commit(self) -> None:
         self._conn.commit()
