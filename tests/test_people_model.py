@@ -164,7 +164,7 @@ def test_migration_from_legacy_fixture_tables():
     unlinked = s.unlinked_contacts()
 
     sean = next(p for p in people_rows if p["display"] == "Sam Parker")
-    assert {c["value"] for c in sean["contacts"]} == {"telegram:111", "sean@example.com"}
+    assert {c["value"] for c in sean["contacts"]} == {"111", "sean@example.com"}
     assert sean["role"] == "partner"
 
     someone = next(p for p in people_rows if p["display"] == "Someone Else")
@@ -248,3 +248,21 @@ def test_api_validation_errors(store):
         console_api.update_person_endpoint(store, {"id": "nope", "display": "x"})
     with pytest.raises(console_api.ValidationError):
         console_api.link_people_endpoint(store, {"keep_id": "nope", "merge_id": "alsonope"})
+
+
+def test_permissions_never_resolve_from_a_name_or_across_kinds(tmp_path):
+    from inkbox_claude.gate.store import Store
+    store = Store(str(tmp_path / "gate.db"))
+    store.set_role("board", ["calendar"])
+    person = store.create_person(display="Pat Example", role="board")
+    pid = person["id"]
+    store.add_contact(pid, "telegram", "5550100001")
+    store.add_contact(pid, "name", "Pat Example")
+    store.add_contact(pid, "email", "pat@example.com")
+    # the stamped Telegram id resolves; the same digits arriving as a phone number do not
+    assert store.trust_for(["telegram:5550100001"])["role"] == "board"
+    assert store.trust_for(["+1 (651) 231-9697"])["role"] == ""
+    assert store.trust_for(["5550100001"])["role"] == ""
+    # a display name is typed by the sender and proves nothing
+    assert store.trust_for(["Pat Example"])["role"] == ""
+    assert store.trust_for(["pat@example.com", "Pat Example"])["role"] == "board"

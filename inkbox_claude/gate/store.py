@@ -729,7 +729,14 @@ class Store:
     def normalize_contact_value(value: str) -> str:
         """Same normalisation the old trust key used, so a migrated contact collides
         with the same value a live message arrives on."""
-        return _trust_key(value)
+        v = str(value or "").strip()
+        if v.lower().startswith("telegram:"):
+            v = v.split(":", 1)[1]
+        return _trust_key(v)
+
+    @classmethod
+    def contact_value(cls, kind: str, value: str) -> str:
+        return cls.normalize_contact_value(value)
 
     def _persons_cols(self) -> set:
         return {r["name"] for r in self._db.execute("PRAGMA table_info(persons)")}
@@ -961,14 +968,26 @@ class Store:
         persons -> nothing. Exactly one -> that person's role+scopes. More than one
         DISTINCT person -> a real conflict (two different people's handles landed on one
         message): grant neither, and log it loudly so it gets noticed."""
-        wanted = [self.normalize_contact_value(h) for h in handles if str(h or "").strip()]
+        # A display name is whatever the sender typed, and a Telegram id is ten digits like a
+        # phone number, so a match is made on kind as well as value: a telegram contact only
+        # from a handle the gateway stamped "telegram:", an email or phone contact only from
+        # a bare address or number, and a name contact never.
+        wanted = set()
+        for h in handles:
+            h = str(h or "").strip()
+            if not h:
+                continue
+            kind = self.guess_contact_kind(h)
+            if kind in ("email", "phone", "telegram"):
+                wanted.add((kind, self.contact_value(kind, h)))
         if not wanted:
             return {"role": "", "scopes": [], "person": "", "person_id": "", "conflict": False}
-        marks = ",".join("?" for _ in wanted)
+        clause = " OR ".join("(kind=? AND value=?)" for _ in wanted)
+        args = [x for pair in sorted(wanted) for x in pair]
         with self._lock:
             rows = self._db.execute(
-                f"SELECT DISTINCT person_id FROM contacts WHERE value IN ({marks}) AND person_id IS NOT NULL",
-                wanted,
+                f"SELECT DISTINCT person_id FROM contacts WHERE ({clause}) AND person_id IS NOT NULL",
+                args,
             ).fetchall()
         person_ids = {self._resolve_person(r["person_id"]) for r in rows}
         person_ids.discard(None)
@@ -1023,12 +1042,24 @@ class Store:
             return
         now = time.time()
         value_to_person: Dict[str, str] = {}
+        telegram_keys = set()
+        try:
+            for r in self._db.execute("SELECT key, channels FROM synced_people").fetchall():
+                if json.loads(r["channels"] or "[]") == ["telegram"]:
+                    telegram_keys.add(self.normalize_contact_value(r["key"]))
+        except sqlite3.OperationalError:
+            pass
+
+        def kind_of(key: str) -> str:
+            if self.normalize_contact_value(key) in telegram_keys:
+                return "telegram"
+            return self.guess_contact_kind(key)
 
         # 1) trust rows -> one person per key, carrying role/scopes/note/display across.
         for r in self._db.execute("SELECT * FROM trust").fetchall():
             key = r["key"]
             norm = self.normalize_contact_value(key)
-            kind = self.guess_contact_kind(key)
+            kind = kind_of(key)
             pid = self._new_id("p")
             self._db.execute(
                 "INSERT INTO persons(id,display,role,scopes,note,created_at,updated_at) "
@@ -1064,7 +1095,7 @@ class Store:
             for norm, m in norms:
                 if norm in value_to_person:
                     continue  # already attached in step 1
-                kind = self.guess_contact_kind(m["key"])
+                kind = kind_of(m["key"])
                 self._db.execute(
                     "INSERT OR IGNORE INTO contacts(id,person_id,kind,value,raw_value,source,"
                     "last_seen,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?)",
@@ -1077,7 +1108,7 @@ class Store:
         # the sync becomes an unlinked contact, never a new person.
         for r in self._db.execute("SELECT * FROM synced_people").fetchall():
             norm = self.normalize_contact_value(r["key"])
-            kind = self.guess_contact_kind(r["key"])
+            kind = kind_of(r["key"])
             pid = value_to_person.get(norm)
             self._db.execute(
                 "INSERT OR IGNORE INTO contacts(id,person_id,kind,value,raw_value,source,"
