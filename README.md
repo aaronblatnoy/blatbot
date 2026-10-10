@@ -279,6 +279,29 @@ These are the decisions the whole thing rests on.
 10. **No confident wrong answers.** A result reply is checked by a judgment against the retrieved results before it is sent: names, titles, numbers, dates and "current" claims must appear in the results, or the reply is rewritten from the results only, or replaced by the raw result. In the agent, a web search result is a lead, not an answer; the page is opened and read before the run can end.
 11. **Nothing goes out to another person without me seeing it, including when I asked for it.** A message the owner asks to have sent is him speaking to someone through the assistant, so the send is held at the tool boundary, the whole draft comes back with every recipient and the text verbatim, and only his yes releases that exact call. A request from anyone else was already read and approved by him in full, so answering it is untouched. The hold is enforced by withholding send tools from the pre-approved list, because a tool the runtime has been told to allow never reaches a permission hook.
 12. **Everyone starts with no permissions.** A person is one record with any number of contacts inside it: emails, phone numbers, Telegram ids. A role names a level of trust and the scopes it carries, and a person can hold several; their scopes are the union. A message arriving on any of a person's contacts resolves to that one person. A contact matches on its kind as well as its value, so a Telegram id never passes for a phone number with the same digits, and a display name never grants anything. Two different people's contacts on one message grant nothing. A request whose scopes fall entirely inside what the person was given runs immediately; anything outside it still waits. Trusting someone with the calendar does not let them send mail.
+
+    ```
+     a message arrives carrying handles          telegram:7000000001      "Sam Parker"
+                │                                        │                     │
+                ▼                                        ▼                     ▼
+     each handle becomes (kind, value)          (telegram, 7000000001)    a name: dropped
+                │
+                ▼
+     ┌───────────────────────────┐        ┌─────────────────────────────────────────┐
+     │ contacts                  │        │ persons                                 │
+     │ (telegram, 7000000001) ───┼──────> │ Sam Parker                              │
+     │ (phone,    5550100001) ───┼──────> │   roles: partner, board member          │
+     │ (email,    sam@example…) ─┼──────> │   own scopes: (none)                    │
+     └───────────────────────────┘        └───────────────────┬─────────────────────┘
+                                                              ▼
+      matched 0 people ──> no permissions        roles:  partner       ──> [filings_read]
+      matched 2 people ──> no permissions                board member  ──> []
+      matched 1 person ──> their own scopes  ∪  the scopes of every role they hold
+                                                              ▼
+                              request scopes all inside that set? ──> runs now
+                              anything outside it?                ──> waits for the owner
+    ```
+
 13. **A surface is how a message arrived, not who it is with.** Email, iMessage, SMS, Telegram and the phone are one conversation with the owner, written to one record, so a notice sent on one is visible from another. A reply still goes back out the way it came. A group chat is its own conversation even when he is the one talking, because what is said in front of other people does not belong in his private record.
 14. **In a group it decides whether to speak, and that decision is only for groups, and today only on Telegram.** A direct message is always answered. In a Telegram group, a message naming it is answered; one that does not goes to a single judgment asking whether its silence would be the worse answer, and an undecided or failed judgment stays quiet. It hears everything either way, and records what it chose not to answer, so a later follow-up has something to refer back to.
 15. **An interrupted run is reported, not forgotten.** A run the process died inside leaves someone watching a typing indicator that never resolves. On startup an ordinary run is named on its own thread and offered again. A scheduled run is completed as a failed schedule run and reported to the owner. Neither is retried on its own, because a half-finished run may already have changed something.
@@ -322,6 +345,37 @@ refused at the tool call in both engines.
 
 A private web console, reachable only over the tailnet. It exists so permissions are
 something I can see rather than something I remember.
+
+```
+  PAGE          WHAT IT ASKS THE API FOR                       WHAT IT CAN CHANGE
+ ┌───────────┬───────────────────────────────────────────────┬───────────────────────────────┐
+ │ Home      │ /home          waiting, running, recent        │ nothing                       │
+ │ Requests  │ /requests      who, surface, scopes, message   │ approve, reject, edit         │
+ │ People    │ /people/directory   persons, contacts, kinds   │ create, rename, roles,        │
+ │           │                                               │ add / move / remove contact,  │
+ │           │                                               │ merge a duplicate             │
+ │ Roles     │ /roles  /scopes     scopes and members         │ scopes of a role, members     │
+ │ Scopes    │ /scopes/breakdown   the decision tree          │ nothing                       │
+ │ Tasks     │ /tasks  /tasks/{id} ledger and events          │ nothing                       │
+ │ Schedules │ /schedules     cadence, next runs              │ pause, resume, edit           │
+ │ Health    │ /health        tunnel, uptime, errors          │ nothing                       │
+ │ Settings  │ /settings      the owner's knobs               │ one value at a time           │
+ └───────────┴───────────────────────────────────────────────┴───────────────────────────────┘
+        every change publishes an event on /console/events, and open pages redraw from the API
+```
+
+The Scopes page draws the tree the gate walks when it decides what a request may use:
+
+```
+  system              question the gate asks              scopes a yes grants     tools
+ ┌──────────────┐    ┌──────────────────────────────┐    ┌───────────────────┐   ┌──────────────┐
+ │ club_websites│─┬─>│ always                       │───>│ (none)            │   │              │
+ │              │ ├─>│ Read the website admin?      │───>│ site_read    read │──>│ 13 tools     │
+ │              │ └─>│ Change the website?          │─┬─>│ site_write  write │──>│ 35 tools     │
+ └──────────────┘    └──────────────────────────────┘ └─>│ site_read    read │──>│ 13 tools     │
+                                                         └───────────────────┘   └──────────────┘
+   a role holds scopes; a person holds roles; a scope someone holds runs without asking
+```
 
 - **People.** One entry per person, with their contacts listed inside it. Create a person, rename
   them, tick the roles they hold, add or remove a contact, move a contact to someone else, or
@@ -453,6 +507,35 @@ backend. The console holds layout and wording only and asks the API for everythi
 including the list of contact types and the assistant's own picture. The API reads and writes
 one database.
 
+```
+ ┌────────────────────┐        ┌──────────────────────────────┐        ┌───────────────────────┐
+ │ CONSOLE            │  HTTP  │ BACKEND                      │  SQL   │ DATABASE              │
+ │ browser, tailnet   │ ─────> │ gate · console API · store   │ ─────> │ Postgres on Coolify   │
+ │                    │ <───── │                              │ <───── │ loopback port only    │
+ │ layout and wording │  JSON  │ code and judgments           │  rows  │ every table           │
+ │ holds no data      │        │ holds no data                │        │ the only copy         │
+ └────────────────────┘        └──────────────────────────────┘        └───────────────────────┘
+          ▲                                   ▲
+          │ static files                      │ messages in and out
+   separate frontend repo             email · SMS · iMessage · Telegram · phone
+```
+
+What is in the database, by what it is for:
+
+```
+  CONVERSATION             WORK                               PEOPLE AND TRUST
+ ┌──────────────────┐     ┌───────────────────────────┐      ┌──────────────────────────┐
+ │ threads          │     │ tasks                     │      │ persons                  │
+ │   └─< messages   │     │   ├─< task_events         │      │   └─< contacts           │
+ │ thread_links     │     │   ├─< task_participants   │      │ roles                    │
+ │ mail_ids         │     │   └── task_fts  (search)  │      │ contact_kinds            │
+ └──────────────────┘     │ requests ──> tasks        │      └──────────────────────────┘
+                          │ schedules ──> requests    │       RUNTIME
+                          └───────────────────────────┘      ┌──────────────────────────┐
+                                                             │ settings                 │
+   ─<  one to many                                           └──────────────────────────┘
+```
+
 - **The database is Postgres.** Set `GATE_DB_PATH` to a `postgresql://` URL and the store opens
   it; every table the gate uses lives there: threads, messages, requests, tasks and their
   events, people and contacts, roles, schedules, settings. Mine is a Coolify-managed Postgres
@@ -464,6 +547,16 @@ one database.
   <gate.db> --pg-dsn <url>` copies everything across with ids preserved. Stop the gateway
   first, run it, compare the printed counts, set `GATE_DB_PATH`, start the gateway. Going back
   is the same setting pointed at the file.
+
+  ```
+   gate.db ── opened read-only ──> migrate_to_postgres ──> Postgres
+      │                                   │                    │
+      │ never written                     │ per table:         │ ids preserved,
+      │ stays as the way back             │ row count both     │ sequences moved past
+      ▼                                   │ sides + checksum   │ the highest id
+   GATE_DB_PATH=<file>   <── rollback ──  ▼                    ▼
+                                    counts match? ── yes ──> GATE_DB_PATH=postgresql://...
+  ```
 - **Search.** Task search is SQLite FTS5 on a file and a `tsvector` with a GIN index on
   Postgres. Both honour quoted phrases and `OR`, require every other word, and match the last
   word of a term as a prefix; on Postgres punctuation is indexed as spaces, so `venue.com`
