@@ -111,6 +111,39 @@ async def post_people_sync(request: web.Request) -> web.StreamResponse:
     return _json(result)
 
 
+# -- person directory endpoints ---------------------------------------------
+async def get_people_directory(request: web.Request) -> web.StreamResponse:
+    return _json(api.people_directory(_manager(request).store))
+
+
+async def post_people_create(request: web.Request) -> web.StreamResponse:
+    return _json(api.create_person_endpoint(_manager(request).store, await _payload(request)))
+
+
+async def post_people_update(request: web.Request) -> web.StreamResponse:
+    return _json(api.update_person_endpoint(_manager(request).store, await _payload(request)))
+
+
+async def post_people_remove(request: web.Request) -> web.StreamResponse:
+    return _json(api.remove_person_endpoint(_manager(request).store, await _payload(request)))
+
+
+async def post_people_contact_add(request: web.Request) -> web.StreamResponse:
+    return _json(api.add_contact_endpoint(_manager(request).store, await _payload(request)))
+
+
+async def post_people_contact_remove(request: web.Request) -> web.StreamResponse:
+    return _json(api.remove_contact_endpoint(_manager(request).store, await _payload(request)))
+
+
+async def post_people_contact_move(request: web.Request) -> web.StreamResponse:
+    return _json(api.move_contact_endpoint(_manager(request).store, await _payload(request)))
+
+
+async def post_people_link(request: web.Request) -> web.StreamResponse:
+    return _json(api.link_people_endpoint(_manager(request).store, await _payload(request)))
+
+
 async def get_roles(request: web.Request) -> web.StreamResponse:
     return _json(api.roles(_manager(request).store))
 
@@ -212,6 +245,14 @@ def register(app: web.Application, gateway: Any) -> None:
     app.router.add_post("/console/api/people", _endpoint(post_people, mutation=True))
     app.router.add_post("/console/api/people/delete", _endpoint(post_people_delete, mutation=True))
     app.router.add_post("/console/api/people/sync", _endpoint(post_people_sync, mutation=True))
+    app.router.add_get("/console/api/people/directory", _endpoint(get_people_directory))
+    app.router.add_post("/console/api/people/create", _endpoint(post_people_create, mutation=True))
+    app.router.add_post("/console/api/people/update", _endpoint(post_people_update, mutation=True))
+    app.router.add_post("/console/api/people/remove", _endpoint(post_people_remove, mutation=True))
+    app.router.add_post("/console/api/people/contact/add", _endpoint(post_people_contact_add, mutation=True))
+    app.router.add_post("/console/api/people/contact/remove", _endpoint(post_people_contact_remove, mutation=True))
+    app.router.add_post("/console/api/people/contact/move", _endpoint(post_people_contact_move, mutation=True))
+    app.router.add_post("/console/api/people/link", _endpoint(post_people_link, mutation=True))
     app.router.add_get("/console/api/roles", _endpoint(get_roles))
     app.router.add_post("/console/api/roles", _endpoint(post_roles, mutation=True))
     app.router.add_post("/console/api/roles/delete", _endpoint(post_roles_delete, mutation=True))
@@ -235,6 +276,9 @@ def register(app: web.Application, gateway: Any) -> None:
     app.router.add_get("/console/events", get_events)
     for path in (
         "/console/api/overview", "/console/api/home", "/console/api/people", "/console/api/people/sync",
+        "/console/api/people/directory", "/console/api/people/create", "/console/api/people/update",
+        "/console/api/people/remove", "/console/api/people/contact/add", "/console/api/people/contact/remove",
+        "/console/api/people/contact/move", "/console/api/people/link",
         "/console/api/roles", "/console/api/roles/delete", "/console/api/roles/members/add",
         "/console/api/roles/members/remove", "/console/api/scopes", "/console/api/requests",
         "/console/api/requests/decide", "/console/api/tasks", "/console/api/health",
