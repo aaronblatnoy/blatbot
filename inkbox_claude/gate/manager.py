@@ -1397,12 +1397,15 @@ class GateSessionManager:
         and offer to run it again. It is not retried on its own: a half-finished run may
         already have changed something, and doing it twice is worse than asking."""
         try:
-            # "running" is a crash while the executor was mid-call. "approved" is a crash
-            # between _fire creating the schedule's request and execute() ever marking it
-            # running -- store.request_running_for_schedule treats an "approved" row as
+            # "running" is a crash while the executor was mid-call. An "approved" row
+            # stuck in that state is only ever a schedule request (an ordinary request
+            # goes pending -> approved -> running in one call, with no gap a crash can
+            # land in) -- store.request_running_for_schedule treats an "approved" row as
             # still in flight forever, so a missed one here means every later firing of
-            # that schedule silently skips. Both need the same restart handling.
-            stranded = self.store.requests_in_state("running") + self.store.requests_in_state("approved")
+            # that schedule silently skips. Non-schedule "approved" rows are left alone.
+            stranded = self.store.requests_in_state("running") + [
+                r for r in self.store.requests_in_state("approved") if r.schedule_id
+            ]
         except Exception:
             logger.exception("[gate] could not look for interrupted runs")
             return
@@ -1965,6 +1968,13 @@ class GateSessionManager:
         """Run an approved request. With notify=False the caller delivers the
         result itself (a live phone call reads it aloud) and gets it back."""
         self.store.set_state(req.id, "running")
+        # The revision this run started from, as _fire recorded it on the request's own
+        # status -- the `req` object here can be the one created before _fire wrote that
+        # status (stale in memory), so re-read it from the store rather than trust req.status.
+        schedule_revision = (req.status or {}).get("schedule_revision")
+        if schedule_revision is None and req.schedule_id:
+            fresh = self.store.get_request(req.id)
+            schedule_revision = (fresh.status or {}).get("schedule_revision") if fresh else None
         session = self.get(req.chat_id)
         slow_ack: Optional[asyncio.Task] = None
         if notify and req.mode in ("imessage", "telegram"):
@@ -1989,6 +1999,8 @@ class GateSessionManager:
             await self.ask_confirmation(req, status)
             return "I need your yes before I change anything; I have texted you what it is."
         ok = bool(status.get("ok"))
+        if schedule_revision is not None:
+            status["schedule_revision"] = schedule_revision
         self.store.set_state(req.id, "done" if ok else "failed",
                              status=status, raw_output=status.get("raw"))
         self.store.set_thread(req.chat_id, "idle")
@@ -1997,19 +2009,9 @@ class GateSessionManager:
         self.task_note(req, "done" if ok else "failed", f"{req.summary} -> {result}",
                        state="open" if req.schedule_id else ("done" if ok else "failed"))
         if await self.schedules.finished(req, status):
-            # The schedule notice is sent; the owner's thread may still have a message
-            # that arrived while this ran (the schedule shares his chat_id). It was never
-            # held for this run (running_for_thread ignores schedule requests), but on a
-            # FAILED run nothing has answered it yet -- pick it up the same way an
-            # ordinary request's failure does, as one fresh turn.
-            meanwhile = self.store.inbound_since(self.get(req.chat_id).record_id, req.created_at)
-            if not ok and meanwhile:
-                logger.info("[gate] scheduled #%s failed with %d message(s) received meanwhile; re-deciding the latest",
-                            req.id, len(meanwhile))
-                try:
-                    await session.handle_followup(meanwhile[-1]["text"], inbound_id=meanwhile[-1]["id"])
-                except Exception:
-                    logger.exception("[gate] follow-up after scheduled #%s failed", req.id)
+            # A message the owner sent while this ran already got its own turn when it
+            # arrived (store.running_for_thread ignores schedule requests, so it was never
+            # held). Nothing further to do with it here.
             session.typing_stop()
             return ""
         if not notify:

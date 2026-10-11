@@ -651,3 +651,578 @@ def test_an_ordinary_word_in_a_schedule_prompt_does_not_name_a_tool():
     assert _schedule_prompt_tool_scopes(prompt) == []
     assert _prompt_tool_mismatch(prompt, ["web"]) == []
     assert "contacts" in _schedule_prompt_tool_scopes("Then call inkbox_create_contact for the tracker.")
+
+
+# -- schedule-fix regression tests -----------------------------------------
+
+
+def test_pause_during_inflight_continue_run_keeps_note_and_outcome_no_new_next_run(tmp_path):
+    m, sent = manager(tmp_path)
+    task = m.store.create_task("pause mid continue")
+    schedule = m.store.create_schedule(chat_id="owner", task_id=task["id"], title="pause mid continue",
+                                       prompt="work", kind="continue", scopes=["web"], timezone="America/New_York",
+                                       report_mode="always", run_at=time.time(), next_run=time.time(),
+                                       max_runs=20, deadline=time.time() + 86400)
+    m.store.update_schedule(schedule.id, state="active", run_count=1, next_run=None)
+    req = m.store.create_request(chat_id="owner", sender="Aaron", sender_name="Aaron", mode="schedule",
+                                 subject="", original_message="work", summary="pause mid continue", scopes=["web"],
+                                 prompt="work", state="running", task_id=task["id"], schedule_id=schedule.id,
+                                 schedule_kind="continue")
+    m.store.set_state(req.id, "running", status={"schedule_revision": 0})
+
+    async def go():
+        paused = await m.schedules.action(schedule.id, "pause", owner=True)
+        assert paused.state == "paused"
+        sent.clear()
+        handled = await m.schedules.finished(
+            req, {"ok": True, "summary": "progress note", "tool_calls": ["x"],
+                  "continue": {"delay_minutes": 5, "note": "should not be added"}})
+        assert handled is True
+        current = m.store.get_schedule(schedule.id)
+        assert current.state == "paused" and current.next_run is None
+        assert current.notes == []
+        assert current.last_outcome == "progress note"
+        assert sent == []  # a run landing on a schedule the owner already moved on gets no owner notice
+        memory = m.store.task_memory_for_task(schedule.task_id)
+        assert "had moved on" in memory
+
+    asyncio.run(go())
+
+
+def test_edit_during_inflight_continue_run_requires_reapproval_and_ignores_stale_revision_signal(tmp_path):
+    m, sent = manager(tmp_path, result={
+        "ok": True, "summary": "progress", "raw": "progress", "tool_calls": ["x"],
+        "continue": {"delay_minutes": 5, "note": "should not land"},
+    })
+    task = m.store.create_task("continue edit")
+    schedule = m.store.create_schedule(chat_id="owner", task_id=task["id"], title="continue edit", prompt="work",
+                                       kind="continue", scopes=["web"], timezone="America/New_York",
+                                       report_mode="always", run_at=time.time(), next_run=time.time(),
+                                       max_runs=20, deadline=time.time() + 86400)
+    m.store.update_schedule(schedule.id, state="active", run_count=1)
+    started_revision = schedule.revision
+    # Mirrors _fire exactly: create_request() returns an object without the status
+    # set_state() is about to write, and that same stale object is what gets executed.
+    req = m.store.create_request(chat_id="owner", sender="Aaron", sender_name="Aaron", mode="schedule",
+                                 subject="", original_message="work", summary="continue edit", scopes=["web"],
+                                 prompt="work", state="approved", task_id=task["id"], schedule_id=schedule.id,
+                                 schedule_kind="continue")
+    m.store.set_state(req.id, "approved", status={"schedule_revision": started_revision})
+
+    async def go():
+        edited = await m.schedules.edit(schedule.id, owner=True, changes={"prompt": "work harder"})
+        assert edited.state == "proposed" and edited.revision == started_revision + 1
+        pending = m.store.get_request(edited.last_request_id)
+        await m.schedules.decide_proposal(pending, "yes")
+        active_again = m.store.get_schedule(schedule.id)
+        assert active_again.state == "active" and active_again.revision == started_revision + 1
+        next_run_before = active_again.next_run
+
+        sent.clear()
+        await m.execute(req)  # the stale (revision 0) run finally reports in
+        final = m.store.get_schedule(schedule.id)
+        assert final.state == "active" and final.revision == started_revision + 1
+        assert final.notes == []  # the continue note from the stale run never landed
+        assert final.next_run == next_run_before  # not rescheduled by the stale signal
+        assert m.store.get_request(req.id).state == "done"
+
+    asyncio.run(go())
+
+
+def test_delete_during_inflight_run_sends_no_notice_and_nothing_fires_again(tmp_path):
+    m, sent = manager(tmp_path)
+    task = m.store.create_task("delete mid run")
+    schedule = m.store.create_schedule(chat_id="owner", task_id=task["id"], title="delete mid run", prompt="work",
+                                       kind="recurring", cron="* * * * *", scopes=["web"], timezone="America/New_York",
+                                       report_mode="always", next_run=time.time())
+    m.store.update_schedule(schedule.id, state="active")
+    req = m.store.create_request(chat_id="owner", sender="Aaron", sender_name="Aaron", mode="schedule",
+                                 subject="", original_message="work", summary="delete mid run", scopes=["web"],
+                                 prompt="work", state="running", task_id=task["id"], schedule_id=schedule.id,
+                                 schedule_kind="recurring")
+
+    async def go():
+        await m.schedules.action(schedule.id, "delete", owner=True)
+        assert m.store.get_schedule(schedule.id) is None
+        sent.clear()
+        handled = await m.schedules.finished(req, {"ok": False, "error": "boom", "tool_calls": []})
+        assert handled is True
+        assert sent == []
+        await m.schedules.tick()
+        assert sent == []  # nothing left to fire
+
+    asyncio.run(go())
+
+
+def test_owner_message_during_schedule_run_is_not_held_for_it(tmp_path):
+    # store.running_for_thread must ignore a schedule's own running request on the
+    # owner's thread, so an owner message arriving meanwhile is decided as its own
+    # turn rather than silently absorbed into the schedule's run.
+    m, sent = manager(tmp_path)
+    task = m.store.create_task("mid-run owner message")
+    schedule = m.store.create_schedule(chat_id="aaron-mid-run", task_id=task["id"], title="mid-run", prompt="work",
+                                       kind="recurring", cron="* * * * *", scopes=["web"], timezone="America/New_York",
+                                       report_mode="always", next_run=time.time())
+    m.store.update_schedule(schedule.id, state="active")
+    running = m.store.create_request(chat_id="aaron-mid-run", sender="Aaron", sender_name="Aaron", mode="schedule",
+                                     subject="", original_message="work", summary="mid-run", scopes=["web"],
+                                     prompt="work", state="running", task_id=task["id"], schedule_id=schedule.id,
+                                     schedule_kind="recurring")
+    assert m.store.running_for_thread("aaron-mid-run") is None
+
+    session = m.get("aaron-mid-run")
+
+    async def decide(**kwargs):
+        out = RouterOutput(reply=None, request=RouterRequest(
+            prompt="look something up", scopes=["web"], summary="owner side request"))
+        return out, m.store.create_task("owner side request")
+
+    session.decide = decide
+    meta = {"sender": "+15550100001", "conversation_id": "conv-aaron"}
+    asyncio.run(session.handle_inbound("while that's running, also check this", "imessage", meta))
+    created = [r for r in m.store.requests_in_state("approved") + m.store.requests_in_state("done")
+              if r.chat_id == "aaron-mid-run" and r.id != running.id]
+    assert len(created) == 1
+    assert created[0].schedule_id is None
+
+
+def test_owner_message_during_failed_scheduled_run_is_handled_exactly_once(tmp_path):
+    m, sent = manager(tmp_path)
+    task = m.store.create_task("fails with meanwhile message")
+    schedule = m.store.create_schedule(chat_id="aaron-fail-mid-run", task_id=task["id"], title="fails mid run",
+                                       prompt="work", kind="recurring", cron="* * * * *", scopes=["web"],
+                                       timezone="America/New_York", report_mode="always", next_run=time.time())
+    m.store.update_schedule(schedule.id, state="active")
+    req = m.store.create_request(chat_id="aaron-fail-mid-run", sender="Aaron", sender_name="Aaron", mode="schedule",
+                                 subject="", original_message="work", summary="fails mid run", scopes=["web"],
+                                 prompt="work", state="running", task_id=task["id"], schedule_id=schedule.id,
+                                 schedule_kind="recurring")
+
+    session = m.get("aaron-fail-mid-run")
+    calls = {"n": 0}
+
+    async def decide(**kwargs):
+        calls["n"] += 1
+        out = RouterOutput(reply=None, request=RouterRequest(
+            prompt="look something up", scopes=["web"], summary="owner side request"))
+        return out, m.store.create_task("owner side request")
+
+    session.decide = decide
+    meta = {"sender": "+15550100001", "conversation_id": "conv-aaron"}
+    # The message arrives while the schedule is "running" -- it must get its own
+    # turn right away, since running_for_thread no longer holds it for the schedule.
+    asyncio.run(session.handle_inbound("while that's running, also check this", "imessage", meta))
+    assert calls["n"] == 1
+    created_after_arrival = [r for r in m.store.requests_in_state("approved") + m.store.requests_in_state("done")
+                            if r.chat_id == "aaron-fail-mid-run" and r.id != req.id]
+    assert len(created_after_arrival) == 1
+
+    # The scheduled run now ends FAILED. It must not re-decide the same message again.
+    m.executor = FakeExecutor({"ok": False, "summary": "it failed", "error": "boom", "raw": "", "tool_calls": []})
+    asyncio.run(m.execute(req))
+    assert calls["n"] == 1  # still exactly one decision for that inbound message
+    still_only_one = [r for r in m.store.requests_in_state("approved") + m.store.requests_in_state("done")
+                      if r.chat_id == "aaron-fail-mid-run" and r.id != req.id]
+    assert len(still_only_one) == 1
+
+
+def test_executor_keys_schedule_session_by_schedule_not_chat_id(tmp_path, monkeypatch):
+    from claude_agent_sdk import ResultMessage
+
+    class Options:
+        def __init__(self, **kwargs):
+            self.__dict__.update(kwargs)
+
+    async def fake_query(prompt, options):
+        yield ResultMessage(subtype="success", duration_ms=1, duration_api_ms=1, is_error=False,
+                            num_turns=1, session_id="sess-abc")
+
+    monkeypatch.setattr(gate_executor, "ClaudeAgentOptions", Options)
+    monkeypatch.setattr(gate_executor, "query", fake_query)
+
+    store = Store(str(tmp_path / "exec.db"))
+    task = store.create_task("session keys")
+    sched_req = store.create_request(chat_id="owner-chat", sender="Aaron", sender_name="Aaron", mode="schedule",
+                                     subject="", original_message="go", summary="go", scopes=["web"], prompt="go",
+                                     state="running", task_id=task["id"], schedule_id=9, schedule_kind="once")
+    ordinary_req = store.create_request(chat_id="owner-chat", sender="Aaron", sender_name="Aaron", mode="imessage",
+                                        subject="", original_message="go", summary="go", scopes=["web"], prompt="go",
+                                        state="running", task_id=task["id"])
+    ex = gate_executor.Executor(mcp_server=None, cwd=str(tmp_path))
+    asyncio.run(ex.run(sched_req))
+    asyncio.run(ex.run(ordinary_req))
+    assert ex._sessions.get("schedule:9") == "sess-abc"
+    assert ex._sessions.get("owner-chat") == "sess-abc"
+    assert "schedule:9" not in ("owner-chat",)
+
+
+def test_next_run_prompt_carries_notes_without_operational_lines_and_run_now_blocked(tmp_path):
+    m, _ = manager(tmp_path)
+    task = m.store.create_task("notes in prompt")
+    schedule = m.store.create_schedule(chat_id="owner", task_id=task["id"], title="notes in prompt", prompt="work",
+                                       kind="continue", scopes=["web"], timezone="America/New_York",
+                                       report_mode="always", run_at=time.time(), next_run=time.time(),
+                                       max_runs=20, deadline=time.time() + 86400)
+    m.store.update_schedule(schedule.id, state="active", run_count=1, notes=["Finished batch one."])
+
+    async def go():
+        req = m.store.create_request(chat_id="owner", sender="Aaron", sender_name="Aaron", mode="schedule",
+                                     subject="", original_message="work", summary="notes in prompt", scopes=["web"],
+                                     prompt="work", state="running", task_id=task["id"], schedule_id=schedule.id,
+                                     schedule_kind="continue")
+        # As in the real flow, execute() marks the request done/failed before handing
+        # off to schedules.finished() -- a request still "running" would otherwise look
+        # like an overlapping run and block the next firing.
+        m.store.set_state(req.id, "done")
+        await m.schedules.finished(req, {"ok": True, "summary": "progress", "tool_calls": ["x"],
+                                         "continue": {"delay_minutes": 5, "note": "Finished batch two."}})
+        await m.schedules.tick(time.time() + 301)
+        latest = m.store.get_request(m.store.get_schedule(schedule.id).last_request_id)
+        assert "Finished batch one." in latest.prompt and "Finished batch two." in latest.prompt
+        assert "Skipped a firing" not in latest.prompt
+
+        # run_now while a run is in flight does not change next_run and says so clearly.
+        before = m.store.get_schedule(schedule.id).next_run
+        m.store.create_request(chat_id="owner", sender="Aaron", sender_name="Aaron", mode="schedule",
+                               subject="", original_message="work", summary="notes in prompt",
+                               scopes=["web"], prompt="work", state="running", task_id=task["id"],
+                               schedule_id=schedule.id, schedule_kind="continue")
+        with pytest.raises(ValueError, match="already has a run in flight"):
+            await m.schedules.action(schedule.id, "run_now", owner=True)
+        assert m.store.get_schedule(schedule.id).next_run == before
+
+    asyncio.run(go())
+
+
+def test_restart_recovers_approved_and_running_schedule_requests_then_fires_once(tmp_path):
+    m, sent = manager(tmp_path)
+    task = m.store.create_task("double restart")
+    approved_sched = m.store.create_schedule(chat_id="owner", task_id=task["id"], title="approved-crash",
+                                             prompt="work", kind="once", scopes=["web"],
+                                             timezone="America/New_York", report_mode="changed",
+                                             run_at=time.time(), next_run=None)
+    m.store.update_schedule(approved_sched.id, state="active", run_count=1)
+    approved_req = m.store.create_request(chat_id="owner", sender="Aaron", sender_name="Aaron", mode="schedule",
+                                          subject="", original_message="work", summary="approved-crash",
+                                          scopes=["web"], prompt="work", state="approved", task_id=task["id"],
+                                          schedule_id=approved_sched.id, schedule_kind="once")
+
+    running_sched = m.store.create_schedule(chat_id="owner", task_id=task["id"], title="running-crash",
+                                            prompt="work", kind="recurring", cron="* * * * *", scopes=["web"],
+                                            timezone="America/New_York", report_mode="changed",
+                                            next_run=time.time() - 120)
+    m.store.update_schedule(running_sched.id, state="active", run_count=1)
+    running_req = m.store.create_request(chat_id="owner", sender="Aaron", sender_name="Aaron", mode="schedule",
+                                         subject="", original_message="work", summary="running-crash",
+                                         scopes=["web"], prompt="work", state="running", task_id=task["id"],
+                                         schedule_id=running_sched.id, schedule_kind="recurring")
+
+    sent.clear()
+    asyncio.run(m.recover_interrupted())
+    assert m.store.get_request(approved_req.id).state == "failed"
+    assert m.store.get_request(running_req.id).state == "failed"
+    # "once" ends failed outright; "recurring" just records the failed run and stays
+    # active -- it was already rescheduled by _fire before the crash.
+    assert m.store.get_schedule(approved_sched.id).state == "failed"
+    recovered_recurring = m.store.get_schedule(running_sched.id)
+    assert recovered_recurring.state == "active" and recovered_recurring.consecutive_failures == 1
+    notices = [row[1] for row in sent if "interrupted by a restart" in row[1]]
+    assert len(notices) == 2  # exactly one owner notice per recovered request
+
+    m.store.update_schedule(running_sched.id, next_run=time.time() - 60)
+    asyncio.run(m.schedules.tick())
+    asyncio.run(asyncio.sleep(0.05))
+    first = m.store.get_schedule(running_sched.id)
+    assert first.run_count == 2 and first.next_run > time.time()
+
+    # Second tick, same moment: must not fire again.
+    before_next_run = first.next_run
+    asyncio.run(m.schedules.tick(time.time()))
+    asyncio.run(asyncio.sleep(0.05))
+    second = m.store.get_schedule(running_sched.id)
+    assert second.run_count == 2 and second.next_run == before_next_run
+
+
+def test_recover_interrupted_restricts_approved_recovery_to_schedule_requests(tmp_path):
+    m, sent = manager(tmp_path)
+    task = m.store.create_task("ordinary approved")
+    ordinary_req = m.store.create_request(chat_id="other", sender="x", sender_name="x", mode="imessage",
+                                          subject="", original_message="do it", summary="ordinary", scopes=["web"],
+                                          prompt="do it", state="approved", task_id=task["id"])
+    sched_task = m.store.create_task("schedule approved")
+    schedule = m.store.create_schedule(chat_id="owner", task_id=sched_task["id"], title="sched", prompt="work",
+                                       kind="once", scopes=["web"], timezone="America/New_York",
+                                       report_mode="changed", run_at=time.time(), next_run=None)
+    m.store.update_schedule(schedule.id, state="active", run_count=1)
+    sched_req = m.store.create_request(chat_id="owner", sender="Aaron", sender_name="Aaron", mode="schedule",
+                                       subject="", original_message="work", summary="sched", scopes=["web"],
+                                       prompt="work", state="approved", task_id=sched_task["id"],
+                                       schedule_id=schedule.id, schedule_kind="once")
+    sent.clear()
+    asyncio.run(m.recover_interrupted())
+    assert m.store.get_request(ordinary_req.id).state == "approved"
+    assert m.store.get_request(sched_req.id).state == "failed"
+    assert m.store.get_schedule(schedule.id).state == "failed"
+
+
+def test_request_running_for_schedule_ignores_stale_run_and_does_not_block_firing(tmp_path):
+    m, _ = manager(tmp_path)
+    task = m.store.create_task("stale blocker")
+    schedule = m.store.create_schedule(chat_id="owner", task_id=task["id"], title="stale blocker", prompt="work",
+                                       kind="recurring", cron="* * * * *", scopes=["web"], timezone="America/New_York",
+                                       report_mode="always", next_run=time.time() - 1)
+    m.store.update_schedule(schedule.id, state="active")
+    stuck = m.store.create_request(chat_id="owner", sender="Aaron", sender_name="Aaron", mode="schedule",
+                                   subject="", original_message="work", summary="stale blocker", scopes=["web"],
+                                   prompt="work", state="running", task_id=task["id"], schedule_id=schedule.id,
+                                   schedule_kind="recurring")
+    old = time.time() - (m.store.RUN_STALE_S + 60)
+    m.store._db.execute("UPDATE requests SET updated_at=? WHERE id=?", (old, stuck.id))
+    m.store._db.commit()
+    assert m.store.request_running_for_schedule(schedule.id) is None
+    assert m.store.get_request(stuck.id).state == "failed"
+
+    asyncio.run(m.schedules.tick())
+    asyncio.run(asyncio.sleep(0.05))
+    assert m.store.get_schedule(schedule.id).run_count == 1
+
+
+def test_continue_delay_past_deadline_ends_with_deadline_outcome(tmp_path):
+    from inkbox_claude.gate.schedules import _shown
+    m, sent = manager(tmp_path)
+    task = m.store.create_task("deadline")
+    now = time.time()
+    deadline = now + 600
+    schedule = m.store.create_schedule(chat_id="owner", task_id=task["id"], title="deadline", prompt="work",
+                                       kind="continue", scopes=["web"], timezone="America/New_York",
+                                       report_mode="always", run_at=now, next_run=now, max_runs=20,
+                                       deadline=deadline)
+    m.store.update_schedule(schedule.id, state="active", run_count=1)
+    req = m.store.create_request(chat_id="owner", sender="Aaron", sender_name="Aaron", mode="schedule",
+                                 subject="", original_message="work", summary="deadline", scopes=["web"],
+                                 prompt="work", state="running", task_id=task["id"], schedule_id=schedule.id,
+                                 schedule_kind="continue")
+    sent.clear()
+    asyncio.run(m.schedules.finished(req, {"ok": True, "summary": "progress", "tool_calls": ["x"],
+                                           "continue": {"delay_minutes": 60, "note": "would be past deadline"}}))
+    current = m.store.get_schedule(schedule.id)
+    assert current.state == "done" and current.next_run is None
+    assert _shown(deadline, schedule.timezone) in current.last_outcome
+
+
+def test_no_continue_call_ends_with_final_notice(tmp_path):
+    m, sent = manager(tmp_path)
+    task = m.store.create_task("no continue")
+    schedule = m.store.create_schedule(chat_id="owner", task_id=task["id"], title="no continue", prompt="work",
+                                       kind="continue", scopes=["web"], timezone="America/New_York",
+                                       report_mode="always", run_at=time.time(), next_run=time.time(),
+                                       max_runs=20, deadline=time.time() + 86400)
+    m.store.update_schedule(schedule.id, state="active", run_count=1)
+    req = m.store.create_request(chat_id="owner", sender="Aaron", sender_name="Aaron", mode="schedule",
+                                 subject="", original_message="work", summary="no continue", scopes=["web"],
+                                 prompt="work", state="running", task_id=task["id"], schedule_id=schedule.id,
+                                 schedule_kind="continue")
+    sent.clear()
+    asyncio.run(m.schedules.finished(req, {"ok": True, "summary": "all done", "tool_calls": ["x"]}))
+    assert m.store.get_schedule(schedule.id).state == "done"
+    assert len(sent) == 1
+    assert "No further runs" in sent[0][1]
+
+
+def test_two_continue_calls_in_one_run_last_wins(tmp_path, monkeypatch):
+    # Claude Code executor path: the in-process host tool clears+overwrites continue_state
+    # on every call, so only the LAST call's delay/note survive into the run's status.
+    import claude_agent_sdk
+    from inkbox_claude.gate import hosttools as hosttools_mod
+    original = claude_agent_sdk.create_sdk_mcp_server
+    captured = {}
+
+    def fake_create(*a, **kw):
+        captured["tools"] = kw.get("tools")
+        return original(*a, **kw)
+
+    monkeypatch.setattr(claude_agent_sdk, "create_sdk_mcp_server", fake_create)
+    state = {}
+    hosttools_mod.sdk_server(state)
+    handler = next(t.handler for t in captured["tools"] if t.name == "schedule_continue")
+    asyncio.run(handler({"delay_minutes": 5, "note": "first"}))
+    asyncio.run(handler({"delay_minutes": 10, "note": "second and final"}))
+    assert state == {"delay_minutes": 10, "note": "second and final"}
+
+    # Jev path: reversed(steps) picks the last matching schedule_continue call.
+    from inkbox_claude.gate.jevagent import JevAgent
+
+    class FakeJudge:
+        calls = 0
+
+    class FakeProse:
+        calls = 0
+
+    steps = [
+        {"tool": "mcp__host__schedule_continue", "args": {"delay_minutes": 5, "note": "first"},
+         "ok": True, "result": "ok"},
+        {"tool": "mcp__x__read", "args": {}, "ok": True, "result": "ok"},
+        {"tool": "mcp__host__schedule_continue", "args": {"delay_minutes": 10, "note": "second and final"},
+         "ok": True, "result": "ok"},
+    ]
+    status = JevAgent._status(True, "", steps, FakeJudge(), FakeProse(), time.time())
+    assert status["continue"] == {"delay_minutes": 10, "note": "second and final"}
+
+
+def test_failed_run_with_continue_keeps_going_with_countdown_then_third_failure_pauses_once(tmp_path):
+    m, sent = manager(tmp_path)
+    task = m.store.create_task("failing continue")
+    schedule = m.store.create_schedule(chat_id="owner", task_id=task["id"], title="failing continue", prompt="work",
+                                       kind="continue", scopes=["web"], timezone="America/New_York",
+                                       report_mode="always", run_at=time.time(), next_run=time.time(),
+                                       max_runs=20, deadline=time.time() + 86400)
+    m.store.update_schedule(schedule.id, state="active", run_count=1)
+
+    async def go():
+        for n in range(1, 4):
+            req = m.store.create_request(chat_id="owner", sender="Aaron", sender_name="Aaron", mode="schedule",
+                                         subject="", original_message="work", summary="failing continue",
+                                         scopes=["web"], prompt="work", state="running", task_id=task["id"],
+                                         schedule_id=schedule.id, schedule_kind="continue")
+            sent.clear()
+            await m.schedules.finished(req, {
+                "ok": False, "error": f"failure {n}", "tool_calls": ["x"],
+                "continue": {"delay_minutes": 10, "note": f"note {n}"},
+            })
+            current = m.store.get_schedule(schedule.id)
+            if n < 3:
+                assert current.state == "active" and current.consecutive_failures == n
+                assert current.notes[-1] == f"note {n}"
+                assert len(sent) == 1
+                assert f"{3 - n} more failure(s) pause this schedule" in sent[0][1]
+            else:
+                assert current.state == "paused" and current.next_run is None
+                assert any("three consecutive failed runs" in row[1] for row in sent)
+
+        # No further notice sent while paused.
+        sent.clear()
+        stale_req = m.store.create_request(chat_id="owner", sender="Aaron", sender_name="Aaron", mode="schedule",
+                                           subject="", original_message="work", summary="failing continue",
+                                           scopes=["web"], prompt="work", state="running", task_id=task["id"],
+                                           schedule_id=schedule.id, schedule_kind="continue")
+        await m.schedules.finished(stale_req, {"ok": False, "error": "late", "tool_calls": [],
+                                                "continue": {"delay_minutes": 10, "note": "too late"}})
+        assert sent == []
+        assert m.store.get_schedule(schedule.id).state == "paused"
+
+    asyncio.run(go())
+
+
+def test_run_notice_uses_final_status_lists_denied_tools_and_next_run_countdown(tmp_path):
+    m, sent = manager(tmp_path)
+    task = m.store.create_task("final status notice")
+    schedule = m.store.create_schedule(chat_id="owner", task_id=task["id"], title="final status notice",
+                                       prompt="work", kind="continue", scopes=["web"], timezone="America/New_York",
+                                       report_mode="always", run_at=time.time(), next_run=time.time(),
+                                       max_runs=20, deadline=time.time() + 86400)
+    m.store.update_schedule(schedule.id, state="active", run_count=1, consecutive_failures=1)
+    req = m.store.create_request(chat_id="owner", sender="Aaron", sender_name="Aaron", mode="schedule",
+                                 subject="", original_message="work", summary="final status notice", scopes=["web"],
+                                 prompt="work", state="running", task_id=task["id"], schedule_id=schedule.id,
+                                 schedule_kind="continue")
+    closing = ("Looked at the roster, cross-checked two tables, and tried to email the weekly summary to the "
+              "list, but the send tool was refused by scope. Will retry the send next run after Aaron widens "
+              "the schedule's scopes, or will give up after the run limit. " * 3).strip()
+    assert len(closing) > 400
+    narration_1 = "First I searched the roster for pending signups and found eleven."
+    narration_2 = "Then I attempted the summary email, which the scope refused outright."
+
+    sent.clear()
+    handled = asyncio.run(m.schedules.finished(req, {
+        "ok": False, "final_status": closing, "summary": f"{narration_1}\n{narration_2}\n{closing}",
+        "tool_calls": ["mcp__inkbox__inkbox_send_email"],
+        "steps": [{"tool": "mcp__inkbox__inkbox_send_email", "args": {}, "ok": False, "denied": "scope"}],
+        "continue": {"delay_minutes": 10, "note": "will retry the email next run"},
+    }))
+    assert handled is True
+    assert len(sent) == 1
+    notice = sent[0][1]
+    assert closing in notice
+    assert narration_1 not in notice and narration_2 not in notice
+    assert "mcp__inkbox__inkbox_send_email refused: outside scope (granted: web)" in notice
+    assert "Next run:" in notice
+    assert "1 more failure(s) pause this schedule" in notice
+    current = m.store.get_schedule(schedule.id)
+    assert current.state == "active" and current.consecutive_failures == 2
+
+
+def test_activation_notice_has_title_first_run_time_and_scopes(tmp_path):
+    m, sent = manager(tmp_path)
+    task = m.store.create_task("activate")
+
+    async def go():
+        schedule = await m.schedules.propose(owner=True, chat_id="owner", task_id=task["id"],
+                                             spec=proposal("recurring", cron="0 9 * * 1-5"),
+                                             scopes=["calendar", "web"])
+        req = m.store.get_request(m.store.get_schedule(schedule.id).last_request_id)
+        sent.clear()
+        await m.schedules.decide_proposal(req, "yes")
+        assert len(sent) == 1
+        notice = sent[0][1]
+        activated = m.store.get_schedule(schedule.id)
+        assert activated.title in notice
+        assert "calendar" in notice and "web" in notice
+        assert "First run" in notice
+
+    asyncio.run(go())
+
+
+def test_executor_final_status_strips_only_the_closing_status_line(tmp_path, monkeypatch):
+    from claude_agent_sdk import AssistantMessage, TextBlock, ToolUseBlock, ResultMessage
+
+    class Options:
+        def __init__(self, **kwargs):
+            self.__dict__.update(kwargs)
+
+    narration_1 = TextBlock(text="First I will look up the roster.")
+    tool_1 = ToolUseBlock(id="t1", name="mcp__x__read", input={})
+    narration_2 = TextBlock(text="Now I will check the second table.")
+    tool_2 = ToolUseBlock(id="t2", name="mcp__x__read2", input={})
+    closing = TextBlock(text="All eleven signups were found and matched.\nSTATUS: OK")
+
+    async def fake_query(prompt, options):
+        yield AssistantMessage(content=[narration_1], model="m")
+        yield AssistantMessage(content=[tool_1], model="m")
+        yield AssistantMessage(content=[narration_2], model="m")
+        yield AssistantMessage(content=[tool_2], model="m")
+        yield AssistantMessage(content=[closing], model="m")
+        yield ResultMessage(subtype="success", duration_ms=1, duration_api_ms=1, is_error=False,
+                            num_turns=1, session_id="s1")
+
+    monkeypatch.setattr(gate_executor, "ClaudeAgentOptions", Options)
+    monkeypatch.setattr(gate_executor, "query", fake_query)
+    store = Store(str(tmp_path / "exec_gate.db"))
+    task = store.create_task("executor final status")
+    req = store.create_request(chat_id="owner", sender="Aaron", sender_name="Aaron", mode="imessage", subject="",
+                               original_message="go", summary="go", scopes=["web"], prompt="go",
+                               state="running", task_id=task["id"])
+    result = asyncio.run(gate_executor.Executor(mcp_server=None, cwd=str(tmp_path)).run(req))
+    assert result["final_status"] == "All eleven signups were found and matched."
+    assert "STATUS: OK" not in result["final_status"]
+    assert narration_1.text not in result["final_status"]
+    assert narration_2.text not in result["final_status"]
+    assert narration_1.text in result["raw"]
+    assert "STATUS: OK" in result["raw"]
+
+
+def test_jev_final_status_is_header_and_tail_only(tmp_path):
+    from inkbox_claude.gate.jevagent import JevAgent
+
+    class FakeJudge:
+        calls = 0
+
+    class FakeProse:
+        calls = 0
+
+    steps = [
+        {"tool": "mcp__x__read", "args": {}, "ok": True, "result": "eleven rows found"},
+    ]
+    status = JevAgent._status(True, "", steps, FakeJudge(), FakeProse(), time.time())
+    assert "eleven rows found" not in status["final_status"]
+    assert "STATUS: OK" in status["final_status"]
+    assert "eleven rows found" in status["raw"]

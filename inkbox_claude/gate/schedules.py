@@ -391,7 +391,12 @@ class ScheduleService:
             # Deleted while it ran: no notice, no further fire. Nothing to update.
             return True
         ok = bool(status.get("ok"))
-        started_revision = (req.status or {}).get("schedule_revision")
+        # The revision this run started from. manager.execute() carries it from the
+        # request's own pre-run status into the status handed here, since `req` itself
+        # can be the in-memory object from before that status was ever written.
+        started_revision = status.get("schedule_revision")
+        if started_revision is None:
+            started_revision = (req.status or {}).get("schedule_revision")
         stale = schedule.state != "active" or (
             started_revision is not None and started_revision != schedule.revision)
         failures = 0 if ok else schedule.consecutive_failures + 1
