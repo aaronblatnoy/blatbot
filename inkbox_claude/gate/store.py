@@ -2104,10 +2104,15 @@ class Store:
     def running_for_thread(self, chat_id: str) -> Optional[Request]:
         """The request currently executing on this thread, if any. A run older than
         RUN_STALE_S is not running any more whatever its row says (a restart mid-run
-        leaves 'running' behind); it is marked failed here so it never blocks a thread."""
+        leaves 'running' behind); it is marked failed here so it never blocks a thread.
+
+        Schedule requests are excluded even when they share the owner's chat_id: a
+        scheduled run must never make the owner's own thread look busy -- a message he
+        sends while it fires is a fresh turn, not something to hold for the schedule."""
         with self._lock:
             r = self._db.execute(
-                "SELECT * FROM requests WHERE chat_id=? AND state IN ('approved','running') ORDER BY id DESC LIMIT 1",
+                "SELECT * FROM requests WHERE chat_id=? AND state IN ('approved','running') "
+                "AND schedule_id IS NULL ORDER BY id DESC LIMIT 1",
                 (chat_id,),
             ).fetchone()
             if r and time.time() - float(r["updated_at"]) > self.RUN_STALE_S:
@@ -2189,10 +2194,22 @@ class Store:
         return [Schedule.from_row(r) for r in rows]
 
     def request_running_for_schedule(self, schedule_id: int) -> Optional[Request]:
+        """The request currently in flight for this schedule, if any. Same staleness
+        rule as running_for_thread: a request stuck in 'approved' or 'running' since
+        before RUN_STALE_S died without reporting (a crash between _fire creating it
+        and execute() finishing it) and must never block every later firing forever."""
         with self._lock:
             row = self._db.execute(
                 "SELECT * FROM requests WHERE schedule_id=? AND state IN ('pending','approved','running') "
                 "ORDER BY id DESC LIMIT 1", (int(schedule_id),)).fetchone()
+            if row and row["state"] in ("approved", "running") and \
+                    time.time() - float(row["updated_at"]) > self.RUN_STALE_S:
+                self._db.execute("UPDATE requests SET state='failed', updated_at=? WHERE id=?",
+                                 (time.time(), row["id"]))
+                self._db.commit()
+                logger.warning("[store] scheduled request #%s had been %r since %s; marked failed (stale)",
+                               row["id"], row["state"], row["updated_at"])
+                return None
         return Request.from_row(row) if row else None
 
     def pending_requests_for_schedule(self, schedule_id: int) -> List[Request]:
