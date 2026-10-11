@@ -641,3 +641,12 @@ def test_owner_command_needs_the_schedule_word_and_reports_a_refused_action(tmp_
     assert asyncio.run(m.schedules.command(f"delete schedule {schedule.id}", owner=False)) is False
     assert asyncio.run(m.schedules.command(f"delete schedule {schedule.id}", owner=True)) is True
     assert m.store.get_schedule(schedule.id) is None
+
+
+def test_an_ordinary_word_in_a_schedule_prompt_does_not_name_a_tool():
+    from inkbox_claude.gate.manager import _schedule_prompt_tool_scopes
+    from inkbox_claude.gate.schedules import _prompt_tool_mismatch
+    prompt = "Check the service logs and the database, then deploy nothing and report on the system."
+    assert _schedule_prompt_tool_scopes(prompt) == []
+    assert _prompt_tool_mismatch(prompt, ["web"]) == []
+    assert "contacts" in _schedule_prompt_tool_scopes("Then call inkbox_create_contact for the tracker.")

@@ -23,7 +23,7 @@ from .taskpick import TaskPicker, enabled as jev_enabled
 from .router import Router, RouterOutput, RouterRequest
 from .scopes import SCOPES
 from .store import Person, Request, Store, TaskRequired, task_key
-from .schedules import ScheduleService
+from .schedules import ScheduleService, names_tool
 
 logger = logging.getLogger(__name__)
 
@@ -93,8 +93,7 @@ def _schedule_prompt_tool_scopes(prompt: str) -> List[str]:
     for name, info in SCOPES.items():
         tools = info.get("tools") or []
         for tool in tools:
-            short = tool.rsplit("__", 1)[-1]
-            if short and re.search(r"\b" + re.escape(short) + r"\b", prompt):
+            if names_tool(prompt, tool):
                 if name not in found:
                     found.append(name)
                 break

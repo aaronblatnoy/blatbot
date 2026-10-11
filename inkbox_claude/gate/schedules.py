@@ -68,6 +68,16 @@ def next_three(schedule: Schedule, now: Optional[float] = None) -> List[float]:
 
 
 
+def names_tool(prompt: str, tool: str) -> str:
+    """The tool's short name (the part after the last `__`) when the prompt names it
+    literally, else "". Short names that are ordinary single words ("logs", "service",
+    "database") are never matched: a prompt using the word is not naming the tool."""
+    short = tool.rsplit("__", 1)[-1]
+    if "_" not in short and short.lower() == short:
+        return ""
+    return short if re.search(r"\b" + re.escape(short) + r"\b", prompt) else ""
+
+
 def _prompt_tool_mismatch(prompt: str, scopes: List[str]) -> List[str]:
     """Tool short names literally named in a schedule's prompt that none of its
     granted scopes actually cover, so the owner sees the gap before approving
@@ -76,8 +86,8 @@ def _prompt_tool_mismatch(prompt: str, scopes: List[str]) -> List[str]:
     named_short: List[str] = []
     for info in SCOPES.values():
         for tool in info.get("tools") or []:
-            short = tool.rsplit("__", 1)[-1]
-            if short and re.search(r'\b' + re.escape(short) + r'\b', prompt) and tool not in allowed:
+            short = names_tool(prompt, tool)
+            if short and tool not in allowed:
                 if short not in named_short:
                     named_short.append(short)
     return named_short
