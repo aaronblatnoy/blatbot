@@ -494,7 +494,8 @@ class TaskPicker:
         if not self.api_key or not message:
             return {"actionable": None, "p": 0.0, "reason": "disabled"}
         state = {"message": message, "conversation": _history_text(history),
-                 "task_in_hand": (task or {}).get("title") or ""}
+                 "task_in_hand": (task or {}).get("title") or "",
+                 "where_things_live": WHERE_THINGS_LIVE}
         body = {"state": state, "model": self.model, "questions": {"clear": {
             "type": "noul",
             "instructions": {
@@ -510,6 +511,17 @@ class TaskPicker:
                     "question, so a bare yes or go ahead is the whole of the instruction. Missing means "
                     "still missing after that reading, and a detail you could settle by looking is not "
                     "missing.",
+                    "Finding something out is done by searching, and the one doing it can search everything "
+                    "in `where_things_live`: the owner's own notes, mail, calendars, drives, course site, "
+                    "servers and the public web. So a question that names what it is about, even loosely or "
+                    "by a nickname (a company, a deal, a project, a person, a topic), is one they can go and "
+                    "do: they search for those words, starting where `where_things_live` says such things "
+                    "are kept, and read what comes back. Not being told which folder, note, thread or file "
+                    "holds the answer is never a reason to ask; locating it is the work. Nor is not "
+                    "recognising a name: the owner's notes are where unfamiliar names of his are explained.",
+                    "Asking first is for when the thing to act on cannot be found by looking at all: a "
+                    "change, a send or a booking whose object or recipient is named nowhere in `message` or "
+                    "`conversation`.",
                 ],
             },
             "criteria": {"true": "They could go and do it.",
