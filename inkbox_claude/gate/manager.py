@@ -555,6 +555,7 @@ class GateSession:
                                             scopes=["web"], summary=str(task.get("title") or message[:100])[:160],
                                             counterpart=emails[0] if (approver and emails) else None)
                 await self.jev_scopes(out, strict=True)
+                await self.jev_knowledge(out)
                 # A follow-up on a task keeps the tools its earlier requests had: "try again"
                 # carries no words for the scope judgment, but the task history does.
                 inherited = [sc for sc in self.m.store.scopes_for_task(task["id"]) if sc in SCOPES]
@@ -635,6 +636,34 @@ class GateSession:
         if set(chosen) != set(out.request.scopes):
             logger.info("[gate %s] scopes: router %s -> jev %s", self.chat_id, out.request.scopes, chosen)
         out.request.scopes = chosen
+
+    async def jev_knowledge(self, out: RouterOutput) -> None:
+        """Which notes in the vault this request needs, chosen by the same top-down
+        traversal as the tool scope tree (TaskPicker.judge_vault_tree): fast, run in
+        the decision step rather than inside the executor. The chosen knowledge
+        scopes join the request's ordinary scope list -- the same list, the same
+        'vault:' names the roles and the console scope picker already carry, under
+        the same permission intersection every other scope goes through. Jev chooses
+        relevance only; what the sender may see is still decided by that
+        intersection afterwards, never by this judgment. Unavailable or nothing
+        cleared the bar: today's behaviour stands (whichever vault scope, if any,
+        the tool scope tree itself granted)."""
+        picker = self.m.task_picker
+        if picker is None or out.request is None or not hasattr(picker, "judge_vault_tree"):
+            return
+        res = await picker.judge_vault_tree(prompt=out.request.prompt, summary=out.request.summary)
+        chosen = res.get("scopes")
+        if chosen is None:
+            logger.info("[gate %s] vault tree unavailable (%s); leaving vault scopes to the tool tree",
+                        self.chat_id, res.get("reason"))
+            return
+        if chosen:
+            merged = list(out.request.scopes) + [sc for sc in chosen if sc not in out.request.scopes]
+            if merged != out.request.scopes:
+                logger.info("[gate %s] knowledge scopes: +%s (%d notes chosen)", self.chat_id,
+                            [sc for sc in chosen if sc not in out.request.scopes], len(res.get("notes") or []))
+            out.request.scopes = merged
+            out.request.knowledge_notes = list(res.get("notes") or [])
 
     def task_memory(self) -> str:
         mem = self.m.store.task_memory(self.record_id, is_approver=self.is_approver(),
@@ -1826,6 +1855,43 @@ class GateSessionManager:
         status["draft_answer"] = draft
         return answered
 
+    def vault_attachment_for(self, req: Request) -> str:
+        """The owner's vault notes this approved request's knowledge scopes cover,
+        as a delimited block for the run's context. Computed fresh from req.scopes
+        at run time (never from req.prompt, which is hash-locked from approval), so
+        it cannot be widened by anything that happened between approval and running:
+        the scopes it reads here are exactly the ones Aaron's approval (or his own
+        trust) already covers. The whole-vault vault_read scope attaches nothing
+        here; the executor's vault tools search the whole vault themselves in that
+        case, which is today's behaviour and the fallback when the knowledge
+        traversal did not narrow anything down."""
+        if "vault_read" in (req.scopes or []):
+            return ""
+        names = [sc for sc in (req.scopes or []) if str(sc).startswith("vault:")]
+        if not names:
+            return ""
+        from . import vaultscopes
+        from . import settings as _settings
+        root = vaultscopes.vault_dir()
+        discovered = vaultscopes.discover_cached()
+        notes: List[str] = []
+        for name in names:
+            info = discovered.get(name)
+            if info is None:
+                continue
+            for p in vaultscopes.notes_under(root, info):
+                rel = str(p.relative_to(root))
+                if rel not in notes:
+                    notes.append(rel)
+        if not notes:
+            return ""
+        budget = int(_settings.get("GATE_VAULT_ATTACH_BUDGET_CHARS") or 60000)
+        attachment = vaultscopes.build_attachment(root, notes, budget_chars=budget)
+        if attachment.overflow:
+            logger.info("[gate] #%s vault attachment: %d notes attached, %d over budget listed by path",
+                        req.id, len(attachment.included), len(attachment.overflow))
+        return attachment.block
+
     async def execute(self, req: Request, notify: bool = True) -> str:
         """Run an approved request. With notify=False the caller delivers the
         result itself (a live phone call reads it aloud) and gets it back."""
@@ -1837,7 +1903,11 @@ class GateSessionManager:
             slow_ack = asyncio.create_task(self._ack_if_slow(session, req))
         tid = self.store.task_id_for_request(req.id)
         context = self.store.task_memory_for_task(tid) if tid else ""
-        logger.info("[gate] executing #%s with ledger T%s (%d chars)", req.id, tid, len(context))
+        vault_block = self.vault_attachment_for(req)
+        if vault_block:
+            context = f"{context}\n\n{vault_block}" if context else vault_block
+        logger.info("[gate] executing #%s with ledger T%s (%d chars, vault attachment %d chars)",
+                    req.id, tid, len(context), len(vault_block))
         try:
             status = await self._run_executor(req, context)
         finally:

@@ -73,6 +73,14 @@ KNOBS: List[Dict[str, Any]] = [
     {"restart": True, "name": "GATE_EXECUTOR_FALLBACK", "kind": "bool", "default": True, "group": "Engine",
      "label": "Fall back to Claude when the fast engine gives up",
      "help": "Only applies when the engine above is jev."},
+
+    # -- the vault (second brain) --------------------------------------------
+    {"name": "GATE_VAULT_ATTACH_BUDGET_CHARS", "kind": "number", "default": 60000, "min": 2000, "max": 2000000,
+     "step": 1000, "group": "Vault",
+     "label": "How much of the vault to attach to a run, in characters",
+     "help": "Notes Jev chose as relevant are attached to the run whole, in relevance order, until this "
+             "many characters are used. Notes beyond the budget are listed by path instead of attached, "
+             "so the run can still open them itself. Nothing is ever cut short."},
 ]
 
 _BY_NAME = {k["name"]: k for k in KNOBS}

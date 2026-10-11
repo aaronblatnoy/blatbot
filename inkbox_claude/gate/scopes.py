@@ -206,6 +206,50 @@ def registry_problems() -> List[str]:
     return problems
 
 
+
+# ---------------------------------------------------------------------------
+# Knowledge scopes: discovered from the vault's own folder structure (see
+# vaultscopes.py), not a list typed here. Merged into SCOPES/SCOPE_SYSTEM so the
+# existing role storage, console scope validation and the scopes breakdown
+# endpoint carry them with no change of their own: a knowledge scope is a scope
+# like any other, grouped under the system name "vault". vault_read (above)
+# keeps meaning the whole vault and is unaffected by this.
+# ---------------------------------------------------------------------------
+
+VAULT_TOOLS = ["mcp__host__vault_search", "mcp__host__vault_read", "mcp__host__vault_list"]
+VAULT_SYSTEM = "vault"
+
+
+def refresh_vault_scopes(force: bool = False) -> None:
+    """Recompute the knowledge scopes from the vault folder and merge them into
+    SCOPES/SCOPE_SYSTEM in place (mutated, not reassigned, so every module that
+    imported the dict already sees the update). Safe to call often: discovery
+    itself is cached against the folder's own mtimes."""
+    from . import vaultscopes
+    try:
+        discovered = vaultscopes.discover_cached(force=force)
+    except Exception:
+        return
+    stale = [name for name, system in SCOPE_SYSTEM.items() if system == VAULT_SYSTEM and name not in discovered]
+    for name in stale:
+        SCOPES.pop(name, None)
+        SCOPE_SYSTEM.pop(name, None)
+    for name, info in discovered.items():
+        SCOPES[name] = {
+            "description": info.description or info.title,
+            "tools": list(VAULT_TOOLS),
+            "read": True,
+            "server": None,
+            "include": [],
+            "exclude": [],
+            "vault_paths": list(info.prefixes),
+            "vault_title": info.title,
+        }
+        SCOPE_SYSTEM[name] = VAULT_SYSTEM
+
+
+refresh_vault_scopes()
+
 ALWAYS_TOOLS = ["mcp__host__rows_where"]     # analysis over gathered results: granted with any scope
 
 

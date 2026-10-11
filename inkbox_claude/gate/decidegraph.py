@@ -198,6 +198,19 @@ async def judge_scopes(state: DecideState, config: RunnableConfig) -> Dict[str, 
     return {"request": out.request}
 
 
+async def judge_knowledge(state: DecideState, config: RunnableConfig) -> Dict[str, Any]:
+    """Which notes in the vault this request needs: the knowledge-scope traversal,
+    run alongside the rest of the decision step rather than inside the executor
+    (fast, so a plain lookup does not sit waiting on Claude Code to search for
+    itself). See GateSession.jev_knowledge for the judgment and what it merges
+    into the request's scope list."""
+    s = _s(config)
+    from .router import RouterOutput
+    out = RouterOutput(request=state["request"])
+    await s.jev_knowledge(out)
+    return {"request": out.request}
+
+
 async def inherit_scopes(state: DecideState, config: RunnableConfig) -> Dict[str, Any]:
     """A follow-up on a task keeps the tools its earlier requests had."""
     s = _s(config)
@@ -301,7 +314,8 @@ def build_graph():
     for name, fn in (("pick_task", pick_task), ("judge_action", judge_action),
                      ("judge_actionable", judge_actionable), ("join_judgments", join_judgments),
                      ("write_reply", write_reply), ("attach_task", attach_task), ("build_request", build_request),
-                     ("judge_scopes", judge_scopes), ("inherit_scopes", inherit_scopes), ("record_event", record_event),
+                     ("judge_scopes", judge_scopes), ("judge_knowledge", judge_knowledge),
+                     ("inherit_scopes", inherit_scopes), ("record_event", record_event),
                      ("finalize", finalize)):
         g.add_node(name, fn)
     g.add_edge(START, "pick_task")
@@ -312,7 +326,8 @@ def build_graph():
     g.add_conditional_edges("attach_task", after_attach, {"build_request": "build_request", "record_event": "record_event"})
     g.add_edge("build_request", "judge_scopes")
     g.add_edge("build_request", "record_event")
-    g.add_edge("judge_scopes", "inherit_scopes")
+    g.add_edge("judge_scopes", "judge_knowledge")
+    g.add_edge("judge_knowledge", "inherit_scopes")
     # finalize waits for every branch that ran (LangGraph defers a node until all its
     # active predecessors in the superstep have finished).
     g.add_edge("write_reply", "finalize")

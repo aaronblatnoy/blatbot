@@ -52,6 +52,10 @@ class RouterRequest(BaseModel):
     # Who the task is about (their email, phone, or full name), so the task
     # ledger links Aaron's instructions to that person's own thread.
     counterpart: Optional[str] = None
+    # Vault note paths the knowledge traversal chose, relevance order, set
+    # alongside `scopes` when it ran. Not part of permission (that is `scopes`
+    # itself); only which of the granted notes to attach and in what order.
+    knowledge_notes: List[str] = Field(default_factory=list)
 
     @field_validator("scopes")
     @classmethod

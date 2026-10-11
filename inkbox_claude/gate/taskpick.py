@@ -15,6 +15,7 @@ Configuration (environment):
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import os
@@ -90,6 +91,11 @@ from . import settings as _settings
 
 
 SCOPE_MIN_YES = float(os.getenv("TYPESAFE_SCOPE_MIN_YES") or 0.6)
+# The bar for the vault (knowledge scope) traversal. Kept separate from the tool
+# scope bar: a missed note costs a worse answer, not a widened permission, so it
+# can run plain rather than generous-by-default the way the tool tree is for the
+# owner.
+VAULT_SCOPE_MIN_YES = float(os.getenv("TYPESAFE_VAULT_SCOPE_MIN_YES") or 0.55)
 SCOPE_SECONDARY_MIN = float(os.getenv("TYPESAFE_SCOPE_SECONDARY_MIN") or 0.3)
 # How close to the best a system may be and still count as tied with it.
 SCOPE_TIE_MARGIN = float(os.getenv("TYPESAFE_SCOPE_TIE_MARGIN") or 0.25)
@@ -450,6 +456,122 @@ class TaskPicker:
             logger.info("scope tree: leaves %s", sorted(leaves_log, key=lambda kv: -kv[1]))
         logger.info("scope judgment (tree): %s", scopes)
         return {"scopes": scopes, "probabilities": probs, "reason": "ok"}
+
+    async def judge_vault_tree(self, *, prompt: str, summary: str) -> Dict[str, Any]:
+        """Which notes in Aaron's vault (his Obsidian second brain) does this task need,
+        chosen top-down exactly like the tool scope tree: level 1, which discovered
+        knowledge scopes (sections, and hubs under them) the request concerns, judged
+        from their own names and descriptions; level 2, within each scope that is a
+        section with hubs, which of its hubs; within a chosen hub (or a section with
+        no hubs), which of its own notes, judged from each note's title and opening
+        text. Every question at one level goes in a single TypeSafe call, so the
+        level runs as one round trip; sibling scopes at the same level are then
+        expanded concurrently. Returns {"scopes": [...], "notes": [...] (paths,
+        relevance order), "probabilities": {...}, "reason": str}. "scopes": None
+        means the judgment is unavailable or failed (the caller's cue to fall back
+        to unrestricted vault tools); "scopes": [] with no exception means the
+        vault was consulted and nothing cleared the bar."""
+        if not self.api_key:
+            return {"scopes": None, "notes": [], "probabilities": {}, "reason": "disabled"}
+        from . import vaultscopes
+        try:
+            discovered = vaultscopes.discover_cached()
+        except Exception as exc:
+            logger.warning("vault discovery failed: %s", exc)
+            return {"scopes": None, "notes": [], "probabilities": {}, "reason": f"error: {exc}"}
+        if not discovered:
+            return {"scopes": None, "notes": [], "probabilities": {}, "reason": "empty vault"}
+        state = {"task_summary": summary, "task_prompt": prompt}
+
+        def noul(description: str) -> Dict[str, Any]:
+            return {"type": "noul",
+                    "instructions": {"topic": description,
+                                     "question": "Does carrying out `task_prompt` need what `topic` covers: "
+                                                 "facts, decisions or preferences Aaron has written down about it?"},
+                    "criteria": {"true": "The task plainly concerns this topic.",
+                                 "false": "The task has nothing to do with this topic."}}
+
+        async def ask(questions: Dict[str, Any]) -> Dict[str, float]:
+            async with httpx.AsyncClient(timeout=self.timeout) as client:
+                r = await client.post(TYPESAFE_URL, headers={"Authorization": f"Bearer {self.api_key}"},
+                                      json={"state": state, "model": self.model, "questions": questions})
+                r.raise_for_status()
+                answers = r.json()["answers"]
+            return {k: float((answers.get(k) or {}).get("noul") or 0.0) for k in questions}
+
+        probs: Dict[str, float] = {}
+        chosen_scopes: List[str] = []
+        notes: List[tuple] = []
+        root = vaultscopes.vault_dir()
+
+        async def expand_notes(scope_name: str) -> None:
+            info = discovered[scope_name]
+            try:
+                paths = vaultscopes.notes_under(root, info)
+            except Exception:
+                return
+            if not paths:
+                return
+            questions = {}
+            keyed = []
+            for i, p in enumerate(paths):
+                key = f"note::{i}"
+                keyed.append((key, p))
+                title = p.stem
+                try:
+                    opening = p.read_text(encoding="utf-8", errors="replace")[:vaultscopes.DESCRIPTION_CHARS]
+                except OSError:
+                    opening = ""
+                questions[key] = noul(f"the note {title!r}: {opening}")
+            try:
+                answers = await ask(questions)
+            except Exception as exc:
+                logger.warning("vault leaf judgment failed for %s: %s", scope_name, exc)
+                return
+            for key, p in keyed:
+                rel = str(p.relative_to(root))
+                pr = answers.get(key, 0.0)
+                probs[rel] = pr
+                if pr >= VAULT_SCOPE_MIN_YES:
+                    notes.append((rel, pr))
+
+        async def expand(scope_name: str) -> None:
+            children = vaultscopes.section_children(discovered, scope_name)
+            if children:
+                questions = {name: noul(info.description or info.title) for name, info in children.items()}
+                try:
+                    answers = await ask(questions)
+                except Exception as exc:
+                    logger.warning("vault level-2 judgment failed for %s: %s", scope_name, exc)
+                    return
+                probs.update(answers)
+                picked = [name for name, p in answers.items() if p >= VAULT_SCOPE_MIN_YES]
+                logger.info("vault tree: %s hubs %s | top=%s", scope_name, picked,
+                            sorted(answers.items(), key=lambda kv: -kv[1])[:4])
+                for name in picked:
+                    if name not in chosen_scopes:
+                        chosen_scopes.append(name)
+                await asyncio.gather(*[expand_notes(name) for name in picked])
+            else:
+                await expand_notes(scope_name)
+
+        top = {name: info for name, info in discovered.items() if info.depth == 1}
+        questions = {name: noul(info.description or info.title) for name, info in top.items()}
+        try:
+            answers = await ask(questions)
+        except Exception as exc:
+            logger.warning("vault tree via TypeSafe failed: %s", exc)
+            return {"scopes": None, "notes": [], "probabilities": {}, "reason": f"error: {exc}"}
+        probs.update(answers)
+        chosen_top = [name for name, p in answers.items() if p >= VAULT_SCOPE_MIN_YES]
+        logger.info("vault tree: sections %s | top=%s", chosen_top, sorted(answers.items(), key=lambda kv: -kv[1])[:4])
+        for name in chosen_top:
+            if name not in chosen_scopes:
+                chosen_scopes.append(name)
+        await asyncio.gather(*[expand(name) for name in chosen_top])
+        notes.sort(key=lambda t: -t[1])
+        logger.info("vault tree: notes chosen %s", [n for n, _ in notes])
+        return {"scopes": chosen_scopes, "notes": [n for n, _ in notes], "probabilities": probs, "reason": "ok"}
 
     async def judge_reply(self, *, reply: str, message: str) -> Dict[str, Any]:
         """Two nouls about a drafted reply, one call: does it promise work the assistant is

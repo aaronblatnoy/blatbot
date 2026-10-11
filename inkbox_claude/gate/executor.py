@@ -25,11 +25,37 @@ from claude_agent_sdk import (
 )
 
 from .router import now_line
-from .scopes import ORG_ACCOUNT, OWNER_ACCOUNT, blocks_requester_send, tools_for
+from .scopes import ORG_ACCOUNT, OWNER_ACCOUNT, SCOPES, blocks_requester_send, tools_for
 from . import hosttools
 from .store import Request, sha256
 
 logger = logging.getLogger(__name__)
+
+
+def vault_prefixes_for_scopes(scopes: List[str]) -> Optional[List[str]]:
+    """The vault-relative path prefixes a run's granted scopes allow the vault
+    tools to see; None means unrestricted. The whole-vault vault_read scope (the
+    owner's usual grant when the second_brain system opens, and the fallback when
+    the knowledge traversal did not run) always means None: everything. Anyone
+    else's run with specific vault:* knowledge scopes and no vault_read is bounded
+    to those scopes' own prefixes; a run with no vault scope at all is bounded to
+    nothing, but in that case the vault tools are not in its allowed_tools either,
+    so the restriction here is defence in depth, not the only gate."""
+    if "vault_read" in (scopes or []):
+        return None
+    prefixes: List[str] = []
+    for name in scopes or []:
+        spec = SCOPES.get(name)
+        if spec and spec.get("vault_paths"):
+            for p in spec["vault_paths"]:
+                if p not in prefixes:
+                    prefixes.append(p)
+    if not prefixes and not any(str(s).startswith("vault:") for s in (scopes or [])):
+        # No vault scope of any kind was granted; vault tools were never handed to
+        # this run, so the prefix list here is moot. Returning None would instead
+        # open the whole vault to a run that was never meant to touch it at all.
+        return []
+    return prefixes
 
 EXECUTOR_SYSTEM = (
     "You are running ONE approved task for Blatbot, Executive Assistant to Aaron Blatnoy. "
@@ -90,6 +116,7 @@ class Executor:
         itself (req.prompt) is what was approved and is hash-checked unchanged."""
         if sha256(req.prompt) != req.prompt_sha256:
             return {"ok": False, "error": "prompt hash mismatch; refused to run", "tool_calls": []}
+        vault_prefixes = vault_prefixes_for_scopes(req.scopes)
         allowed = tools_for(req.scopes)
         if req.schedule_kind == "continue":
             allowed.append("mcp__host__schedule_continue")
@@ -171,7 +198,7 @@ class Executor:
             setting_sources=["user", "project"],
             permission_mode="default",
             allowed_tools=allowed,
-            mcp_servers={"inkbox": self.mcp_server, "host": hosttools.sdk_server(continue_state)},
+            mcp_servers={"inkbox": self.mcp_server, "host": hosttools.sdk_server(continue_state, vault_prefixes=vault_prefixes)},
             # One conversation per thread, continued rather than restarted. A request is a
             # turn in it, so what was looked up an hour ago is still in view and a follow-up
             # does not arrive as a stranger's first sentence.

@@ -46,8 +46,13 @@ async def host_status(args: Dict[str, Any]) -> str:
     return "\n\n".join(f"## {p}\n{o}" for p, o in zip(parts, outs))
 
 
-def sdk_server(continue_state: Optional[Dict[str, Any]] = None) -> Any:
-    """The same tool as an in-process MCP server for the Claude Code executor."""
+def sdk_server(continue_state: Optional[Dict[str, Any]] = None, *, vault_prefixes: Optional[List[str]] = None) -> Any:
+    """The same tool as an in-process MCP server for the Claude Code executor.
+
+    vault_prefixes bounds vault_search/vault_read/vault_list to the vault-relative
+    path prefixes the running request's knowledge scopes cover; None means every
+    scope granted carries the whole-vault vault_read scope (or the caller is the
+    owner's unrestricted fallback path), so every note is reachable."""
     from claude_agent_sdk import create_sdk_mcp_server, tool
 
     @tool("host_status", DESCRIPTION, SCHEMA)
@@ -56,15 +61,15 @@ def sdk_server(continue_state: Optional[Dict[str, Any]] = None) -> Any:
 
     @tool("vault_search", VAULT_SEARCH_DESCRIPTION, VAULT_SEARCH_SCHEMA)
     async def _vault_search(args: Dict[str, Any]) -> Dict[str, Any]:
-        return {"content": [{"type": "text", "text": vault_search(args)}]}
+        return {"content": [{"type": "text", "text": vault_search(args, vault_prefixes)}]}
 
     @tool("vault_read", VAULT_READ_DESCRIPTION, VAULT_READ_SCHEMA)
     async def _vault_read(args: Dict[str, Any]) -> Dict[str, Any]:
-        return {"content": [{"type": "text", "text": vault_read(args)}]}
+        return {"content": [{"type": "text", "text": vault_read(args, vault_prefixes)}]}
 
     @tool("vault_list", VAULT_LIST_DESCRIPTION, VAULT_LIST_SCHEMA)
     async def _vault_list(args: Dict[str, Any]) -> Dict[str, Any]:
-        return {"content": [{"type": "text", "text": vault_list(args)}]}
+        return {"content": [{"type": "text", "text": vault_list(args, vault_prefixes)}]}
 
     tools = [_host_status, _vault_search, _vault_read, _vault_list]
     if continue_state is not None:
@@ -218,9 +223,15 @@ def vault_dir() -> Path:
 
 
 def _vault_path(rel: str) -> Path:
-    """A path inside the vault, or ValueError. Dot-directories (.obsidian, .git) are not notes."""
+    """A path inside the vault, or ValueError. Dot-directories (.obsidian, .git) are
+    not notes. A symlink anywhere along the path (the entry itself, or a parent
+    directory inside the vault) is refused before it is ever resolved, so a link
+    planted inside the vault cannot be used to read outside it."""
     root = vault_dir()
-    p = (root / str(rel or "").strip().lstrip("/")).resolve()
+    candidate = root / str(rel or "").strip().lstrip("/")
+    if candidate.is_symlink() or any(parent.is_symlink() for parent in candidate.parents if root in parent.parents or parent == root):
+        raise ValueError("that path is not a note")
+    p = candidate.resolve()
     if p != root and root not in p.parents:
         raise ValueError("that path is outside the vault")
     if any(part.startswith(".") for part in p.relative_to(root).parts):
@@ -228,25 +239,48 @@ def _vault_path(rel: str) -> Path:
     return p
 
 
-def _vault_notes(folder: str = "") -> List[Path]:
+def _vault_rel_allowed(p: Path, prefixes: Optional[List[str]]) -> bool:
+    """Whether a path this request's granted knowledge scopes may see. None means
+    unrestricted (the owner's generous grant, or the whole-vault vault_read scope)."""
+    if prefixes is None:
+        return True
+    from .vaultscopes import path_allowed, vault_dir as _vd
+    try:
+        rel = p.relative_to(_vd())
+    except ValueError:
+        return False
+    return path_allowed(rel, prefixes)
+
+
+def _vault_notes(folder: str = "", prefixes: Optional[List[str]] = None) -> List[Path]:
     base = _vault_path(folder)
     if not base.is_dir():
         raise ValueError(f"no vault folder named {folder!r}")
     root = vault_dir()
-    return sorted(p for p in base.rglob("*.md")
-                  if p.is_file() and not any(part.startswith(".") for part in p.relative_to(root).parts))
+    out = []
+    for p in base.rglob("*.md"):
+        if not p.is_file() or p.is_symlink():
+            continue
+        if any(part.startswith(".") for part in p.relative_to(root).parts):
+            continue
+        if any(parent.is_symlink() for parent in p.parents if parent != root and root in parent.parents):
+            continue
+        if not _vault_rel_allowed(p, prefixes):
+            continue
+        out.append(p)
+    return sorted(out)
 
 
-def vault_list(args: Dict[str, Any]) -> str:
+def vault_list(args: Dict[str, Any], prefixes: Optional[List[str]] = None) -> str:
     try:
-        notes = _vault_notes(str(args.get("folder") or ""))
+        notes = _vault_notes(str(args.get("folder") or ""), prefixes)
     except ValueError as exc:
         return f"ERROR: {exc}"
     root = vault_dir()
     return "\n".join([f"{len(notes)} notes"] + [str(p.relative_to(root)) for p in notes])
 
 
-def vault_read(args: Dict[str, Any]) -> str:
+def vault_read(args: Dict[str, Any], prefixes: Optional[List[str]] = None) -> str:
     rel = str(args.get("path") or "").strip()
     if not rel:
         return "ERROR: a note path is required"
@@ -256,25 +290,28 @@ def vault_read(args: Dict[str, Any]) -> str:
         if not p.is_file() and not rel.lower().endswith(".md"):
             p = _vault_path(rel + ".md")
         if not p.is_file():
-            # A bare title: every note with that file name, wherever it sits.
+            # A bare title: every note with that file name, wherever it sits
+            # (within what this request may see).
             want = Path(rel).name.lower().removesuffix(".md")
-            hits = [n for n in _vault_notes() if n.stem.lower() == want]
+            hits = [n for n in _vault_notes(prefixes=prefixes) if n.stem.lower() == want]
             if len(hits) > 1:
                 return "Several notes have that title; read one by path:\n" + "\n".join(str(n.relative_to(root)) for n in hits)
             if not hits:
-                return f"ERROR: no note at {rel!r}. Use vault_search or vault_list to find it."
+                return f"ERROR: no note at {rel!r} within this request's knowledge scopes. Use vault_search or vault_list to find it."
             p = hits[0]
     except ValueError as exc:
         return f"ERROR: {exc}"
+    if not _vault_rel_allowed(p, prefixes):
+        return "ERROR: that note is outside this request's knowledge scopes."
     return f"# {p.relative_to(root)}\n\n" + p.read_text(encoding="utf-8", errors="replace")
 
 
-def vault_search(args: Dict[str, Any]) -> str:
+def vault_search(args: Dict[str, Any], prefixes: Optional[List[str]] = None) -> str:
     words = [w for w in str(args.get("query") or "").lower().split() if w]
     if not words:
         return "ERROR: a query is required"
     try:
-        notes = _vault_notes(str(args.get("folder") or ""))
+        notes = _vault_notes(str(args.get("folder") or ""), prefixes)
     except ValueError as exc:
         return f"ERROR: {exc}"
     root = vault_dir()
