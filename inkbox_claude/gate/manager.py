@@ -1364,7 +1364,12 @@ class GateSessionManager:
         and offer to run it again. It is not retried on its own: a half-finished run may
         already have changed something, and doing it twice is worse than asking."""
         try:
-            stranded = self.store.requests_in_state("running")
+            # "running" is a crash while the executor was mid-call. "approved" is a crash
+            # between _fire creating the schedule's request and execute() ever marking it
+            # running -- store.request_running_for_schedule treats an "approved" row as
+            # still in flight forever, so a missed one here means every later firing of
+            # that schedule silently skips. Both need the same restart handling.
+            stranded = self.store.requests_in_state("running") + self.store.requests_in_state("approved")
         except Exception:
             logger.exception("[gate] could not look for interrupted runs")
             return
@@ -1959,6 +1964,19 @@ class GateSessionManager:
         self.task_note(req, "done" if ok else "failed", f"{req.summary} -> {result}",
                        state="open" if req.schedule_id else ("done" if ok else "failed"))
         if await self.schedules.finished(req, status):
+            # The schedule notice is sent; the owner's thread may still have a message
+            # that arrived while this ran (the schedule shares his chat_id). It was never
+            # held for this run (running_for_thread ignores schedule requests), but on a
+            # FAILED run nothing has answered it yet -- pick it up the same way an
+            # ordinary request's failure does, as one fresh turn.
+            meanwhile = self.store.inbound_since(self.get(req.chat_id).record_id, req.created_at)
+            if not ok and meanwhile:
+                logger.info("[gate] scheduled #%s failed with %d message(s) received meanwhile; re-deciding the latest",
+                            req.id, len(meanwhile))
+                try:
+                    await session.handle_followup(meanwhile[-1]["text"], inbound_id=meanwhile[-1]["id"])
+                except Exception:
+                    logger.exception("[gate] follow-up after scheduled #%s failed", req.id)
             session.typing_stop()
             return ""
         if not notify:
