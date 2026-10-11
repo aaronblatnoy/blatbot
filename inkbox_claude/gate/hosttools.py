@@ -104,7 +104,11 @@ ROWS_WHERE_SCHEMA = {"type": "object", "required": ["result_key", "contains"], "
 
 SCHEDULE_CONTINUE_DESCRIPTION = (
     "SET THE NEXT WAKE-UP for this continuing scheduled job and leave a progress note. "
-    "Call this only when more work remains. If it is not called, the continuing schedule ends."
+    "Call this only when more work remains. If it is not called, the continuing schedule ends. "
+    "If you call it more than once in a run, only the last call counts. A delay that would land past "
+    "the schedule's own deadline ends the schedule instead of waking it up again. A run that fails and "
+    "still calls this continues anyway (the note explains what went wrong); three consecutive failed "
+    "runs pause the schedule for the owner to look at."
 )
 SCHEDULE_CONTINUE_SCHEMA = {
     "type": "object", "required": ["delay_minutes", "note"], "properties": {

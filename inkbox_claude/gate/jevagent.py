@@ -1397,7 +1397,13 @@ class JevAgent:
         raw = "\n".join(lines + full + tail)
         summary = "\n".join(lines + brief + tail)
         wrote = any(s["ok"] and is_write_tool(s["tool"]) for s in steps)
-        status = {"ok": ok, "summary": summary, "raw": raw, "tool_calls": [s["tool"] for s in steps], "wrote": wrote, "partial": partial,
+        # final_status mirrors the Claude Code executor's field of the same name: the run's
+        # own closing status, never the step-by-step narration. The Jev path's steps are
+        # deterministic tool calls rather than prose, so its "closing status" is the header
+        # plus the tail -- the same text a run with no tool calls at all would report.
+        final_status = "\n".join(lines + tail)
+        status = {"ok": ok, "summary": summary, "final_status": final_status, "raw": raw,
+                "tool_calls": [s["tool"] for s in steps], "wrote": wrote, "partial": partial,
                 "steps": [{"tool": s["tool"], "args": s["args"], "ok": s["ok"]} for s in steps],
                 "error": error or None, "engine": "jev", "jev_calls": judge.calls, "prose_calls": prose.calls,
                 "seconds": round(time.time() - started, 1), "probs": probs}
