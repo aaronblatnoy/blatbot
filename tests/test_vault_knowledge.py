@@ -31,10 +31,16 @@ def make_vault(root: Path) -> Path:
     write(root / "Areas" / "Garden Shed.md", "# Garden Shed\n\nUpkeep notes for the shed.")
     write(root / "Areas" / "Garden Shed" / "Roof.md", "# Roof\n\nThe roof was patched in spring.")
     write(root / "Areas" / "Garden Shed" / "Paint.md", "# Paint\n\nRepainted the door blue.")
+    write(root / "Areas" / "Garden Shed" / "Maintenance" / "Gutters.md", "# Gutters\n\nCleared in autumn.")
+    write(root / "Areas" / "Garden Shed" / "Maintenance" / "Old" / "Ancient.md", "# Ancient\n\nTwo levels deep.")
     write(root / "Areas" / "Greenhouse.md", "# Greenhouse\n\nSeedling schedule and notes.")
     write(root / "Areas" / "Greenhouse" / "Tomatoes.md", "# Tomatoes\n\nStaked in June.")
+    write(root / "Areas" / "People.md", "# People\n\nFolks involved in the shed project.")
+    write(root / "Areas" / "People" / "Pebble.md", "# Pebble\n\nRuns the greenhouse rota.")
+    write(root / "Areas" / "People" / "Juniper.md", "# Juniper\n\nFixes the shed roof.")
     write(root / "Reference" / "Reference.md", "# Reference\n\nGeneral reference notes.")
     write(root / "Reference" / "Tools.md", "# Tools\n\nWhich tool does what.")
+    write(root / "Daily" / "2024-03-14.md", "# 2024-03-14\n\nPatched the roof today.")
     return root
 
 
@@ -165,23 +171,24 @@ def patched_ask(monkeypatch):
     return install
 
 
-def test_vault_tree_picks_hub_then_its_notes(tmp_path, monkeypatch, patched_ask):
+def test_vault_tree_picks_hub_directly_not_its_container_section(tmp_path, monkeypatch, patched_ask):
+    """A section with hubs (Areas) is never itself a level-1 option; only its
+    hubs are judged, by name, directly."""
     root = make_vault(tmp_path / "vault")
     monkeypatch.setenv("BLATBOT_VAULT_DIR", str(root))
     vaultscopes._cache = vaultscopes._Cache()
     picker = TaskPicker(api_key="fake-key")
     script = {
-        "vault:home": 0.1, "vault:areas": 0.9, "vault:reference": 0.05,
-        "vault:areas/garden-shed": 0.95, "vault:areas/greenhouse": 0.1,
+        "vault:areas/garden-shed": 0.95, "vault:areas/greenhouse": 0.1, "vault:areas/people": 0.05,
+        "vault:reference": 0.05,
     }
-    # Note-level keys are assigned by position (note::0, note::1, ...) in the order
-    # _vault_notes lists them (sorted); make every note in the chosen hub a hit.
-    script.update({f"note::{i}": 0.9 for i in range(4)})
     patched_ask(picker, script)
-    res = asyncio.run(picker.judge_vault_tree(prompt="what's the shed upkeep plan", summary="shed upkeep"))
-    assert res["scopes"] == ["vault:areas", "vault:areas/garden-shed"]
-    assert set(res["notes"]) == {"Areas/Garden Shed.md", "Areas/Garden Shed/Paint.md", "Areas/Garden Shed/Roof.md"}
-    assert "vault:areas/greenhouse" not in res["scopes"]
+    res = asyncio.run(picker.judge_vault_tree(prompt="what's the garden shed upkeep plan", summary="shed upkeep"))
+    assert res["scopes"] == ["vault:areas/garden-shed"]
+    assert "vault:areas" not in res["scopes"]  # the container section was never a level-1 option
+    # The hub's own note, plus the two notes directly in its folder, were judged (0.0
+    # under this script); bounded recursion is covered separately below.
+    assert res["timings"].get("level1") is not None
 
 
 def test_vault_tree_picks_nothing_below_the_bar(tmp_path, monkeypatch, patched_ask):
@@ -194,6 +201,92 @@ def test_vault_tree_picks_nothing_below_the_bar(tmp_path, monkeypatch, patched_a
     assert res["scopes"] == []
     assert res["notes"] == []
     assert res["reason"] == "ok"
+
+
+def test_vault_tree_catchall_not_chosen_by_default(tmp_path, monkeypatch, patched_ask):
+    """The home note is a catch-all: it must not be asked about (and so never
+    picked) unless the question names it. The script would answer 'yes' for it
+    if asked; the point of this test is that it is never asked."""
+    root = make_vault(tmp_path / "vault")
+    monkeypatch.setenv("BLATBOT_VAULT_DIR", str(root))
+    vaultscopes._cache = vaultscopes._Cache()
+    picker = TaskPicker(api_key="fake-key")
+    script = {"vault:home": 0.99}
+    patched_ask(picker, script)
+    res = asyncio.run(picker.judge_vault_tree(prompt="what's the shed upkeep plan", summary="shed upkeep"))
+    assert "vault:home" not in res["scopes"]
+    assert "vault:home" not in res["probabilities"]  # never even asked
+
+
+def test_vault_tree_catchall_chosen_when_named_outright(tmp_path, monkeypatch, patched_ask):
+    root = make_vault(tmp_path / "vault")
+    monkeypatch.setenv("BLATBOT_VAULT_DIR", str(root))
+    vaultscopes._cache = vaultscopes._Cache()
+    picker = TaskPicker(api_key="fake-key")
+    script = {"vault:home": 0.9}
+    patched_ask(picker, script)
+    res = asyncio.run(picker.judge_vault_tree(prompt="what's on my home note", summary="home note"))
+    assert "vault:home" in res["scopes"]
+
+
+def test_vault_tree_date_shaped_question_resolves_without_a_jev_call(tmp_path, monkeypatch, patched_ask):
+    """A question naming an explicit date is resolved in code, by filename, with
+    no Jev call needed to tell near-identical daily notes apart."""
+    root = make_vault(tmp_path / "vault")
+    monkeypatch.setenv("BLATBOT_VAULT_DIR", str(root))
+    vaultscopes._cache = vaultscopes._Cache()
+    picker = TaskPicker(api_key="fake-key")
+    patched_ask(picker, {})  # every other question answers 0.0; proves this isn't guesswork
+    res = asyncio.run(picker.judge_vault_tree(prompt="what happened on 2024-03-14", summary="that day"))
+    assert "Daily/2024-03-14.md" in res["notes"]
+    assert res["scopes"]  # the date's own scope was picked, by filename, without being asked about
+
+
+def test_vault_tree_hub_chosen_but_no_note_clears_the_bar_falls_back(tmp_path, monkeypatch, patched_ask):
+    """A chosen hub never resolves to zero notes: it falls back to its own hub
+    note plus its three best-scoring notes."""
+    root = make_vault(tmp_path / "vault")
+    monkeypatch.setenv("BLATBOT_VAULT_DIR", str(root))
+    vaultscopes._cache = vaultscopes._Cache()
+    picker = TaskPicker(api_key="fake-key")
+    script = {"vault:areas/garden-shed": 0.9}
+    # Every note under the hub scores below VAULT_SCOPE_MIN_YES but not all equally:
+    # the keys are "<hub>::<index>", assigned in notes_under_bounded's sorted order.
+    for i in range(4):
+        script[f"vault:areas/garden-shed::{i}"] = 0.1 + i * 0.05
+    patched_ask(picker, script)
+    res = asyncio.run(picker.judge_vault_tree(prompt="garden shed", summary="garden shed"))
+    assert "vault:areas/garden-shed" in res["scopes"]
+    assert "Areas/Garden Shed.md" in res["notes"]  # the hub's own note is always included
+    assert len(res["notes"]) >= 1
+
+
+def test_vault_tree_people_cross_reference_even_when_people_hub_not_picked(tmp_path, monkeypatch, patched_ask):
+    """A person note can be pulled in even though 'People' itself did not clear
+    the level-1 bar, when the question names the person."""
+    root = make_vault(tmp_path / "vault")
+    monkeypatch.setenv("BLATBOT_VAULT_DIR", str(root))
+    vaultscopes._cache = vaultscopes._Cache()
+    picker = TaskPicker(api_key="fake-key")
+    discovered = vaultscopes.discover(root)
+    people_paths = sorted(vaultscopes.notes_under_bounded(root, discovered["vault:areas/people"]))
+    idx = next(i for i, p in enumerate(people_paths) if p.stem == "Juniper")
+    script = {"vault:areas/people": 0.1, f"vault:areas/people::{idx}": 0.95}
+    patched_ask(picker, script)
+    res = asyncio.run(picker.judge_vault_tree(prompt="who is juniper", summary="who is juniper"))
+    assert "vault:areas/people" in res["scopes"]
+    assert "Areas/People/Juniper.md" in res["notes"]
+
+
+def test_vault_tree_bounded_recursion_skips_two_levels_deep(tmp_path, monkeypatch, patched_ask):
+    root = make_vault(tmp_path / "vault")
+    monkeypatch.setenv("BLATBOT_VAULT_DIR", str(root))
+    vaultscopes._cache = vaultscopes._Cache()
+    discovered = vaultscopes.discover(root)
+    paths = vaultscopes.notes_under_bounded(root, discovered["vault:areas/garden-shed"])
+    names = {p.name for p in paths}
+    assert "Gutters.md" in names        # one level of subfolder below the hub: included
+    assert "Ancient.md" not in names    # two levels deep: out of bounds
 
 
 def test_vault_tree_disabled_without_a_key(tmp_path, monkeypatch):

@@ -219,6 +219,139 @@ def notes_under(root: Path, info: KnowledgeScope) -> List[Path]:
     return sorted(uniq)
 
 
+def sections_with_hubs(scopes: Dict[str, KnowledgeScope]) -> set:
+    """Names of every depth-1 scope that has at least one hub nested under it. A
+    section in this set is a pure container for traversal: it is never offered as
+    a level-1 relevance option itself, since its hubs are judged directly instead."""
+    return {info.parent for info in scopes.values() if info.parent}
+
+
+# Catch-all places: picked only when a request is specifically about them, never
+# as a default when nothing else clears the bar. A loose note named by a date
+# (YYYY-MM-DD, a daily note kept at the vault root until it is filed under the
+# Daily section) counts as a catch-all too.
+CATCHALL_TITLES = {"home", "inbox", "archive", "daily", "daily notes"}
+_DATE_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
+
+
+def is_catchall(name: str, info: "KnowledgeScope") -> bool:
+    if info.depth != 1:
+        return False
+    if _DATE_RE.match(info.title):
+        return True
+    return info.title.strip().lower() in CATCHALL_TITLES
+
+
+def level1_candidates(scopes: Dict[str, KnowledgeScope]) -> Dict[str, "KnowledgeScope"]:
+    """The scopes a level-1 relevance judgment should ask about: every hub (depth
+    2, judged directly rather than through its parent section), plus every
+    depth-1 scope that is not itself a container for hubs. Catch-all scopes are
+    included here too; the caller decides whether to actually ask Jev about one
+    (gated separately, never asked as a generic relevance default)."""
+    containers = sections_with_hubs(scopes)
+    out: Dict[str, KnowledgeScope] = {}
+    for name, info in scopes.items():
+        if info.depth == 2:
+            out[name] = info
+        elif info.depth == 1 and name not in containers:
+            out[name] = info
+    return out
+
+
+def find_people_scope(scopes: Dict[str, KnowledgeScope]) -> Optional[str]:
+    """The knowledge scope that is the People area, if the vault has one: a hub
+    (or section) whose own title is exactly 'People'. Used to cross-reference
+    person notes for a question even when 'People' was not itself picked by a
+    level-1 judgment keyed off its generic description."""
+    for name, info in scopes.items():
+        if info.title.strip().lower() == "people":
+            return name
+    return None
+
+
+def resolve_daily_scope(scopes: Dict[str, KnowledgeScope], root: Path, question: str, *,
+                         tz: str = "America/New_York") -> Optional[Tuple[str, str]]:
+    """When `question` plainly names a day ("today", "yesterday", "tomorrow", or
+    an explicit YYYY-MM-DD date), resolve which calendar date it means in code
+    (the owner's timezone, same approach as router.now_line) and return the
+    (scope_name, vault-relative path) of that day's daily note -- a daily note
+    is picked directly by filename, never by asking Jev to tell two
+    near-identical daily notes apart. Covers both shapes the vault uses: a
+    recent daily note kept loose at the vault root (its own discovered scope),
+    and an older one filed inside a "Daily" section's folder. None when the
+    question is not date-shaped or no matching note exists."""
+    import datetime
+    from zoneinfo import ZoneInfo
+    q = question.lower()
+    now = datetime.datetime.now(ZoneInfo(tz))
+    target: Optional[datetime.date] = None
+    m = re.search(r"\b(\d{4}-\d{2}-\d{2})\b", question)
+    if m:
+        try:
+            target = datetime.date.fromisoformat(m.group(1))
+        except ValueError:
+            target = None
+    elif re.search(r"\btoday\b", q):
+        target = now.date()
+    elif re.search(r"\byesterday\b", q):
+        target = now.date() - datetime.timedelta(days=1)
+    elif re.search(r"\btomorrow\b", q):
+        target = now.date() + datetime.timedelta(days=1)
+    if target is None:
+        return None
+    wanted = f"{target.isoformat()}.md"
+    for name, info in scopes.items():
+        if info.depth == 1 and info.prefixes == (wanted,):
+            return name, wanted
+    for name, info in scopes.items():
+        if info.depth == 1 and info.title.strip().lower() in ("daily", "daily notes"):
+            for prefix in info.prefixes:
+                if (root / prefix / wanted).is_file():
+                    return name, f"{prefix}/{wanted}"
+    return None
+
+
+def notes_under_bounded(root: Path, info: KnowledgeScope, *, max_depth: int = 2,
+                         max_notes: int = 40) -> List[Path]:
+    """Notes a level-2 judgment considers for one hub: its own folder's notes,
+    then one further level of real subfolders (bounded, not an unlimited
+    recursive walk), capped at `max_notes` so one oversized hub cannot blow out
+    a single TypeSafe call. `max_depth` counts folder levels below the hub's own
+    directory (1 = the hub folder itself, 2 = one level of subfolders under it)."""
+    out: List[Path] = []
+    for prefix in info.prefixes:
+        p = root / prefix
+        if p.is_symlink():
+            continue
+        if p.is_file() and _is_note(p):
+            out.append(p)
+        elif p.is_dir():
+            stack = [(p, 1)]
+            while stack and len(out) < max_notes:
+                cur, depth = stack.pop(0)
+                try:
+                    children = sorted(cur.iterdir(), key=lambda c: c.name)
+                except OSError:
+                    continue
+                for child in children:
+                    if child.name.startswith(SKIP_DIR_PREFIX) or child.is_symlink():
+                        continue
+                    if _is_note(child):
+                        out.append(child)
+                    elif child.is_dir() and depth < max_depth:
+                        stack.append((child, depth + 1))
+                    if len(out) >= max_notes:
+                        break
+    seen = set()
+    uniq = []
+    for p in out:
+        rp = str(p)
+        if rp not in seen:
+            seen.add(rp)
+            uniq.append(p)
+    return sorted(uniq)[:max_notes]
+
+
 def path_prefixes(scopes: Dict[str, KnowledgeScope], names: List[str]) -> List[str]:
     """The vault-relative path prefixes a set of granted knowledge scopes covers.
     A later tool call is allowed only under one of these."""
