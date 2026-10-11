@@ -182,7 +182,8 @@ def test_overlap_is_skipped_and_noted(tmp_path):
                                      schedule_kind="recurring")
     asyncio.run(m.schedules.tick())
     current = m.store.get_schedule(schedule.id)
-    assert current.run_count == 0 and f"request #{running.id} was still running" in current.notes[-1]
+    assert current.run_count == 0 and current.notes == []
+    assert f"request #{running.id} was still running" in current.last_outcome
 
 
 def test_non_owner_refused_and_edit_returns_to_proposed(tmp_path):
