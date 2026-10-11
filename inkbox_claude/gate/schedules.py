@@ -5,12 +5,14 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import re
 import time
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from . import cron
+from .scopes import SCOPES, tools_for
 from .store import Request, Schedule, sha256
 
 logger = logging.getLogger(__name__)
@@ -62,6 +64,23 @@ def next_three(schedule: Schedule, now: Optional[float] = None) -> List[float]:
         return cron.next_fires(schedule.cron, now, schedule.timezone, 3)
     first = schedule.next_run if schedule.next_run is not None else schedule.run_at
     return [first] if first is not None and first >= now else []
+
+
+
+
+def _prompt_tool_mismatch(prompt: str, scopes: List[str]) -> List[str]:
+    """Tool short names literally named in a schedule's prompt that none of its
+    granted scopes actually cover, so the owner sees the gap before approving
+    rather than discovering it when a run is refused."""
+    allowed = set(tools_for(scopes))
+    named_short: List[str] = []
+    for info in SCOPES.values():
+        for tool in info.get("tools") or []:
+            short = tool.rsplit("__", 1)[-1]
+            if short and re.search(r'\b' + re.escape(short) + r'\b', prompt) and tool not in allowed:
+                if short not in named_short:
+                    named_short.append(short)
+    return named_short
 
 
 class ScheduleService:
@@ -137,6 +156,9 @@ class ScheduleService:
         if schedule.kind == "continue":
             extra = (f"\nRun limit: {schedule.max_runs}\n"
                      f"Deadline: {_shown(schedule.deadline, schedule.timezone)}")
+        mismatch = _prompt_tool_mismatch(schedule.prompt, schedule.scopes)
+        warning = (f"\n\nThe prompt names {', '.join(mismatch)}, which no scope above grants -- "
+                   f"check the scopes before approving." if mismatch else "")
         return (
             f"[Blatbot #{request_id}] Schedule proposal\n\n"
             f"Title: {schedule.title}\n"
@@ -144,7 +166,7 @@ class ScheduleService:
             f"Next three fire times:\n{shown}\n\n"
             f"Exact prompt:\n{schedule.prompt}\n\n"
             f"Scopes: {', '.join(schedule.scopes)}\n"
-            f"Report mode: {schedule.report_mode}{extra}\n\n"
+            f"Report mode: {schedule.report_mode}{extra}{warning}\n\n"
             f"Reply \"#{request_id} yes\" to activate it or \"#{request_id} no\" to reject it."
         )
 

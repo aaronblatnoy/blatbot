@@ -112,6 +112,10 @@ class ScheduleProposal(BaseModel):
     report_mode: str = "always"
     max_runs: int = Field(default=20, ge=1)
     deadline: Optional[str] = None
+    # Scope names Aaron named explicitly for this schedule (e.g. he said "it can touch
+    # contacts"), null when he named none. Code never derives permission from this
+    # field alone -- see manager.py's deterministic scoping of a schedule proposal.
+    scopes: Optional[List[str]] = None
 
     @field_validator("kind")
     @classmethod
@@ -177,7 +181,7 @@ class Router:
             "Available task scopes (choose the minimal set):\n"
             f"{scope_lines}\n\n"
             "Respond with ONLY a JSON object, no prose, of the form:\n"
-            '{"reasoning": string or null, "reply": string or null, "request": null or {"prompt": string, "scopes": [string], "summary": string, "counterpart": string or null}, "schedule": null or {"title": string, "prompt": string, "kind": "once"|"recurring"|"continue", "cron": string|null, "run_at": ISO datetime|null, "timezone": IANA timezone, "report_mode": "always"|"changed", "max_runs": integer, "deadline": ISO datetime|null}}\n'
+            '{"reasoning": string or null, "reply": string or null, "request": null or {"prompt": string, "scopes": [string], "summary": string, "counterpart": string or null}, "schedule": null or {"title": string, "prompt": string, "kind": "once"|"recurring"|"continue", "cron": string|null, "run_at": ISO datetime|null, "timezone": IANA timezone, "report_mode": "always"|"changed", "max_runs": integer, "deadline": ISO datetime|null, "scopes": null or [string]}}\n'
             "- reply: what to send back to the sender now, or null to send nothing.\n"
             "- request.counterpart: the email (preferred), phone, or full name of the person the task is\n"
             "  about, when it concerns someone other than the sender; null otherwise.\n"
@@ -233,7 +237,10 @@ class Router:
             "or as continuing work, fill schedule. For recurring use a standard five-field cron expression. "
             "For once use an absolute ISO datetime. For continue, prompt is the exact work each run should "
             "continue, max_runs defaults to 20 and deadline defaults to seven days from NOW. Never fill "
-            "schedule for anyone except Aaron. A schedule is proposed for his approval and does not run now.\n"
+            "schedule for anyone except Aaron. A schedule is proposed for his approval and does not run now. "
+            "schedule.scopes: the scope names Aaron named explicitly for this schedule (e.g. he said it "
+            "can touch contacts, or send email), or null when he named none -- do not guess scopes from "
+            "what the work will probably need, only from what he actually said.\n"
             "- You have no memory of what tools can or cannot do. NEVER tell anyone a capability is missing, "
             "broken, or unavailable, and never rely on past failure notes in the history; tools get fixed. "
             "If information is needed (who emailed, what is on a calendar, a phone number, a file), "

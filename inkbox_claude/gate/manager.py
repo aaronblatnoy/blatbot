@@ -83,6 +83,24 @@ def _strip_quoted(text: str) -> str:
 OWNER_THREAD = "owner"   # the one thread for the person the assistant works for
 
 
+def _schedule_prompt_tool_scopes(prompt: str) -> List[str]:
+    """Scopes whose own tools are named literally, by short name, in a schedule's
+    prompt text (e.g. the prompt says "create it with inkbox_create_contact"). A
+    schedule that spells out the exact tool it will call has already told us, in the
+    one place that matters -- the unattended instructions it runs from -- which scope
+    that requires, with no probability judgment needed."""
+    found: List[str] = []
+    for name, info in SCOPES.items():
+        tools = info.get("tools") or []
+        for tool in tools:
+            short = tool.rsplit("__", 1)[-1]
+            if short and re.search(r"\b" + re.escape(short) + r"\b", prompt):
+                if name not in found:
+                    found.append(name)
+                break
+    return found
+
+
 class GateSession:
     def __init__(self, chat_id: str, manager: "GateSessionManager"):
         self.chat_id = chat_id
@@ -992,11 +1010,27 @@ class GateSession:
             if task is None:
                 task = self.m.store.create_task(out.schedule.title)
                 self._ensure_inbound_on_task(task, body)
-            schedule_request = RouterOutput(request=RouterRequest(
-                prompt=out.schedule.prompt, scopes=["web"], summary=out.schedule.title,
-            ))
-            await self.jev_scopes(schedule_request, strict=True, owner_generous=False)
-            scopes = list(schedule_request.request.scopes) if schedule_request.request is not None else ["web"]
+            named = list(out.schedule.scopes or [])
+            unknown = sorted(set(named) - set(SCOPES))
+            if unknown:
+                out.request = None
+                out.schedule = None
+                return await self.send_to_sender(
+                    f"I can't propose that schedule: unknown scope(s) {', '.join(unknown)}.", role="answer")
+            implied = _schedule_prompt_tool_scopes(out.schedule.prompt)
+            if named or implied:
+                # The owner named scopes, or the schedule's own prompt names the tools
+                # it will call -- both are deterministic and prompt-grounded, so Jev's
+                # probability judgment (which can score a plainly-needed scope too low,
+                # as it did for "contacts" the first time this ran for real) is not
+                # consulted at all.
+                scopes = list(dict.fromkeys(named + implied))
+            else:
+                schedule_request = RouterOutput(request=RouterRequest(
+                    prompt=out.schedule.prompt, scopes=["web"], summary=out.schedule.title,
+                ))
+                await self.jev_scopes(schedule_request, strict=True, owner_generous=False)
+                scopes = list(schedule_request.request.scopes) if schedule_request.request is not None else ["web"]
             await self.m.schedules.propose(
                 owner=True, chat_id=self.record_id, task_id=int(task["id"]),
                 spec=out.schedule.model_dump(), scopes=scopes, mode=self.mode,
