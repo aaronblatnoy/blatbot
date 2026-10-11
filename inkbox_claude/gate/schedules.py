@@ -205,7 +205,11 @@ class ScheduleService:
                                                           "schedule_id": schedule.id})
             self.store.task_event(schedule.task_id, "approved", f"Schedule S{schedule.id} activated.",
                                   chat_id=schedule.chat_id, request_id=req.id, state="open")
-            await self.manager.send_to_approver(f"Schedule S{schedule.id} is active: {schedule.title}")
+            activated = self.store.get_schedule(schedule.id)
+            await self.manager.send_to_approver(
+                f"Schedule S{schedule.id} is active: {activated.title}. "
+                f"First run {_shown(activated.next_run, activated.timezone)}. "
+                f"Scopes: {', '.join(activated.scopes)}.")
             return {"ok": True, "state": "active", "error": ""}
         if d in {"no", "n", "stop", "drop", "reject", "decline"}:
             self.store.update_schedule(schedule.id, state="rejected", next_run=None)
@@ -268,6 +272,8 @@ class ScheduleService:
         if action == "run_now":
             if schedule.state != "active":
                 raise ValueError(f"schedule S{schedule.id} is {schedule.state}; it can only run now while active")
+            if self.store.request_running_for_schedule(schedule.id) is not None:
+                raise ValueError(f"schedule S{schedule.id} already has a run in flight; wait for it to finish")
             return self.store.update_schedule(schedule.id, next_run=now)
         if action == "delete":
             for request in self.store.pending_requests_for_schedule(schedule.id):
@@ -336,12 +342,14 @@ class ScheduleService:
                 return
         running = self.store.request_running_for_schedule(schedule.id)
         if running is not None:
+            # Operational (skip/limit/deadline/outcome) lines never enter schedule.notes:
+            # notes feed straight into the next run's prompt as PROGRESS NOTES, and this is
+            # not something the model said -- it would be reading its own scheduler's chatter.
             note = f"Skipped a firing because request #{running.id} was still running."
-            notes = list(schedule.notes) + [note]
             next_run = None if schedule.kind == "once" else (
                 cron.next_fire(schedule.cron, now, schedule.timezone) if schedule.kind == "recurring"
                 else now + MIN_CONTINUE_DELAY)
-            self.store.update_schedule(schedule.id, notes=notes, next_run=next_run,
+            self.store.update_schedule(schedule.id, next_run=next_run,
                                        state="done" if schedule.kind == "once" else schedule.state,
                                        last_outcome=note)
             self.store.task_event(schedule.task_id, "note", note, chat_id=schedule.chat_id)
@@ -354,6 +362,10 @@ class ScheduleService:
             original_message=schedule.prompt, summary=schedule.title, scopes=list(schedule.scopes), prompt=prompt,
             state="approved", task_id=schedule.task_id, schedule_id=schedule.id, schedule_kind=schedule.kind,
         )
+        # The revision this run started from. A continue signal from an older revision
+        # (the owner edited the schedule mid-run) is a different, unapproved job talking --
+        # finished() checks this before ever acting on that signal.
+        self.store.set_state(req.id, "approved", status={"schedule_revision": schedule.revision})
         if schedule.kind == "recurring":
             next_run = cron.next_fire(schedule.cron, now, schedule.timezone)
         else:
@@ -365,51 +377,95 @@ class ScheduleService:
         asyncio.create_task(self.manager.execute(req))
 
     async def finished(self, req: Request, status: Dict[str, Any]) -> bool:
-        """Update the schedule and report. Returns True when normal delivery is replaced."""
+        """Update the schedule and report. Returns True when normal delivery is replaced.
+
+        Re-reads the schedule fresh: it is the live owner-facing truth, and a run can
+        outlast an owner action taken while it was in flight (pause, edit, delete). Only
+        a schedule still "active", and still on the revision this run started from, is
+        ever moved on from here -- paused/proposed/rejected/done are left exactly where
+        the owner put them; this run's note and outcome are still recorded either way."""
         if not req.schedule_id or self.is_proposal_request(req):
             return False
         schedule = self.store.get_schedule(req.schedule_id)
         if schedule is None:
+            # Deleted while it ran: no notice, no further fire. Nothing to update.
             return True
         ok = bool(status.get("ok"))
+        started_revision = (req.status or {}).get("schedule_revision")
+        stale = schedule.state != "active" or (
+            started_revision is not None and started_revision != schedule.revision)
         failures = 0 if ok else schedule.consecutive_failures + 1
-        result = str(status.get("summary") or status.get("error") or "")
-        changes: Dict[str, Any] = {"consecutive_failures": failures, "last_outcome": result}
-        if schedule.kind == "once":
-            changes.update(state="done" if ok else "failed", next_run=None)
-        elif schedule.kind == "continue":
-            signal = status.get("continue") or {}
-            if signal:
-                delay = int(signal.get("delay_minutes") or 0) * 60
-                note = str(signal.get("note") or "").strip()
-                if delay < MIN_CONTINUE_DELAY:
-                    ok = False
-                    failures = schedule.consecutive_failures + 1
-                    result = "The continue tool requested a delay shorter than 5 minutes."
-                    changes.update(consecutive_failures=failures, last_outcome=result, state="failed", next_run=None)
-                else:
-                    notes = list(schedule.notes) + [note]
-                    next_run = time.time() + delay
-                    if schedule.run_count >= schedule.max_runs or (schedule.deadline and next_run > schedule.deadline):
-                        changes.update(notes=notes, state="done", next_run=None)
-                    else:
-                        changes.update(notes=notes, state="active", next_run=next_run)
-            else:
+        result = str(status.get("final_status") or status.get("summary") or status.get("error") or "")
+        denied = [step for step in (status.get("steps") or [])
+                  if isinstance(step, dict) and not step.get("ok") and step.get("denied")]
+        changes: Dict[str, Any] = {"last_outcome": result}
+        next_run_note = ""
+        if stale:
+            # The owner acted mid-run: leave state and next_run exactly as they are.
+            # This run's own outcome is still recorded for the record, but it never
+            # reactivates a paused/edited/rejected/done schedule, and a continue signal
+            # from an older revision is ignored outright.
+            changes["consecutive_failures"] = schedule.consecutive_failures
+        else:
+            changes["consecutive_failures"] = failures
+            if schedule.kind == "once":
                 changes.update(state="done" if ok else "failed", next_run=None)
-        if failures >= 3:
-            changes.update(state="paused", next_run=None)
+            elif schedule.kind == "continue":
+                signal = status.get("continue") or {}
+                if signal:
+                    delay = int(signal.get("delay_minutes") or 0) * 60
+                    note = str(signal.get("note") or "").strip()
+                    if delay < MIN_CONTINUE_DELAY:
+                        ok = False
+                        failures = schedule.consecutive_failures + 1
+                        result = "The continue tool requested a delay shorter than 5 minutes."
+                        changes.update(consecutive_failures=failures, last_outcome=result,
+                                      state="failed", next_run=None)
+                    else:
+                        notes = list(schedule.notes) + [note]
+                        next_run = time.time() + delay
+                        if schedule.run_count >= schedule.max_runs:
+                            changes.update(notes=notes, state="done", next_run=None)
+                            next_run_note = "No further runs: run limit."
+                        elif schedule.deadline and next_run > schedule.deadline:
+                            result = (f"stopped: the next wake-up would pass the deadline "
+                                      f"{_shown(schedule.deadline, schedule.timezone)}")
+                            changes.update(notes=notes, state="done", next_run=None, last_outcome=result)
+                            next_run_note = "No further runs: deadline."
+                        else:
+                            changes.update(notes=notes, state="active", next_run=next_run)
+                            next_run_note = f"Next run: {_shown(next_run, schedule.timezone)}"
+                else:
+                    changes.update(state="done" if ok else "failed", next_run=None)
+                    next_run_note = "No further runs: no continue." if ok else "No further runs: failed."
+            if failures >= 3:
+                changes.update(state="paused", next_run=None)
         updated = self.store.update_schedule(schedule.id, **changes)
-        if failures >= 3:
+        if not stale and failures >= 3:
             await self.manager.send_to_approver(
                 f"Schedule S{schedule.id} paused after three consecutive failed runs: {schedule.title}")
+        elif not stale and not ok and schedule.kind == "continue" and updated.state == "active":
+            next_run_note = (f"{next_run_note} ({3 - failures} more failure(s) pause this schedule.)"
+                             if next_run_note else f"({3 - failures} more failure(s) pause this schedule.)")
+        if stale:
+            self.store.task_event(schedule.task_id, "note",
+                                  f"Run finished but schedule S{schedule.id} had moved on "
+                                  f"({schedule.state}); not reactivated.", chat_id=schedule.chat_id)
+            return True
         from .jevagent import is_write_tool
         steps = status.get("steps") or []
+        # The Jev path reports every call it made in `steps` (ok True or False) -- those
+        # entries are informative about successful writes on their own. The Claude Code
+        # executor path only ever puts DENIED calls in `steps` (every call it made is in
+        # `tool_calls` instead), so when every entry here is a denial, `steps` has nothing
+        # to say about writes either way and the tool_calls fallback is what applies.
+        informative = [step for step in steps if isinstance(step, dict) and not step.get("denied")]
         successful_writes = any(
             bool(step.get("ok")) and step.get("tool") != "mcp__host__schedule_continue"
             and is_write_tool(str(step.get("tool") or ""))
-            for step in steps if isinstance(step, dict)
+            for step in informative
         )
-        if not steps and ok:
+        if not informative and ok:
             successful_writes = any(
                 tool != "mcp__host__schedule_continue" and is_write_tool(str(tool))
                 for tool in status.get("tool_calls") or []
@@ -419,8 +475,16 @@ class ScheduleService:
         if (schedule.report_mode == "always" or successful_writes or not ok
                 or final_continue or final_failed_once):
             word = "done" if ok else "failed"
-            await self.manager.send_to_approver(
-                f"Schedule S{schedule.id} run {schedule.run_count} {word}: {schedule.title}\n{result}")
+            limit_part = f" of {schedule.max_runs}" if schedule.kind == "continue" else ""
+            lines = [f"Schedule S{schedule.id} run {schedule.run_count}{limit_part} {word}: {schedule.title}",
+                     result]
+            if not ok:
+                for step in denied:
+                    granted = ", ".join(schedule.scopes) or "none"
+                    lines.append(f"{step.get('tool')} refused: outside scope (granted: {granted})")
+            if next_run_note:
+                lines.append(next_run_note)
+            await self.manager.send_to_approver("\n".join(lines))
         return True
 
     async def command(self, text: str, *, owner: bool) -> bool:

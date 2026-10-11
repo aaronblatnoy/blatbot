@@ -128,6 +128,12 @@ class Executor:
             allowed = [tool for tool in allowed if not _is_write(tool)]
         tool_calls: List[str] = []
         texts: List[str] = []
+        denied_steps: List[Dict[str, Any]] = []
+        # The key this run's Claude Code session resumes under. A scheduled run never
+        # shares the owner's own thread's session: two runs (the owner talking live, a
+        # schedule firing) can be in flight on the owner's chat_id at once, and a
+        # scheduled run resuming the owner's live conversation would leak into it.
+        session_key = f"schedule:{req.schedule_id}" if req.schedule_id else req.chat_id
 
         self.held_send = None
         held_destructive: Optional[Dict[str, Any]] = None
@@ -146,6 +152,7 @@ class Executor:
 
         async def can_use(tool_name: str, input_data: Dict[str, Any], context: Any):
             if tool_name not in allowed_set:
+                denied_steps.append({"tool": tool_name, "args": dict(input_data or {}), "ok": False, "denied": "scope"})
                 return PermissionResultDeny(message=f"{tool_name} is outside this task's scope; do not retry it.")
             from .jevagent import is_destructive, is_outbound_message, recipients_of
             if confirm_sends and is_outbound_message(tool_name, input_data or {}) and not self.allow_send:
@@ -202,10 +209,12 @@ class Executor:
             # One conversation per thread, continued rather than restarted. A request is a
             # turn in it, so what was looked up an hour ago is still in view and a follow-up
             # does not arrive as a stranger's first sentence.
-            resume=self._sessions.get(req.chat_id),
+            resume=self._sessions.get(session_key),
             can_use_tool=can_use,
             max_turns=30,
         )
+
+        closing_texts: List[str] = []
 
         async def _go():
             final: Optional[Any] = None
@@ -213,15 +222,24 @@ class Executor:
             # loop leaves the SDK's async generator half-closed.
             async for msg in query(prompt=req.prompt, options=options):
                 if isinstance(msg, AssistantMessage):
+                    saw_tool_use = False
                     for block in msg.content:
                         if isinstance(block, TextBlock):
                             texts.append(block.text)
                         elif isinstance(block, ToolUseBlock):
                             tool_calls.append(block.name)
+                            saw_tool_use = True
+                    if saw_tool_use:
+                        # A text block landed in the same turn as a tool call; it is
+                        # narration, not the closing status. Only text after the LAST
+                        # tool call in the whole run is the run's final status.
+                        closing_texts.clear()
+                    else:
+                        closing_texts.extend(block.text for block in msg.content if isinstance(block, TextBlock))
                 elif isinstance(msg, ResultMessage):
                     sid = getattr(msg, "session_id", None)
                     if sid:
-                        self._sessions[req.chat_id] = sid
+                        self._sessions[session_key] = sid
                     final = msg
             return final
 
@@ -241,12 +259,21 @@ class Executor:
             is_error = is_error or ("FAILED" in last)
         elif raw.lower().startswith("task failed") or "STATUS: FAILED" in raw.upper():
             is_error = True
+        # final_status is the run's own closing status -- the text that arrived after
+        # the last tool call, with the STATUS: OK/FAILED line stripped. raw (the full
+        # step-by-step narration) stays available for the console and the record, but
+        # a notice to the owner is built from final_status, never raw.
+        final_status = "\n".join(closing_texts).strip()
+        final_lines = [ln for ln in final_status.splitlines() if not ln.strip().upper().startswith("STATUS:")]
+        final_status = "\n".join(final_lines).strip()
         out = {
             "ok": not is_error,
             "engine": f"claude:{model or self.model}",
             "summary": raw if raw else "(no status text)",
+            "final_status": final_status or (raw if raw else "(no status text)"),
             "tool_calls": tool_calls,
             "raw": raw,
+            "steps": denied_steps,
             "cost_usd": getattr(result, "total_cost_usd", None) if result is not None else None,
         }
         if self.held_send is not None:
