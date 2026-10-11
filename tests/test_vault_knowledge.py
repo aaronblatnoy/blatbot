@@ -578,3 +578,34 @@ def test_owner_runs_are_unrestricted_through_the_tools(tmp_path, monkeypatch):
     everything = hosttools.vault_list({}, None)
     assert "Areas/Garden Shed/Roof.md" in everything
     assert "Areas/Greenhouse/Tomatoes.md" in everything
+
+
+def _approved(scopes, request_id=7):
+    from inkbox_claude.gate.store import Request
+    return Request(
+        id=request_id, chat_id="c1", sender="x", sender_name="x", mode="email", subject="",
+        original_message="x", summary="x", scopes=scopes, prompt="x", prompt_sha256="x",
+        state="approved", revision=0, status=None, raw_output=None, created_at=0.0, updated_at=0.0,
+    )
+
+
+def test_attachment_is_built_when_the_whole_vault_scope_is_held_too(tmp_path, monkeypatch):
+    # the owner's usual grant: the tool tree gives vault_read, the traversal adds the hub
+    m, _sent, _root = _manager_with_vault(tmp_path, monkeypatch)
+    block = m.vault_attachment_for(_approved(["vault_read", "vault:areas/garden-shed"]))
+    assert "The roof was patched in spring." in block
+
+
+def test_attachment_puts_the_chosen_notes_first_and_only_those(tmp_path, monkeypatch):
+    m, _sent, _root = _manager_with_vault(tmp_path, monkeypatch)
+    m.remember_knowledge_notes(7, ["Areas/Garden Shed/Paint.md", "Areas/Greenhouse/Tomatoes.md"])
+    block = m.vault_attachment_for(_approved(["vault:areas/garden-shed"]))
+    assert "Repainted the door blue." in block
+    assert "The roof was patched in spring." not in block   # in the hub, but not chosen
+    assert "Tomatoes" not in block                           # chosen, but outside the granted scope
+
+
+def test_attachment_falls_back_to_the_scope_when_no_choice_was_kept(tmp_path, monkeypatch):
+    m, _sent, _root = _manager_with_vault(tmp_path, monkeypatch)
+    block = m.vault_attachment_for(_approved(["vault:areas/garden-shed"], request_id=99))
+    assert "The roof was patched in spring." in block and "Repainted the door blue." in block

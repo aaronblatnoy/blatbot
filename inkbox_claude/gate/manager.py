@@ -660,6 +660,13 @@ class GateSession:
             logger.info("[gate %s] vault tree unavailable (%s); leaving vault scopes to the tool tree",
                         self.chat_id, res.get("reason"))
             return
+        if chosen and not self.is_approver():
+            # Relevance never widens what someone else may see, and never turns a request
+            # their role already covers into one that waits for approval: only knowledge
+            # scopes their roles carry are added. Asking for the owner's notes outright
+            # still goes through the tool scope tree and its approval, as before.
+            allowed = set(self.trust().get("scopes") or [])
+            chosen = [sc for sc in chosen if sc in allowed]
         if chosen:
             merged = list(out.request.scopes) + [sc for sc in chosen if sc not in out.request.scopes]
             if merged != out.request.scopes:
@@ -856,6 +863,7 @@ class GateSession:
                     subject="", original_message=body, summary=out.request.summary,
                     scopes=out.request.scopes, prompt=out.request.prompt,
                     state="approved" if approver else "pending", task_id=task["id"], inbound_id=self.inbound_id)
+                self.m.remember_knowledge_notes(req.id, getattr(out.request, "knowledge_notes", None))
                 self.m.record_request_on_task(req, task, self)
                 if not approver:
                     self.m.store.set_thread(self.chat_id, "awaiting_aaron")
@@ -1023,6 +1031,7 @@ class GateSession:
             state="approved" if (approver or trusted) else "pending", task_id=task["id"],
             inbound_id=self.inbound_id,
         )
+        self.m.remember_knowledge_notes(req.id, getattr(out.request, "knowledge_notes", None))
         self.m.record_request_on_task(req, task, self)
         if approver or trusted:
             # Run after this turn releases the session lock; execute() will
@@ -1282,6 +1291,9 @@ class GateSessionManager:
         # read per turn, not captured here: the console can change it between messages
         self._voice_trust_override: Optional[bool] = None
         self.sessions: Dict[str, GateSession] = {}
+        # request id -> the notes the vault traversal chose, most relevant first. Held in
+        # memory only: after a restart a run falls back to its knowledge scopes' own notes.
+        self._knowledge_notes: Dict[int, List[str]] = {}
         self.schedules = ScheduleService(self)
         self._expiry_task: Optional[asyncio.Task] = None
         self._schedule_task: Optional[asyncio.Task] = None
@@ -1867,18 +1879,20 @@ class GateSessionManager:
         status["draft_answer"] = draft
         return answered
 
+    def remember_knowledge_notes(self, request_id: int, notes: Optional[List[str]]) -> None:
+        if notes:
+            self._knowledge_notes[int(request_id)] = list(notes)
+            while len(self._knowledge_notes) > 500:
+                self._knowledge_notes.pop(next(iter(self._knowledge_notes)))
+
     def vault_attachment_for(self, req: Request) -> str:
         """The owner's vault notes this approved request's knowledge scopes cover,
         as a delimited block for the run's context. Computed fresh from req.scopes
         at run time (never from req.prompt, which is hash-locked from approval), so
         it cannot be widened by anything that happened between approval and running:
         the scopes it reads here are exactly the ones Aaron's approval (or his own
-        trust) already covers. The whole-vault vault_read scope attaches nothing
-        here; the executor's vault tools search the whole vault themselves in that
-        case, which is today's behaviour and the fallback when the knowledge
-        traversal did not narrow anything down."""
-        if "vault_read" in (req.scopes or []):
-            return ""
+        trust) already covers. Holding the whole-vault vault_read scope as well changes
+        only what the vault tools may open afterwards, not what is attached here."""
         names = [sc for sc in (req.scopes or []) if str(sc).startswith("vault:")]
         if not names:
             return ""
@@ -1886,17 +1900,22 @@ class GateSessionManager:
         from . import settings as _settings
         root = vaultscopes.vault_dir()
         discovered = vaultscopes.discover_cached()
-        notes: List[str] = []
+        covered: List[str] = []
         for name in names:
             info = discovered.get(name)
             if info is None:
                 continue
             for p in vaultscopes.notes_under(root, info):
                 rel = str(p.relative_to(root))
-                if rel not in notes:
-                    notes.append(rel)
-        if not notes:
+                if rel not in covered:
+                    covered.append(rel)
+        if not covered:
             return ""
+        # The notes the traversal chose come first, most relevant first, and only those
+        # the granted knowledge scopes cover. Without that list (a restart since the
+        # decision) every note the scopes cover is offered, in the vault's own order.
+        chosen = [n for n in self._knowledge_notes.get(int(req.id), []) if n in covered]
+        notes = chosen or covered
         budget = int(_settings.get("GATE_VAULT_ATTACH_BUDGET_CHARS") or 60000)
         attachment = vaultscopes.build_attachment(root, notes, budget_chars=budget)
         if attachment.overflow:
