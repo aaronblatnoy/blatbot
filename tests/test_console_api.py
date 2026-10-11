@@ -328,7 +328,7 @@ def test_home_empty_state(tmp_path):
     assert result["coming_up"] == {"schedules_paused": False, "next": []}
     assert result["people"]["total"] == 0
     assert result["people"]["with_role"] == 0
-    assert result["people"]["roles"] == []
+    assert result["people"]["roles"] == [{"name": "commander", "members": 0}]  # the built-in commander role always exists, unheld on a fresh store
     assert result["people"]["last_sync"] == {"at": None, "counts": {}, "failed": []}
     assert result["recent_contacts"] == []
     # No message bodies or secrets anywhere in the shape.
@@ -451,4 +451,6 @@ def test_person_can_hold_two_roles(tmp_path):
     assert by_name["ops"]["people_count"] == 1 and by_name["club"]["people_count"] == 1
     api.remove_role_member(store, {"name": "ops", "key": "sam@example.edu"})
     assert store.trust_for(["sam@example.edu"])["scopes"] == ["calendar_read"]
-    assert {r["name"]: r["people_count"] for r in api.roles(store)} == {"ops": 0, "club": 1}
+    by_name2 = {r["name"]: r["people_count"] for r in api.roles(store)}
+    by_name2.pop("commander", None)
+    assert by_name2 == {"ops": 0, "club": 1}
