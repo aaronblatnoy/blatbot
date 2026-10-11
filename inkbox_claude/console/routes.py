@@ -67,6 +67,11 @@ def _endpoint(
             return await handler(request)
         except api.ValidationError as exc:
             return _json({"error": str(exc)}, status=400)
+        except PermissionError as exc:
+            # The commander write guards (store.py) raise PermissionError, not
+            # ValidationError, since they are enforced below the API layer too
+            # (direct store callers, migrations) and not only here.
+            return _json({"error": str(exc)}, status=400)
 
     return wrapped
 

@@ -214,9 +214,12 @@ class GateSession:
 
     def trust(self) -> Dict[str, Any]:
         """What this sender may have done without asking Aaron. Nothing, unless he has put
-        them in the table: everyone starts at no permissions."""
+        them in the table: everyone starts at no permissions. `commander` is the formal
+        name of what the approver already is; it changes only the label here, never the
+        check above (is_approver()) or the scopes, and the person name stays the existing
+        literal rather than a store lookup -- nothing about is_approver() reads the store."""
         if self.is_approver():
-            return {"role": "owner", "scopes": ["*"], "person": "Aaron"}
+            return {"role": "commander", "scopes": ["*"], "person": "Aaron"}
         try:
             return self.m.store.trust_for(self.handles())
         except Exception:
@@ -1237,6 +1240,15 @@ class GateSessionManager:
         self.approver_phone = str(getattr(cfg, "approver_phone", "") or "")
         from .. import telegram as _tg
         self.approver_telegram_id = _tg.approver_id()
+        # The commander role's one legitimate assignment: tell the store the owner's two
+        # verified handles (never logged, never read from the environment by the store
+        # itself) and have it resolve/pin who holds the role, then reconcile stray data.
+        self.store.set_approver_handles(telegram_id=self.approver_telegram_id or "",
+                                        phone=self.approver_phone or "")
+        try:
+            self.store.reconcile_commander()
+        except Exception:
+            logger.exception("[gate] commander reconciliation failed at start-up")
         self.voice_vocabulary = str(os.getenv("GATE_VOICE_VOCABULARY") or DEFAULT_VOICE_VOCABULARY).strip()
         # read per turn, not captured here: the console can change it between messages
         self._voice_trust_override: Optional[bool] = None

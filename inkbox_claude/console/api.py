@@ -207,6 +207,7 @@ def _person_model(store: Store, row: Dict[str, Any]) -> Dict[str, Any]:
     role_scopes = [s for name in role_names(row.get("role"))
                    for s in roles_by_name.get(name, {}).get("scopes", [])]
     effective = sorted(set(role_scopes) | set(row.get("scopes") or []))
+    is_commander = bool(row.get("id")) and row["id"] == store.commander_person_id()
     return {
         "id": row["id"],
         "display": row.get("display") or "",
@@ -218,6 +219,10 @@ def _person_model(store: Store, row: Dict[str, Any]) -> Dict[str, Any]:
         "contacts": row.get("contacts") or [],
         "created_at": row.get("created_at"),
         "updated_at": row.get("updated_at"),
+        # The front end acts only on this flag, never on a role name: it is this
+        # one person, their "commander" role membership cannot be changed here,
+        # and their delete/merge-away controls must not be offered.
+        "commander": is_commander,
     }
 
 
@@ -403,6 +408,20 @@ def _role_members(store: Store, name: str) -> List[Dict[str, Any]]:
     return _dedupe_members_by_person(rows)
 
 
+LOCKED_ROLES = frozenset({"commander"})
+_LOCKED_ROLE_DESCRIPTION = {
+    "commander": "Everything, on verified channels only.",
+}
+
+
+def _require_unlocked_role(name: str) -> None:
+    """Member add/remove, delete, rename and scope changes are refused for a
+    locked (system) role at the API layer -- a clear 400 message -- as well as
+    inside the store itself, which is the layer that cannot be bypassed."""
+    if name in LOCKED_ROLES:
+        raise ValidationError(f"{name} is a built-in role and cannot be changed here")
+
+
 def _role_model(store: Store, row: Dict[str, Any], people_rows: Optional[List[Dict[str, Any]]] = None) -> Dict[str, Any]:
     scope_names = row.get("scopes") or []
     details = [_scope_detail(name) for name in scope_names]
@@ -414,6 +433,7 @@ def _role_model(store: Store, row: Dict[str, Any], people_rows: Optional[List[Di
         if row["name"] in role_names(r.get("role"))
     ]
     members = _dedupe_members_by_person(matching)
+    locked = row["name"] in LOCKED_ROLES
     return {
         "name": row["name"],
         "note": row.get("note") or "",
@@ -423,6 +443,11 @@ def _role_model(store: Store, row: Dict[str, Any], people_rows: Optional[List[Di
         "members": members,
         "people_count": len(members),
         "warning": _SEND_WARNING if has_send else "",
+        # The front end acts only on this flag (and the text below), never on
+        # the role's name: locked means not editable, not deletable, and its
+        # membership cannot be changed from here.
+        "locked": locked,
+        "description": _LOCKED_ROLE_DESCRIPTION.get(row["name"], "") if locked else "",
     }
 
 
@@ -433,6 +458,7 @@ def roles(store: Store) -> List[Dict[str, Any]]:
 
 def upsert_role(store: Store, payload: Dict[str, Any]) -> Dict[str, Any]:
     name = _required_text(payload.get("name"), "name").lower()
+    _require_unlocked_role(name)
     store.set_role(name, _scopes(payload.get("scopes")), _text(payload.get("note"), "note"))
     row = next(item for item in roles(store) if item["name"] == name)
     events.publish("permissions.changed", {"kind": "role", "name": name})
@@ -442,6 +468,8 @@ def upsert_role(store: Store, payload: Dict[str, Any]) -> Dict[str, Any]:
 def rename_role_endpoint(store: Store, payload: Dict[str, Any]) -> Dict[str, Any]:
     old_name = _required_text(payload.get("name"), "name").lower()
     new_name = _required_text(payload.get("new_name"), "new_name").lower()
+    _require_unlocked_role(old_name)
+    _require_unlocked_role(new_name)
     try:
         store.rename_role(old_name, new_name)
     except (KeyError, ValueError) as exc:
@@ -454,6 +482,7 @@ def rename_role_endpoint(store: Store, payload: Dict[str, Any]) -> Dict[str, Any
 def add_role_scope(store: Store, payload: Dict[str, Any]) -> Dict[str, Any]:
     """Add one scope to a role without touching the rest of its scopes."""
     name = _required_text(payload.get("name"), "name").lower()
+    _require_unlocked_role(name)
     scope_name = _required_text(payload.get("scope"), "scope")
     role = next((r for r in store.roles() if r["name"] == name), None)
     if role is None:
@@ -470,6 +499,7 @@ def add_role_scope(store: Store, payload: Dict[str, Any]) -> Dict[str, Any]:
 def remove_role_scope(store: Store, payload: Dict[str, Any]) -> Dict[str, Any]:
     """Remove one scope from a role without touching the rest of its scopes."""
     name = _required_text(payload.get("name"), "name").lower()
+    _require_unlocked_role(name)
     scope_name = _required_text(payload.get("scope"), "scope")
     role = next((r for r in store.roles() if r["name"] == name), None)
     if role is None:
@@ -483,6 +513,7 @@ def remove_role_scope(store: Store, payload: Dict[str, Any]) -> Dict[str, Any]:
 
 def delete_role(store: Store, payload: Dict[str, Any]) -> Dict[str, Any]:
     name = _required_text(payload.get("name"), "name").lower()
+    _require_unlocked_role(name)
     store.drop_role(name)
     events.publish("permissions.changed", {"kind": "role", "name": name, "deleted": True})
     return {"ok": True, "name": name}
@@ -490,6 +521,7 @@ def delete_role(store: Store, payload: Dict[str, Any]) -> Dict[str, Any]:
 
 def add_role_member(store: Store, payload: Dict[str, Any]) -> Dict[str, Any]:
     name = _required_text(payload.get("name"), "name").lower()
+    _require_unlocked_role(name)
     key = _required_text(payload.get("key"), "key")
     if not any(row["name"] == name for row in store.roles()):
         raise ValidationError(f"no such role: {name}")
@@ -505,6 +537,7 @@ def add_role_member(store: Store, payload: Dict[str, Any]) -> Dict[str, Any]:
 
 def remove_role_member(store: Store, payload: Dict[str, Any]) -> Dict[str, Any]:
     name = _required_text(payload.get("name"), "name").lower()
+    _require_unlocked_role(name)
     key = _required_text(payload.get("key"), "key")
     existing = next((row for row in store.trusted() if row["key"] == store.trusted_key(key)), None)
     if existing and name in role_names(existing.get("role")):

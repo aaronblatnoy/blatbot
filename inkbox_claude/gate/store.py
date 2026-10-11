@@ -642,6 +642,11 @@ class Store:
             self._db = sqlite3.connect(path, check_same_thread=False)
             self._db.row_factory = sqlite3.Row
         self._lock = threading.Lock()
+        # The commander's two verified handles. Set once by the manager via
+        # set_approver_handles() after it reads the environment/config; the
+        # store itself never reads the environment and never logs these values.
+        self._approver_telegram_id: str = ""
+        self._approver_phone: str = ""
         with self._lock:
             if self._is_pg:
                 # Postgres always gets the final current shape in one shot --
@@ -684,6 +689,210 @@ class Store:
             n_fts = self._db.execute("SELECT COUNT(*) AS n FROM task_fts").fetchone()["n"]
         if n_fts < n_tasks:
             self.reindex_all()
+        self.ensure_commander_role()
+
+    # -- commander: the formal name of the owner's existing full control ------
+    # The commander role is a built-in system role. Its scopes are ALWAYS empty
+    # in the roles table and can never be made non-empty: resolve_handles unions
+    # a person's role scopes onto ANY of their contacts, including a forgeable
+    # email, so commander power must never be reachable through the roles table.
+    # It flows only through GateSession.is_approver() (manager.py), unchanged.
+    # Who holds it is recorded once, by person id, in settings.commander_person_id,
+    # and that pin is never silently re-picked.
+    COMMANDER_ROLE = "commander"
+    COMMANDER_NOTE = ("Full control. Requests from everyone else come here for approval. "
+                       "Held by one person and recognised only on that person's verified channels.")
+
+    def set_approver_handles(self, *, telegram_id: str = "", phone: str = "") -> None:
+        """Record the commander's two verified handles for the write guards below.
+        Called by the manager after it reads the environment/config; the store
+        never reads the environment itself and these values are never logged."""
+        self._approver_telegram_id = str(telegram_id or "").strip()
+        self._approver_phone = self.normalize_contact_value(phone) if str(phone or "").strip() else ""
+
+    def ensure_commander_role(self) -> None:
+        """Idempotent: the `commander` system role always exists, with empty
+        scopes. Safe to call on every start; never overwrites a wider note a
+        human may have set (there is only ever this one note for this role)."""
+        self._ensure_trust()
+        with self._lock:
+            row = self._db.execute(
+                "SELECT name FROM roles WHERE name=?", (self.COMMANDER_ROLE,)
+            ).fetchone()
+            if row is None:
+                self._db.execute(
+                    "INSERT INTO roles(name,scopes,note,updated_at) VALUES(?,?,?,?)",
+                    (self.COMMANDER_ROLE, json.dumps([]), self.COMMANDER_NOTE, time.time()),
+                )
+            else:
+                # Defensive: scopes must always be empty for this role, even if
+                # something upstream (a restore, a manual DB edit) left it non-empty.
+                self._db.execute(
+                    "UPDATE roles SET scopes=? WHERE name=? AND scopes<>?",
+                    (json.dumps([]), self.COMMANDER_ROLE, json.dumps([])),
+                )
+            self._db.commit()
+
+    def _is_approver_handle(self, kind: str, value: str) -> bool:
+        """True when (kind, value) is one of the commander's two verified handles
+        (the approver Telegram id or the approver phone number). These contacts
+        are the ONLY thing is_approver() actually trusts, so they must never be
+        reassigned, edited or removed out from under the commander person."""
+        kind = (kind or "").strip().lower()
+        norm = self.normalize_contact_value(value)
+        if kind == "telegram" and self._approver_telegram_id:
+            return norm == self.normalize_contact_value(self._approver_telegram_id)
+        if kind == "phone" and self._approver_phone:
+            return norm == self._approver_phone
+        return False
+
+    def commander_person_id(self) -> Optional[str]:
+        """The person id pinned to the commander role, resolving and pinning it
+        on first call if it is not yet set. Pins by person id and never
+        re-picks: once settings.commander_person_id is written, this returns
+        that id (following merges) for as long as the person still exists,
+        even if their contacts later change. Returns None when nothing can be
+        (or could be) pinned yet -- the gate then behaves exactly as before
+        commander existed, with full control recognised only via is_approver()."""
+        self._ensure_settings()
+        with self._lock:
+            return self._commander_person_id_locked()
+
+    def _commander_person_id_locked(self) -> Optional[str]:
+        """Same as commander_person_id(), but assumes self._lock is already held
+        by the caller -- the only form the write guards below may call, since
+        they are always invoked from inside a `with self._lock:` block and the
+        lock is not reentrant."""
+        row = self._db.execute(
+            "SELECT value FROM settings WHERE name='commander_person_id'"
+        ).fetchone()
+        pinned = str(row["value"]) if row and row["value"] else ""
+        if pinned:
+            live = self._resolve_person(pinned)  # may be None if deleted -- never re-picked
+            if live is not None:
+                self._sync_commander_role_locked(live)
+            return live
+        # Not yet pinned: look for exactly one live person holding an approver
+        # handle contact. Zero or conflicting candidates both pin nothing.
+        candidates: set = set()
+        if self._approver_telegram_id:
+            r = self._db.execute(
+                "SELECT person_id FROM contacts WHERE kind='telegram' AND value=? AND person_id IS NOT NULL",
+                (self.normalize_contact_value(self._approver_telegram_id),),
+            ).fetchone()
+            if r:
+                candidates.add(r["person_id"])
+        if self._approver_phone:
+            r = self._db.execute(
+                "SELECT person_id FROM contacts WHERE kind='phone' AND value=? AND person_id IS NOT NULL",
+                (self._approver_phone,),
+            ).fetchone()
+            if r:
+                candidates.add(r["person_id"])
+        live_candidates = {self._resolve_person(c) for c in candidates}
+        live_candidates.discard(None)
+        if len(live_candidates) != 1:
+            if len(live_candidates) > 1:
+                logger.warning(
+                    "commander_person_id: approver handles resolve to %d different people "
+                    "(%s) -- recording nobody as commander", len(live_candidates), sorted(live_candidates),
+                )
+            return None
+        pid = next(iter(live_candidates))
+        # Pin once, racing safely against a concurrent first call: if something
+        # already pinned a value in the meantime, keep that one (ON CONFLICT DO
+        # NOTHING), then re-read so two near-simultaneous callers agree.
+        self._db.execute(
+            "INSERT INTO settings(name,value,updated_at) VALUES('commander_person_id',?,?) "
+            "ON CONFLICT(name) DO NOTHING",
+            (pid, time.time()),
+        )
+        self._db.commit()
+        row = self._db.execute(
+            "SELECT value FROM settings WHERE name='commander_person_id'"
+        ).fetchone()
+        final_pid = self._resolve_person(str(row["value"])) if row and row["value"] else pid
+        if final_pid is not None:
+            self._sync_commander_role_locked(final_pid)
+        return final_pid
+
+    def _sync_commander_role_locked(self, pid: str) -> None:
+        """Rule 4: commander is in a person's role list IF AND ONLY IF they are the
+        recorded commander person. The pin (settings.commander_person_id) is the
+        source of truth; this keeps the displayed role list in sync with it. Assumes
+        self._lock is already held."""
+        row = self._db.execute("SELECT role FROM persons WHERE id=?", (pid,)).fetchone()
+        if row is None:
+            return
+        names = role_names(row["role"])
+        if self.COMMANDER_ROLE not in names:
+            names.append(self.COMMANDER_ROLE)
+            self._db.execute("UPDATE persons SET role=?, updated_at=? WHERE id=?",
+                             (", ".join(names), time.time(), pid))
+            self._db.commit()
+
+    def reconcile_commander(self) -> None:
+        """Call once at start-up, after set_approver_handles(). Resolves/pins the
+        commander person id (logging loudly on zero or conflicting candidates),
+        warns loudly if the pinned person no longer holds an approver-handle
+        contact (without re-picking anyone), and strips a stray `commander`
+        role name from every OTHER person (logged by person id, never by name) --
+        belt-and-suspenders against old data or a manual edit, not a substitute
+        for the write guards below."""
+        self._ensure_settings()
+        with self._lock:
+            pid = self._commander_person_id_locked()
+            if pid is None:
+                logger.warning("reconcile_commander: no commander person is recorded; "
+                               "full control is still recognised only via is_approver()")
+            else:
+                contacts = self._contact_rows(pid)
+                still_holds = any(self._is_approver_handle(c["kind"], c["value"]) for c in contacts)
+                if not still_holds:
+                    logger.warning(
+                        "reconcile_commander: pinned commander person %s no longer holds either "
+                        "approver-handle contact; keeping the existing pin (not re-picking)", pid,
+                    )
+            rows = self._db.execute("SELECT id, role FROM persons WHERE merged_into IS NULL").fetchall()
+            now = time.time()
+            for r in rows:
+                if r["id"] == pid:
+                    continue
+                names = role_names(r["role"])
+                if self.COMMANDER_ROLE in names:
+                    kept = [n for n in names if n != self.COMMANDER_ROLE]
+                    self._db.execute("UPDATE persons SET role=?, updated_at=? WHERE id=?",
+                                      (", ".join(kept), now, r["id"]))
+                    logger.warning("reconcile_commander: stripped a stray commander role from person %s", r["id"])
+            self._db.commit()
+
+    def _guard_commander_write(self, person_id: Optional[str], *, old_names: List[str],
+                                new_names: Optional[List[str]] = None,
+                                new_scopes: Optional[List[str]] = None) -> None:
+        """The one enforcement point for every write that can touch a person's role
+        list or scopes. MUST be called from inside a `with self._lock:` block,
+        BEFORE the write. Raises PermissionError to refuse.
+            - commander can be granted to nobody through this (or any) API call --
+              it is assigned only by the start-up pin in commander_person_id().
+            - commander cannot be removed from the pinned commander person.
+            - the commander person can never be given non-empty per-person scopes
+              (resolve_handles unions those onto every contact, including a
+              forgeable email, which would defeat the whole point of rule 2)."""
+        pid = self._commander_person_id_locked()
+        is_commander_person = pid is not None and person_id == pid
+        old_has = self.COMMANDER_ROLE in (old_names or [])
+        if new_names is not None:
+            new_has = self.COMMANDER_ROLE in new_names
+            if new_has and not (is_commander_person and old_has):
+                raise PermissionError(
+                    "the commander role cannot be granted; it is assigned automatically "
+                    "to the recognised owner")
+            if is_commander_person and old_has and not new_has:
+                raise PermissionError("the commander role cannot be removed from the owner")
+        if is_commander_person and new_scopes is not None and len(new_scopes) > 0:
+            raise PermissionError(
+                "the commander person cannot be given extra scopes directly; their power "
+                "comes only from verified channels, never from the roles/scopes table")
 
     def _seed_contact_kinds_locked(self) -> None:
         """Idempotent: insert the fixed contact-kind rows if the table is
@@ -864,6 +1073,8 @@ class Store:
 
     def set_role(self, name: str, scopes: List[str], note: str = "") -> None:
         """A named level of trust and the scopes it may use without asking the owner."""
+        if name.strip().lower() == self.COMMANDER_ROLE and list(dict.fromkeys(s for s in scopes if s)):
+            raise PermissionError("the commander role's scopes are always empty and cannot be changed")
         self._ensure_trust()
         with self._lock:
             self._db.execute(
@@ -875,6 +1086,8 @@ class Store:
 
     def drop_role(self, name: str) -> None:
         name = name.strip().lower()
+        if name == self.COMMANDER_ROLE:
+            raise PermissionError("the commander role cannot be deleted")
         self._ensure_trust()
         with self._lock:
             self._db.execute("DELETE FROM roles WHERE name=?", (name,))
@@ -902,6 +1115,10 @@ class Store:
         new_name = (new_name or "").strip().lower()
         if not new_name:
             raise ValueError("new name is required")
+        if old_name == self.COMMANDER_ROLE:
+            raise PermissionError("the commander role cannot be renamed")
+        if new_name == self.COMMANDER_ROLE:
+            raise PermissionError("no role can be renamed to commander")
         self._ensure_trust()
         with self._lock:
             existing = self._db.execute("SELECT * FROM roles WHERE name=?", (old_name,)).fetchone()
@@ -945,15 +1162,26 @@ class Store:
         without needing their own rewrite."""
         norm = self.normalize_contact_value(key)
         kind = self.guess_contact_kind(key)
+        new_scopes = sorted(set(scopes or []))
         with self._lock:
             existing = self._db.execute(
                 "SELECT * FROM contacts WHERE kind=? AND value=?", (kind, norm)
             ).fetchone()
             now = time.time()
+            self._commander_person_id_locked()  # sync the role column before reading it
             if existing and existing["person_id"]:
                 pid = self._resolve_person(existing["person_id"])
+                old_row = self._person_row(pid) or {}
+                old_names = role_names(old_row.get("role"))
             else:
                 pid = self._new_id("p")
+                old_names = []
+            # Guarded before any row is written, with the lock already held: a
+            # new person can never be born holding commander, and an existing
+            # person's commander membership/scopes can never change through here.
+            self._guard_commander_write(pid, old_names=old_names,
+                                        new_names=role_names(role), new_scopes=new_scopes)
+            if not (existing and existing["person_id"]):
                 self._db.execute(
                     "INSERT INTO persons(id,display,role,scopes,note,created_at,updated_at) "
                     "VALUES(?,?,?,?,?,?,?)", (pid, person or key, "", "[]", "", now, now))
@@ -968,13 +1196,15 @@ class Store:
             self._db.execute(
                 "UPDATE persons SET display=?, role=?, scopes=?, note=?, updated_at=? WHERE id=?",
                 (person or self._person_row(pid).get("display") or key, ", ".join(role_names(role)),
-                 json.dumps(sorted(set(scopes or []))), note, now, pid))
+                 json.dumps(new_scopes), note, now, pid))
             self._db.commit()
 
     def drop_trust(self, key: str) -> None:
         """Legacy single-handle removal: detach and delete that one contact. If it was
         the person's only contact, the person goes too; otherwise the person (and its
-        remaining contacts) stays, with role/scopes left as they were."""
+        remaining contacts) stays, with role/scopes left as they were. Refused on an
+        approver-handle contact, and refused if it would delete the commander person
+        (their last contact)."""
         norm = self.normalize_contact_value(key)
         kind = self.guess_contact_kind(key)
         with self._lock:
@@ -983,7 +1213,16 @@ class Store:
             ).fetchone()
             if existing is None:
                 return
+            if self._is_approver_handle(existing["kind"], existing["value"]):
+                raise PermissionError("an approver-handle contact cannot be removed")
             pid = existing["person_id"]
+            cmdr_pid = self._commander_person_id_locked()
+            if pid and pid == cmdr_pid:
+                remaining = self._db.execute(
+                    "SELECT COUNT(*) AS n FROM contacts WHERE person_id=?", (pid,)
+                ).fetchone()["n"]
+                if remaining <= 1:
+                    raise PermissionError("the commander person's last contact cannot be removed")
             self._db.execute("DELETE FROM contacts WHERE id=?", (existing["id"],))
             if pid:
                 remaining = self._db.execute(
@@ -1165,12 +1404,17 @@ class Store:
                        note: str = "") -> Dict[str, Any]:
         pid = self._new_id("p")
         now = time.time()
+        new_names = role_names(role)
+        new_scopes = sorted(set(scopes or []))
         with self._lock:
+            # A brand-new person is never the pinned commander (their id does not
+            # exist yet), so this only ever refuses an attempt to create someone
+            # already holding the commander role.
+            self._guard_commander_write(pid, old_names=[], new_names=new_names, new_scopes=new_scopes)
             self._db.execute(
                 "INSERT INTO persons(id,display,role,scopes,note,created_at,updated_at) "
                 "VALUES(?,?,?,?,?,?,?)",
-                (pid, display.strip(), ", ".join(role_names(role)),
-                 json.dumps(sorted(set(scopes or []))), note, now, now),
+                (pid, display.strip(), ", ".join(new_names), json.dumps(new_scopes), note, now, now),
             )
             self._db.commit()
         return self.get_person(pid)
@@ -1183,14 +1427,23 @@ class Store:
         fields, values = [], []
         if display is not None:
             fields.append("display=?"); values.append(display.strip())
+        new_names = role_names(role) if role is not None else None
         if role is not None:
-            fields.append("role=?"); values.append(", ".join(role_names(role)))
+            fields.append("role=?"); values.append(", ".join(new_names))
+        new_scopes = sorted(set(scopes)) if scopes is not None else None
         if scopes is not None:
-            fields.append("scopes=?"); values.append(json.dumps(sorted(set(scopes))))
+            fields.append("scopes=?"); values.append(json.dumps(new_scopes))
         if note is not None:
             fields.append("note=?"); values.append(note)
         fields.append("updated_at=?"); values.append(time.time())
         with self._lock:
+            self._commander_person_id_locked()  # sync the role column before reading it
+            old_row = self._person_row(live) or {}
+            # If role is given but drops "commander" for the commander person
+            # (e.g. role="helper"), that is a refused removal, not a silent
+            # demotion -- same rule as removing the role explicitly.
+            self._guard_commander_write(live, old_names=role_names(old_row.get("role")),
+                                        new_names=new_names, new_scopes=new_scopes)
             self._db.execute(f"UPDATE persons SET {', '.join(fields)} WHERE id=?", (*values, live))
             self._db.commit()
         return self.get_person(live)
@@ -1200,6 +1453,8 @@ class Store:
         if live is None:
             return False
         with self._lock:
+            if live == self._commander_person_id_locked():
+                raise PermissionError("the commander person cannot be deleted")
             self._db.execute("UPDATE contacts SET person_id=NULL, updated_at=? WHERE person_id=?",
                               (time.time(), live))
             # Anyone merged into the person being deleted is deleted too, not resurrected:
@@ -1256,6 +1511,13 @@ class Store:
         now = time.time()
         seen = float(last_seen) if last_seen is not None else now
         live_person = self._resolve_person(person_id) if person_id else None
+        if self._is_approver_handle(kind, norm):
+            cmdr_pid = self._commander_person_id_locked()
+            # Only refused once a commander is already pinned: before that, attaching
+            # an approver-handle value to a person is exactly how the pin gets made.
+            if live_person and cmdr_pid and live_person != cmdr_pid:
+                raise PermissionError(
+                    "an approver-handle value cannot be attached to anyone other than the commander")
         existing = self._db.execute(
             "SELECT * FROM contacts WHERE kind=? AND value=?", (kind, norm)
         ).fetchone()
@@ -1299,9 +1561,15 @@ class Store:
             existing = self._db.execute("SELECT * FROM contacts WHERE id=?", (contact_id,)).fetchone()
             if existing is None:
                 raise KeyError(f"no such contact: {contact_id}")
+            if self._is_approver_handle(existing["kind"], existing["value"]):
+                raise PermissionError("an approver-handle contact's kind/value cannot be edited")
             new_kind = kind if kind is not None else existing["kind"]
             raw_value = value if value is not None else existing["raw_value"]
             norm = self.normalize_contact_value(raw_value) if value is not None else existing["value"]
+            cmdr_pid = self._commander_person_id_locked()
+            if self._is_approver_handle(new_kind, norm) and cmdr_pid and existing["person_id"] != cmdr_pid:
+                raise PermissionError(
+                    "an approver-handle value cannot be attached to anyone other than the commander")
             if new_kind != existing["kind"] or norm != existing["value"]:
                 clash = self._db.execute(
                     "SELECT * FROM contacts WHERE kind=? AND value=? AND id<>?",
@@ -1330,6 +1598,9 @@ class Store:
 
     def remove_contact(self, contact_id: str) -> bool:
         with self._lock:
+            existing = self._db.execute("SELECT * FROM contacts WHERE id=?", (contact_id,)).fetchone()
+            if existing is not None and self._is_approver_handle(existing["kind"], existing["value"]):
+                raise PermissionError("an approver-handle contact cannot be removed")
             cur = self._db.execute("DELETE FROM contacts WHERE id=?", (contact_id,))
             self._db.commit()
         return cur.rowcount > 0
@@ -1341,6 +1612,11 @@ class Store:
         if person_id and live is None:
             raise KeyError(f"no such person: {person_id}")
         with self._lock:
+            existing = self._db.execute("SELECT * FROM contacts WHERE id=?", (contact_id,)).fetchone()
+            if existing is None:
+                raise KeyError(f"no such contact: {contact_id}")
+            if self._is_approver_handle(existing["kind"], existing["value"]):
+                raise PermissionError("an approver-handle contact cannot be moved")
             cur = self._db.execute(
                 "UPDATE contacts SET person_id=?, updated_at=? WHERE id=?",
                 (live, time.time(), contact_id),
@@ -1366,6 +1642,8 @@ class Store:
         before = self.get_person(merge_live)
         now = time.time()
         with self._lock:
+            if merge_live == self._commander_person_id_locked():
+                raise PermissionError("the commander person cannot be merged into another person")
             self._db.execute(
                 "UPDATE contacts SET person_id=?, updated_at=? WHERE person_id=?",
                 (keep_live, now, merge_live),
