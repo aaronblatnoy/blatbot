@@ -291,7 +291,8 @@ def _seed_legacy_pg(path, rows):
         CREATE TABLE tasks (
           id BIGSERIAL PRIMARY KEY,
           key TEXT NOT NULL DEFAULT '', display TEXT NOT NULL DEFAULT '',
-          title TEXT NOT NULL, state TEXT NOT NULL DEFAULT 'open',
+          title TEXT NOT NULL,
+          summary TEXT NOT NULL DEFAULT '', state TEXT NOT NULL DEFAULT 'open',
           created_at DOUBLE PRECISION NOT NULL, updated_at DOUBLE PRECISION NOT NULL
         );
         CREATE TABLE schedules (
