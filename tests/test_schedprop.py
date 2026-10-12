@@ -1,0 +1,271 @@
+"""schedprop.py: turning the owner's words into a schedule proposal, and the
+scopes a proposal gets -- chosen deterministically, never by Jev."""
+
+from __future__ import annotations
+
+import asyncio
+from types import SimpleNamespace
+
+import pytest
+
+from inkbox_claude.gate import manager as gm
+from inkbox_claude.gate import schedprop
+from inkbox_claude.gate.router import RouterOutput, RouterRequest, ScheduleProposal
+from inkbox_claude.gate.scopes import SCOPES
+
+
+# ---------------------------------------------------------------------------
+# Labels
+# ---------------------------------------------------------------------------
+
+def test_every_scope_in_the_registry_has_a_label():
+    for name in SCOPES:
+        got = schedprop.label(name)
+        assert got, f"{name} has no label"
+
+
+def test_no_two_scopes_share_a_label():
+    seen = {}
+    for name in SCOPES:
+        lbl = schedprop.label(name)
+        assert lbl not in seen, f"{name} and {seen.get(lbl)} share the label {lbl!r}"
+        seen[lbl] = name
+
+
+def test_vault_scope_label_is_generated_from_its_folder_name():
+    # A dynamically discovered vault knowledge scope has no entry in
+    # scopes.yaml at all; it is not even guaranteed to exist right now, so the
+    # label is tested directly rather than through a live SCOPES lookup.
+    assert schedprop.label("vault:projects/widgets") == "read your notes on projects/widgets"
+
+
+def test_labels_joins_one_two_and_three_or_more_with_commas_and_and():
+    assert schedprop.labels(["web"]) == schedprop.label("web")
+    assert schedprop.labels(["web", "contacts"]) == f"{schedprop.label('web')} and {schedprop.label('contacts')}"
+    joined = schedprop.labels(["web", "contacts", "host_read"])
+    assert joined == (f"{schedprop.label('web')}, {schedprop.label('contacts')}, "
+                       f"and {schedprop.label('host_read')}")
+
+
+# ---------------------------------------------------------------------------
+# capabilities_for
+# ---------------------------------------------------------------------------
+
+def test_capabilities_for_includes_named_scopes():
+    assert schedprop.capabilities_for("check it", ["web"], [], "") == ["web"]
+
+
+def test_capabilities_for_matches_a_synonym_in_his_own_words():
+    got = schedprop.capabilities_for("watch the page", [], [], "update the contact note if it changes")
+    assert "contacts" in got
+
+
+def test_capabilities_for_does_not_match_a_bare_common_word():
+    assert schedprop.capabilities_for("watch the page", [], [], "the service") == []
+
+
+def test_capabilities_for_matches_a_tool_named_literally_in_the_prompt():
+    got = schedprop.capabilities_for("Then call inkbox_create_contact for the tracker.", [], [], "")
+    assert "contacts" in got
+
+
+def test_capabilities_for_includes_the_routers_suggested_scopes():
+    assert schedprop.capabilities_for("check it", [], ["calendar"], "") == ["calendar"]
+
+
+def test_capabilities_for_dedupes_and_orders_by_registry():
+    got = schedprop.capabilities_for(
+        "Then call inkbox_create_contact for the tracker.", ["web"], ["contacts"], "edit contacts please")
+    assert got == [name for name in SCOPES if name in {"web", "contacts"}]
+
+
+def test_capabilities_for_refuses_an_unknown_named_scope():
+    with pytest.raises(schedprop.UnknownScopes) as exc:
+        schedprop.capabilities_for("check it", ["not_a_real_scope"], [], "")
+    assert exc.value.names == ["not_a_real_scope"]
+
+
+def test_capabilities_for_refuses_an_unknown_suggested_scope():
+    with pytest.raises(schedprop.UnknownScopes):
+        schedprop.capabilities_for("check it", [], ["not_a_real_scope"], "")
+
+
+def test_missing_capabilities_names_a_tool_named_prompt_scope_not_granted():
+    prompt = "Then call inkbox_create_contact for the tracker."
+    assert schedprop.missing_capabilities(prompt, []) == ["contacts"]
+    assert schedprop.missing_capabilities(prompt, ["contacts"]) == []
+
+
+# ---------------------------------------------------------------------------
+# format_proposal / format_change
+# ---------------------------------------------------------------------------
+
+def _schedule(**kwargs):
+    base = dict(title="Team total watch", cadence_kind="every", cadence={"minutes": 240},
+                timezone="America/New_York", scopes=["web", "contacts"],
+                report_every_time=False, until=None)
+    base.update(kwargs)
+    return SimpleNamespace(**base)
+
+
+def test_format_proposal_matches_the_specs_example_shape(monkeypatch):
+    monkeypatch.setattr(schedprop, "_cadence_text", lambda s: "every 4 hours")
+    monkeypatch.setattr(schedprop, "_first_run_text", lambda s: "2:30 PM today")
+    schedule = _schedule()
+    text = schedprop.format_proposal(schedule)
+    assert text == (
+        'Set up "Team total watch": every 4 hours, starting 2:30 PM today. '
+        'It will read public web pages and look up and edit contacts. '
+        'You hear from it only when something changed or it could not finish. '
+        'Reply yes to start, or tell me what to change.'
+    )
+    assert "cron" not in text
+    assert "#" not in text
+    assert "*" not in text
+    assert "every\"" not in text and "'every'" not in text  # no raw cadence_kind word as a token
+
+
+def test_format_proposal_every_time_reporting(monkeypatch):
+    monkeypatch.setattr(schedprop, "_cadence_text", lambda s: "once")
+    monkeypatch.setattr(schedprop, "_first_run_text", lambda s: "9:00 AM tomorrow")
+    schedule = _schedule(cadence_kind="once", cadence={"at": "2026-11-01T09:00:00"}, report_every_time=True)
+    text = schedprop.format_proposal(schedule)
+    assert "You hear from it every time it runs." in text
+    assert "only when something changed" not in text
+
+
+def test_format_proposal_with_until_adds_the_date(monkeypatch):
+    monkeypatch.setattr(schedprop, "_cadence_text", lambda s: "every 4 hours")
+    monkeypatch.setattr(schedprop, "_first_run_text", lambda s: "2:30 PM today")
+    monkeypatch.setattr(schedprop, "_until_text", lambda s: "November 1")
+    schedule = _schedule(until=1793000000.0)
+    text = schedprop.format_proposal(schedule)
+    assert "until November 1" in text
+
+
+def test_format_proposal_contains_no_scope_names():
+    import unittest.mock as mock
+    with mock.patch.object(schedprop, "_cadence_text", return_value="daily at 8:00 AM"), \
+         mock.patch.object(schedprop, "_first_run_text", return_value="8:00 AM tomorrow"):
+        # Scope identifiers (underscored, machine-shaped) must not leak into the
+        # text, even though the plain-English label can of course use an
+        # ordinary word that happens to also be part of a scope's name ("web").
+        schedule = _schedule(cadence_kind="daily", cadence={"time": "08:00"},
+                             scopes=["browser_act", "coolify_control"])
+        text = schedprop.format_proposal(schedule)
+    for scope_name in schedule.scopes:
+        assert scope_name not in text
+
+
+def test_format_change_cadence_only(monkeypatch):
+    monkeypatch.setattr(schedprop, "_cadence_text", lambda s: "daily at 8:00 AM")
+    monkeypatch.setattr(schedprop, "_first_run_text", lambda s: "8:00 AM tomorrow")
+    schedule = _schedule(title="Team total watch", cadence_kind="daily", cadence={"time": "08:00"})
+    text = schedprop.format_change(schedule, {"cadence_kind": "daily", "cadence": {"time": "08:00"}})
+    assert text == ("Team total watch will run daily at 8:00 AM, next 8:00 AM tomorrow. "
+                     "Reply yes to confirm.")
+
+
+def test_format_change_added_capabilities_only(monkeypatch):
+    schedule = _schedule(title="Team total watch")
+    text = schedprop.format_change(schedule, {"scopes": ["contacts"]})
+    assert text == "Team total watch will also be allowed to look up and edit contacts. Reply yes to confirm."
+
+
+def test_format_change_both_cadence_and_capabilities(monkeypatch):
+    monkeypatch.setattr(schedprop, "_cadence_text", lambda s: "daily at 8:00 AM")
+    monkeypatch.setattr(schedprop, "_first_run_text", lambda s: "8:00 AM tomorrow")
+    schedule = _schedule(title="Team total watch")
+    text = schedprop.format_change(schedule, {"cadence_kind": "daily", "scopes": ["contacts"]})
+    assert "Team total watch will run daily at 8:00 AM, next 8:00 AM tomorrow. Reply yes to confirm." in text
+    assert "Team total watch will also be allowed to look up and edit contacts. Reply yes to confirm." in text
+
+
+# ---------------------------------------------------------------------------
+# Router schema
+# ---------------------------------------------------------------------------
+
+def test_router_schedule_proposal_accepts_the_new_fields():
+    sp = ScheduleProposal(title="t", prompt="p", cadence_kind="every", cadence={"minutes": 240},
+                          timezone="America/New_York", report_every_time=True, until="2026-12-01",
+                          scopes=["web"], start_now=True)
+    assert sp.cadence_kind == "every"
+    assert sp.cadence == {"minutes": 240}
+
+
+def test_router_schedule_proposal_rejects_the_old_kind_field():
+    with pytest.raises(Exception):
+        ScheduleProposal(title="t", prompt="p", kind="once", run_at="2026-11-01T09:00:00")
+
+
+def test_router_schedule_proposal_rejects_an_unknown_cadence_kind():
+    with pytest.raises(Exception):
+        ScheduleProposal(title="t", prompt="p", cadence_kind="continue", cadence={})
+
+
+# ---------------------------------------------------------------------------
+# Manager block
+# ---------------------------------------------------------------------------
+
+from tests.test_schedules import RecordingSchedules, RaisingScopePicker, manager, new_proposal
+
+
+def test_manager_calls_propose_with_the_new_keyword_arguments_and_origin_thread(tmp_path):
+    m, _ = manager(tmp_path)
+    m.schedules = RecordingSchedules()
+    schedule = ScheduleProposal(**new_proposal("every", title="Team total watch",
+                                               prompt="Check the page.", scopes=["web"], start_now=True))
+    session = m.get("aaron-origin-route")
+
+    async def decide(**kwargs):
+        return RouterOutput(reply=None, task="new", task_title="Team total watch", schedule=schedule), None
+
+    session.decide = decide
+    m.task_picker = RaisingScopePicker()
+    meta = {"sender": "+15550100001", "conversation_id": "conv-aaron"}
+    asyncio.run(session.handle_inbound("set it up", "imessage", meta))
+    call = m.schedules.calls[0]
+    assert call["title"] == "Team total watch"
+    assert call["prompt"] == "Check the page."
+    assert call["cadence_kind"] == "every"
+    assert call["cadence"] == {"minutes": 240}
+    assert call["start_now"] is True
+    assert call["owner"] is True
+    assert call["origin_mode"] == "imessage"
+    assert call["origin_chat_id"] == session.record_id
+
+
+def test_manager_relays_a_propose_valueerror_as_the_reply(tmp_path):
+    m, sent = manager(tmp_path)
+
+    class FailingSchedules(RecordingSchedules):
+        async def propose(self, **kwargs):
+            raise ValueError("every must be at least 5 minutes")
+
+    m.schedules = FailingSchedules()
+    schedule = ScheduleProposal(**new_proposal("every", title="Too fast", prompt="Check it.", scopes=["web"]))
+    session = m.get("aaron-fail-route")
+
+    async def decide(**kwargs):
+        return RouterOutput(reply=None, task="new", task_title="Too fast", schedule=schedule), None
+
+    session.decide = decide
+    meta = {"sender": "+15550100001", "conversation_id": "conv-aaron"}
+    asyncio.run(session.handle_inbound("every minute please", "imessage", meta))
+    assert any("every must be at least 5 minutes" in row[1] for row in sent)
+
+
+def test_manager_never_calls_the_jev_picker_for_a_schedule(tmp_path):
+    m, _ = manager(tmp_path)
+    m.schedules = RecordingSchedules()
+    schedule = ScheduleProposal(**new_proposal("daily", title="Monday brief", prompt="Check it.", scopes=["web"]))
+    session = m.get("aaron-no-jev-route")
+
+    async def decide(**kwargs):
+        return RouterOutput(reply=None, task="new", task_title="Monday brief", schedule=schedule), None
+
+    session.decide = decide
+    m.task_picker = RaisingScopePicker()  # raises AssertionError if ever called
+    meta = {"sender": "+15550100001", "conversation_id": "conv-aaron"}
+    asyncio.run(session.handle_inbound("set it up", "imessage", meta))
+    assert len(m.schedules.calls) == 1

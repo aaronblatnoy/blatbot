@@ -1,0 +1,194 @@
+"""Turning the owner's words into a schedule proposal he can judge, and the
+permission that comes with it -- chosen without any probability judgment.
+
+A scope is granted to a schedule only for one of three reasons, all deterministic
+and grounded in something that already happened: he named it, his own message
+used a synonym for it, or the schedule's prompt names one of its tools literally.
+Jev is never called from this module.
+"""
+
+from __future__ import annotations
+
+import re
+import time
+from datetime import datetime, timedelta
+from typing import Any, Dict, Iterable, List, Optional
+from zoneinfo import ZoneInfo
+
+from .schedules import names_tool
+from .scopes import LABELS, SCOPES, SYNONYMS
+
+
+# ---------------------------------------------------------------------------
+# Labels
+# ---------------------------------------------------------------------------
+
+def label(scope: str) -> str:
+    """The owner-facing verb phrase for a scope ("read public web pages"). A
+    dynamically discovered vault knowledge scope (name "vault:<folder>") has no
+    entry in scopes.yaml, so its label is generated here from its folder name."""
+    found = LABELS.get(scope)
+    if found:
+        return found
+    if scope.startswith("vault:"):
+        return f"read your notes on {scope.split(':', 1)[1]}"
+    # Fallback for a scope with no written label and no vault pattern: a scope
+    # that is in the registry but was never given one, which registry_problems()
+    # style checks are expected to catch during review, not here.
+    return scope.replace("_", " ")
+
+
+def labels(scopes: Iterable[str]) -> str:
+    """Scope labels joined in words: one, "X and Y", or "X, Y, and Z" for three
+    or more."""
+    ls = [label(s) for s in scopes]
+    if not ls:
+        return ""
+    if len(ls) == 1:
+        return ls[0]
+    if len(ls) == 2:
+        return f"{ls[0]} and {ls[1]}"
+    return ", ".join(ls[:-1]) + ", and " + ls[-1]
+
+
+# ---------------------------------------------------------------------------
+# Capabilities
+# ---------------------------------------------------------------------------
+
+class UnknownScopes(ValueError):
+    """Raised by capabilities_for when named_scopes or suggested_scopes contains
+    a name that is not in the registry, so the caller can refuse the proposal
+    with a plain reply instead of silently dropping or granting it."""
+
+    def __init__(self, names: List[str]):
+        self.names = names
+        super().__init__(f"unknown scope(s): {', '.join(names)}")
+
+
+def _said_scopes(said_text: str) -> List[str]:
+    """Scope names whose synonym appears in the owner's own words, whole-phrase
+    and case-insensitive. Synonyms are checked longest-first and a match
+    consumes its span of the text, so a shorter synonym that is only a
+    substring of an already-matched longer one is not also counted."""
+    text = said_text or ""
+    remaining = text.lower()
+    candidates = [(len(syn), name, syn.lower()) for name, syns in SYNONYMS.items() for syn in syns]
+    candidates.sort(key=lambda t: -t[0])
+    found: List[str] = []
+    for _, name, syn in candidates:
+        m = re.search(r"\b" + re.escape(syn) + r"\b", remaining)
+        if not m:
+            continue
+        if name not in found:
+            found.append(name)
+        start, end = m.span()
+        remaining = remaining[:start] + (" " * (end - start)) + remaining[end:]
+    return found
+
+
+def _prompt_tool_scopes(prompt: str) -> List[str]:
+    """Scopes whose own tools are named literally, by short name, in a prompt."""
+    found: List[str] = []
+    for name, info in SCOPES.items():
+        for tool in info.get("tools") or []:
+            if names_tool(prompt, tool):
+                if name not in found:
+                    found.append(name)
+                break
+    return found
+
+
+def capabilities_for(prompt: str, named_scopes: Optional[List[str]], suggested_scopes: Optional[List[str]],
+                      said_text: str) -> List[str]:
+    """The de-duplicated union, in registry order, of: scopes he named
+    explicitly, scopes his own words name by synonym, scopes whose tools the
+    prompt names literally, and the scopes the router suggests the work needs
+    (a suggestion only -- it becomes permission only with his yes). Raises
+    UnknownScopes if named_scopes or suggested_scopes names something not in
+    the registry, so the caller can refuse the proposal."""
+    unknown = sorted({n for n in (list(named_scopes or []) + list(suggested_scopes or [])) if n not in SCOPES})
+    if unknown:
+        raise UnknownScopes(unknown)
+    matched = set(named_scopes or []) | set(_said_scopes(said_text)) | set(_prompt_tool_scopes(prompt)) | set(suggested_scopes or [])
+    return [name for name in SCOPES if name in matched]
+
+
+def missing_capabilities(prompt: str, scopes: Iterable[str]) -> List[str]:
+    """Scopes whose tools the prompt names literally but that are not in
+    `scopes` -- what a proposal or an activation attempt is missing."""
+    granted = set(scopes)
+    out: List[str] = []
+    for name, info in SCOPES.items():
+        if name in granted:
+            continue
+        for tool in info.get("tools") or []:
+            if names_tool(prompt, tool):
+                out.append(name)
+                break
+    return out
+
+
+# ---------------------------------------------------------------------------
+# Wording seams onto cadence.py (owned by another package; not built yet in
+# this tree). Tests replace these two functions directly.
+# ---------------------------------------------------------------------------
+
+def _cadence_text(schedule: Any) -> str:
+    from . import cadence as cadence_mod
+    return cadence_mod.describe(schedule.cadence_kind, schedule.cadence, schedule.timezone)
+
+
+def _first_run_text(schedule: Any) -> str:
+    from . import cadence as cadence_mod
+    when = cadence_mod.next_run(schedule.cadence_kind, schedule.cadence, schedule.timezone, time.time())
+    return _format_time(when, schedule.timezone)
+
+
+def _format_time(when: Optional[float], timezone_name: str) -> str:
+    if when is None:
+        return "an unknown time"
+    tz = ZoneInfo(timezone_name or "America/New_York")
+    dt = datetime.fromtimestamp(when, tz)
+    now = datetime.now(tz)
+    clock = dt.strftime("%-I:%M %p")
+    if dt.date() == now.date():
+        return f"{clock} today"
+    if dt.date() == now.date() + timedelta(days=1):
+        return f"{clock} tomorrow"
+    return f"{dt.strftime('%A, %B %-d')}, {clock}"
+
+
+def _until_text(schedule: Any) -> str:
+    return _format_time(schedule.until, schedule.timezone).replace(" today", "").replace(" tomorrow", "")
+
+
+# ---------------------------------------------------------------------------
+# What he reads
+# ---------------------------------------------------------------------------
+
+def format_proposal(schedule: Any) -> str:
+    """The proposal message, in the specification's voice. No scope names, no
+    cadence kind, no cron string, no "#<id>" and no markdown."""
+    cadence_text = _cadence_text(schedule)
+    first_run = _first_run_text(schedule)
+    sentence = f'Set up "{schedule.title}": {cadence_text}, starting {first_run}'
+    if getattr(schedule, "until", None):
+        sentence += f", until {_until_text(schedule)}"
+    sentence += ". It will " + labels(schedule.scopes) + "."
+    hears = "every time it runs" if schedule.report_every_time else "only when something changed or it could not finish"
+    sentence += f" You hear from it {hears}."
+    sentence += " Reply yes to start, or tell me what to change."
+    return sentence
+
+
+def format_change(schedule: Any, changes: Dict[str, Any]) -> str:
+    """The message after an edit: the new cadence if it changed, and/or newly
+    added capabilities. Each half asks for his yes on its own."""
+    parts: List[str] = []
+    if any(k in changes for k in ("cadence_kind", "cadence", "until", "report_every_time")):
+        parts.append(f"{schedule.title} will run {_cadence_text(schedule)}, next {_first_run_text(schedule)}. "
+                     "Reply yes to confirm.")
+    added = changes.get("scopes")
+    if added:
+        parts.append(f"{schedule.title} will also be allowed to {labels(added)}. Reply yes to confirm.")
+    return " ".join(parts)
