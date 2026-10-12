@@ -135,6 +135,32 @@ class ScheduleProposal(BaseModel):
         return value
 
 
+SCHEDULE_COMMAND_ACTIONS = {"list", "last", "change", "pause", "resume", "run_now", "stop", "add_capability"}
+
+
+class ScheduleCommand(BaseModel):
+    """Plain-language management of an EXISTING schedule (schedcmd.py, P4):
+    asking about it, changing it, or acting on it. Never used for creating one
+    (that stays ScheduleProposal/`schedule`). `target` is his own words for
+    which schedule he means, exactly as said -- schedcmd.resolve() does the
+    matching, never this model; null when he said "it"/"that" or named none.
+    `changes` uses the same cadence vocabulary as ScheduleProposal
+    (cadence_kind/cadence), plus report_every_time, until, title,
+    prompt_addition (words to add to the schedule's own prompt) and scopes
+    (scope names for a capability change or addition)."""
+    model_config = {"extra": "forbid"}
+    action: str
+    target: Optional[str] = None
+    changes: Dict[str, Any] = Field(default_factory=dict)
+
+    @field_validator("action")
+    @classmethod
+    def _action_ok(cls, value: str) -> str:
+        if value not in SCHEDULE_COMMAND_ACTIONS:
+            raise ValueError(f"action must be one of {sorted(SCHEDULE_COMMAND_ACTIONS)}")
+        return value
+
+
 class RouterOutput(BaseModel):
     # Written FIRST when phrasing a result: what the results establish, what follows
     # from them, what stays unknown. Never sent; it makes the reply a conclusion
@@ -150,6 +176,9 @@ class RouterOutput(BaseModel):
     # turn. Stored on the task and shown as "Where it stands" next time.
     task_summary: Optional[str] = None
     schedule: Optional[ScheduleProposal] = None
+    # Managing an EXISTING schedule in plain language (schedcmd.py acts on this);
+    # never used for creating one -- that stays `schedule` above.
+    schedule_command: Optional[ScheduleCommand] = None
 
 
 class Router:
@@ -188,7 +217,7 @@ class Router:
             "Available task scopes (choose the minimal set):\n"
             f"{scope_lines}\n\n"
             "Respond with ONLY a JSON object, no prose, of the form:\n"
-            '{"reasoning": string or null, "reply": string or null, "request": null or {"prompt": string, "scopes": [string], "summary": string, "counterpart": string or null}, "schedule": null or {"title": string, "prompt": string, "cadence_kind": "once"|"every"|"daily"|"weekdays"|"weekly"|"cron", "cadence": object, "timezone": IANA timezone or null, "report_every_time": true|false|null, "until": ISO date or null, "scopes": [string], "start_now": true|false}}\n'
+            '{"reasoning": string or null, "reply": string or null, "request": null or {"prompt": string, "scopes": [string], "summary": string, "counterpart": string or null}, "schedule": null or {"title": string, "prompt": string, "cadence_kind": "once"|"every"|"daily"|"weekdays"|"weekly"|"cron", "cadence": object, "timezone": IANA timezone or null, "report_every_time": true|false|null, "until": ISO date or null, "scopes": [string], "start_now": true|false}, "schedule_command": null or {"action": "list"|"last"|"change"|"pause"|"resume"|"run_now"|"stop"|"add_capability", "target": string or null, "changes": object}}\n'
             "- reply: what to send back to the sender now, or null to send nothing.\n"
             "- request.counterpart: the email (preferred), phone, or full name of the person the task is\n"
             "  about, when it concerns someone other than the sender; null otherwise.\n"
@@ -268,6 +297,25 @@ class Router:
             "    immediately; otherwise false.\n"
             "  Schedule scopes, with the plain words Aaron will see for each:\n"
             f"{schedule_scope_lines}\n"
+            "- SCHEDULE COMMANDS: only when Aaron is asking about or managing a schedule that ALREADY "
+            "exists (listed under SCHEDULES below), not when he is describing new work to set up, fill "
+            "schedule_command instead of schedule or request:\n"
+            "  - action: \"list\" (what's scheduled), \"last\" (what a schedule did last time), \"change\" "
+            "(a different cadence, report setting, title, prompt addition, or capability -- anything that "
+            "needs his yes before it takes effect except a plain cadence/report/title change, which code "
+            "applies at once), \"pause\", \"resume\", \"run_now\", \"stop\", or \"add_capability\" (he is "
+            "explicitly telling it it may now do something, e.g. \"let it edit contacts\").\n"
+            "  - target: his own words for which schedule he means, exactly as he said them (\"the team "
+            "one\", a full or partial title) -- never an id, never invented; null when he said \"it\"/"
+            "\"that\" or did not name one at all. Matching the words to a schedule is done by code, not you.\n"
+            "  - changes: only for \"change\" or \"add_capability\". Use the SAME cadence vocabulary as "
+            "schedule.cadence_kind/schedule.cadence above for a new cadence; report_every_time, until, or "
+            "title for those; prompt_addition for words to add to what the schedule does; scopes (scope "
+            "names from the list above) for a capability change or addition. Set only the keys that changed.\n"
+            "  - A bare \"yes\"/\"no\" while a schedule proposal is open is handled before you ever see it; "
+            "do not fill schedule_command for that. Anything else he says about that open proposal (a "
+            "different cadence, an added capability) is schedule_command action \"change\" with target "
+            "naming that proposal's title.\n"
             "- You have no memory of what tools can or cannot do. NEVER tell anyone a capability is missing, "
             "broken, or unavailable, and never rely on past failure notes in the history; tools get fixed. "
             "If information is needed (who emailed, what is on a calendar, a phone number, a file), "
@@ -329,12 +377,16 @@ class Router:
                     sender: str, contact_notes: str, is_approver: bool,
                     task_memory: str = "", found_tasks: str = "",
                     action: Optional[bool] = None, action_task: str = "",
-                    ask: bool = False) -> RouterOutput:
+                    ask: bool = False, schedules_context: str = "") -> RouterOutput:
         """`action` is set when typed judgments have already decided whether a tool
         request exists for this message; the router then only writes the reply
         (and the task title/summary) and must not define a request."""
         sender_label = f"Aaron Blatnoy (the owner; his private iMessage) {sender}" if is_approver else sender
         found = f"TASKS FOUND BY YOUR LOOKUP (same format; may include older or other people's tasks):\n{found_tasks}\n\n" if found_tasks else ""
+        # Titles and states only -- never a prompt, a scope name or an id -- so the
+        # model can resolve "the team one" or know a schedule already exists
+        # without being able to invent facts about what it does.
+        sched_ctx = f"SCHEDULES (title: state):\n{schedules_context}\n\n" if schedules_context else ""
         decided = ""
         if ask:
             decided = ("DECIDED: this asks for something to be done, but not clearly enough for anyone to go "
@@ -365,6 +417,7 @@ class Router:
             f"Now: {now_line()}\n\n{decided}"
             f"TASK MEMORY (authoritative ledger, newest events last):\n{task_memory or '(no tasks on record)'}\n\n"
             f"{found}"
+            f"{sched_ctx}"
             f"Channel: {mode}\nSender: {sender_label}\n"
             f"Contact notes: {contact_notes or '(none)'}\n\n"
             f"Conversation so far:\n{self.render_history(history)}\n\n"
