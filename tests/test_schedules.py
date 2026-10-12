@@ -268,41 +268,81 @@ def test_expired_schedule_proposal_is_rejected(tmp_path):
     asyncio.run(go())
 
 
+class RecordingSchedules:
+    """Stand-in for ScheduleService.propose: the real one belongs to another
+    package's rewrite of schedules.py (SPEC.md's new ScheduleService.propose
+    signature), so this records the keyword arguments manager.py's schedule
+    block calls it with instead of exercising the real store."""
+
+    def __init__(self):
+        self.calls = []
+
+    async def propose(self, **kwargs):
+        self.calls.append(kwargs)
+        return SimpleNamespace(id=len(self.calls), **kwargs)
+
+    async def command(self, text: str, *, owner: bool) -> bool:
+        return False
+
+
+class RaisingScopePicker:
+    """A Jev scope picker that fails the test if it is ever consulted: schedule
+    permission is chosen with no probability judgment at all (SPEC.md's
+    "Permission" section)."""
+
+    async def judge_scopes_tree(self, **kwargs):
+        raise AssertionError("Jev must never be consulted on a schedule code path")
+
+
+def new_proposal(cadence_kind="once", **changes):
+    spec = {"title": "Scheduled check", "prompt": "Check the roster", "cadence_kind": cadence_kind}
+    if cadence_kind == "once":
+        spec["cadence"] = {"at": "2026-11-01T09:00:00"}
+    elif cadence_kind == "every":
+        spec["cadence"] = {"minutes": 240}
+    elif cadence_kind == "daily":
+        spec["cadence"] = {"time": "08:00"}
+    spec.update(changes)
+    return spec
+
+
 def test_plain_language_owner_proposes_but_non_owner_is_refused_in_code(tmp_path):
     m, sent = manager(tmp_path)
-    schedule = ScheduleProposal(**proposal("recurring"))
+    m.schedules = RecordingSchedules()
+    schedule = ScheduleProposal(**new_proposal("every", scopes=["web"]))
     m.router.next = RouterOutput(
         reply=None, task="new", task_title="Scheduled check", schedule=schedule,
         request=RouterRequest(prompt="ignored", scopes=["web"], summary="Scheduled check"),
     )
     owner_meta = {"sender": "+15550100001", "conversation_id": "conv-aaron"}
     asyncio.run(m.get("aaron-route").handle_inbound("check every weekday", "imessage", owner_meta))
-    assert len(m.store.schedules()) == 1 and m.store.schedules()[0].state == "proposed"
+    assert len(m.schedules.calls) == 1
+    assert m.schedules.calls[0]["origin_mode"] == "imessage"
 
     other_meta = {"sender": "other@example.com", "to": "other@example.com"}
     asyncio.run(m.get("other-route").handle_inbound("check every weekday", "email", other_meta))
-    assert len(m.store.schedules()) == 1
+    assert len(m.schedules.calls) == 1
     assert any("Only Aaron can create or change a schedule" in row[1] for row in sent)
 
 
-def test_plain_language_schedule_uses_strict_minimal_scope_judgment(tmp_path):
+def test_plain_language_schedule_uses_the_routers_suggested_scopes_not_jev(tmp_path):
+    # With no scope named by Aaron and no tool named in the prompt, the only
+    # source of scopes left is the router's own suggestion (schedule.scopes) --
+    # Jev is never consulted on a schedule code path at all.
     m, _ = manager(tmp_path)
-    schedule = ScheduleProposal(**proposal("recurring", prompt="Read my calendar", title="Calendar check"))
+    m.schedules = RecordingSchedules()
+    schedule = ScheduleProposal(**new_proposal("every", prompt="Read my calendar",
+                                               title="Calendar check", scopes=["calendar"]))
     session = m.get("aaron-scope-route")
 
     async def decide(**kwargs):
         return RouterOutput(reply=None, task="new", task_title="Calendar check", schedule=schedule), None
 
-    class ScopePicker:
-        async def judge_scopes_tree(self, **kwargs):
-            assert kwargs == {"prompt": "Read my calendar", "summary": "Calendar check", "generous": False}
-            return {"scopes": ["calendar"], "probabilities": {"calendar": 0.9, "web": 0.8}}
-
     session.decide = decide
-    m.task_picker = ScopePicker()
+    m.task_picker = RaisingScopePicker()
     meta = {"sender": "+15550100001", "conversation_id": "conv-aaron"}
-    asyncio.run(session.handle_inbound("check my calendar every weekday", "imessage", meta))
-    assert m.store.schedules()[0].scopes == ["calendar"]
+    asyncio.run(session.handle_inbound("set that up please", "imessage", meta))
+    assert m.schedules.calls[0]["scopes"] == ["calendar"]
 
 
 def test_schedule_prompt_naming_a_tool_grants_its_scope_without_asking_jev(tmp_path):
@@ -312,23 +352,20 @@ def test_schedule_prompt_naming_a_tool_grants_its_scope_without_asking_jev(tmp_p
     # so the schedule was approved and persisted without it. A prompt that names its own
     # tools is unambiguous: honor that literally and never ask Jev for those scopes.
     m, _ = manager(tmp_path)
+    m.schedules = RecordingSchedules()
     prompt = ("Check the page. If it changed, look it up with inkbox_lookup_contact; if "
-              "missing, create it with inkbox_create_contact. Then call schedule_continue.")
-    schedule = ScheduleProposal(title="Fundraising monitor", prompt=prompt, kind="continue")
+              "missing, create it with inkbox_create_contact. End with a STATUS line.")
+    schedule = ScheduleProposal(**new_proposal("every", title="Fundraising monitor", prompt=prompt))
     session = m.get("aaron-contacts-route")
 
     async def decide(**kwargs):
         return RouterOutput(reply=None, task="new", task_title="Fundraising monitor", schedule=schedule), None
 
-    class ScopePicker:
-        async def judge_scopes_tree(self, **kwargs):
-            raise AssertionError("Jev must not be consulted when the prompt names its own tools")
-
     session.decide = decide
-    m.task_picker = ScopePicker()
+    m.task_picker = RaisingScopePicker()
     meta = {"sender": "+15550100001", "conversation_id": "conv-aaron"}
     asyncio.run(session.handle_inbound("set up a fundraising monitor that alerts me", "imessage", meta))
-    scopes = m.store.schedules()[0].scopes
+    scopes = m.schedules.calls[0]["scopes"]
     assert "contacts" in scopes
     allowed = gm.SCOPES["contacts"]["tools"]
     assert "mcp__inkbox__inkbox_lookup_contact" in allowed
@@ -337,8 +374,9 @@ def test_schedule_prompt_naming_a_tool_grants_its_scope_without_asking_jev(tmp_p
 
 def test_schedule_naming_an_unknown_scope_is_refused(tmp_path):
     m, sent = manager(tmp_path)
-    schedule = ScheduleProposal(title="Bad scope", prompt="Read my calendar", kind="once",
-                                run_at="2026-11-01T09:00:00", scopes=["not_a_real_scope"])
+    m.schedules = RecordingSchedules()
+    schedule = ScheduleProposal(**new_proposal("once", title="Bad scope", prompt="Read my calendar",
+                                               scopes=["not_a_real_scope"]))
     session = m.get("aaron-bad-scope-route")
 
     async def decide(**kwargs):
@@ -347,28 +385,25 @@ def test_schedule_naming_an_unknown_scope_is_refused(tmp_path):
     session.decide = decide
     meta = {"sender": "+15550100001", "conversation_id": "conv-aaron"}
     asyncio.run(session.handle_inbound("set this up", "imessage", meta))
-    assert m.store.schedules() == []
+    assert m.schedules.calls == []
     assert any("not_a_real_scope" in row[1] for row in sent)
 
 
 def test_schedule_scopes_named_by_the_owner_are_honored_without_asking_jev(tmp_path):
     m, _ = manager(tmp_path)
-    schedule = ScheduleProposal(title="Named scopes", prompt="Watch the page", kind="once",
-                                run_at="2026-11-01T09:00:00", scopes=["contacts", "web"])
+    m.schedules = RecordingSchedules()
+    schedule = ScheduleProposal(**new_proposal("once", title="Named scopes", prompt="Watch the page",
+                                               scopes=["contacts", "web"]))
     session = m.get("aaron-named-scope-route")
 
     async def decide(**kwargs):
         return RouterOutput(reply=None, task="new", task_title="Named scopes", schedule=schedule), None
 
-    class ScopePicker:
-        async def judge_scopes_tree(self, **kwargs):
-            raise AssertionError("Jev must not be consulted when the owner named scopes")
-
     session.decide = decide
-    m.task_picker = ScopePicker()
+    m.task_picker = RaisingScopePicker()
     meta = {"sender": "+15550100001", "conversation_id": "conv-aaron"}
     asyncio.run(session.handle_inbound("watch the page, it can touch contacts", "imessage", meta))
-    assert set(m.store.schedules()[0].scopes) == {"contacts", "web"}
+    assert set(m.schedules.calls[0]["scopes"]) == {"contacts", "web"}
 
 
 
@@ -645,12 +680,13 @@ def test_owner_command_needs_the_schedule_word_and_reports_a_refused_action(tmp_
 
 
 def test_an_ordinary_word_in_a_schedule_prompt_does_not_name_a_tool():
-    from inkbox_claude.gate.manager import _schedule_prompt_tool_scopes
+    from inkbox_claude.gate import schedprop
     from inkbox_claude.gate.schedules import _prompt_tool_mismatch
     prompt = "Check the service logs and the database, then deploy nothing and report on the system."
-    assert _schedule_prompt_tool_scopes(prompt) == []
+    assert schedprop.capabilities_for(prompt, [], [], "") == []
     assert _prompt_tool_mismatch(prompt, ["web"]) == []
-    assert "contacts" in _schedule_prompt_tool_scopes("Then call inkbox_create_contact for the tracker.")
+    assert "contacts" in schedprop.capabilities_for(
+        "Then call inkbox_create_contact for the tracker.", [], [], "")
 
 
 # -- schedule-fix regression tests -----------------------------------------

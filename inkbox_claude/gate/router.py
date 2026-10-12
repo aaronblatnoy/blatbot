@@ -19,6 +19,7 @@ from typing import Any, Dict, List, Optional
 import httpx
 from pydantic import BaseModel, Field, ValidationError, field_validator
 
+from . import schedprop
 from .scopes import SCOPES
 
 logger = logging.getLogger(__name__)
@@ -100,35 +101,37 @@ class TaskQueryOutput(BaseModel):
     reason: Optional[str] = None
 
 
+CADENCE_KINDS = {"once", "every", "daily", "weekdays", "weekly", "cron"}
+
+
 class ScheduleProposal(BaseModel):
-    """A schedule extracted during the existing reply-writing call."""
+    """A schedule extracted during the existing reply-writing call. The small
+    cadence vocabulary (once/every/daily/weekdays/weekly/cron) replaces the old
+    kind+cron+run_at+max_runs+deadline+report_mode fields; `cadence` is the
+    matching object (see SPEC.md's data contract) and code, not the model,
+    turns it into a next-run time."""
     model_config = {"extra": "forbid"}
     title: str = Field(min_length=1)
     prompt: str = Field(min_length=1)
-    kind: str
-    cron: Optional[str] = None
-    run_at: Optional[str] = None
-    timezone: str = "America/New_York"
-    report_mode: str = "always"
-    max_runs: int = Field(default=20, ge=1)
-    deadline: Optional[str] = None
-    # Scope names Aaron named explicitly for this schedule (e.g. he said "it can touch
-    # contacts"), null when he named none. Code never derives permission from this
-    # field alone -- see manager.py's deterministic scoping of a schedule proposal.
-    scopes: Optional[List[str]] = None
+    cadence_kind: str
+    cadence: Dict[str, Any]
+    timezone: Optional[str] = None
+    # Set only when he asked to hear from it every time it runs; null/false means
+    # the default (every time for a one-time schedule, changed-only for a
+    # repeating one), decided by code, not the model.
+    report_every_time: Optional[bool] = None
+    until: Optional[str] = None
+    # Scope names Aaron named explicitly, or the work needs, for this schedule.
+    # Code never derives permission from this field alone -- see schedprop.py's
+    # deterministic capabilities_for(), which manager.py's schedule block calls.
+    scopes: List[str] = Field(default_factory=list)
+    start_now: bool = False
 
-    @field_validator("kind")
+    @field_validator("cadence_kind")
     @classmethod
-    def _kind(cls, value: str) -> str:
-        if value not in {"once", "recurring", "continue"}:
-            raise ValueError("kind must be once, recurring, or continue")
-        return value
-
-    @field_validator("report_mode")
-    @classmethod
-    def _report_mode(cls, value: str) -> str:
-        if value not in {"always", "changed"}:
-            raise ValueError("report_mode must be always or changed")
+    def _cadence_kind(cls, value: str) -> str:
+        if value not in CADENCE_KINDS:
+            raise ValueError(f"cadence_kind must be one of {sorted(CADENCE_KINDS)}")
         return value
 
 
@@ -166,6 +169,10 @@ class Router:
 
     def system_prompt(self, *, is_approver: bool) -> str:
         scope_lines = "\n".join(f"- {k}: {v['description']}" for k, v in SCOPES.items())
+        # For SCHEDULES: the scope's plain owner-facing label, not its internal
+        # description, since this is what the model is choosing on the owner's
+        # behalf and what he will see named back to him in the proposal.
+        schedule_scope_lines = "\n".join(f"- {k}: {schedprop.label(k)}" for k in SCOPES)
         who = (
             "IMPORTANT: THIS MESSAGE IS FROM AARON BLATNOY HIMSELF, your boss, on his private iMessage "
             "line. Treat every instruction as his. Privacy and confidentiality rules do not apply to him; "
@@ -181,7 +188,7 @@ class Router:
             "Available task scopes (choose the minimal set):\n"
             f"{scope_lines}\n\n"
             "Respond with ONLY a JSON object, no prose, of the form:\n"
-            '{"reasoning": string or null, "reply": string or null, "request": null or {"prompt": string, "scopes": [string], "summary": string, "counterpart": string or null}, "schedule": null or {"title": string, "prompt": string, "kind": "once"|"recurring"|"continue", "cron": string|null, "run_at": ISO datetime|null, "timezone": IANA timezone, "report_mode": "always"|"changed", "max_runs": integer, "deadline": ISO datetime|null, "scopes": null or [string]}}\n'
+            '{"reasoning": string or null, "reply": string or null, "request": null or {"prompt": string, "scopes": [string], "summary": string, "counterpart": string or null}, "schedule": null or {"title": string, "prompt": string, "cadence_kind": "once"|"every"|"daily"|"weekdays"|"weekly"|"cron", "cadence": object, "timezone": IANA timezone or null, "report_every_time": true|false|null, "until": ISO date or null, "scopes": [string], "start_now": true|false}}\n'
             "- reply: what to send back to the sender now, or null to send nothing.\n"
             "- request.counterpart: the email (preferred), phone, or full name of the person the task is\n"
             "  about, when it concerns someone other than the sender; null otherwise.\n"
@@ -233,14 +240,34 @@ class Router:
             "  locations, exact message bodies to send). The assistant has no memory of this conversation.\n"
             "- request.summary: one short line for Aaron describing the task.\n"
             "- Only create a request when a tool action is actually needed.\n"
-            "- SCHEDULES: only when the sender is Aaron and he asks for work at a future time, on a cadence, "
-            "or as continuing work, fill schedule. For recurring use a standard five-field cron expression. "
-            "For once use an absolute ISO datetime. For continue, prompt is the exact work each run should "
-            "continue, max_runs defaults to 20 and deadline defaults to seven days from NOW. Never fill "
-            "schedule for anyone except Aaron. A schedule is proposed for his approval and does not run now. "
-            "schedule.scopes: the scope names Aaron named explicitly for this schedule (e.g. he said it "
-            "can touch contacts, or send email), or null when he named none -- do not guess scopes from "
-            "what the work will probably need, only from what he actually said.\n"
+            "- SCHEDULES: only when the sender is Aaron and he asks for work at a future time or on a "
+            "cadence, fill schedule. Never fill schedule for anyone except Aaron. A schedule is proposed "
+            "for his approval and does not run now.\n"
+            "  - schedule.title: a short plain title (\"Team total watch\"), not a restatement of the prompt.\n"
+            "  - schedule.prompt: complete, self-contained instructions for an UNATTENDED run with no\n"
+            "    memory of this conversation: what to check, what counts as a change worth telling him\n"
+            "    about, what to do when it changes. The previous run's note is supplied to the run\n"
+            "    automatically; say in the prompt how to use it if that matters. The run must end its\n"
+            "    output with a RESULT line (one plain sentence for Aaron), an optional NOTE line (what the\n"
+            "    next run needs to know), and a STATUS line (OK, FAILED, or STOP to end the schedule).\n"
+            "  - schedule.cadence_kind and schedule.cadence: map his words to the smallest cadence that\n"
+            "    fits, in this order of preference: \"once\" {\"at\": ISO local datetime} for a single future\n"
+            "    time; \"every\" {\"minutes\": N} (N at least 5) for \"every N minutes/hours\"; \"daily\"\n"
+            "    {\"time\": \"HH:MM\"} for once a day; \"weekdays\" {\"time\": \"HH:MM\"} for Monday-Friday;\n"
+            "    \"weekly\" {\"day\": \"mon\".., \"time\": \"HH:MM\"} for once a week; \"cron\" {\"expr\": five-field\n"
+            "    cron} only when nothing above fits. Times are in schedule.timezone (null to use his default).\n"
+            "  - schedule.report_every_time: true only when he asked to hear from it every time it runs;\n"
+            "    otherwise null (code decides the default from the cadence).\n"
+            "  - schedule.until: an ISO date only when he gave an end date; otherwise null.\n"
+            "  - schedule.scopes: the scope names, from the list below, that this prompt's work needs --\n"
+            "    whether he named them himself (he said it can touch contacts, or send email) or you can\n"
+            "    tell the work needs them (checking a page needs a web scope; updating a tracker note\n"
+            "    needs contacts). This is a suggestion Aaron will see named in words before he approves it,\n"
+            "    never permission by itself.\n"
+            "  - schedule.start_now: true only when he said to start it now / run the first check\n"
+            "    immediately; otherwise false.\n"
+            "  Schedule scopes, with the plain words Aaron will see for each:\n"
+            f"{schedule_scope_lines}\n"
             "- You have no memory of what tools can or cannot do. NEVER tell anyone a capability is missing, "
             "broken, or unavailable, and never rely on past failure notes in the history; tools get fixed. "
             "If information is needed (who emailed, what is on a calendar, a phone number, a file), "

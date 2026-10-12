@@ -91,6 +91,17 @@ def build_scopes(reg: Dict[str, object], resolved: Dict[str, List[str]]) -> Dict
 _REGISTRY = load_registry()
 SCOPES: Dict[str, Dict[str, object]] = build_scopes(_REGISTRY, load_resolved())
 READ_SCOPES: List[str] = [k for k, v in SCOPES.items() if v.get("read")]
+
+# Owner-facing labels and plain-language synonyms (schedprop.py), loaded straight
+# from scopes.yaml so the one registry stays the single source for both the Jev
+# scope tree and schedule proposal wording.
+LABELS: Dict[str, str] = {
+    name: str(spec["label"]) for name, spec in (_REGISTRY.get("scopes") or {}).items()  # type: ignore[union-attr]
+    if spec.get("label")
+}
+SYNONYMS: Dict[str, List[str]] = {
+    name: list(spec.get("synonyms") or []) for name, spec in (_REGISTRY.get("scopes") or {}).items()  # type: ignore[union-attr]
+}
 WHERE_THINGS_LIVE: List[str] = list(_REGISTRY.get("where_things_live") or [])  # type: ignore[arg-type]
 
 # The Jev scope tree, derived from the registry's systems.

@@ -210,6 +210,10 @@ scopes:
   calendar:
     description: 'TAMID calendar: read and write the club''s Google Calendar (org@example.org; interviews, club
       events; NOT Aaron''s own calendar): list, free/busy, create/update events'
+    label: look up and manage the TAMID calendar
+    synonyms:
+    - tamid calendar
+    - club calendar
     read: true
     tools:
     - mcp__tamid-drive__list_calendars
@@ -219,6 +223,11 @@ scopes:
   inbox_read:
     description: read Blatbot's own Inkbox mailbox blatbot@inkboxmail.com (list recent inbound/outbound emails,
       read one by id) and its SMS/iMessage threads
+    label: read its own email and texts
+    synonyms:
+    - check its email
+    - check its messages
+    - check its inbox
     read: true
     tools:
     - mcp__inkbox__inkbox_list_emails
@@ -229,6 +238,11 @@ scopes:
     - mcp__inkbox__inkbox_get_imessage_conversation
   email_send:
     description: send email from the Inkbox mailbox blatbot@inkboxmail.com and read that mailbox
+    label: send email from its own account
+    synonyms:
+    - send email
+    - send an email
+    - email them
     read: false
     tools:
     - mcp__inkbox__inkbox_send_email
@@ -236,6 +250,10 @@ scopes:
     - mcp__inkbox__inkbox_get_email
   imessage_send:
     description: send iMessages from Blatbot's line and read its iMessage threads
+    label: send iMessages
+    synonyms:
+    - send an imessage
+    - send him an imessage
     read: false
     tools:
     - mcp__inkbox__inkbox_send_imessage
@@ -243,6 +261,11 @@ scopes:
     - mcp__inkbox__inkbox_get_imessage_conversation
   sms_send:
     description: send SMS from Blatbot's number and read its text threads
+    label: send text messages
+    synonyms:
+    - send a text
+    - send them a text
+    - send an sms
     read: false
     tools:
     - mcp__inkbox__inkbox_send_sms
@@ -250,6 +273,14 @@ scopes:
     - mcp__inkbox__inkbox_get_text_conversation
   contacts:
     description: look up, create, or update Inkbox address-book contacts and their notes
+    label: look up and edit contacts
+    synonyms:
+    - edit contacts
+    - update the contact
+    - update the contact note
+    - look up a contact
+    - update a contact
+    - create a contact
     read: true
     tools:
     - mcp__inkbox__inkbox_lookup_contact
@@ -259,6 +290,12 @@ scopes:
     - mcp__inkbox__inkbox_update_contact
   tamid_drive_read:
     description: read TAMID Google Drive, Sheets, Docs, Forms, and Gmail (org@example.org)
+    label: 'read TAMID''s Drive, Sheets, Docs and Forms'
+    synonyms:
+    - tamid drive
+    - the team sheet
+    - tamid docs
+    - tamid sheets
     read: true
     tools:
     - mcp__tamid-drive__search_drive_files
@@ -280,6 +317,12 @@ scopes:
     - mcp__tamid-drive__get_gmail_thread_content
   tamid_drive_write:
     description: write to TAMID Google Sheets, Docs, Forms, and Drive folders (no sharing, no Gmail send)
+    label: 'edit TAMID''s Drive, Sheets, Docs and Forms'
+    synonyms:
+    - edit the sheet
+    - update the sheet
+    - write to the sheet
+    - edit tamid drive
     read: false
     tools:
     - mcp__tamid-drive__modify_sheet_values
@@ -296,6 +339,10 @@ scopes:
   stern_calendar:
     description: 'read and write Aaron''s own NYU Stern Google Calendar (tool address owner@example.edu): list,
       free/busy, create/update events and invites'
+    label: look up and manage your Stern calendar
+    synonyms:
+    - my calendar
+    - my stern calendar
     read: true
     tools:
     - mcp__stern-drive__list_calendars
@@ -304,6 +351,10 @@ scopes:
     - mcp__stern-drive__manage_event
   stern_email_read:
     description: read Aaron's Stern Gmail (tool address owner@example.edu); no sending
+    label: read your Stern email
+    synonyms:
+    - my stern email
+    - check my email
     read: true
     tools:
     - mcp__stern-drive__search_gmail_messages
@@ -312,6 +363,10 @@ scopes:
   sjba_site_read:
     description: 'read the SJBA (Stern Jewish Business Association) website admin backend: board members and bios,
       events, club members, semesters, site config, contact requests, newsletter signups'
+    label: read the SJBA website admin
+    synonyms:
+    - sjba website
+    - the sjba site
     read: true
     tools:
     - mcp__sjba-admin__sjba_list_board_members
@@ -331,6 +386,10 @@ scopes:
     description: 'change the SJBA (Stern Jewish Business Association) website: create/update/delete board members
       (incl. bios and headshots), events and flyers, members, semesters, site config; manage contact requests and
       newsletter signups. Includes read.'
+    label: edit the SJBA website
+    synonyms:
+    - edit the sjba website
+    - update the sjba site
     read: false
     tools:
     - mcp__sjba-admin__sjba_list_board_members
@@ -371,6 +430,10 @@ scopes:
   tamid_site_read:
     description: 'read the TAMID at NYU website admin backend: board members and bios, events, club members, semesters,
       site config, contact requests, newsletter signups'
+    label: read the TAMID website admin
+    synonyms:
+    - tamid website
+    - the tamid site
     read: true
     tools:
     - mcp__tamid-admin__tamid_list_board_members
@@ -390,6 +453,10 @@ scopes:
     description: 'change the TAMID at NYU website: create/update/delete board members (incl. bios and headshots),
       events and flyers, members, semesters, site config; manage contact requests and newsletter signups. Includes
       read.'
+    label: edit the TAMID website
+    synonyms:
+    - edit the tamid website
+    - update the tamid site
     read: false
     tools:
     - mcp__tamid-admin__tamid_list_board_members
@@ -431,6 +498,11 @@ scopes:
     description: search the public web and open web pages, only when the answer lives OUTSIDE Aaron's own systems
       (a person's LinkedIn or employer, an outside club's leadership, news, a public page). Not for anything in
       TAMID/SJBA Drive, sheets, forms, calendars, inboxes or the club websites' admin backends.
+    label: read public web pages
+    synonyms:
+    - look it up online
+    - search the web
+    - google it
     read: true
     tools:
     - WebSearch
@@ -443,6 +515,11 @@ scopes:
   vault_read:
     description: 'search and read Aaron''s second brain (his Obsidian vault of personal notes on projects, people,
       decisions, preferences, daily notes). Read-only; cannot add or change a note. Not Drive, not the web.'
+    label: read your notes
+    synonyms:
+    - my notes
+    - my vault
+    - my second brain
     read: true
     tools:
     - mcp__host__vault_search
@@ -451,12 +528,21 @@ scopes:
   host_read:
     description: 'see what is running on the server Blatbot itself runs on (black-sky): containers, services, uptime,
       disk, memory, GPUs. Read-only status only; no commands, no changes.'
+    label: 'check the server''s status'
+    synonyms:
+    - check the server
+    - check black-sky
+    - the server status
     read: true
     tools:
     - mcp__host__host_status
   browser_read:
     description: 'read a public web page in a headless browser (navigate, snapshot, find, screenshot), for things
       that are only online and not in Aaron''s own systems. Read-only: no clicking, typing or form filling.'
+    label: open and read a web page in a browser
+    synonyms:
+    - read the page
+    - open the page
     read: true
     tools:
     - mcp__playwright__browser_search
@@ -475,6 +561,11 @@ scopes:
     description: operate a headless browser like a person (click, type, fill and submit forms, select options, upload,
       dialogs) for something that can only be done through a website's own UI and has no tool of its own. Last resort,
       never the first choice when a Drive, calendar, inbox, contacts or site-admin tool covers it. Includes browser_read.
+    label: operate public web pages like a person
+    synonyms:
+    - fill out the form
+    - click through the site
+    - log into the site
     read: false
     tools:
     - mcp__playwright__browser_search
@@ -502,6 +593,10 @@ scopes:
     - mcp__playwright__browser_emulate_media
   tamid_instagram_read:
     description: 'read TAMID''s Instagram: account, recent posts, insights, audience; check a caption'
+    label: 'read TAMID''s Instagram'
+    synonyms:
+    - tamid instagram
+    - the instagram account
     read: true
     server: tamid-instagram
     include:
@@ -514,6 +609,10 @@ scopes:
     - ig_audience
   tamid_instagram_post:
     description: stage and publish posts on TAMID's Instagram (publishing is public and needs Aaron's yes)
+    label: 'post to TAMID''s Instagram'
+    synonyms:
+    - post on instagram
+    - publish on instagram
     read: false
     server: tamid-instagram
     include:
@@ -521,6 +620,10 @@ scopes:
     - ig_publish_post
   tamid_linkedin_read:
     description: read TAMID's LinkedIn account and check post text
+    label: 'read TAMID''s LinkedIn'
+    synonyms:
+    - tamid linkedin
+    - the linkedin account
     read: true
     server: tamid-linkedin
     include:
@@ -528,6 +631,10 @@ scopes:
     - li_check_text
   tamid_linkedin_post:
     description: stage, publish and delete posts on TAMID's LinkedIn (publishing is public and needs Aaron's yes)
+    label: 'post to TAMID''s LinkedIn'
+    synonyms:
+    - post on linkedin
+    - publish on linkedin
     read: false
     server: tamid-linkedin
     include:
@@ -537,6 +644,10 @@ scopes:
   tamid_analytics_read:
     description: 'read TAMID''s Google Analytics property configuration: dimensions, metrics, key events, streams,
       retention, access'
+    label: 'read TAMID''s website analytics'
+    synonyms:
+    - tamid analytics
+    - the analytics property
     read: true
     server: analytics-admin
     include:
@@ -544,6 +655,10 @@ scopes:
     - ga_get_*
   tamid_analytics_write:
     description: 'change TAMID''s Google Analytics property: create, update, archive, delete, grant or revoke'
+    label: 'change TAMID''s website analytics settings'
+    synonyms:
+    - change the analytics
+    - edit the analytics property
     read: false
     server: analytics-admin
     include:
@@ -554,6 +669,11 @@ scopes:
   brightspace_read:
     description: 'read Aaron''s NYU Brightspace: courses, assignments, due dates, grades, announcements, quizzes,
       discussions, content, notifications'
+    label: read your Brightspace courses and grades
+    synonyms:
+    - my classes
+    - my grades
+    - my brightspace
     read: true
     server: brightspace
     include:
@@ -578,6 +698,10 @@ scopes:
   brightspace_act:
     description: 'act in Aaron''s NYU Brightspace: submit an assignment, post or reply in a discussion, mark complete,
       create a calendar event, pin a course, dismiss an announcement (submitting and posting need Aaron''s yes)'
+    label: act in Brightspace (submit, post, mark complete)
+    synonyms:
+    - submit the assignment
+    - post in brightspace
     read: false
     server: brightspace
     include:
@@ -592,6 +716,10 @@ scopes:
   coolify_read:
     description: 'read the black-sky Coolify: infrastructure overview, apps, services, databases, deployments, logs,
       env var names, health, docs'
+    label: read the black-sky Coolify
+    synonyms:
+    - the coolify
+    - black-sky coolify
     read: true
     server: coolify
     include:
@@ -617,6 +745,11 @@ scopes:
   coolify_control:
     description: 'change the black-sky Coolify: deploy, restart, stop, start, redeploy, edit env vars (each needs
       Aaron''s yes)'
+    label: deploy and control the black-sky Coolify
+    synonyms:
+    - deploy it
+    - restart the app
+    - redeploy coolify
     read: false
     server: coolify
     include:
@@ -632,6 +765,10 @@ scopes:
     - service
   coolify_vox_read:
     description: 'read the Vox Coolify instance: overview, apps, services, databases, deployments, logs, health'
+    label: read the Vox Coolify
+    synonyms:
+    - the vox instance
+    - vox coolify
     read: true
     server: coolify-vox
     include:
@@ -657,6 +794,10 @@ scopes:
   coolify_vox_control:
     description: 'change the Vox Coolify instance: deploy, restart, stop, start, edit env vars (each needs Aaron''s
       yes)'
+    label: deploy and control the Vox Coolify
+    synonyms:
+    - deploy to vox
+    - restart vox
     read: false
     server: coolify-vox
     include:
@@ -674,6 +815,10 @@ scopes:
     description: 'query the pension filings database (public Department of Labor Form 5500 data): search plans, read
       one plan and its history, find service providers and their client plans, find lookalike plans, search plan
       events and funds, map consultants, run a read-only SQL query'
+    label: query the pension filings database
+    synonyms:
+    - pension filings
+    - the pension database
     read: true
     server: pension-filings
     include:

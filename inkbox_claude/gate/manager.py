@@ -23,7 +23,8 @@ from .taskpick import TaskPicker, enabled as jev_enabled
 from .router import Router, RouterOutput, RouterRequest
 from .scopes import SCOPES
 from .store import Person, Request, Store, TaskRequired, task_key
-from .schedules import ScheduleService, names_tool
+from .schedules import ScheduleService
+from . import schedprop
 
 logger = logging.getLogger(__name__)
 
@@ -81,23 +82,6 @@ def _strip_quoted(text: str) -> str:
 
 
 OWNER_THREAD = "owner"   # the one thread for the person the assistant works for
-
-
-def _schedule_prompt_tool_scopes(prompt: str) -> List[str]:
-    """Scopes whose own tools are named literally, by short name, in a schedule's
-    prompt text (e.g. the prompt says "create it with inkbox_create_contact"). A
-    schedule that spells out the exact tool it will call has already told us, in the
-    one place that matters -- the unattended instructions it runs from -- which scope
-    that requires, with no probability judgment needed."""
-    found: List[str] = []
-    for name, info in SCOPES.items():
-        tools = info.get("tools") or []
-        for tool in tools:
-            if names_tool(prompt, tool):
-                if name not in found:
-                    found.append(name)
-                break
-    return found
 
 
 class GateSession:
@@ -1009,31 +993,30 @@ class GateSession:
             if task is None:
                 task = self.m.store.create_task(out.schedule.title)
                 self._ensure_inbound_on_task(task, body)
-            named = list(out.schedule.scopes or [])
-            unknown = sorted(set(named) - set(SCOPES))
-            if unknown:
+            # Permission is chosen with no probability judgment at all: scopes he
+            # named, scopes his own words name by synonym, scopes the prompt names
+            # its own tools by, and the router's suggestion -- never Jev.
+            try:
+                scopes = schedprop.capabilities_for(
+                    out.schedule.prompt, [], out.schedule.scopes, message)
+            except schedprop.UnknownScopes as exc:
                 out.request = None
                 out.schedule = None
                 return await self.send_to_sender(
-                    f"I can't propose that schedule: unknown scope(s) {', '.join(unknown)}.", role="answer")
-            implied = _schedule_prompt_tool_scopes(out.schedule.prompt)
-            if named or implied:
-                # The owner named scopes, or the schedule's own prompt names the tools
-                # it will call -- both are deterministic and prompt-grounded, so Jev's
-                # probability judgment (which can score a plainly-needed scope too low,
-                # as it did for "contacts" the first time this ran for real) is not
-                # consulted at all.
-                scopes = list(dict.fromkeys(named + implied))
-            else:
-                schedule_request = RouterOutput(request=RouterRequest(
-                    prompt=out.schedule.prompt, scopes=["web"], summary=out.schedule.title,
-                ))
-                await self.jev_scopes(schedule_request, strict=True, owner_generous=False)
-                scopes = list(schedule_request.request.scopes) if schedule_request.request is not None else ["web"]
-            await self.m.schedules.propose(
-                owner=True, chat_id=self.record_id, task_id=int(task["id"]),
-                spec=out.schedule.model_dump(), scopes=scopes, mode=self.mode,
-            )
+                    f"I can't propose that schedule: unknown scope(s) {', '.join(exc.names)}.", role="answer")
+            try:
+                await self.m.schedules.propose(
+                    owner=True, chat_id=self.record_id, task_id=int(task["id"]),
+                    title=out.schedule.title, prompt=out.schedule.prompt,
+                    cadence_kind=out.schedule.cadence_kind, cadence=out.schedule.cadence,
+                    timezone=out.schedule.timezone, report_every_time=out.schedule.report_every_time,
+                    until=out.schedule.until, scopes=scopes, start_now=out.schedule.start_now,
+                    origin_mode=self.mode, origin_chat_id=self.record_id,
+                )
+            except ValueError as exc:
+                out.request = None
+                out.schedule = None
+                return await self.send_to_sender(f"I can't set that up: {exc}", role="answer")
             return True
         sent_reply = False
         if out.reply:
