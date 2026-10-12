@@ -7,7 +7,17 @@ from __future__ import annotations
 import json
 import time
 
+import sys
+
 from inkbox_claude.gate.store import Store
+
+# tests/conftest.py registers itself under this key (see its tail) so this
+# module gets the exact same already-imported instance pytest loaded for the
+# whole run -- a bare `import conftest` would resolve ambiguously, since
+# tests/ci, tests/contract and tests/live each have their own conftest.py
+# with no package __init__.py to namespace them apart.
+_conftest = sys.modules["_blatbot_tests_conftest"]
+preseed_pg_schema = _conftest.preseed_pg_schema
 
 
 def make_store(tmp_path, name="gate.db"):
@@ -257,12 +267,103 @@ def test_open_schedule_proposal_picks_newest_when_several(tmp_path):
 # ---------------------------------------------------------------------------
 
 def _seed_legacy_db(path, rows):
-    """Build a throwaway sqlite file shaped like the OLD (pre-cadence) schedules
+    """Build a throwaway database shaped like the OLD (pre-cadence) schedules
     table -- none of the new columns exist yet -- and insert the given legacy
-    rows. Opening it with Store(path) then exercises the same ALTER-column-if-
-    missing + migration path a real old gate.db would go through. Mirrors how
-    the people-model migration's own tests seed legacy fixture tables directly
-    (see test_people_model.py's test_migration_from_legacy_fixture_tables)."""
+    rows. Opening it with Store(path) then exercises the same
+    ALTER-column-if-missing (sqlite) / ALTER-COLUMN-IF-NOT-EXISTS (Postgres)
+    + migration path a real old gate.db (or a real old Postgres database)
+    would go through. Mirrors how the people-model migration's own tests seed
+    legacy fixture tables directly (see test_people_model.py's
+    test_migration_from_legacy_fixture_tables).
+
+    Under STORE_BACKEND=postgres this seeds the Postgres schema Store(path)
+    will route to, with hand-written old-shape tables, via
+    conftest.preseed_pg_schema; under the default sqlite backend it builds a
+    legacy sqlite file by hand, as before."""
+    pg_ids = _seed_legacy_pg(path, rows)
+    if pg_ids is not None:
+        return pg_ids
+    return _seed_legacy_sqlite(path, rows)
+
+
+def _seed_legacy_pg(path, rows):
+    ddl = """
+        CREATE TABLE tasks (
+          id BIGSERIAL PRIMARY KEY,
+          key TEXT NOT NULL DEFAULT '', display TEXT NOT NULL DEFAULT '',
+          title TEXT NOT NULL, state TEXT NOT NULL DEFAULT 'open',
+          created_at DOUBLE PRECISION NOT NULL, updated_at DOUBLE PRECISION NOT NULL
+        );
+        CREATE TABLE schedules (
+          id BIGSERIAL PRIMARY KEY,
+          chat_id TEXT NOT NULL,
+          task_id BIGINT NOT NULL,
+          title TEXT NOT NULL,
+          prompt TEXT NOT NULL,
+          prompt_sha256 TEXT NOT NULL,
+          kind TEXT NOT NULL,
+          cron TEXT,
+          run_at DOUBLE PRECISION,
+          timezone TEXT NOT NULL DEFAULT 'America/New_York',
+          scopes_json TEXT NOT NULL,
+          report_mode TEXT NOT NULL DEFAULT 'always',
+          state TEXT NOT NULL DEFAULT 'proposed',
+          next_run DOUBLE PRECISION,
+          last_run DOUBLE PRECISION,
+          last_request_id BIGINT,
+          run_count INTEGER NOT NULL DEFAULT 0,
+          max_runs INTEGER NOT NULL DEFAULT 20,
+          deadline DOUBLE PRECISION,
+          notes TEXT NOT NULL DEFAULT '[]',
+          revision INTEGER NOT NULL DEFAULT 0,
+          consecutive_failures INTEGER NOT NULL DEFAULT 0,
+          last_outcome TEXT NOT NULL DEFAULT '',
+          created_at DOUBLE PRECISION NOT NULL,
+          updated_at DOUBLE PRECISION NOT NULL
+        );
+        CREATE TABLE messages (
+          id BIGSERIAL PRIMARY KEY,
+          chat_id TEXT NOT NULL,
+          kind TEXT NOT NULL,
+          mode TEXT,
+          text TEXT NOT NULL,
+          created_at DOUBLE PRECISION NOT NULL,
+          reply_to BIGINT,
+          role TEXT
+        );
+    """
+    now = time.time()
+    pg_result = preseed_pg_schema(str(path), ddl, [])
+    if pg_result is None:
+        return None
+    import psycopg
+
+    schema = _conftest._schema_for(str(path))
+    _dsn_for_schema = _conftest._dsn_for_schema
+    ids = []
+    with psycopg.connect(_dsn_for_schema(schema), autocommit=False) as conn:
+        with conn.cursor() as cur:
+            for row in rows:
+                cur.execute(
+                    "INSERT INTO tasks(key,display,title,state,created_at,updated_at) "
+                    "VALUES(%s,%s,%s,%s,%s,%s) RETURNING id",
+                    ("", "", "legacy watch", "open", now, now),
+                )
+                task_id = cur.fetchone()[0]
+                cur.execute(
+                    "INSERT INTO schedules(chat_id,task_id,title,prompt,prompt_sha256,kind,cron,run_at,"
+                    "timezone,scopes_json,report_mode,state,notes,created_at,updated_at) "
+                    "VALUES(%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s) RETURNING id",
+                    ("chat-legacy", task_id, "legacy watch", "do the thing", "sha",
+                     row["kind"], row.get("cron") or None, row.get("run_at"), "America/New_York", "[]",
+                     row.get("report_mode", "always"), row["state"], row.get("notes", "[]"), now, now),
+                )
+                ids.append(cur.fetchone()[0])
+        conn.commit()
+    return ids
+
+
+def _seed_legacy_sqlite(path, rows):
     import sqlite3
     conn = sqlite3.connect(str(path))
     conn.executescript("""
@@ -398,3 +499,46 @@ def test_migration_running_twice_changes_nothing(tmp_path):
     assert first.last_outcome == second.last_outcome == "needs a cadence"
     assert first.cadence_kind == second.cadence_kind == ""
     assert first.updated_at == second.updated_at  # untouched the second time: no-op, not a rewrite
+
+
+def test_opening_old_shape_database_adds_every_new_column(tmp_path):
+    """An old-shape database (sqlite file or, under STORE_BACKEND=postgres, a
+    real pre-existing Postgres database/schema) is missing every column this
+    rework added: schedules.cadence_kind/cadence_json/report_every_time/
+    until/origin_mode/origin_chat_id/last_note, and messages.schedule_id.
+    Opening it with Store(path) must add all of them -- this is the defect
+    the Postgres ALTER-COLUMN-IF-NOT-EXISTS block fixes: SCHEMA_PG's
+    CREATE TABLE IF NOT EXISTS alone leaves an already-existing old-shape
+    table untouched."""
+    path = tmp_path / "gate.db"
+    [sid] = _seed_legacy_db(path, [{"kind": "cron", "state": "active", "cron": "0 9 * * *"}])
+    store = Store(str(path))
+    sched = store.get_schedule(sid)
+    # every new schedules column is readable and holds its migrated/default value
+    assert sched.cadence_kind == "cron"
+    assert sched.cadence == {"expr": "0 9 * * *"}
+    assert sched.report_every_time is True  # old report_mode defaulted to 'always'
+    assert sched.until is None
+    assert sched.origin_mode == ""
+    assert sched.origin_chat_id == ""
+    assert isinstance(sched.last_note, str)
+    # messages.schedule_id exists and is usable (insert + read back)
+    msg_id = store.add_message("chat-legacy", "outbound", "notice", schedule_id=sid)
+    assert store.schedule_for_message(msg_id).id == sid
+
+
+def test_opening_old_shape_database_twice_changes_nothing(tmp_path):
+    """Opening the same old-shape database twice (the ALTER-COLUMN-IF-NOT-EXISTS
+    block, not just the cadence-value migration already covered above) must be
+    a pure no-op the second time: no error, no duplicate columns, same data."""
+    path = tmp_path / "gate.db"
+    [sid] = _seed_legacy_db(path, [{"kind": "cron", "state": "active", "cron": "0 9 * * *"}])
+    store1 = Store(str(path))
+    first = store1.get_schedule(sid)
+    store2 = Store(str(path))
+    second = store2.get_schedule(sid)
+    assert first.cadence_kind == second.cadence_kind == "cron"
+    assert first.cadence == second.cadence == {"expr": "0 9 * * *"}
+    assert first.report_every_time == second.report_every_time is True
+    assert first.until == second.until is None
+    assert first.last_note == second.last_note == ""

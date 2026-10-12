@@ -714,8 +714,36 @@ class Store:
                 # Postgres always gets the final current shape in one shot --
                 # see SCHEMA_PG's docstring-comment above for why the
                 # ALTER-TABLE-if-missing dance and the two one-time sqlite
-                # migrations below do not apply here.
+                # migrations below (_migrate_person_keyed_tasks,
+                # _migrate_people_model) do not apply here: those migrate an
+                # OLD SQLITE FILE's shape forward, and the live Postgres
+                # database was always filled by the migration script already
+                # in the current shape for those tables.
+                #
+                # The schedule-cadence rework is different: the live Postgres
+                # database already has `schedules` and `messages` in the
+                # shape from BEFORE this rework shipped, and SCHEMA_PG's
+                # CREATE TABLE IF NOT EXISTS leaves an already-existing table
+                # untouched -- it does not add columns to it. So this one
+                # needs the same ALTER-COLUMN-IF-NOT-EXISTS treatment as the
+                # sqlite branch below, just spelled the Postgres way (which
+                # supports IF NOT EXISTS directly on ADD COLUMN, so no
+                # PRAGMA-table_info-style existence check is needed first).
+                # Idempotent: a brand-new database already has every column
+                # from SCHEMA_PG above, so every ADD COLUMN here is a no-op
+                # for it, and running this twice changes nothing either way.
                 self._db.executescript(SCHEMA_PG)
+                self._db.executescript("""
+                    ALTER TABLE schedules ADD COLUMN IF NOT EXISTS cadence_kind TEXT NOT NULL DEFAULT '';
+                    ALTER TABLE schedules ADD COLUMN IF NOT EXISTS cadence_json TEXT NOT NULL DEFAULT '{}';
+                    ALTER TABLE schedules ADD COLUMN IF NOT EXISTS report_every_time INTEGER NOT NULL DEFAULT 0;
+                    ALTER TABLE schedules ADD COLUMN IF NOT EXISTS until DOUBLE PRECISION;
+                    ALTER TABLE schedules ADD COLUMN IF NOT EXISTS origin_mode TEXT NOT NULL DEFAULT '';
+                    ALTER TABLE schedules ADD COLUMN IF NOT EXISTS origin_chat_id TEXT NOT NULL DEFAULT '';
+                    ALTER TABLE schedules ADD COLUMN IF NOT EXISTS last_note TEXT NOT NULL DEFAULT '';
+                    ALTER TABLE messages ADD COLUMN IF NOT EXISTS schedule_id BIGINT;
+                    CREATE INDEX IF NOT EXISTS messages_schedule ON messages(schedule_id);
+                """)
                 self._migrate_schedule_cadence_model()
                 self._seed_contact_kinds_locked()
                 self._db.commit()

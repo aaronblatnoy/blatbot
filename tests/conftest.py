@@ -24,6 +24,7 @@ from __future__ import annotations
 import hashlib
 import os
 from pathlib import Path
+from typing import Any, Dict, List, Optional, Sequence
 
 # A handful of tests build a LEGACY sqlite file by hand (raw sqlite3.connect +
 # executescript with the pre-people-model trust/people/synced_people tables,
@@ -56,6 +57,18 @@ def pytest_collection_modifyitems(config, items):
             item.add_marker(skip)
 
 
+# -- schema naming, shared by the Store-routing below and by preseed_pg_schema
+# (a test's own legacy-fixture helper needs the SAME schema name Store(path)
+# will use, computed the same way, with no psycopg import required just to
+# read it) -------------------------------------------------------------------
+
+def _schema_for(path: str) -> str:
+    return "test_" + hashlib.sha1(path.encode("utf-8")).hexdigest()[:16]
+
+
+_seen_schemas: set[str] = set()
+
+
 if os.environ.get("STORE_BACKEND") == "postgres":
     import psycopg
 
@@ -63,10 +76,6 @@ if os.environ.get("STORE_BACKEND") == "postgres":
 
     _BASE_DSN = os.environ["BLATBOT_TEST_PG_DSN"]  # postgresql://user:pass@host:port/db
     _OrigStore = _store_mod.Store
-    _seen_schemas: set[str] = set()
-
-    def _schema_for(path: str) -> str:
-        return "test_" + hashlib.sha1(path.encode("utf-8")).hexdigest()[:16]
 
     def _dsn_for_schema(schema: str) -> str:
         sep = "&" if "?" in _BASE_DSN else "?"
@@ -95,3 +104,62 @@ if os.environ.get("STORE_BACKEND") == "postgres":
             super().__init__(_dsn_for_schema(schema), *a, **kw)
 
     _store_mod.Store = _PgRoutedStore  # type: ignore[assignment]
+
+
+def preseed_pg_schema(
+    path: str,
+    ddl: str,
+    inserts: Sequence[tuple[str, Dict[str, Any]]] = (),
+) -> Optional[List[int]]:
+    """Pre-seed the Postgres schema that a later ``Store(path)`` call will
+    use, with hand-written OLD-shape tables (no new columns), for proving a
+    migration runs correctly against a real pre-existing Postgres database --
+    the Postgres counterpart to a test's own sqlite-file legacy seeding.
+
+    Returns None (does nothing) under the default sqlite backend, so a test
+    can write one seeding helper that branches on the return value: build a
+    legacy sqlite file itself when this returns None, or use the ids handed
+    back here under STORE_BACKEND=postgres.
+
+    ``ddl`` is raw old-shape CREATE TABLE statements (semicolon-separated,
+    no trailing data). ``inserts`` is a list of (sql, params) pairs; each
+    sql should end with ``RETURNING id`` for rows this needs the generated
+    id back for (schedules rows), or omit it otherwise (tasks rows). Runs
+    before Store(path) opens the schema, and marks the schema as already
+    reset so Store's own open does not wipe these rows -- it only runs
+    SCHEMA_PG (CREATE TABLE/INDEX IF NOT EXISTS, which leaves an existing
+    old-shape table alone) and then the ALTER/migration path under test.
+    """
+    if os.environ.get("STORE_BACKEND") != "postgres":
+        return None
+    import psycopg
+
+    schema = _schema_for(str(path))
+    _reset_schema(schema)
+    _seen_schemas.add(schema)
+    ids: List[int] = []
+    with psycopg.connect(_dsn_for_schema(schema), autocommit=False) as conn:
+        with conn.cursor() as cur:
+            cur.execute(ddl)
+            for sql, params in inserts:
+                cur.execute(sql, params)
+                if "RETURNING" in sql.upper():
+                    row = cur.fetchone()
+                    if row is not None:
+                        ids.append(row[0])
+        conn.commit()
+    return ids
+
+
+# tests/ci/conftest.py, tests/contract/conftest.py and tests/live/conftest.py
+# are separate modules that also happen to be named "conftest" (there is no
+# tests/__init__.py, so nothing namespaces them); a bare `import conftest`
+# from a test module resolves ambiguously against whichever of those sys.path
+# picks first, not necessarily this file. Registering this already-imported
+# module object under a private, collision-proof key lets a sibling test
+# module fetch the EXACT instance pytest already loaded (the one whose
+# _seen_schemas set _PgRoutedStore actually reads), instead of importing a
+# second, divergent copy under the ambiguous bare name.
+import sys  # noqa: E402
+
+sys.modules["_blatbot_tests_conftest"] = sys.modules[__name__]
