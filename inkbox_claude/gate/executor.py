@@ -158,8 +158,6 @@ class Executor:
         started_at = time.time()
         vault_prefixes = vault_prefixes_for_scopes(req.scopes)
         allowed = tools_for(req.scopes)
-        if req.schedule_kind == "continue":
-            allowed.append("mcp__host__schedule_continue")
         allowed_set = set(allowed)   # what this task may touch at all, send tools included
         if req.schedule_id:
             # Every scheduled write reaches the hook. The schedule pre-approves ordinary
@@ -181,7 +179,6 @@ class Executor:
 
         self.held_send = None
         held_destructive: Optional[Dict[str, Any]] = None
-        continue_state: Optional[Dict[str, Any]] = {} if req.schedule_kind == "continue" else None
         # A message the owner asked to have sent is him speaking to someone through the
         # assistant, and he sees it before it goes. A request that came from someone else
         # was already read and approved by him in full, so answering it needs nothing more.
@@ -250,7 +247,7 @@ class Executor:
             setting_sources=["user", "project"],
             permission_mode="default",
             allowed_tools=allowed,
-            mcp_servers={"inkbox": self.mcp_server, "host": hosttools.sdk_server(continue_state, vault_prefixes=vault_prefixes)},
+            mcp_servers={"inkbox": self.mcp_server, "host": hosttools.sdk_server(vault_prefixes=vault_prefixes)},
             # One conversation per thread, continued rather than restarted, for an ordinary
             # request: what was looked up an hour ago is still in view and a follow-up does
             # not arrive as a stranger's first sentence. A scheduled run never resumes:
@@ -368,6 +365,4 @@ class Executor:
             out["confirm"] = {"tool": held_destructive["tool"], "args": held_destructive["args"],
                               "about": [raw or req.original_message], "kind": "destructive"}
             out["ok"] = False
-        if continue_state:
-            out["continue"] = dict(continue_state)
         return out

@@ -102,8 +102,6 @@ VIRTUAL_TOOLS: Dict[str, Dict[str, Any]] = {
     "mcp__host__vault_search": {"description": hosttools.VAULT_SEARCH_DESCRIPTION, "schema": hosttools.VAULT_SEARCH_SCHEMA},
     "mcp__host__vault_read": {"description": hosttools.VAULT_READ_DESCRIPTION, "schema": hosttools.VAULT_READ_SCHEMA},
     "mcp__host__vault_list": {"description": hosttools.VAULT_LIST_DESCRIPTION, "schema": hosttools.VAULT_LIST_SCHEMA},
-    "mcp__host__schedule_continue": {"description": hosttools.SCHEDULE_CONTINUE_DESCRIPTION,
-                                      "schema": hosttools.SCHEDULE_CONTINUE_SCHEMA},
     # A web search done THROUGH the browser: the Playwright server opens the local
     # SearXNG results page (which queries Google/Bing server-side, so no bot walls)
     # and reads it. Two browser calls, one tool from the agent's point of view.
@@ -299,8 +297,6 @@ class ToolBox:
             return hosttools.vault_read(args)
         if name == "mcp__host__vault_list":
             return hosttools.vault_list(args)
-        if name == "mcp__host__schedule_continue":
-            return hosttools.schedule_continue(args)
         server, short = split_tool(name)
         if server == "inkbox":
             from mcp import types as mt
@@ -818,8 +814,6 @@ class JevAgent:
             return {"ok": False, "error": "prompt hash mismatch; refused to run", "tool_calls": []}
         judge, prose = Judge(), Prose(self.router)
         allowed = tools_for(req.scopes)
-        if req.schedule_kind == "continue":
-            allowed.append("mcp__host__schedule_continue")
         started = time.time()
         steps: List[Dict[str, Any]] = []
         facts: Dict[str, Any] = {"request": req.original_message, "task_context": context,
@@ -1420,16 +1414,11 @@ class JevAgent:
                 "stop": False, "result_line": "", "note": "", "denied": [], "held": False,
                 "tool_results": [{"tool": s["tool"], "ok": s["ok"]} for s in steps],
                 "started_at": started, "finished_at": finished_at, "cost_usd": None}
-        continued = next((s for s in reversed(steps)
-                          if s["ok"] and s["tool"] == "mcp__host__schedule_continue"), None)
-        if continued is not None:
-            status["continue"] = dict(continued["args"])
-            status["note"] = str(continued["args"].get("note") or "")
         return status
 
 
 
-_WRITE_RE = re.compile(r"(send|create|update|modify|delete|manage|append|publish|place_call|move|set_|replace|import|insert|format|resize|run_script|reply|complete|fail|schedule_continue"
+_WRITE_RE = re.compile(r"(send|create|update|modify|delete|manage|append|publish|place_call|move|set_|replace|import|insert|format|resize|run_script|reply|complete|fail"
                        r"|browser_click|browser_type|browser_fill_form|browser_select_option|browser_press_key|browser_drag|browser_drop|browser_file_upload|browser_handle_dialog)", re.I)
 
 

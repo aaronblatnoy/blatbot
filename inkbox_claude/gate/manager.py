@@ -1436,6 +1436,33 @@ class GateSessionManager:
         conv = self.approver_conv
         await self.send(f"imessage:{conv}", text, "imessage", {"conversation_id": conv})
 
+    async def send_schedule_notice(self, schedule: Any, text: str) -> int:
+        """Every schedule notice and proposal (schedules.py's only way to speak)
+        goes through here: send on the schedule's own origin thread, falling back
+        to the owner's iMessage thread when there is no origin or that send fails,
+        and tag the stored outbound row with schedule_id so a bare reply on that
+        thread is understood as answering this schedule."""
+        target = str(getattr(schedule, "origin_chat_id", "") or "")
+        mode = str(getattr(schedule, "origin_mode", "") or "")
+        chat_id = target
+        sent = False
+        if target and mode:
+            try:
+                meta = {"conversation_id": target} if mode == "imessage" else {}
+                await self.send_fn(target, text, mode, meta)
+                sent = True
+            except Exception:
+                logger.exception("[gate] schedule %s notice failed on %s/%s; falling back to the owner's thread",
+                                 getattr(schedule, "id", "?"), mode, target)
+        if not sent:
+            conv = self.approver_conv
+            mode = "imessage"
+            target = f"imessage:{conv}"
+            chat_id = OWNER_THREAD
+            await self.send_fn(target, text, mode, {"conversation_id": conv})
+        return self.store.add_message(chat_id or target, "outbound", text, mode, role="notice",
+                                      schedule_id=getattr(schedule, "id", None))
+
     _outage_notified: Dict[str, float] = {}
 
     async def report_outage(self, exc: BaseException, chat_id: str) -> None:
@@ -1825,8 +1852,14 @@ class GateSessionManager:
         asked (denied at the tool call)."""
         if not self.jev_agent:
             model = await self._pick_model(req)
+            run_kwargs: Dict[str, Any] = {}
+            if req.schedule_id:
+                sched = self.store.get_schedule(req.schedule_id)
+                if sched is not None:
+                    run_kwargs = {"timezone": sched.timezone, "note": sched.last_note}
             status = await self.executor.run(req, context=context, model=model,
-                                             from_owner=_owner_request(self, req) and not req.schedule_id)
+                                             from_owner=_owner_request(self, req) and not req.schedule_id,
+                                             **run_kwargs)
             status = await self._grant_what_it_asked_for(req, status, context, model)
             return await self._insist_it_actually_ran(req, status, context, model)
         status = await self.jev_agent.run(req, context=context)

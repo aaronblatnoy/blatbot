@@ -1,71 +1,40 @@
-"""Approved schedules as a source of ordinary gate requests."""
+"""Blatbot schedules, second version: the scheduler core.
+
+A schedule is approved once, then fires itself on a cadence computed by code
+(no model ever picks its own next run). Scope names, cron strings and "S<id>"
+jargon never reach the owner here -- that is schedprop's and schedcmd's job;
+this module calls through two thin seams (`_labels`, `_missing`, and
+`_proposal_text`) so a prompt naming a tool outside its scopes is caught
+before anything runs, and so notices read in plain words."""
 
 from __future__ import annotations
 
 import asyncio
-import json
 import logging
 import re
 import time
-from datetime import datetime, timezone
+from datetime import datetime
 from typing import Any, Dict, List, Optional
-from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
+from zoneinfo import ZoneInfo
 
-from . import cron
+from . import cadence as cadence_module
 from .scopes import SCOPES, tools_for
 from .store import Request, Schedule, sha256
 
 logger = logging.getLogger(__name__)
 
 DEFAULT_TIMEZONE = "America/New_York"
-MIN_CONTINUE_DELAY = 5 * 60
-DEFAULT_MAX_RUNS = 20
-DEFAULT_DEADLINE = 7 * 24 * 3600
-REPORT_MODES = {"always", "changed"}
-KINDS = {"once", "recurring", "continue"}
-OWNER_INSTRUCTIONS = "--- AARON'S INSTRUCTIONS ---"
 
-
-def _timestamp(value: Any, timezone_name: str = DEFAULT_TIMEZONE) -> Optional[float]:
-    if value in (None, ""):
-        return None
-    if isinstance(value, (int, float)) and not isinstance(value, bool):
-        return float(value)
-    text = str(value).strip()
-    if text.endswith("Z"):
-        text = text[:-1] + "+00:00"
-    try:
-        dt = datetime.fromisoformat(text)
-    except ValueError as exc:
-        raise ValueError(f"invalid date and time: {value}") from exc
-    if dt.tzinfo is None:
-        dt = dt.replace(tzinfo=ZoneInfo(timezone_name))
-    return dt.timestamp()
-
-
-def _shown(when: Optional[float], timezone_name: str) -> str:
-    if when is None:
-        return "not set"
-    return datetime.fromtimestamp(when, ZoneInfo(timezone_name)).strftime("%A, %B %-d, %Y at %-I:%M %p %Z")
-
-
-def cadence(schedule: Schedule) -> str:
-    if schedule.kind == "once":
-        return f"once on {_shown(schedule.run_at, schedule.timezone)}"
-    if schedule.kind == "continue":
-        first = _shown(schedule.run_at or schedule.next_run, schedule.timezone)
-        return f"continuing work, first run {first}"
-    return f"{cron.describe(schedule.cron)} in {schedule.timezone}"
-
-
-def next_three(schedule: Schedule, now: Optional[float] = None) -> List[float]:
-    now = time.time() if now is None else now
-    if schedule.kind == "recurring":
-        return cron.next_fires(schedule.cron, now, schedule.timezone, 3)
-    first = schedule.next_run if schedule.next_run is not None else schedule.run_at
-    return [first] if first is not None and first >= now else []
-
-
+# Actions schedule.action() itself handles. "edit", "approve" and "reject" are
+# real actions the console/chat can take, but they go through edit()/decide()
+# instead -- valid_actions() lists them too, so a caller sees the whole menu.
+_ACTION_NAMES = {"pause", "resume", "run_now", "stop", "start_again"}
+_ACTIONS_BY_STATE: Dict[str, set] = {
+    "proposed": {"approve", "reject"},
+    "active": {"pause", "stop", "run_now"},
+    "paused": {"resume", "stop", "start_again"},
+    "ended": {"start_again"},
+}
 
 
 def names_tool(prompt: str, tool: str) -> str:
@@ -78,19 +47,65 @@ def names_tool(prompt: str, tool: str) -> str:
     return short if re.search(r"\b" + re.escape(short) + r"\b", prompt) else ""
 
 
-def _prompt_tool_mismatch(prompt: str, scopes: List[str]) -> List[str]:
-    """Tool short names literally named in a schedule's prompt that none of its
-    granted scopes actually cover, so the owner sees the gap before approving
-    rather than discovering it when a run is refused."""
-    allowed = set(tools_for(scopes))
-    named_short: List[str] = []
-    for info in SCOPES.values():
-        for tool in info.get("tools") or []:
-            short = names_tool(prompt, tool)
-            if short and tool not in allowed:
-                if short not in named_short:
-                    named_short.append(short)
-    return named_short
+def cadence(schedule: Schedule) -> str:
+    """Back-compat shim for the console package (P6/P7), which still imports a
+    bare  from this module. The real wording logic lives in
+    cadence.py now; this just reads the schedule's own cadence_kind/cadence."""
+    if schedule.cadence_kind not in cadence_module.KINDS:
+        return "not set"  # a legacy/paused row with no cadence model yet
+    try:
+        return cadence_module.describe(schedule.cadence_kind, schedule.cadence, schedule.timezone)
+    except cadence_module.CadenceError:
+        return "not set"
+
+
+def next_three(schedule: Schedule, now: Optional[float] = None) -> List[float]:
+    """Back-compat shim for the console package: the next (up to) three fire
+    times for a schedule, from its own next_run forward."""
+    now = time.time() if now is None else now
+    out: List[float] = []
+    if schedule.cadence_kind not in cadence_module.KINDS:
+        return out  # a legacy/paused row with no cadence model yet: nothing to show
+    cursor = schedule.next_run
+    if cursor is None or cursor < now:
+        cursor = now
+    for _ in range(3):
+        try:
+            nxt = cadence_module.next_run(schedule.cadence_kind, schedule.cadence, schedule.timezone, cursor)
+        except cadence_module.CadenceError:
+            break
+        if nxt is None:
+            break
+        out.append(nxt)
+        cursor = nxt
+    return out
+
+
+def run_outcome(status: Dict[str, Any]) -> str:
+    """complete / incomplete / failed, from the executor's status contract. A run
+    that was denied a tool or had a call held is incomplete even when the model's
+    own STATUS line said OK -- the model does not get the last word on whether its
+    own run was complete."""
+    if status.get("error"):
+        return "failed"
+    if status.get("denied") or status.get("held"):
+        return "incomplete"
+    if status.get("ok"):
+        return "complete"
+    return "failed"
+
+
+def _shown(ts: Optional[float], timezone_name: str) -> str:
+    """"2:30 PM", with the day added when it is not today, in the schedule's zone."""
+    if ts is None:
+        return "soon"
+    tz = ZoneInfo(timezone_name)
+    dt = datetime.fromtimestamp(ts, tz)
+    now_local = datetime.fromtimestamp(time.time(), tz)
+    clock = dt.strftime("%-I:%M %p")
+    if dt.date() != now_local.date():
+        return f"{dt.strftime('%a %b %-d')}, {clock}"
+    return clock
 
 
 class ScheduleService:
@@ -98,189 +113,119 @@ class ScheduleService:
         self.manager = manager
         self.store = manager.store
 
-    def validate(self, spec: Dict[str, Any], *, now: Optional[float] = None) -> Dict[str, Any]:
-        now = time.time() if now is None else now
-        kind = str(spec.get("kind") or "").strip().lower()
-        if kind not in KINDS:
-            raise ValueError("kind must be once, recurring, or continue")
-        timezone_name = str(spec.get("timezone") or DEFAULT_TIMEZONE).strip()
-        try:
-            ZoneInfo(timezone_name)
-        except ZoneInfoNotFoundError as exc:
-            raise ValueError(f"unknown timezone: {timezone_name}") from exc
-        title = " ".join(str(spec.get("title") or "").split())
-        prompt = str(spec.get("prompt") or "").strip()
-        if not title or not prompt:
-            raise ValueError("title and prompt are required")
-        report_mode = str(spec.get("report_mode") or "always").strip().lower()
-        if report_mode not in REPORT_MODES:
-            raise ValueError("report_mode must be always or changed")
-        expression = str(spec.get("cron") or "").strip()
-        run_at = _timestamp(spec.get("run_at"), timezone_name)
-        if kind == "recurring":
-            cron.parse(expression)
-            next_run = cron.next_fire(expression, now, timezone_name)
-        else:
-            if kind == "once" and run_at is None:
-                raise ValueError("a once schedule needs run_at")
-            next_run = run_at if run_at is not None else now
-        max_runs = int(spec.get("max_runs") or DEFAULT_MAX_RUNS)
-        if max_runs < 1:
-            raise ValueError("max_runs must be at least 1")
-        deadline = _timestamp(spec.get("deadline"), timezone_name)
-        if kind == "continue" and deadline is None:
-            deadline = now + DEFAULT_DEADLINE
-        if kind == "continue" and deadline is not None and deadline <= now:
-            raise ValueError("deadline must be in the future")
-        return {"kind": kind, "timezone": timezone_name, "title": title, "prompt": prompt,
-                "report_mode": report_mode, "cron": expression, "run_at": run_at,
-                "next_run": next_run, "max_runs": max_runs, "deadline": deadline}
+    # -- the seams other packages fill in (schedprop.py does not exist in this
+    # tree; tests replace these by setting an attribute on the gate package so
+    # `from . import schedprop` resolves to a fake) --------------------------
+    def _proposal_text(self, schedule: Schedule) -> str:
+        from . import schedprop
+        return schedprop.format_proposal(schedule)
 
-    async def propose(self, *, owner: bool, chat_id: str, task_id: int, spec: Dict[str, Any],
-                      scopes: List[str], mode: str = "imessage") -> Schedule:
+    def _labels(self, scopes: List[str]) -> str:
+        from . import schedprop
+        return schedprop.labels(scopes)
+
+    def _missing(self, prompt: str, scopes: List[str]) -> List[str]:
+        from . import schedprop
+        return schedprop.missing_capabilities(prompt, scopes)
+
+    async def _notice(self, schedule: Schedule, text: str) -> None:
+        await self.manager.send_schedule_notice(schedule, text)
+
+    def _scopes_for_tool(self, tool: str) -> List[str]:
+        return [name for name, info in SCOPES.items() if tool in (info.get("tools") or [])]
+
+    def _run_row_for_request(self, schedule_id: int, request_id: Optional[int]) -> Optional[Dict[str, Any]]:
+        if request_id is None:
+            return None
+        for row in self.store.schedule_runs(schedule_id):
+            if row.get("request_id") == request_id:
+                return row
+        return None
+
+    # -- creating and deciding -------------------------------------------
+    async def propose(self, *, owner: bool, chat_id: str, task_id: int, title: str, prompt: str,
+                      cadence_kind: str, cadence: Dict[str, Any], timezone: Optional[str] = None,
+                      report_every_time: Optional[bool] = None, until: Optional[float] = None,
+                      scopes: List[str], start_now: bool = False, origin_mode: str = "",
+                      origin_chat_id: str = "") -> Schedule:
         if not owner:
             raise PermissionError("only Aaron can create or change schedules")
-        data = self.validate(spec)
-        schedule = self.store.create_schedule(chat_id=chat_id, task_id=task_id, scopes=scopes, **data)
-        await self._new_proposal(schedule, mode=mode)
+        cadence_module.validate(cadence_kind, cadence)
+        timezone_name = timezone or DEFAULT_TIMEZONE
+        ZoneInfo(timezone_name)
+        missing = self._missing(prompt, scopes)
+        if missing:
+            raise ValueError(f"missing capability: {self._labels(missing)}")
+        report_every = (bool(report_every_time) if report_every_time is not None
+                        else cadence_kind == "once")
+        stored_cadence = dict(cadence or {})
+        stored_cadence["start_now"] = bool(start_now)
+        schedule = self.store.create_schedule(
+            chat_id=chat_id, task_id=task_id, title=title, prompt=prompt,
+            kind=cadence_kind, scopes=scopes, timezone=timezone_name, report_mode="changed",
+            cadence_kind=cadence_kind, cadence=stored_cadence, report_every_time=report_every,
+            until=until, origin_mode=origin_mode, origin_chat_id=origin_chat_id or chat_id,
+        )
+        logger.info("[schedules] %s proposed: %s", schedule.id, title)
+        await self._notice(schedule, self._proposal_text(schedule))
         return schedule
 
-    async def _new_proposal(self, schedule: Schedule, mode: str = "imessage") -> Request:
-        req = self.store.create_request(
-            chat_id=schedule.chat_id, sender="Aaron", sender_name="Aaron", mode=mode, subject="",
-            original_message=schedule.prompt, summary=f"Approve schedule: {schedule.title}",
-            scopes=schedule.scopes, prompt=schedule.prompt, state="pending", task_id=schedule.task_id,
-            schedule_id=schedule.id, schedule_kind=schedule.kind,
-        )
-        self.store.set_state(req.id, "pending", status={"schedule_proposal": True, "schedule_id": schedule.id})
-        self.store.update_schedule(schedule.id, last_request_id=req.id)
-        self.store.task_event(schedule.task_id, "request", f"Schedule proposed: {schedule.title}",
-                              chat_id=schedule.chat_id, request_id=req.id, state="waiting_aaron")
-        await self.manager.send_to_approver(self.format_proposal(self.store.get_schedule(schedule.id), req.id))
-        return self.store.get_request(req.id)  # type: ignore[return-value]
-
-    def format_proposal(self, schedule: Schedule, request_id: int) -> str:
-        fires = next_three(schedule)
-        shown = "\n".join(f"  {_shown(t, schedule.timezone)}" for t in fires) or "  none"
-        extra = ""
-        if schedule.kind == "continue":
-            extra = (f"\nRun limit: {schedule.max_runs}\n"
-                     f"Deadline: {_shown(schedule.deadline, schedule.timezone)}")
-        mismatch = _prompt_tool_mismatch(schedule.prompt, schedule.scopes)
-        warning = (f"\n\nThe prompt names {', '.join(mismatch)}, which no scope above grants -- "
-                   f"check the scopes before approving." if mismatch else "")
-        return (
-            f"[Blatbot #{request_id}] Schedule proposal\n\n"
-            f"Title: {schedule.title}\n"
-            f"Cadence: {cadence(schedule)}\n"
-            f"Next three fire times:\n{shown}\n\n"
-            f"Exact prompt:\n{schedule.prompt}\n\n"
-            f"Scopes: {', '.join(schedule.scopes)}\n"
-            f"Report mode: {schedule.report_mode}{extra}{warning}\n\n"
-            f"Reply \"#{request_id} yes\" to activate it or \"#{request_id} no\" to reject it."
-        )
-
-    def is_proposal_request(self, req: Request) -> bool:
-        return bool(req.schedule_id and (req.status or {}).get("schedule_proposal"))
-
-    async def decide_proposal(self, req: Request, decision: str, note: str = "") -> Dict[str, Any]:
-        schedule = self.store.get_schedule(req.schedule_id or 0)
-        if schedule is None:
-            return {"ok": False, "state": req.state, "error": "the schedule no longer exists"}
-        d = decision.strip().lower()
-        if d in {"yes", "y", "ok", "approve", "run", "go"}:
-            now = time.time()
-            if schedule.kind == "recurring":
-                next_run = cron.next_fire(schedule.cron, now, schedule.timezone)
-            elif schedule.kind == "continue":
-                next_run = max(now, schedule.run_at or now)
-            else:
-                next_run = schedule.run_at
-            if schedule.kind == "once" and (next_run is None or next_run < now):
-                next_run = now
-            self.store.update_schedule(schedule.id, state="active", next_run=next_run,
-                                       deadline=(schedule.deadline or now + DEFAULT_DEADLINE)
-                                       if schedule.kind == "continue" else schedule.deadline)
-            self.store.set_state(req.id, "done", status={"schedule_proposal": True, "approved": True,
-                                                          "schedule_id": schedule.id})
-            self.store.task_event(schedule.task_id, "approved", f"Schedule S{schedule.id} activated.",
-                                  chat_id=schedule.chat_id, request_id=req.id, state="open")
-            activated = self.store.get_schedule(schedule.id)
-            await self.manager.send_to_approver(
-                f"Schedule S{schedule.id} is active: {activated.title}. "
-                f"First run {_shown(activated.next_run, activated.timezone)}. "
-                f"Scopes: {', '.join(activated.scopes)}.")
-            return {"ok": True, "state": "active", "error": ""}
-        if d in {"no", "n", "stop", "drop", "reject", "decline"}:
-            self.store.update_schedule(schedule.id, state="rejected", next_run=None)
-            self.store.set_state(req.id, "rejected")
-            self.store.task_event(schedule.task_id, "rejected", f"Schedule S{schedule.id} rejected.",
-                                  chat_id=schedule.chat_id, request_id=req.id, state="open")
-            await self.manager.send_to_approver(f"Rejected schedule S{schedule.id}: {schedule.title}")
-            return {"ok": True, "state": "rejected", "error": ""}
-        if d == "edit":
-            if not note.strip():
-                return {"ok": False, "state": req.state, "error": "an edit needs instructions"}
-            base = schedule.prompt.split(f"\n\n{OWNER_INSTRUCTIONS}")[0].rstrip()
-            prompt = f"{base}\n\n{OWNER_INSTRUCTIONS}\n{note.strip()}"
-            edited = await self.edit(schedule.id, owner=True, changes={"prompt": prompt})
-            self.store.set_state(req.id, "rejected")
-            return {"ok": True, "state": edited.state, "error": ""}
-        return {"ok": False, "state": req.state, "error": f"unknown decision {decision!r}"}
-
-    async def edit(self, schedule_id: int, *, owner: bool, changes: Dict[str, Any]) -> Schedule:
-        if not owner:
-            raise PermissionError("only Aaron can create or change schedules")
-        old = self.store.get_schedule(schedule_id)
-        if old is None:
-            raise ValueError(f"no schedule S{schedule_id}")
-        for request in self.store.pending_requests_for_schedule(schedule_id):
-            if self.is_proposal_request(request):
-                self.store.set_state(request.id, "rejected")
-        spec = {"title": old.title, "prompt": old.prompt, "kind": old.kind, "cron": old.cron,
-                "run_at": old.run_at, "timezone": old.timezone, "report_mode": old.report_mode,
-                "max_runs": old.max_runs, "deadline": old.deadline}
-        spec.update({k: v for k, v in changes.items() if k != "scopes"})
-        data = self.validate(spec)
-        scopes = changes.get("scopes", old.scopes)
-        updated = self.store.update_schedule(schedule_id, **data, scopes=scopes, state="proposed",
-                                             revision=old.revision + 1, consecutive_failures=0)
-        await self._new_proposal(updated)
-        return self.store.get_schedule(schedule_id)  # type: ignore[return-value]
-
-    async def action(self, schedule_id: int, action: str, *, owner: bool) -> Schedule:
-        if not owner:
-            raise PermissionError("only Aaron can create or change schedules")
+    async def decide(self, schedule_id: int, approve: bool) -> Schedule:
         schedule = self.store.get_schedule(schedule_id)
         if schedule is None:
-            raise ValueError(f"no schedule S{schedule_id}")
-        action = action.strip().lower().replace(" ", "_")
+            raise ValueError(f"no such schedule: {schedule_id}")
         now = time.time()
-        if action == "pause":
-            if schedule.state != "active":
-                raise ValueError(f"schedule S{schedule.id} is {schedule.state}; it can only be paused while active")
-            return self.store.update_schedule(schedule.id, state="paused")
-        if action == "resume":
-            if schedule.state not in {"paused", "failed"}:
-                raise ValueError(f"schedule S{schedule.id} is {schedule.state}; only paused or failed schedules can resume")
-            if schedule.kind == "recurring":
-                next_run = cron.next_fire(schedule.cron, now, schedule.timezone)
-            else:
-                next_run = max(now, schedule.next_run or schedule.run_at or now)
-            return self.store.update_schedule(schedule.id, state="active", next_run=next_run,
-                                              consecutive_failures=0)
-        if action == "run_now":
-            if schedule.state != "active":
-                raise ValueError(f"schedule S{schedule.id} is {schedule.state}; it can only run now while active")
-            if self.store.request_running_for_schedule(schedule.id) is not None:
-                raise ValueError(f"schedule S{schedule.id} already has a run in flight; wait for it to finish")
-            return self.store.update_schedule(schedule.id, next_run=now)
-        if action == "delete":
-            for request in self.store.pending_requests_for_schedule(schedule.id):
-                self.store.set_state(request.id, "rejected")
-            self.store.delete_schedule(schedule.id)
-            return schedule
-        raise ValueError("action must be pause, resume, run_now, or delete")
+        if not approve:
+            updated = self.store.update_schedule(schedule_id, state="ended", next_run=None,
+                                                 last_outcome="rejected")
+            logger.info("[schedules] %s rejected", schedule_id)
+            await self._notice(updated, f"Rejected {updated.title}.")
+            return updated
+        cadence = dict(schedule.cadence or {})
+        start_now = bool(cadence.pop("start_now", False))
+        if cadence != (schedule.cadence or {}):
+            self.store.update_schedule(schedule_id, cadence=cadence)
+            schedule = self.store.get_schedule(schedule_id)  # type: ignore[assignment]
+        if start_now:
+            next_run = now
+        else:
+            next_run = cadence_module.next_run(schedule.cadence_kind, schedule.cadence,
+                                               schedule.timezone, now)
+        if schedule.cadence_kind == "every" and "anchor" not in (schedule.cadence or {}):
+            anchored = dict(schedule.cadence)
+            anchored["anchor"] = next_run
+            self.store.update_schedule(schedule_id, cadence=anchored)
+            schedule = self.store.get_schedule(schedule_id)  # type: ignore[assignment]
+        updated = self.store.update_schedule(schedule_id, state="active", next_run=next_run)
+        logger.info("[schedules] %s activated, first run %s", schedule_id, next_run)
+        await self._notice(updated, self._started_text(updated, next_run))
+        return updated
+
+    def _started_text(self, schedule: Schedule, next_run: Optional[float]) -> str:
+        when = _shown(next_run, schedule.timezone)
+        if schedule.cadence_kind == "once":
+            return f"Scheduled for {when}."
+        words = cadence_module.describe(schedule.cadence_kind, schedule.cadence, schedule.timezone)
+        return f"Started. First check {when}, then {words}."
+
+    def is_proposal_request(self, req: Request) -> bool:
+        """The new model never routes a proposal through the requests table (it is
+        a schedule in state 'proposed' with the owner answering plain yes/no on its
+        thread), so a request is never, itself, the proposal. Kept so older call
+        sites that still check this before touching a request never misfire."""
+        return False
+
+    async def decide_proposal(self, req: Request, decision: str, note: str = "") -> Dict[str, Any]:
+        """Back-compat entry point: the single activation path is decide()."""
+        schedule_id = req.schedule_id or 0
+        d = decision.strip().lower()
+        if d in {"yes", "y", "ok", "approve", "run", "go"}:
+            updated = await self.decide(schedule_id, True)
+            return {"ok": True, "state": updated.state, "error": ""}
+        if d in {"no", "n", "stop", "drop", "reject", "decline"}:
+            updated = await self.decide(schedule_id, False)
+            return {"ok": True, "state": updated.state, "error": ""}
+        return {"ok": False, "state": req.state, "error": f"unknown decision {decision!r}"}
 
     def proposal_expired(self, req: Request) -> None:
         if not req.schedule_id:
@@ -288,10 +233,8 @@ class ScheduleService:
         schedule = self.store.get_schedule(req.schedule_id)
         if schedule is None or schedule.state != "proposed":
             return
-        self.store.update_schedule(
-            schedule.id, state="rejected", next_run=None,
-            last_outcome="The proposal expired unanswered.",
-        )
+        self.store.update_schedule(schedule.id, state="ended", next_run=None,
+                                   last_outcome="The proposal expired unanswered.")
 
     async def held_ended(self, req: Request, reason: str) -> None:
         if not req.schedule_id:
@@ -306,12 +249,97 @@ class ScheduleService:
         else:
             raise ValueError(f"unknown held call outcome: {reason}")
         changes: Dict[str, Any] = {"last_outcome": outcome}
-        if schedule.kind in {"once", "continue"}:
-            changes.update(state="done", next_run=None)
-        self.store.update_schedule(schedule.id, **changes)
-        await self.manager.send_to_approver(
-            f"Schedule S{schedule.id} run ended: {schedule.title}. {outcome}")
+        if schedule.cadence_kind == "once":
+            changes.update(state="ended", next_run=None)
+        updated = self.store.update_schedule(schedule.id, **changes)
+        await self._notice(updated, f"{updated.title}: {outcome}")
 
+    # -- editing and acting ------------------------------------------------
+    async def edit(self, schedule_id: int, *, owner: bool, changes: Dict[str, Any]) -> Dict[str, Any]:
+        if not owner:
+            raise PermissionError("only Aaron can create or change schedules")
+        old = self.store.get_schedule(schedule_id)
+        if old is None:
+            raise ValueError(f"no such schedule: {schedule_id}")
+        immediate: Dict[str, Any] = {}
+        if "title" in changes:
+            immediate["title"] = changes["title"]
+        if "cadence_kind" in changes or "cadence" in changes:
+            kind = changes.get("cadence_kind", old.cadence_kind)
+            cadence = changes.get("cadence", old.cadence)
+            cadence_module.validate(kind, cadence)
+            immediate["cadence_kind"] = kind
+            immediate["cadence"] = cadence
+        if "report_every_time" in changes:
+            immediate["report_every_time"] = bool(changes["report_every_time"])
+        if "until" in changes:
+            immediate["until"] = changes["until"]
+        if immediate and old.state == "active":
+            immediate["next_run"] = cadence_module.next_run(
+                immediate.get("cadence_kind", old.cadence_kind),
+                immediate.get("cadence", old.cadence), old.timezone, time.time())
+        updated = old
+        message = ""
+        if immediate:
+            updated = self.store.update_schedule(schedule_id, **immediate)
+            message = f"{updated.title} updated."
+        needs_approval = "prompt" in changes or "scopes" in changes
+        if needs_approval:
+            prompt = changes.get("prompt", old.prompt)
+            scopes = changes.get("scopes", old.scopes)
+            missing = self._missing(prompt, scopes)
+            if missing:
+                raise ValueError(f"missing capability: {self._labels(missing)}")
+            updated = self.store.update_schedule(schedule_id, prompt=prompt, scopes=scopes,
+                                                 state="proposed", revision=old.revision + 1)
+            await self._notice(updated, self._proposal_text(updated))
+            message = f"Updated proposal sent for {updated.title}."
+        logger.info("[schedules] %s edited (needs_approval=%s)", schedule_id, needs_approval)
+        return {"schedule": updated, "applied": immediate, "needs_approval": needs_approval,
+                "message": message}
+
+    def valid_actions(self, schedule: Schedule) -> List[str]:
+        actions = set(_ACTIONS_BY_STATE.get(schedule.state, set()))
+        actions.add("edit")
+        return sorted(actions)
+
+    async def action(self, schedule_id: int, action: str, *, owner: bool) -> Schedule:
+        if not owner:
+            raise PermissionError("only Aaron can create or change schedules")
+        schedule = self.store.get_schedule(schedule_id)
+        if schedule is None:
+            raise ValueError(f"no such schedule: {schedule_id}")
+        action = action.strip().lower().replace(" ", "_")
+        valid = self.valid_actions(schedule)
+        if action not in _ACTION_NAMES or action not in valid:
+            raise ValueError(f"{action} is not valid for a schedule that is {schedule.state} "
+                             f"(valid actions: {', '.join(valid)})")
+        now = time.time()
+        if action == "pause":
+            return self.store.update_schedule(schedule_id, state="paused")
+        if action == "resume":
+            next_run = cadence_module.next_run(schedule.cadence_kind, schedule.cadence,
+                                               schedule.timezone, now)
+            return self.store.update_schedule(schedule_id, state="active", next_run=next_run,
+                                              consecutive_failures=0)
+        if action == "run_now":
+            if self.store.request_running_for_schedule(schedule_id) is not None:
+                raise ValueError(f"{schedule.title} already has a run in flight; wait for it to finish")
+            return self.store.update_schedule(schedule_id, next_run=now)
+        if action == "stop":
+            return self.store.update_schedule(schedule_id, state="ended", next_run=None,
+                                              last_outcome="stopped")
+        if action == "start_again":
+            missing = self._missing(schedule.prompt, schedule.scopes)
+            if missing:
+                raise ValueError(f"missing capability: {self._labels(missing)}")
+            next_run = cadence_module.next_run(schedule.cadence_kind, schedule.cadence,
+                                               schedule.timezone, now)
+            return self.store.update_schedule(schedule_id, state="active", next_run=next_run,
+                                              consecutive_failures=0)
+        raise ValueError(f"unknown action: {action}")
+
+    # -- firing --------------------------------------------------------------
     async def tick(self, now: Optional[float] = None) -> None:
         now = time.time() if now is None else now
         if str(self.store.settings().get("GATE_SCHEDULES_PAUSED", "0")).lower() in {"1", "true", "yes", "on"}:
@@ -320,212 +348,181 @@ class ScheduleService:
             try:
                 await self._fire(schedule, now)
             except Exception:
-                logger.exception("schedule S%s failed during its tick", schedule.id)
+                logger.exception("schedule %s failed during its tick", schedule.id)
 
     async def _fire(self, schedule: Schedule, now: float) -> None:
-        if sha256(schedule.prompt) != schedule.prompt_sha256:
-            self.store.update_schedule(schedule.id, state="failed", next_run=None,
-                                       last_outcome="Prompt hash mismatch; refused to run.")
-            await self.manager.send_to_approver(
-                f"Schedule S{schedule.id} failed its prompt hash check and did not run: {schedule.title}")
+        if schedule.until is not None and now >= schedule.until:
+            updated = self.store.update_schedule(schedule.id, state="ended", next_run=None,
+                                                 last_outcome="reached its end date")
+            logger.info("[schedules] %s ended: reached its end date", schedule.id)
+            await self._notice(updated, f"{updated.title} has reached its end date and will not run again.")
             return
-        if schedule.kind == "continue":
-            if schedule.run_count >= schedule.max_runs:
-                self.store.update_schedule(schedule.id, state="done", next_run=None,
-                                           last_outcome="Stopped at the approved run limit.")
-                await self.manager.send_to_approver(f"Schedule S{schedule.id} stopped at its run limit: {schedule.title}")
-                return
-            if schedule.deadline is not None and now >= schedule.deadline:
-                self.store.update_schedule(schedule.id, state="done", next_run=None,
-                                           last_outcome="Stopped at the approved deadline.")
-                await self.manager.send_to_approver(f"Schedule S{schedule.id} reached its deadline: {schedule.title}")
-                return
         running = self.store.request_running_for_schedule(schedule.id)
         if running is not None:
-            # Operational (skip/limit/deadline/outcome) lines never enter schedule.notes:
-            # notes feed straight into the next run's prompt as PROGRESS NOTES, and this is
-            # not something the model said -- it would be reading its own scheduler's chatter.
-            note = f"Skipped a firing because request #{running.id} was still running."
-            next_run = None if schedule.kind == "once" else (
-                cron.next_fire(schedule.cron, now, schedule.timezone) if schedule.kind == "recurring"
-                else now + MIN_CONTINUE_DELAY)
-            self.store.update_schedule(schedule.id, next_run=next_run,
-                                       state="done" if schedule.kind == "once" else schedule.state,
-                                       last_outcome=note)
-            self.store.task_event(schedule.task_id, "note", note, chat_id=schedule.chat_id)
+            run_id = self.store.create_schedule_run(schedule.id, None, now)
+            self.store.finish_schedule_run(run_id, finished_at=now, complete=False, outcome="skipped",
+                                           result_line="", final_status="", denied=[], note="",
+                                           changed=False, cost_usd=None)
+            next_run = cadence_module.next_run(schedule.cadence_kind, schedule.cadence,
+                                               schedule.timezone, now)
+            self.store.update_schedule(schedule.id, next_run=next_run)
+            logger.info("[schedules] %s skipped a firing: previous run still in flight", schedule.id)
             return
-        prompt = schedule.prompt
-        if schedule.kind == "continue" and schedule.notes:
-            prompt += "\n\n--- PROGRESS NOTES FROM EARLIER RUNS ---\n" + "\n\n".join(schedule.notes)
         req = self.store.create_request(
             chat_id=schedule.chat_id, sender="Aaron", sender_name="Aaron", mode="schedule", subject="",
-            original_message=schedule.prompt, summary=schedule.title, scopes=list(schedule.scopes), prompt=prompt,
-            state="approved", task_id=schedule.task_id, schedule_id=schedule.id, schedule_kind=schedule.kind,
+            original_message=schedule.prompt, summary=schedule.title, scopes=list(schedule.scopes),
+            prompt=schedule.prompt, state="approved", task_id=schedule.task_id, schedule_id=schedule.id,
+            schedule_kind=schedule.cadence_kind,
         )
-        # The revision this run started from. A continue signal from an older revision
-        # (the owner edited the schedule mid-run) is a different, unapproved job talking --
-        # finished() checks this before ever acting on that signal.
+        # The revision this run started from: finished() refuses to act on a signal
+        # from an older revision if the owner edited the schedule while it ran.
         self.store.set_state(req.id, "approved", status={"schedule_revision": schedule.revision})
-        if schedule.kind == "recurring":
-            next_run = cron.next_fire(schedule.cron, now, schedule.timezone)
-        else:
-            next_run = None
+        next_run = cadence_module.next_run(schedule.cadence_kind, schedule.cadence, schedule.timezone, now)
+        self.store.create_schedule_run(schedule.id, req.id, now)
         self.store.update_schedule(schedule.id, next_run=next_run, last_run=now, last_request_id=req.id,
                                    run_count=schedule.run_count + 1)
-        self.store.task_event(schedule.task_id, "request", f"Scheduled run #{schedule.run_count + 1}: {schedule.title}",
+        self.store.task_event(schedule.task_id, "request", f"Scheduled run: {schedule.title}",
                               chat_id=schedule.chat_id, request_id=req.id, state="running")
+        logger.info("[schedules] %s fired: request #%s", schedule.id, req.id)
         asyncio.create_task(self.manager.execute(req))
 
+    # -- finishing a run -------------------------------------------------
     async def finished(self, req: Request, status: Dict[str, Any]) -> bool:
-        """Update the schedule and report. Returns True when normal delivery is replaced.
-
-        Re-reads the schedule fresh: it is the live owner-facing truth, and a run can
-        outlast an owner action taken while it was in flight (pause, edit, delete). Only
-        a schedule still "active", and still on the revision this run started from, is
-        ever moved on from here -- paused/proposed/rejected/done are left exactly where
-        the owner put them; this run's note and outcome are still recorded either way."""
-        if not req.schedule_id or self.is_proposal_request(req):
+        if not req.schedule_id:
             return False
         schedule = self.store.get_schedule(req.schedule_id)
         if schedule is None:
-            # Deleted while it ran: no notice, no further fire. Nothing to update.
             return True
-        ok = bool(status.get("ok"))
-        # The revision this run started from. manager.execute() carries it from the
-        # request's own pre-run status into the status handed here, since `req` itself
-        # can be the in-memory object from before that status was ever written.
+        outcome = run_outcome(status)
+        complete = outcome == "complete"
+        finished_at = status.get("finished_at") or time.time()
+        result_line = str(status.get("result_line") or "")
+        final_status = str(status.get("final_status") or status.get("summary") or status.get("error") or "")
+        denied = list(status.get("denied") or [])
+        note = str(status.get("note") or "")
+        # The newest schedule_runs row by id is THIS run's own (still-blank) row,
+        # created by _fire before the executor was awaited -- the previous run to
+        # compare against for "changed" is the next one back, not that row.
+        run_row = self._run_row_for_request(schedule.id, req.id)
+        recent = self.store.schedule_runs(schedule.id, limit=2)
+        prev = next((r for r in recent if r.get("id") != (run_row or {}).get("id")), None)
+        changed = prev is None or (prev.get("result_line"), prev.get("note")) != (result_line, note)
+        run_id = run_row["id"] if run_row else self.store.create_schedule_run(schedule.id, req.id, finished_at)
+        self.store.finish_schedule_run(run_id, finished_at=finished_at, complete=complete, outcome=outcome,
+                                       result_line=result_line, final_status=final_status, denied=denied,
+                                       note=note, changed=changed, cost_usd=status.get("cost_usd"))
+        logger.info("[schedules] %s run #%s finished: outcome=%s", schedule.id, run_id, outcome)
         started_revision = status.get("schedule_revision")
         if started_revision is None:
             started_revision = (req.status or {}).get("schedule_revision")
         stale = schedule.state != "active" or (
             started_revision is not None and started_revision != schedule.revision)
-        failures = 0 if ok else schedule.consecutive_failures + 1
-        result = str(status.get("final_status") or status.get("summary") or status.get("error") or "")
-        denied = [step for step in (status.get("steps") or [])
-                  if isinstance(step, dict) and not step.get("ok") and step.get("denied")]
-        changes: Dict[str, Any] = {"last_outcome": result}
-        next_run_note = ""
-        if stale:
-            # The owner acted mid-run: leave state and next_run exactly as they are.
-            # This run's own outcome is still recorded for the record, but it never
-            # reactivates a paused/edited/rejected/done schedule, and a continue signal
-            # from an older revision is ignored outright.
-            changes["consecutive_failures"] = schedule.consecutive_failures
-        else:
-            changes["consecutive_failures"] = failures
-            if schedule.kind == "once":
-                changes.update(state="done" if ok else "failed", next_run=None)
-            elif schedule.kind == "continue":
-                signal = status.get("continue") or {}
-                if signal:
-                    delay = int(signal.get("delay_minutes") or 0) * 60
-                    note = str(signal.get("note") or "").strip()
-                    if delay < MIN_CONTINUE_DELAY:
-                        ok = False
-                        failures = schedule.consecutive_failures + 1
-                        result = "The continue tool requested a delay shorter than 5 minutes."
-                        changes.update(consecutive_failures=failures, last_outcome=result,
-                                      state="failed", next_run=None)
-                    else:
-                        notes = list(schedule.notes) + [note]
-                        next_run = time.time() + delay
-                        if schedule.run_count >= schedule.max_runs:
-                            changes.update(notes=notes, state="done", next_run=None)
-                            next_run_note = "No further runs: run limit."
-                        elif schedule.deadline and next_run > schedule.deadline:
-                            result = (f"stopped: the next wake-up would pass the deadline "
-                                      f"{_shown(schedule.deadline, schedule.timezone)}")
-                            changes.update(notes=notes, state="done", next_run=None, last_outcome=result)
-                            next_run_note = "No further runs: deadline."
-                        else:
-                            changes.update(notes=notes, state="active", next_run=next_run)
-                            next_run_note = f"Next run: {_shown(next_run, schedule.timezone)}"
-                else:
-                    changes.update(state="done" if ok else "failed", next_run=None)
-                    next_run_note = "No further runs: no continue." if ok else "No further runs: failed."
-            if failures >= 3:
-                changes.update(state="paused", next_run=None)
-        updated = self.store.update_schedule(schedule.id, **changes)
-        if not stale and failures >= 3:
-            await self.manager.send_to_approver(
-                f"Schedule S{schedule.id} paused after three consecutive failed runs: {schedule.title}")
-        elif not stale and not ok and schedule.kind == "continue" and updated.state == "active":
-            next_run_note = (f"{next_run_note} ({3 - failures} more failure(s) pause this schedule.)"
-                             if next_run_note else f"({3 - failures} more failure(s) pause this schedule.)")
         if stale:
             self.store.task_event(schedule.task_id, "note",
-                                  f"Run finished but schedule S{schedule.id} had moved on "
-                                  f"({schedule.state}); not reactivated.", chat_id=schedule.chat_id)
+                                  f"Run finished but {schedule.title} had moved on ({schedule.state}); "
+                                  "not reactivated.", chat_id=schedule.chat_id)
             return True
-        from .jevagent import is_write_tool
-        steps = status.get("steps") or []
-        # The Jev path reports every call it made in `steps` (ok True or False) -- those
-        # entries are informative about successful writes on their own. The Claude Code
-        # executor path only ever puts DENIED calls in `steps` (every call it made is in
-        # `tool_calls` instead), so when every entry here is a denial, `steps` has nothing
-        # to say about writes either way and the tool_calls fallback is what applies.
-        informative = [step for step in steps if isinstance(step, dict) and not step.get("denied")]
-        successful_writes = any(
-            bool(step.get("ok")) and step.get("tool") != "mcp__host__schedule_continue"
-            and is_write_tool(str(step.get("tool") or ""))
-            for step in informative
-        )
-        if not informative and ok:
-            successful_writes = any(
-                tool != "mcp__host__schedule_continue" and is_write_tool(str(tool))
-                for tool in status.get("tool_calls") or []
-            )
-        final_continue = schedule.kind == "continue" and updated.state in {"done", "failed"}
-        final_failed_once = schedule.kind == "once" and not ok
-        if (schedule.report_mode == "always" or successful_writes or not ok
-                or final_continue or final_failed_once):
-            word = "done" if ok else "failed"
-            limit_part = f" of {schedule.max_runs}" if schedule.kind == "continue" else ""
-            lines = [f"Schedule S{schedule.id} run {schedule.run_count}{limit_part} {word}: {schedule.title}",
-                     result]
-            if not ok:
-                for step in denied:
-                    granted = ", ".join(schedule.scopes) or "none"
-                    lines.append(f"{step.get('tool')} refused: outside scope (granted: {granted})")
-            if next_run_note:
-                lines.append(next_run_note)
-            await self.manager.send_to_approver("\n".join(lines))
+        if note:
+            self.store.update_schedule(schedule.id, last_note=note)
+        run_dict = {"outcome": outcome, "result_line": result_line, "final_status": final_status,
+                   "denied": denied, "note": note, "changed": changed, "cost_usd": status.get("cost_usd")}
+        stop = bool(status.get("stop"))
+        failures = 0 if complete else schedule.consecutive_failures + 1
+        if stop:
+            updated = self.store.update_schedule(schedule.id, state="ended", next_run=None,
+                                                 last_outcome=result_line or "stopped itself",
+                                                 consecutive_failures=0)
+            logger.info("[schedules] %s ended: STATUS: STOP", schedule.id)
+            await self._notice(updated, f"{updated.title}: {result_line or 'it stopped itself.'} "
+                                        "It will not run again.")
+            return True
+        if failures >= 3:
+            updated = self.store.update_schedule(schedule.id, state="paused", next_run=None,
+                                                 consecutive_failures=failures, last_outcome=result_line)
+            logger.info("[schedules] %s paused: three consecutive runs that could not finish", schedule.id)
+            paused_run = dict(run_dict)
+            paused_run["paused"] = True
+            await self._notice(updated, self.notice_text(updated, paused_run, None))
+            return True
+        extra: Dict[str, Any] = {}
+        if schedule.cadence_kind == "once":
+            extra.update(state="ended", next_run=None)
+        updated = self.store.update_schedule(schedule.id, consecutive_failures=failures,
+                                             last_outcome=result_line, **extra)
+        send = (not complete) or schedule.report_every_time or changed
+        if send:
+            await self._notice(updated, self.notice_text(updated, run_dict, updated.next_run))
         return True
 
+    # -- notice text -------------------------------------------------------
+    def notice_text(self, schedule: Schedule, run: Dict[str, Any], next_run: Optional[float]) -> str:
+        if run.get("paused"):
+            return (f'{schedule.title} is paused after three runs that could not finish. '
+                    'Say "start it again" when it is fixed.')
+        outcome = run.get("outcome")
+        result_line = run.get("result_line") or ""
+        if outcome == "complete":
+            text = f"{schedule.title}: {result_line}"
+            if schedule.cadence_kind != "once" and next_run is not None:
+                text += f" Next check {_shown(next_run, schedule.timezone)}."
+            return text
+        if outcome == "incomplete":
+            scope_names: List[str] = []
+            for item in run.get("denied") or []:
+                tool = item.get("tool") if isinstance(item, dict) else item
+                for name in self._scopes_for_tool(str(tool)):
+                    if name not in scope_names:
+                        scope_names.append(name)
+            labels = self._labels(sorted(scope_names)) if scope_names else "do part of this"
+            return (f"{schedule.title} could not finish: it is not allowed to {labels}. {result_line} "
+                    f'Reply "let it {labels}" to fix that, or "stop it".')
+        if outcome == "failed":
+            remaining = max(0, 3 - schedule.consecutive_failures)
+            when = _shown(next_run, schedule.timezone) if next_run is not None else "soon"
+            reason = result_line or "it failed"
+            return (f"{schedule.title} could not finish: {reason}. I will try again at {when}. "
+                    f"After {remaining} more misses I will pause it and tell you.")
+        return f"{schedule.title}: {result_line}"
+
+    # -- plain-text chat commands -------------------------------------------
+    # The regex-driven "S<id>" handle stays only as a fallback: schedcmd.py (P4)
+    # owns the plain-language router path. This exists so callers that already
+    # go through schedules.command (manager.py's chat dispatch) keep working.
     async def command(self, text: str, *, owner: bool) -> bool:
-        import re
         t = " ".join((text or "").strip().split())
-        if t.lower() in {"list schedules", "schedules", "schedule list"}:
+        low = t.lower()
+        if low in {"list schedules", "schedules", "schedule list"}:
             if not owner:
                 return False
             rows = self.store.schedules()
-            lines = ["Schedules:"] + [f"S{s.id} {s.title} ({s.state}; {cadence(s)})" for s in rows]
+            lines = [f"{s.title}: {cadence_module.describe(s.cadence_kind, s.cadence, s.timezone)} "
+                     f"({s.state})" for s in rows]
             await self.manager.send_to_approver("\n".join(lines) if rows else "No schedules.")
             return True
-        if t.lower() in {"pause all schedules", "pause schedules"}:
+        if low in {"pause all schedules", "pause schedules"}:
             if not owner:
                 return False
             self.store.set_setting("GATE_SCHEDULES_PAUSED", "1")
             await self.manager.send_to_approver("All schedules are paused.")
             return True
-        if t.lower() in {"resume all schedules", "resume schedules"}:
+        if low in {"resume all schedules", "resume schedules"}:
             if not owner:
                 return False
             self.store.set_setting("GATE_SCHEDULES_PAUSED", "0")
             await self.manager.send_to_approver("All schedules may fire again.")
             return True
-        # The word "schedule" or the S prefix is required, so "delete 5" about something
-        # else is never read as a schedule command.
-        m = re.match(r"^(pause|resume|delete|run now)\s+(?:schedule\s+s?|s)(\d+)$", t, re.I)
+        m = re.match(r"^(pause|resume|delete|stop|run now)\s+(?:schedule\s+s?|s)(\d+)$", t, re.I)
         if not m:
             return False
         if not owner:
             return False
         action = m.group(1).lower().replace(" ", "_")
+        if action == "delete":
+            action = "stop"
         try:
             schedule = await self.action(int(m.group(2)), action, owner=True)
         except ValueError as exc:
             await self.manager.send_to_approver(str(exc))
             return True
-        await self.manager.send_to_approver(f"Schedule S{schedule.id} {action.replace('_', ' ')}: {schedule.title}")
+        await self.manager.send_to_approver(f"{action.replace('_', ' ').capitalize()}: {schedule.title}")
         return True

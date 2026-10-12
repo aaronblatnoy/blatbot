@@ -46,7 +46,7 @@ async def host_status(args: Dict[str, Any]) -> str:
     return "\n\n".join(f"## {p}\n{o}" for p, o in zip(parts, outs))
 
 
-def sdk_server(continue_state: Optional[Dict[str, Any]] = None, *, vault_prefixes: Optional[List[str]] = None) -> Any:
+def sdk_server(*, vault_prefixes: Optional[List[str]] = None) -> Any:
     """The same tool as an in-process MCP server for the Claude Code executor.
 
     vault_prefixes bounds vault_search/vault_read/vault_list to the vault-relative
@@ -72,15 +72,6 @@ def sdk_server(continue_state: Optional[Dict[str, Any]] = None, *, vault_prefixe
         return {"content": [{"type": "text", "text": vault_list(args, vault_prefixes)}]}
 
     tools = [_host_status, _vault_search, _vault_read, _vault_list]
-    if continue_state is not None:
-        @tool("schedule_continue", SCHEDULE_CONTINUE_DESCRIPTION, SCHEDULE_CONTINUE_SCHEMA)
-        async def _schedule_continue(args: Dict[str, Any]) -> Dict[str, Any]:
-            text = schedule_continue(args)
-            continue_state.clear()
-            continue_state.update({"delay_minutes": int(args["delay_minutes"]), "note": str(args["note"]).strip()})
-            return {"content": [{"type": "text", "text": text}]}
-
-        tools.append(_schedule_continue)
     return create_sdk_mcp_server(name="host", version="1.0.0", tools=tools)
 
 
