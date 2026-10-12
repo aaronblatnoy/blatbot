@@ -14,6 +14,86 @@ from inkbox_claude.gate.router import RouterOutput, RouterRequest, SchedulePropo
 from inkbox_claude.gate.scopes import SCOPES
 
 
+class _FakeRouter:
+    def __init__(self):
+        self.next = RouterOutput(reply=None, request=None)
+
+    async def plan_query(self, **kwargs):
+        return None
+
+    async def route(self, **kwargs):
+        return self.next.model_copy(deep=True)
+
+    async def phrase(self, instruction, facts):
+        return "Before I do this, I need your yes: remove the named item."
+
+
+class _FakeExecutor:
+    def __init__(self, result=None):
+        self.result = result or {"ok": True, "summary": "looked it up", "raw": "looked it up",
+                                 "tool_calls": ["mcp__x__read"], "wrote": False}
+        self.ran = []
+
+    async def run(self, req, **kwargs):
+        self.ran.append((req, kwargs))
+        return dict(self.result)
+
+
+def manager(tmp_path, result=None):
+    """A real GateSessionManager with only the router and executor faked -- the
+    manager block under test (the ScheduleProposal -> schedprop.capabilities_for
+    -> schedules.propose path) is exercised for real."""
+    sent = []
+
+    async def send_fn(target, text, mode, meta):
+        sent.append((target, text, mode, meta))
+
+    cfg = SimpleNamespace(deepseek_api_key="x", deepseek_model="m", claude_model="sonnet",
+                          approver_imessage_conversation_id="conv-aaron", approver_phone="")
+    out = gm.GateSessionManager(cfg=cfg, send_fn=send_fn, mcp_server=None, identity_info={},
+                                store_path=str(tmp_path / "gate.db"), exec_cwd=str(tmp_path))
+    out.router = _FakeRouter()
+    out.executor = _FakeExecutor(result)
+    out.task_picker = None
+    return out, sent
+
+
+class RecordingSchedules:
+    """Stand-in for ScheduleService.propose, so these manager-block tests check
+    exactly what manager.py passes it without also exercising the real store."""
+
+    def __init__(self):
+        self.calls = []
+
+    async def propose(self, **kwargs):
+        self.calls.append(kwargs)
+        return SimpleNamespace(id=len(self.calls), **kwargs)
+
+    async def command(self, text: str, *, owner: bool) -> bool:
+        return False
+
+
+class RaisingScopePicker:
+    """A Jev scope picker that fails the test if it is ever consulted: schedule
+    permission is chosen with no probability judgment at all (SPEC.md's
+    "Permission" section)."""
+
+    async def judge_scopes_tree(self, **kwargs):
+        raise AssertionError("Jev must never be consulted on a schedule code path")
+
+
+def new_proposal(cadence_kind="once", **changes):
+    spec = {"title": "Scheduled check", "prompt": "Check the roster", "cadence_kind": cadence_kind}
+    if cadence_kind == "once":
+        spec["cadence"] = {"at": "2026-11-01T09:00:00"}
+    elif cadence_kind == "every":
+        spec["cadence"] = {"minutes": 240}
+    elif cadence_kind == "daily":
+        spec["cadence"] = {"time": "08:00"}
+    spec.update(changes)
+    return spec
+
+
 # ---------------------------------------------------------------------------
 # Labels
 # ---------------------------------------------------------------------------
@@ -206,8 +286,6 @@ def test_router_schedule_proposal_rejects_an_unknown_cadence_kind():
 # ---------------------------------------------------------------------------
 # Manager block
 # ---------------------------------------------------------------------------
-
-from tests.schedprop_helpers import RecordingSchedules, RaisingScopePicker, manager, new_proposal
 
 
 def test_manager_calls_propose_with_the_new_keyword_arguments_and_origin_thread(tmp_path):

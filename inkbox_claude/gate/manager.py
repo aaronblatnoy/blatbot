@@ -1400,10 +1400,11 @@ class GateSessionManager:
                 self.store.set_thread(req.chat_id, "idle")
                 self.task_note(req, "failed", f"Interrupted by a restart: {req.summary}", state="open")
                 if req.schedule_id:
-                    await self.schedules.finished(
-                        req, {"ok": False, "error": "interrupted by a restart",
-                              "summary": "interrupted by a restart", "raw": "", "tool_calls": []},
-                    )
+                    # A restart is not a failed run: schedules.interrupted() records its own
+                    # outcome, does not count toward the three-strikes pause, and re-fires the
+                    # schedule once immediately if that is warranted -- finished()/run_outcome
+                    # would wrongly treat this as a failure and pause after three restarts.
+                    await self.schedules.interrupted(req)
                     logger.info("[gate] reported interrupted scheduled request #%s", req.id)
                     continue
                 line = (f"That one stopped when I restarted, so it never finished: {req.summary}. "
@@ -2077,6 +2078,9 @@ class GateSessionManager:
 
     # -- expiry ----------------------------------------------------------------
     async def _expire_pending(self) -> None:
+        # New-model proposals are schedule rows in state "proposed", not requests, so
+        # they are never in store.expire_older_than's result; they expire here too.
+        await self.schedules.expire_stale_proposals(EXPIRE_SECONDS)
         for req in self.store.expire_older_than(EXPIRE_SECONDS):
             self.store.set_thread(req.chat_id, "idle")
             if self.schedules.is_proposal_request(req):

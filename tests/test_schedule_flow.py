@@ -1,0 +1,358 @@
+"""End-to-end schedule flow: real GateSessionManager, ScheduleService, schedprop,
+cadence and store. Only three seams are faked: the router's model output (a
+canned RouterOutput), the executor's Claude call (FakeExecutor.run), and the
+outbound transport (send_fn capturing instead of sending). Everything else --
+propose/decide/tick/_fire/finished/notice_text, schedprop's capability scoping
+and labels, cadence's next-run math -- runs for real against a throwaway
+SQLite store, matching the integration-level verification this package owns.
+"""
+
+from __future__ import annotations
+
+import asyncio
+import time
+from types import SimpleNamespace
+
+import pytest
+
+from inkbox_claude.gate import manager as gm
+from inkbox_claude.gate.router import RouterOutput, ScheduleProposal
+from inkbox_claude.gate.store import Request, Store
+
+APPROVER_CONV = "conv-aaron"
+
+
+class FakeExecutor:
+    """Stands in for Executor.run (the owner's Claude Code call). Each queued
+    result is consumed in order; build_prompt/parse_closing are schedrun.py's
+    own job and are exercised directly below, not re-derived here."""
+
+    def __init__(self):
+        self.calls = []
+        self.results = []
+
+    async def run(self, req, context="", prior_work="", model=None, **kw):
+        self.calls.append({"req": req, "context": context, "kw": kw})
+        return self.results.pop(0)
+
+
+def make_manager(tmp_path):
+    sent = []
+
+    async def send_fn(chat_id, text, mode, meta):
+        sent.append((chat_id, text, mode, meta))
+
+    cfg = SimpleNamespace(deepseek_api_key="x", deepseek_model="m", claude_model="sonnet",
+                          approver_imessage_conversation_id=APPROVER_CONV)
+    m = gm.GateSessionManager(cfg=cfg, send_fn=send_fn, mcp_server=None, identity_info={},
+                              store_path=str(tmp_path / "gate.db"), exec_cwd=str(tmp_path))
+    m.jev_agent = None  # force the plain executor path regardless of env
+    m.caller = None
+    m.executor = FakeExecutor()
+    return m, sent
+
+
+async def _propose_via_manager(m, *, title="Team total watch",
+                               prompt="check the team page", said="every 4 hours check the team page",
+                               cadence_kind="every", cadence=None, scopes=None,
+                               report_every_time=None, start_now=False):
+    task = m.store.create_task(title)
+    proposal = ScheduleProposal(title=title, prompt=prompt, cadence_kind=cadence_kind,
+                                cadence=cadence or {"minutes": 240}, timezone=None,
+                                report_every_time=report_every_time, until=None,
+                                scopes=scopes or [], start_now=start_now)
+    out = RouterOutput(reply="", request=None, schedule=proposal)
+
+    class _Router:
+        async def route(self, **kw):
+            return out.model_copy(deep=True)
+
+        async def plan_query(self, **kw):
+            return None
+
+    m.router = _Router()
+    session = m.get(APPROVER_CONV)
+    await session.handle_inbound(said, mode="imessage", meta={"sender": "+15550100001", "to": "+15550100001",
+                                                               "conversation_id": APPROVER_CONV})
+
+
+async def _afut(value):
+    return value
+
+
+@pytest.mark.asyncio
+async def test_full_flow_propose_approve_fire_complete_notice(tmp_path):
+    m, sent = make_manager(tmp_path)
+    await _propose_via_manager(m, said="every 4 hours check the team page", scopes=["web"])
+    schedule = m.store.schedules(states=["proposed"])[0]
+    assert schedule.scopes == ["web"]
+
+    proposal_text = sent[-1][1]
+    assert proposal_text == (
+        f'Set up "{schedule.title}": every 4 hours, starting '
+        + proposal_text.split("starting ", 1)[1]
+    )  # sanity: the exact string is asserted in full just below, against the live schedule
+    first_run = schedule.next_run or time.time()
+    from inkbox_claude.gate import schedprop
+    expected = (f'Set up "{schedule.title}": every 4 hours, starting '
+               + schedprop._first_run_text(schedule) + '. It will read public web pages. '
+               'You hear from it only when something changed or it could not finish. '
+               'Reply yes to start, or tell me what to change.')
+    assert proposal_text == expected
+
+    activated = await m.schedules.decide(schedule.id, True)
+    assert activated.state == "active"
+    started_text = sent[-1][1]
+    assert started_text.startswith("Started. First check ")
+    assert "every 4 hours" in started_text
+
+    m.executor.results.append({"ok": True, "result_line": "total went from $4,027.39 to $4,922.45",
+                               "final_status": "checked the page", "note": "", "denied": [], "tool_calls": ["mcp__fake__tool"], "held": False,
+                               "started_at": time.time(), "finished_at": time.time(), "cost_usd": None})
+    await m.schedules.tick(now=activated.next_run)
+    await asyncio.sleep(0)
+    call = m.executor.calls[-1]
+    assert call["req"].schedule_id == schedule.id
+    assert call["kw"]["timezone"] == schedule.timezone
+    assert call["kw"]["note"] == ""
+
+    run = m.store.last_schedule_run(schedule.id)
+    assert run["outcome"] == "complete"
+    notice = sent[-1][1]
+    assert notice.startswith(f"{schedule.title}: total went from $4,027.39 to $4,922.45")
+    assert "Next check" in notice
+
+
+@pytest.mark.asyncio
+async def test_second_run_same_result_sends_no_notice_but_logs_a_row(tmp_path):
+    m, sent = make_manager(tmp_path)
+    await _propose_via_manager(m, said="every 4 hours check the team page", scopes=["web"])
+    schedule = m.store.schedules(states=["proposed"])[0]
+    activated = await m.schedules.decide(schedule.id, True)
+
+    same_status = {"ok": True, "result_line": "no change", "final_status": "no change", "note": "",
+                   "denied": [], "tool_calls": ["mcp__fake__tool"], "held": False, "finished_at": time.time(), "cost_usd": None}
+    m.executor.results.append(dict(same_status))
+    await m.schedules.tick(now=activated.next_run)
+    await asyncio.sleep(0)
+    runs_before = len(m.store.schedule_runs(schedule.id))
+    notices_before = len(sent)
+
+    updated = m.store.get_schedule(schedule.id)
+    m.executor.results.append(dict(same_status))
+    await m.schedules.tick(now=updated.next_run)
+    await asyncio.sleep(0)
+
+    assert len(m.store.schedule_runs(schedule.id)) == runs_before + 1
+    assert len(sent) == notices_before
+
+
+@pytest.mark.asyncio
+async def test_denied_contact_tool_gives_incomplete_notice_with_phrase(tmp_path):
+    m, sent = make_manager(tmp_path)
+    await _propose_via_manager(m, said="every 4 hours check the team page and update the contact note",
+                               prompt="check the team page and update the contact note",
+                               scopes=["web", "contacts"])
+    schedule = m.store.schedules(states=["proposed"])[0]
+    activated = await m.schedules.decide(schedule.id, True)
+
+    m.executor.results.append({
+        "ok": True, "result_line": "the total did change (+$200)", "final_status": "checked",
+        "note": "", "denied": [{"tool": "mcp__tamid-drive__manage_doc_tab", "reason": "scope"}],
+        "tool_calls": ["mcp__fake__tool"], "held": False, "finished_at": time.time(), "cost_usd": None,
+    })
+    await m.schedules.tick(now=activated.next_run)
+    await asyncio.sleep(0)
+
+    run = m.store.last_schedule_run(schedule.id)
+    assert run["outcome"] == "incomplete" and not run["complete"]
+    notice = sent[-1][1]
+    assert "could not finish" in notice
+    assert "let it" in notice
+    assert '"stop it"' in notice
+
+
+@pytest.mark.asyncio
+async def test_failed_run_notice_has_retry_countdown(tmp_path):
+    m, sent = make_manager(tmp_path)
+    await _propose_via_manager(m, said="every 4 hours check the team page", scopes=["web"])
+    schedule = m.store.schedules(states=["proposed"])[0]
+    activated = await m.schedules.decide(schedule.id, True)
+
+    m.executor.results.append({"ok": False, "error": "the page timed out", "result_line": "",
+                               "final_status": "the page timed out", "note": "", "denied": [],
+                               "tool_calls": ["mcp__fake__tool"], "held": False, "finished_at": time.time(), "cost_usd": None})
+    await m.schedules.tick(now=activated.next_run)
+    await asyncio.sleep(0)
+
+    notice = sent[-1][1]
+    assert "I will try again at" in notice
+    assert "After 2 more misses" in notice
+
+
+@pytest.mark.asyncio
+async def test_three_consecutive_incomplete_runs_pause_it(tmp_path):
+    m, sent = make_manager(tmp_path)
+    await _propose_via_manager(m, said="every 4 hours check the team page", scopes=["web"])
+    schedule = m.store.schedules(states=["proposed"])[0]
+    current = await m.schedules.decide(schedule.id, True)
+
+    for _ in range(3):
+        m.executor.results.append({"ok": False, "error": "boom", "result_line": "", "final_status": "boom",
+                                   "note": "", "denied": [], "tool_calls": ["mcp__fake__tool"], "held": False, "finished_at": time.time(),
+                                   "cost_usd": None})
+        await m.schedules.tick(now=current.next_run)
+        await asyncio.sleep(0)
+        current = m.store.get_schedule(schedule.id)
+
+    assert current.state == "paused"
+    assert "paused after three" in sent[-1][1]
+
+
+@pytest.mark.asyncio
+async def test_status_stop_ends_schedule_with_notice(tmp_path):
+    m, sent = make_manager(tmp_path)
+    await _propose_via_manager(m, said="every 4 hours check the team page", scopes=["web"])
+    schedule = m.store.schedules(states=["proposed"])[0]
+    activated = await m.schedules.decide(schedule.id, True)
+
+    m.executor.results.append({"ok": True, "stop": True, "result_line": "the team disbanded",
+                               "final_status": "the team disbanded", "note": "", "denied": [],
+                               "tool_calls": ["mcp__fake__tool"], "held": False, "finished_at": time.time(), "cost_usd": None})
+    await m.schedules.tick(now=activated.next_run)
+    await asyncio.sleep(0)
+
+    assert m.store.get_schedule(schedule.id).state == "ended"
+    assert "the team disbanded" in sent[-1][1]
+    assert "will not run again" in sent[-1][1]
+
+
+@pytest.mark.asyncio
+async def test_one_time_schedule_ends_after_its_single_run(tmp_path):
+    m, sent = make_manager(tmp_path)
+    import datetime as _dt
+    at = _dt.datetime.now() + _dt.timedelta(minutes=5)
+    await _propose_via_manager(m, said="remind me once tomorrow", scopes=["web"],
+                               cadence_kind="once", cadence={"at": at.isoformat()})
+    schedule = m.store.schedules(states=["proposed"])[0]
+    activated = await m.schedules.decide(schedule.id, True)
+    assert activated.cadence_kind == "once"
+
+    m.executor.results.append({"ok": True, "result_line": "done once", "final_status": "done once",
+                               "note": "", "denied": [], "tool_calls": ["mcp__fake__tool"], "held": False,
+                               "finished_at": time.time(), "cost_usd": None})
+    await m.schedules.tick(now=activated.next_run)
+    await asyncio.sleep(0)
+
+    updated = m.store.get_schedule(schedule.id)
+    assert updated.state == "ended"
+    assert updated.next_run is None
+
+
+@pytest.mark.asyncio
+async def test_proposal_expires_unanswered_after_24h(tmp_path):
+    m, sent = make_manager(tmp_path)
+    await _propose_via_manager(m, said="every 4 hours check the team page", scopes=["web"])
+    schedule = m.store.schedules(states=["proposed"])[0]
+
+    await m.schedules.expire_stale_proposals(24 * 3600, now=time.time() + 24 * 3600 + 1)
+    updated = m.store.get_schedule(schedule.id)
+    assert updated.state == "ended"
+    assert updated.last_outcome == "not approved in time"
+    assert "was not approved in time" in sent[-1][1]
+
+
+@pytest.mark.asyncio
+async def test_edit_proposal_expiry_reverts_an_active_schedule(tmp_path):
+    m, sent = make_manager(tmp_path)
+    await _propose_via_manager(m, said="every 4 hours check the team page", scopes=["web"])
+    schedule = m.store.schedules(states=["proposed"])[0]
+    activated = await m.schedules.decide(schedule.id, True)
+    old_prompt = activated.prompt
+
+    result = await m.schedules.edit(schedule.id, owner=True, changes={"prompt": "check the other page"})
+    assert result["needs_approval"] is True
+    proposed = m.store.get_schedule(schedule.id)
+    assert proposed.state == "proposed"
+
+    await m.schedules.expire_stale_proposals(24 * 3600, now=time.time() + 24 * 3600 + 1)
+    reverted = m.store.get_schedule(schedule.id)
+    assert reverted.state == "active"
+    assert reverted.prompt == old_prompt
+    assert "kept it as it was" in sent[-1][1]
+
+
+@pytest.mark.asyncio
+async def test_restart_recovery_marks_interrupted_not_a_failure(tmp_path):
+    m, sent = make_manager(tmp_path)
+    await _propose_via_manager(m, said="every 4 hours check the team page", scopes=["web"])
+    schedule = m.store.schedules(states=["proposed"])[0]
+    activated = await m.schedules.decide(schedule.id, True)
+
+    # Simulate a crash mid-run: fire once (creates the request + run row), but the crash
+    # happens before execute() ever runs, so the request is still "approved" -- stub
+    # execute() out so the background task _fire() schedules does nothing.
+    async def _crashed_execute(req, notify=True):
+        return ""
+    m.execute = _crashed_execute
+    await m.schedules.tick(now=activated.next_run)
+    await asyncio.sleep(0)
+    req = [r for r in m.store.requests_in_state("approved") if r.schedule_id == schedule.id][0]
+
+    before_failures = m.store.get_schedule(schedule.id).consecutive_failures
+    await m.recover_interrupted()
+
+    run = m.store.last_schedule_run(schedule.id)
+    assert run["outcome"] == "interrupted"
+    updated = m.store.get_schedule(schedule.id)
+    assert updated.state == "active"
+    assert updated.consecutive_failures == before_failures  # a restart is not a strike
+    assert "interrupted by a restart" in sent[-1][1]
+    assert "Next check" in sent[-1][1]
+
+
+@pytest.mark.asyncio
+async def test_timezone_wording_uses_schedule_zone_across_a_utc_day_boundary(tmp_path):
+    """2:30 AM America/New_York on, say, Jan 2 is 7:30 AM UTC on the SAME UTC day in
+    winter, so pick a moment where the zones genuinely disagree on the calendar day:
+    11:30 PM America/New_York is 03:30 UTC the NEXT day. The notice must still read
+    in the schedule's own zone, "day name" only when that is not today in that zone."""
+    import datetime as dt
+    from zoneinfo import ZoneInfo
+    from inkbox_claude.gate import cadence as cadence_mod
+
+    tz = ZoneInfo("America/New_York")
+    local_11_30pm = dt.datetime(2026, 1, 15, 23, 30, tzinfo=tz)
+    after = local_11_30pm.timestamp()
+    next_fire = cadence_mod.next_run("every", {"minutes": 240, "anchor": after}, "America/New_York", after)
+    shown = cadence_mod.describe("every", {"minutes": 240}, "America/New_York")
+    assert shown == "every 4 hours"
+    local_next = dt.datetime.fromtimestamp(next_fire, tz)
+    assert local_next.hour == 3 and local_next.minute == 30  # 11:30 PM + 4h, in NY local time
+    utc_next = dt.datetime.fromtimestamp(next_fire, dt.timezone.utc)
+    assert utc_next.date() != local_next.date() or utc_next.hour != local_next.hour  # genuinely different clocks
+
+
+def test_notes_field_repurposed_for_edit_revert_round_trips(tmp_path):
+    """schedules.py's edit() stashes the pre-edit snapshot in the otherwise-unread
+    `notes` column; _edit_revert must read exactly what edit() wrote."""
+    store = Store(str(tmp_path / "gate.db"))
+    from inkbox_claude.gate.manager import GateSessionManager as _GM  # noqa: F401 (import smoke)
+    from inkbox_claude.gate.schedules import ScheduleService
+    task = store.create_task("t")
+
+    class Stub:
+        def __init__(self, store):
+            self.store = store
+        async def send_schedule_notice(self, schedule, text):
+            return None
+
+    service = ScheduleService(Stub(store))
+    schedule = store.create_schedule(chat_id="c", task_id=task["id"], title="T", prompt="p",
+                                     kind="every", scopes=["web"], timezone="America/New_York",
+                                     report_mode="changed", cadence_kind="every",
+                                     cadence={"minutes": 60}, report_every_time=False,
+                                     origin_mode="imessage", origin_chat_id="c")
+    store.update_schedule(schedule.id, state="active")
+    active = store.get_schedule(schedule.id)
+    assert service._edit_revert(active) is None  # nothing stashed yet

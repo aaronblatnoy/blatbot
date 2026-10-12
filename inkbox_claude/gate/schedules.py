@@ -10,6 +10,7 @@ before anything runs, and so notices read in plain words."""
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import re
 import time
@@ -228,13 +229,60 @@ class ScheduleService:
         return {"ok": False, "state": req.state, "error": f"unknown decision {decision!r}"}
 
     def proposal_expired(self, req: Request) -> None:
+        """Back-compat: an old-style proposal that still lived as a 'pending' request
+        row (one with a request to expire at all). The new model proposes with no
+        request row, so this is dead in practice unless such a row exists; see
+        expire_stale_proposals for the real path."""
         if not req.schedule_id:
             return
         schedule = self.store.get_schedule(req.schedule_id)
         if schedule is None or schedule.state != "proposed":
             return
-        self.store.update_schedule(schedule.id, state="ended", next_run=None,
-                                   last_outcome="The proposal expired unanswered.")
+        updated = self.store.update_schedule(schedule.id, state="ended", next_run=None,
+                                             last_outcome="not approved in time")
+        return updated
+
+    def _edit_revert(self, schedule: Schedule) -> Optional[Dict[str, Any]]:
+        if not schedule.notes:
+            return None
+        try:
+            data = json.loads(schedule.notes[-1])
+        except (TypeError, ValueError, IndexError):
+            return None
+        return data.get("_edit_revert") if isinstance(data, dict) else None
+
+    async def expire_stale_proposals(self, max_age: float, now: Optional[float] = None) -> None:
+        """A schedule stuck in 'proposed' with no answer for longer than max_age (the
+        24-hour rule). A fresh proposal just ends. An edit proposal (one with a
+        pre-edit snapshot stashed by edit()) reverts to what it was before the edit
+        when that was 'active', or is left 'paused' with a plain reason when it was
+        not (nothing to safely resume)."""
+        now = time.time() if now is None else now
+        for schedule in self.store.schedules(states=["proposed"]):
+            if now - schedule.updated_at < max_age:
+                continue
+            revert = self._edit_revert(schedule)
+            if revert is None:
+                updated = self.store.update_schedule(schedule.id, state="ended", next_run=None,
+                                                     last_outcome="not approved in time")
+                logger.info("[schedules] %s proposal expired unanswered", schedule.id)
+                await self._notice(updated, f"{updated.title} was not approved in time, so it was not set up.")
+                continue
+            if revert.get("state") == "active":
+                next_run = cadence_module.next_run(schedule.cadence_kind, schedule.cadence,
+                                                   schedule.timezone, now)
+                updated = self.store.update_schedule(
+                    schedule.id, prompt=revert["prompt"], scopes=revert["scopes"], state="active",
+                    next_run=next_run, notes=[], last_outcome="an edit expired unanswered; kept as it was")
+                logger.info("[schedules] %s edit proposal expired; reverted to the previous version", schedule.id)
+                await self._notice(updated, f"{updated.title}: that change expired unanswered, so I kept it as it was.")
+            else:
+                updated = self.store.update_schedule(
+                    schedule.id, prompt=revert["prompt"], scopes=revert["scopes"], state="paused",
+                    next_run=None, notes=[],
+                    last_outcome="an edit expired unanswered and could not resume automatically")
+                logger.info("[schedules] %s edit proposal expired; left paused", schedule.id)
+                await self._notice(updated, f"{updated.title} is paused: that change expired unanswered.")
 
     async def held_ended(self, req: Request, reason: str) -> None:
         if not req.schedule_id:
@@ -290,8 +338,13 @@ class ScheduleService:
             missing = self._missing(prompt, scopes)
             if missing:
                 raise ValueError(f"missing capability: {self._labels(missing)}")
-            updated = self.store.update_schedule(schedule_id, prompt=prompt, scopes=scopes,
-                                                 state="proposed", revision=old.revision + 1)
+            # Stashed so an unanswered edit can be reverted rather than left half-applied
+            # if it expires (expire_stale_proposals below). `notes` is otherwise unread
+            # after the cadence-model migration, so it is free for this bookkeeping.
+            revert = {"prompt": old.prompt, "scopes": old.scopes, "state": old.state}
+            updated = self.store.update_schedule(
+                schedule_id, prompt=prompt, scopes=scopes, state="proposed",
+                revision=old.revision + 1, notes=[json.dumps({"_edit_revert": revert})])
             await self._notice(updated, self._proposal_text(updated))
             message = f"Updated proposal sent for {updated.title}."
         logger.info("[schedules] %s edited (needs_approval=%s)", schedule_id, needs_approval)
@@ -385,6 +438,50 @@ class ScheduleService:
                               chat_id=schedule.chat_id, request_id=req.id, state="running")
         logger.info("[schedules] %s fired: request #%s", schedule.id, req.id)
         asyncio.create_task(self.manager.execute(req))
+
+    # -- restart recovery --------------------------------------------------
+    async def interrupted(self, req: Request) -> None:
+        """A scheduled request stranded mid-run by a process restart. Recorded as its
+        own outcome ('interrupted'), never routed through finished()/run_outcome: an
+        interruption is not a failure of the model's work, so it must not count toward
+        the three-strikes pause, and the schedule stays active with its next_run
+        intact. Re-fired once immediately only when that next run is not already
+        fairly close, or when there is no regular next run to wait for (a one-time
+        schedule, or a repeating one whose next_run was already consumed)."""
+        if not req.schedule_id:
+            return
+        schedule = self.store.get_schedule(req.schedule_id)
+        if schedule is None:
+            return
+        now = time.time()
+        run_row = self._run_row_for_request(schedule.id, req.id)
+        run_id = run_row["id"] if run_row else self.store.create_schedule_run(schedule.id, req.id, now)
+        self.store.finish_schedule_run(run_id, finished_at=now, complete=False, outcome="interrupted",
+                                       result_line="", final_status="interrupted by a restart", denied=[],
+                                       note="", changed=False, cost_usd=None)
+        logger.info("[schedules] %s run #%s recorded as interrupted by a restart", schedule.id, run_id)
+        await self._notice(schedule, f"{schedule.title} was interrupted by a restart. "
+                                      f"Next check {_shown(schedule.next_run, schedule.timezone)}.")
+        if schedule.state != "active":
+            return
+        refire = schedule.cadence_kind == "once" or schedule.next_run is None
+        if not refire:
+            interval = None
+            try:
+                probe = cadence_module.next_run(schedule.cadence_kind, schedule.cadence,
+                                                schedule.timezone, now)
+                probe2 = (cadence_module.next_run(schedule.cadence_kind, schedule.cadence,
+                                                  schedule.timezone, probe)
+                          if probe is not None else None)
+                if probe is not None and probe2 is not None:
+                    interval = probe2 - probe
+            except cadence_module.CadenceError:
+                interval = None
+            if interval and (schedule.next_run - now) > interval / 2:
+                refire = True
+        if refire:
+            self.store.update_schedule(schedule.id, next_run=now)
+            logger.info("[schedules] %s re-fired immediately after the restart", schedule.id)
 
     # -- finishing a run -------------------------------------------------
     async def finished(self, req: Request, status: Dict[str, Any]) -> bool:
