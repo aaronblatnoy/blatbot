@@ -1018,6 +1018,14 @@ class GateSession:
                 out.schedule = None
                 return await self.send_to_sender(f"I can't set that up: {exc}", role="answer")
             return True
+        if not system_note and getattr(out, "schedule_command", None) is not None:
+            if not approver:
+                out.request = None
+                out.schedule_command = None
+                return await self.send_to_sender("Only Aaron can manage schedules.", role="answer")
+            from . import schedcmd
+            reply = await schedcmd.handle(self.m, self, out.schedule_command)
+            return await self.send_to_sender(reply, role="answer")
         sent_reply = False
         if out.reply:
             # Alongside a request the reply is an acknowledgement; on its own, or when
@@ -1742,13 +1750,9 @@ class GateSessionManager:
 
     async def handle_approver_command(self, session: GateSession, text: str) -> bool:
         """Parse Aaron's reply as a gate command. Returns True if consumed."""
-        if await self.schedules.command(text, owner=session.is_approver()):
-            return True
         if await self.handle_task_command(session, text):
             return True
         pending = self.store.pending()
-        if not pending:
-            return False
         t = text.strip()
         m = re.match(r"^\s*#?(\d+)\s*[:\-]?\s*(.*)$", t, re.S)
         req: Optional[Request] = None
@@ -1758,21 +1762,32 @@ class GateSessionManager:
             rest = m.group(2).strip()
         elif len(pending) == 1 and t.lower() in (_YES | _NO):
             req = pending[0]
-        if req is None:
+        if req is not None:
+            # Parsing stops here: what the words mean is decided in one place, so a text and a
+            # click in the console cannot drift apart.
+            low = rest.lower()
+            if low in _YES or low in _NO:
+                out = await self.decide_request(req.id, "yes" if low in _YES else "no",
+                                                actor="Aaron", source=session.mode or "imessage")
+                if not out.get("ok") and out.get("error"):
+                    await self.send_to_approver(out["error"])
+                return True
+            em = re.match(r"^edit\s*:\s*(.+)$", rest, re.S | re.I)
+            if em:
+                await self.decide_request(req.id, "edit", actor="Aaron",
+                                          source=session.mode or "imessage", note=em.group(1).strip())
+                return True
             return False
-        # Parsing stops here: what the words mean is decided in one place, so a text and a
-        # click in the console cannot drift apart.
-        low = rest.lower()
-        if low in _YES or low in _NO:
-            out = await self.decide_request(req.id, "yes" if low in _YES else "no",
-                                            actor="Aaron", source=session.mode or "imessage")
-            if not out.get("ok") and out.get("error"):
-                await self.send_to_approver(out["error"])
-            return True
-        em = re.match(r"^edit\s*:\s*(.+)$", rest, re.S | re.I)
-        if em:
-            await self.decide_request(req.id, "edit", actor="Aaron",
-                                      source=session.mode or "imessage", note=em.group(1).strip())
+        # No pending request on his plate claims this reply (that precedence is
+        # exactly the block above, unchanged): a bare yes/no may instead be
+        # answering an open schedule proposal on this thread. Everything else
+        # about managing an existing schedule (S<id>, titles, pause/resume/...)
+        # goes through the router's schedule_command instead of a regex here.
+        from . import schedcmd
+        reply = await schedcmd.answer_proposal(self, session, t)
+        if reply is not None:
+            if reply:
+                await session.send_to_sender(reply, role="answer")
             return True
         return False
 
