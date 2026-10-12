@@ -66,7 +66,7 @@ def is_postgres_target(path: str) -> bool:
 
 # Tables whose `id` column is a serial/identity primary key -- the only ones
 # where sqlite3's cur.lastrowid was ever read by store.py.
-SERIAL_ID_TABLES = {"messages", "requests", "tasks", "task_events", "schedules"}
+SERIAL_ID_TABLES = {"messages", "requests", "tasks", "task_events", "schedules", "schedule_runs"}
 
 _OR_IGNORE_RE = re.compile(r"(?i)\bINSERT\s+OR\s+IGNORE\s+INTO\b")
 _INSERT_TABLE_RE = re.compile(r"(?is)^\s*INSERT\s+(?:OR\s+IGNORE\s+)?INTO\s+(\w+)")

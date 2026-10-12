@@ -127,10 +127,33 @@ CREATE TABLE IF NOT EXISTS schedules (
   revision INTEGER NOT NULL DEFAULT 0,
   consecutive_failures INTEGER NOT NULL DEFAULT 0,
   last_outcome TEXT NOT NULL DEFAULT '',
+  cadence_kind TEXT NOT NULL DEFAULT '',
+  cadence_json TEXT NOT NULL DEFAULT '{}',
+  report_every_time INTEGER NOT NULL DEFAULT 0,
+  until REAL,
+  origin_mode TEXT NOT NULL DEFAULT '',
+  origin_chat_id TEXT NOT NULL DEFAULT '',
+  last_note TEXT NOT NULL DEFAULT '',
   created_at REAL NOT NULL,
   updated_at REAL NOT NULL
 );
 CREATE INDEX IF NOT EXISTS schedules_due ON schedules(state, next_run);
+CREATE TABLE IF NOT EXISTS schedule_runs (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  schedule_id INTEGER NOT NULL,
+  request_id INTEGER,
+  started_at REAL NOT NULL,
+  finished_at REAL,
+  complete INTEGER NOT NULL DEFAULT 0,
+  outcome TEXT NOT NULL DEFAULT '',
+  result_line TEXT NOT NULL DEFAULT '',
+  final_status TEXT NOT NULL DEFAULT '',
+  denied_json TEXT NOT NULL DEFAULT '[]',
+  note TEXT NOT NULL DEFAULT '',
+  changed INTEGER NOT NULL DEFAULT 0,
+  cost_usd REAL
+);
+CREATE INDEX IF NOT EXISTS schedule_runs_schedule ON schedule_runs(schedule_id, id);
 CREATE TABLE IF NOT EXISTS persons (
   id TEXT PRIMARY KEY,            -- stable generated id, never derived from a contact
   display TEXT NOT NULL DEFAULT '',
@@ -193,10 +216,12 @@ CREATE TABLE IF NOT EXISTS messages (
   text TEXT NOT NULL,
   created_at DOUBLE PRECISION NOT NULL,
   reply_to BIGINT,
-  role TEXT
+  role TEXT,
+  schedule_id BIGINT
 );
 CREATE INDEX IF NOT EXISTS messages_chat ON messages(chat_id, id);
 CREATE INDEX IF NOT EXISTS messages_reply_to ON messages(reply_to);
+CREATE INDEX IF NOT EXISTS messages_schedule ON messages(schedule_id);
 CREATE TABLE IF NOT EXISTS mail_ids (
   message_id TEXT PRIMARY KEY,
   root TEXT NOT NULL
@@ -312,10 +337,33 @@ CREATE TABLE IF NOT EXISTS schedules (
   revision INTEGER NOT NULL DEFAULT 0,
   consecutive_failures INTEGER NOT NULL DEFAULT 0,
   last_outcome TEXT NOT NULL DEFAULT '',
+  cadence_kind TEXT NOT NULL DEFAULT '',
+  cadence_json TEXT NOT NULL DEFAULT '{}',
+  report_every_time INTEGER NOT NULL DEFAULT 0,
+  until DOUBLE PRECISION,
+  origin_mode TEXT NOT NULL DEFAULT '',
+  origin_chat_id TEXT NOT NULL DEFAULT '',
+  last_note TEXT NOT NULL DEFAULT '',
   created_at DOUBLE PRECISION NOT NULL,
   updated_at DOUBLE PRECISION NOT NULL
 );
 CREATE INDEX IF NOT EXISTS schedules_due ON schedules(state, next_run);
+CREATE TABLE IF NOT EXISTS schedule_runs (
+  id BIGSERIAL PRIMARY KEY,
+  schedule_id BIGINT NOT NULL,
+  request_id BIGINT,
+  started_at DOUBLE PRECISION NOT NULL,
+  finished_at DOUBLE PRECISION,
+  complete INTEGER NOT NULL DEFAULT 0,
+  outcome TEXT NOT NULL DEFAULT '',
+  result_line TEXT NOT NULL DEFAULT '',
+  final_status TEXT NOT NULL DEFAULT '',
+  denied_json TEXT NOT NULL DEFAULT '[]',
+  note TEXT NOT NULL DEFAULT '',
+  changed INTEGER NOT NULL DEFAULT 0,
+  cost_usd DOUBLE PRECISION
+);
+CREATE INDEX IF NOT EXISTS schedule_runs_schedule ON schedule_runs(schedule_id, id);
 CREATE TABLE IF NOT EXISTS persons (
   id TEXT PRIMARY KEY,
   display TEXT NOT NULL DEFAULT '',
@@ -588,6 +636,13 @@ class Schedule:
     revision: int
     consecutive_failures: int
     last_outcome: str
+    cadence_kind: str
+    cadence: Dict[str, Any]
+    report_every_time: bool
+    until: Optional[float]
+    origin_mode: str
+    origin_chat_id: str
+    last_note: str
     created_at: float
     updated_at: float
 
@@ -607,6 +662,13 @@ class Schedule:
             deadline=float(r["deadline"]) if r["deadline"] is not None else None,
             notes=list(json.loads(r["notes"] or "[]")), revision=int(r["revision"]),
             consecutive_failures=int(r["consecutive_failures"]), last_outcome=str(r["last_outcome"] or ""),
+            cadence_kind=str(r["cadence_kind"] or "") if "cadence_kind" in r.keys() else "",
+            cadence=json.loads(r["cadence_json"] or "{}") if "cadence_json" in r.keys() else {},
+            report_every_time=bool(r["report_every_time"]) if "report_every_time" in r.keys() and r["report_every_time"] is not None else False,
+            until=float(r["until"]) if "until" in r.keys() and r["until"] is not None else None,
+            origin_mode=str(r["origin_mode"] or "") if "origin_mode" in r.keys() else "",
+            origin_chat_id=str(r["origin_chat_id"] or "") if "origin_chat_id" in r.keys() else "",
+            last_note=str(r["last_note"] or "") if "last_note" in r.keys() else "",
             created_at=float(r["created_at"]), updated_at=float(r["updated_at"]),
         )
 
@@ -654,6 +716,7 @@ class Store:
                 # ALTER-TABLE-if-missing dance and the two one-time sqlite
                 # migrations below do not apply here.
                 self._db.executescript(SCHEMA_PG)
+                self._migrate_schedule_cadence_model()
                 self._seed_contact_kinds_locked()
                 self._db.commit()
             else:
@@ -674,6 +737,23 @@ class Store:
                     self._db.execute("ALTER TABLE messages ADD COLUMN reply_to INTEGER")
                     self._db.execute("ALTER TABLE messages ADD COLUMN role TEXT")
                     self._db.execute("CREATE INDEX IF NOT EXISTS messages_reply_to ON messages(reply_to)")
+                if "schedule_id" not in mcols:
+                    # Tags an outbound schedule notice with the schedule it is about, so a
+                    # bare reply on that thread can be understood as answering that schedule.
+                    self._db.execute("ALTER TABLE messages ADD COLUMN schedule_id INTEGER")
+                    self._db.execute("CREATE INDEX IF NOT EXISTS messages_schedule ON messages(schedule_id)")
+                scols = {r["name"] for r in self._db.execute("PRAGMA table_info(schedules)")}
+                for col, ddl in (
+                    ("cadence_kind", "ALTER TABLE schedules ADD COLUMN cadence_kind TEXT NOT NULL DEFAULT ''"),
+                    ("cadence_json", "ALTER TABLE schedules ADD COLUMN cadence_json TEXT NOT NULL DEFAULT '{}'"),
+                    ("report_every_time", "ALTER TABLE schedules ADD COLUMN report_every_time INTEGER NOT NULL DEFAULT 0"),
+                    ("until", "ALTER TABLE schedules ADD COLUMN until REAL"),
+                    ("origin_mode", "ALTER TABLE schedules ADD COLUMN origin_mode TEXT NOT NULL DEFAULT ''"),
+                    ("origin_chat_id", "ALTER TABLE schedules ADD COLUMN origin_chat_id TEXT NOT NULL DEFAULT ''"),
+                    ("last_note", "ALTER TABLE schedules ADD COLUMN last_note TEXT NOT NULL DEFAULT ''"),
+                ):
+                    if col not in scols:
+                        self._db.execute(ddl)
                 tcols = {r["name"] for r in self._db.execute("PRAGMA table_info(tasks)")}
                 if "summary" not in tcols:
                     self._db.execute("ALTER TABLE tasks ADD COLUMN summary TEXT NOT NULL DEFAULT ''")
@@ -683,6 +763,7 @@ class Store:
                 self._db.execute("CREATE INDEX IF NOT EXISTS task_participants_person ON task_participants(person_id)")
                 self._migrate_person_keyed_tasks()
                 self._migrate_people_model()
+                self._migrate_schedule_cadence_model()
                 self._seed_contact_kinds_locked()
                 self._db.commit()
             n_tasks = self._db.execute("SELECT COUNT(*) AS n FROM tasks").fetchone()["n"]
@@ -989,13 +1070,17 @@ class Store:
 
     # -- messages --------------------------------------------------------
     def add_message(self, chat_id: str, kind: str, text: str, mode: str = "",
-                    reply_to: Optional[int] = None, role: Optional[str] = None) -> int:
+                    reply_to: Optional[int] = None, role: Optional[str] = None,
+                    schedule_id: Optional[int] = None) -> int:
         """Store a message and return its id. Outbound messages carry `reply_to`
-        (the inbound they respond to) and `role` ('ack' or 'answer')."""
+        (the inbound they respond to) and `role` ('ack' or 'answer'); an outbound
+        schedule notice also carries `schedule_id`, so a bare reply on that thread
+        can be understood as answering that schedule (see schedule_for_message)."""
         with self._lock:
             cur = self._db.execute(
-                "INSERT INTO messages(chat_id,kind,mode,text,created_at,reply_to,role) VALUES(?,?,?,?,?,?,?)",
-                (chat_id, kind, mode, text, time.time(), reply_to, role),
+                "INSERT INTO messages(chat_id,kind,mode,text,created_at,reply_to,role,schedule_id) "
+                "VALUES(?,?,?,?,?,?,?,?)",
+                (chat_id, kind, mode, text, time.time(), reply_to, role, schedule_id),
             )
             self._db.commit()
             return int(cur.lastrowid)
@@ -2158,15 +2243,21 @@ class Store:
                         kind: str, scopes: List[str], timezone: str, report_mode: str,
                         cron: str = "", run_at: Optional[float] = None,
                         next_run: Optional[float] = None, max_runs: int = 20,
-                        deadline: Optional[float] = None) -> Schedule:
+                        deadline: Optional[float] = None,
+                        cadence_kind: str = "", cadence: Optional[Dict[str, Any]] = None,
+                        report_every_time: bool = False, until: Optional[float] = None,
+                        origin_mode: str = "", origin_chat_id: str = "") -> Schedule:
         now = time.time()
         with self._lock:
             cur = self._db.execute(
                 "INSERT INTO schedules(chat_id,task_id,title,prompt,prompt_sha256,kind,cron,run_at,timezone,"
-                "scopes_json,report_mode,state,next_run,max_runs,deadline,created_at,updated_at) "
-                "VALUES(?,?,?,?,?,?,?,?,?,?,?,'proposed',?,?,?,?,?)",
+                "scopes_json,report_mode,state,next_run,max_runs,deadline,cadence_kind,cadence_json,"
+                "report_every_time,until,origin_mode,origin_chat_id,created_at,updated_at) "
+                "VALUES(?,?,?,?,?,?,?,?,?,?,?,'proposed',?,?,?,?,?,?,?,?,?,?,?)",
                 (chat_id, task_id, title, prompt, sha256(prompt), kind, cron or None, run_at, timezone,
-                 json.dumps(sorted(set(scopes))), report_mode, next_run, max_runs, deadline, now, now),
+                 json.dumps(sorted(set(scopes))), report_mode, next_run, max_runs, deadline,
+                 cadence_kind, json.dumps(cadence or {}), int(bool(report_every_time)), until,
+                 origin_mode, origin_chat_id or chat_id, now, now),
             )
             self._db.commit()
         return self.get_schedule(int(cur.lastrowid))  # type: ignore[return-value]
@@ -2223,7 +2314,8 @@ class Store:
         allowed = {"title", "prompt", "prompt_sha256", "kind", "cron", "run_at", "timezone", "scopes",
                    "scopes_json", "report_mode", "state", "next_run", "last_run", "last_request_id",
                    "run_count", "max_runs", "deadline", "notes", "revision", "consecutive_failures",
-                   "last_outcome"}
+                   "last_outcome", "cadence_kind", "cadence", "cadence_json", "report_every_time",
+                   "until", "origin_mode", "origin_chat_id", "last_note"}
         bad = set(changes) - allowed
         if bad:
             raise ValueError(f"unknown schedule columns: {sorted(bad)}")
@@ -2233,6 +2325,10 @@ class Store:
             changes["prompt_sha256"] = sha256(str(changes["prompt"]))
         if "scopes" in changes:
             changes["scopes_json"] = json.dumps(sorted(set(changes.pop("scopes"))))
+        if "cadence" in changes:
+            changes["cadence_json"] = json.dumps(changes.pop("cadence") or {})
+        if "report_every_time" in changes:
+            changes["report_every_time"] = int(bool(changes["report_every_time"]))
         if "notes" in changes and not isinstance(changes["notes"], str):
             changes["notes"] = json.dumps(changes["notes"], ensure_ascii=False)
         changes["updated_at"] = time.time()
@@ -2247,6 +2343,156 @@ class Store:
             cur = self._db.execute("DELETE FROM schedules WHERE id=?", (int(schedule_id),))
             self._db.commit()
         return bool(cur.rowcount)
+
+    # -- schedule runs ----------------------------------------------------
+    def create_schedule_run(self, schedule_id: int, request_id: Optional[int],
+                            started_at: float) -> int:
+        """Start recording one firing of a schedule. finish_schedule_run fills in
+        the rest once the executor returns."""
+        with self._lock:
+            cur = self._db.execute(
+                "INSERT INTO schedule_runs(schedule_id,request_id,started_at,complete,outcome,"
+                "result_line,final_status,denied_json,note,changed) "
+                "VALUES(?,?,?,0,'','','','[]','',0)",
+                (int(schedule_id), request_id, started_at),
+            )
+            self._db.commit()
+            return int(cur.lastrowid)
+
+    def finish_schedule_run(self, run_id: int, *, finished_at: float, complete: bool,
+                            outcome: str, result_line: str, final_status: str,
+                            denied: Optional[List[Dict[str, Any]]], note: str,
+                            changed: bool, cost_usd: Optional[float]) -> None:
+        """Record the result of a run. `final_status` and `result_line` are stored
+        whole -- never cut, however long the model's closing text ran."""
+        with self._lock:
+            self._db.execute(
+                "UPDATE schedule_runs SET finished_at=?, complete=?, outcome=?, result_line=?, "
+                "final_status=?, denied_json=?, note=?, changed=?, cost_usd=? WHERE id=?",
+                (finished_at, int(bool(complete)), outcome, result_line, final_status,
+                 json.dumps(denied or []), note, int(bool(changed)), cost_usd, int(run_id)),
+            )
+            self._db.commit()
+
+    def schedule_runs(self, schedule_id: int, limit: Optional[int] = None) -> List[Dict[str, Any]]:
+        """Every recorded run of one schedule, newest first."""
+        sql = "SELECT * FROM schedule_runs WHERE schedule_id=? ORDER BY id DESC"
+        params: List[Any] = [int(schedule_id)]
+        if limit is not None:
+            sql += " LIMIT ?"
+            params.append(int(limit))
+        with self._lock:
+            rows = self._db.execute(sql, params).fetchall()
+        return [self._schedule_run_from_row(r) for r in rows]
+
+    def last_schedule_run(self, schedule_id: int) -> Optional[Dict[str, Any]]:
+        with self._lock:
+            row = self._db.execute(
+                "SELECT * FROM schedule_runs WHERE schedule_id=? ORDER BY id DESC LIMIT 1",
+                (int(schedule_id),)).fetchone()
+        return self._schedule_run_from_row(row) if row else None
+
+    @staticmethod
+    def _schedule_run_from_row(r: Any) -> Dict[str, Any]:
+        return {
+            "id": int(r["id"]), "schedule_id": int(r["schedule_id"]),
+            "request_id": int(r["request_id"]) if r["request_id"] is not None else None,
+            "started_at": float(r["started_at"]),
+            "finished_at": float(r["finished_at"]) if r["finished_at"] is not None else None,
+            "complete": bool(r["complete"]), "outcome": str(r["outcome"] or ""),
+            "result_line": str(r["result_line"] or ""), "final_status": str(r["final_status"] or ""),
+            "denied": json.loads(r["denied_json"] or "[]"), "note": str(r["note"] or ""),
+            "changed": bool(r["changed"]),
+            "cost_usd": float(r["cost_usd"]) if r["cost_usd"] is not None else None,
+        }
+
+    def schedule_for_message(self, message_id: int) -> Optional[Schedule]:
+        """The schedule an outbound notice was about, if any -- lets a bare reply on
+        that thread be understood as answering that schedule rather than the
+        single open proposal (see open_schedule_proposal)."""
+        with self._lock:
+            row = self._db.execute(
+                "SELECT schedule_id FROM messages WHERE id=?", (int(message_id),)).fetchone()
+        if not row or row["schedule_id"] is None:
+            return None
+        return self.get_schedule(int(row["schedule_id"]))
+
+    def open_schedule_proposal(self, chat_id: str) -> Optional[Schedule]:
+        """The one schedule on this thread still waiting on a plain yes/no, if any.
+        A bare "yes" on a thread answers this and nothing else."""
+        with self._lock:
+            row = self._db.execute(
+                "SELECT * FROM schedules WHERE chat_id=? AND state='proposed' ORDER BY id DESC LIMIT 1",
+                (chat_id,)).fetchone()
+        return Schedule.from_row(row) if row else None
+
+    def _migrate_schedule_cadence_model(self) -> None:
+        """One-time-per-row, idempotent: carry every schedule row forward from the old
+        kind/report_mode/notes model to cadence_kind/cadence_json/report_every_time/last_note.
+        Only touches rows whose cadence_kind is still unset, so running this twice (or
+        against a Postgres database the coordinator fills with old-shape test rows)
+        changes nothing the second time. No real data is touched here -- see the data
+        contract's note that live rows are migrated separately by the coordinator.
+        Called from __init__ while self._lock is already held (same convention as
+        _migrate_people_model): no re-entrant lock acquisition here."""
+        from datetime import datetime
+        rows = self._db.execute(
+            "SELECT id, kind, cron, run_at, report_mode, state, notes FROM schedules "
+            "WHERE cadence_kind='' OR cadence_kind IS NULL"
+        ).fetchall()
+        for r in rows:
+            kind = str(r["kind"] or "")
+            state = str(r["state"] or "")
+            cadence_kind = ""
+            cadence: Dict[str, Any] = {}
+            new_state = None
+            last_outcome = None
+            if kind == "cron":
+                cadence_kind = "cron"
+                cadence = {"expr": str(r["cron"] or "")}
+            elif kind == "once":
+                cadence_kind = "once"
+                run_at = r["run_at"]
+                cadence = {"at": datetime.fromtimestamp(float(run_at)).isoformat(timespec="minutes")
+                           if run_at is not None else ""}
+            elif kind == "continue":
+                # The removed `continue` kind had no fixed cadence of its own. One
+                # supplied by the caller (via a later update_schedule, never from this
+                # migration itself) becomes "every"; otherwise it cannot run unattended
+                # any more and is paused with a reason the owner can act on.
+                cadence_kind = ""
+                new_state = "paused"
+                last_outcome = "needs a cadence"
+            else:
+                cadence_kind = kind
+
+            if state in ("done", "failed", "rejected"):
+                new_state = "ended"
+
+            report_every_time = 1 if str(r["report_mode"] or "") == "always" else 0
+
+            last_note = ""
+            try:
+                for entry in reversed(json.loads(r["notes"] or "[]")):
+                    if isinstance(entry, dict) and entry.get("kind") == "model":
+                        last_note = str(entry.get("text") or "")
+                        break
+                    if isinstance(entry, str):
+                        last_note = entry
+                        break
+            except (TypeError, ValueError):
+                pass
+
+            sets = ["cadence_kind=?", "cadence_json=?", "report_every_time=?", "last_note=?"]
+            params: List[Any] = [cadence_kind, json.dumps(cadence), report_every_time, last_note]
+            if new_state is not None:
+                sets.append("state=?")
+                params.append(new_state)
+            if last_outcome is not None:
+                sets.append("last_outcome=?")
+                params.append(last_outcome)
+            params.append(int(r["id"]))
+            self._db.execute(f"UPDATE schedules SET {', '.join(sets)} WHERE id=?", params)
 
     # -- tasks -----------------------------------------------------------
     def create_task(self, title: str, participants: Optional[List[Any]] = None) -> Dict[str, Any]:
