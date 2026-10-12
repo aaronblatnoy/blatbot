@@ -33,7 +33,7 @@ _ACTION_NAMES = {"pause", "resume", "run_now", "stop", "start_again"}
 _ACTIONS_BY_STATE: Dict[str, set] = {
     "proposed": {"approve", "reject"},
     "active": {"pause", "stop", "run_now"},
-    "paused": {"resume", "stop", "start_again"},
+    "paused": {"resume", "stop"},
     "ended": {"start_again"},
 }
 
@@ -387,11 +387,6 @@ class ScheduleService:
         now = time.time()
         if action == "pause":
             return self.store.update_schedule(schedule_id, state="paused")
-        if action == "resume":
-            next_run = cadence_module.next_run(schedule.cadence_kind, schedule.cadence,
-                                               schedule.timezone, now)
-            return self.store.update_schedule(schedule_id, state="active", next_run=next_run,
-                                              consecutive_failures=0)
         if action == "run_now":
             if self.store.request_running_for_schedule(schedule_id) is not None:
                 raise ValueError(f"{schedule.title} already has a run in flight; wait for it to finish")
@@ -399,7 +394,9 @@ class ScheduleService:
         if action == "stop":
             return self.store.update_schedule(schedule_id, state="ended", next_run=None,
                                               last_outcome="stopped")
-        if action == "start_again":
+        if action in ("resume", "start_again"):
+            if not schedule.cadence_kind:
+                raise ValueError(f"{schedule.title} needs to be told how often to run first")
             missing = self._missing(schedule.prompt, schedule.scopes)
             if missing:
                 raise ValueError(f"missing capability: {self._labels(missing)}")

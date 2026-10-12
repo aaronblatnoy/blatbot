@@ -341,7 +341,7 @@ async def test_valid_actions_per_state(env):
     activated = await service.decide(schedule.id, True)
     assert set(service.valid_actions(activated)) == {"pause", "stop", "run_now", "edit"}
     paused = await service.action(schedule.id, "pause", owner=True)
-    assert set(service.valid_actions(paused)) == {"resume", "stop", "start_again", "edit"}
+    assert set(service.valid_actions(paused)) == {"resume", "stop", "edit"}
     ended = await service.action(schedule.id, "stop", owner=True)
     assert set(service.valid_actions(ended)) == {"start_again", "edit"}
 
