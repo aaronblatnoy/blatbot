@@ -175,8 +175,24 @@ class ScheduleService:
         schedule = self.store.get_schedule(schedule_id)
         if schedule is None:
             raise ValueError(f"no such schedule: {schedule_id}")
+        if schedule.state != "proposed":
+            raise ValueError(f"{schedule.title} is not waiting for an answer")
         now = time.time()
+        was_edit = self._edit_revert(schedule) is not None
         if not approve:
+            revert = self._edit_revert(schedule)
+            if revert is not None:
+                # A rejected change to an existing schedule puts it back as it was;
+                # only a brand-new proposal ends when he says no.
+                state = revert.get("state") if revert.get("state") in ("active", "paused") else "paused"
+                next_run = (cadence_module.next_run(schedule.cadence_kind, schedule.cadence,
+                                                    schedule.timezone, now) if state == "active" else None)
+                updated = self.store.update_schedule(
+                    schedule_id, prompt=revert["prompt"], scopes=revert["scopes"], state=state,
+                    next_run=next_run, notes=[], last_outcome="a change was rejected; kept as it was")
+                logger.info("[schedules] %s edit rejected; reverted", schedule_id)
+                await self._notice(updated, f"Left {updated.title} as it was.")
+                return updated
             updated = self.store.update_schedule(schedule_id, state="ended", next_run=None,
                                                  last_outcome="rejected")
             logger.info("[schedules] %s rejected", schedule_id)
@@ -197,9 +213,10 @@ class ScheduleService:
             anchored["anchor"] = next_run
             self.store.update_schedule(schedule_id, cadence=anchored)
             schedule = self.store.get_schedule(schedule_id)  # type: ignore[assignment]
-        updated = self.store.update_schedule(schedule_id, state="active", next_run=next_run)
+        updated = self.store.update_schedule(schedule_id, state="active", next_run=next_run, notes=[])
         logger.info("[schedules] %s activated, first run %s", schedule_id, next_run)
-        await self._notice(updated, self._started_text(updated, next_run))
+        await self._notice(updated, f"Changed {updated.title}. Next check {_shown(next_run, updated.timezone)}."
+                           if was_edit else self._started_text(updated, next_run))
         return updated
 
     def _started_text(self, schedule: Schedule, next_run: Optional[float]) -> str:

@@ -481,3 +481,55 @@ async def test_bare_yes_on_same_thread_with_both_open_asks_which(tmp_path):
     assert reply.startswith("Yes to which:")
     assert "Team total watch" in reply
     assert "do X" in reply
+
+
+@pytest.mark.asyncio
+async def test_rejecting_an_edit_puts_the_schedule_back_as_it_was(tmp_path):
+    m, sent = make_manager(tmp_path)
+    await _propose_via_manager(m, said="every 4 hours check the team page", scopes=["web"])
+    schedule = m.store.schedules(states=["proposed"])[0]
+    activated = await m.schedules.decide(schedule.id, True)
+
+    await m.schedules.edit(schedule.id, owner=True, changes={"prompt": "check the other page"})
+    await m.schedules.decide(schedule.id, False)
+    reverted = m.store.get_schedule(schedule.id)
+    assert reverted.state == "active"
+    assert reverted.prompt == activated.prompt
+    assert reverted.scopes == activated.scopes
+    assert reverted.next_run is not None
+    assert m.schedules._edit_revert(reverted) is None
+    assert sent[-1][1] == f"Left {reverted.title} as it was."
+
+
+@pytest.mark.asyncio
+async def test_approving_an_edit_keeps_the_new_prompt_and_clears_the_snapshot(tmp_path):
+    m, _sent = make_manager(tmp_path)
+    await _propose_via_manager(m, said="every 4 hours check the team page", scopes=["web"])
+    schedule = m.store.schedules(states=["proposed"])[0]
+    await m.schedules.decide(schedule.id, True)
+
+    await m.schedules.edit(schedule.id, owner=True, changes={"prompt": "check the other page"})
+    await m.schedules.decide(schedule.id, True)
+    updated = m.store.get_schedule(schedule.id)
+    assert updated.state == "active"
+    assert updated.prompt == "check the other page"
+    assert m.schedules._edit_revert(updated) is None
+    # a later rejection of nothing must not resurrect the old prompt
+    assert "check the other page" == m.store.get_schedule(schedule.id).prompt
+
+
+@pytest.mark.asyncio
+async def test_a_proposed_schedule_never_fires_and_refuses_run_now(tmp_path):
+    m, _sent = make_manager(tmp_path)
+    await _propose_via_manager(m, said="every 4 hours check the team page", scopes=["web"])
+    schedule = m.store.schedules(states=["proposed"])[0]
+    m.store.update_schedule(schedule.id, next_run=time.time() - 60)
+
+    await m.schedules.tick(now=time.time())
+    assert m.store.schedule_runs(schedule.id) == []
+    assert m.store.get_schedule(schedule.id).state == "proposed"
+    assert "run_now" not in m.schedules.valid_actions(m.store.get_schedule(schedule.id))
+    with pytest.raises(ValueError):
+        await m.schedules.action(schedule.id, "run_now", owner=True)
+    with pytest.raises(PermissionError):
+        await m.schedules.action(schedule.id, "pause", owner=False)
