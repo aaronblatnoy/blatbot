@@ -207,7 +207,7 @@ def test_router_schedule_proposal_rejects_an_unknown_cadence_kind():
 # Manager block
 # ---------------------------------------------------------------------------
 
-from tests.test_schedules import RecordingSchedules, RaisingScopePicker, manager, new_proposal
+from tests.schedprop_helpers import RecordingSchedules, RaisingScopePicker, manager, new_proposal
 
 
 def test_manager_calls_propose_with_the_new_keyword_arguments_and_origin_thread(tmp_path):
