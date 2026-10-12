@@ -826,7 +826,10 @@ def test_owner_message_during_failed_scheduled_run_is_handled_exactly_once(tmp_p
     assert len(still_only_one) == 1
 
 
-def test_executor_keys_schedule_session_by_schedule_not_chat_id(tmp_path, monkeypatch):
+def test_executor_never_resumes_or_stores_a_session_for_a_scheduled_run(tmp_path, monkeypatch):
+    # Superseded by the schedules-v2 run status contract (SPEC.md): a scheduled run
+    # never resumes a Claude Code session, and no session id is kept for it at all.
+    # An ordinary request still resumes and stores its thread's own session.
     from claude_agent_sdk import ResultMessage
 
     class Options:
@@ -851,9 +854,8 @@ def test_executor_keys_schedule_session_by_schedule_not_chat_id(tmp_path, monkey
     ex = gate_executor.Executor(mcp_server=None, cwd=str(tmp_path))
     asyncio.run(ex.run(sched_req))
     asyncio.run(ex.run(ordinary_req))
-    assert ex._sessions.get("schedule:9") == "sess-abc"
+    assert "schedule:9" not in ex._sessions
     assert ex._sessions.get("owner-chat") == "sess-abc"
-    assert "schedule:9" not in ("owner-chat",)
 
 
 def test_next_run_prompt_carries_notes_without_operational_lines_and_run_now_blocked(tmp_path):

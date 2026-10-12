@@ -1539,7 +1539,7 @@ def telegram_meta(user_id: str):
             "telegram_user_id": user_id, "contact": {"name": "Someone"}}
 
 
-def test_send_tools_are_taken_off_the_preapproved_list_for_the_owner(tmp_path):
+def test_send_tools_are_taken_off_the_preapproved_list_for_the_owner(tmp_path, monkeypatch):
     """The permission hook is never consulted for a tool the SDK was told to allow, so a
     send has to be withheld from that list or it goes out unseen. This is the bug that let
     a poem reach a stranger and an email reach five people."""
@@ -1563,7 +1563,11 @@ def test_send_tools_are_taken_off_the_preapproved_list_for_the_owner(tmp_path):
     def fake_options(**kw):
         captured.update(kw)
         raise RuntimeError("stop here; the list is what matters")
-    ex_mod.ClaudeAgentOptions = fake_options
+    # monkeypatch.setattr, not a bare assignment: a bare assignment to a module
+    # attribute here never gets undone, and leaked into every test file that ran
+    # after this one (ClaudeAgentOptions stayed replaced for the rest of the
+    # session), breaking unrelated executor tests elsewhere in the suite.
+    monkeypatch.setattr(ex_mod, "ClaudeAgentOptions", fake_options)
     try:
         _a.run(ex.run(req, from_owner=True))
     except Exception:

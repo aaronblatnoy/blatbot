@@ -948,6 +948,7 @@ class JevAgent:
                         # and performs this one call on "yes".
                         st = self._status(False, "confirmation required", steps, judge, prose, started)
                         st["confirm"] = {"tool": choice, "args": args, "about": about}
+                        st["held"] = True
                         logger.info("jev agent: %s needs the owner's confirmation; pausing", choice.split("__")[-1])
                         return st
                     if any(s["ok"] and s["tool"] == choice and s["args"] == args for s in steps) and p_done < DONE_MIN:
@@ -1402,15 +1403,28 @@ class JevAgent:
         # deterministic tool calls rather than prose, so its "closing status" is the header
         # plus the tail -- the same text a run with no tool calls at all would report.
         final_status = "\n".join(lines + tail)
+        finished_at = time.time()
+        # The schedule-run status contract (executor.py's Claude Code path and this one
+        # must agree): this deterministic loop has no model-authored RESULT:/NOTE: text,
+        # so result_line and note default empty (note is filled in below when a
+        # schedule_continue call carried one). stop is always False here -- STATUS: STOP
+        # is a Claude Code executor concept this loop does not produce. denied is empty:
+        # every tool this loop calls was already filtered to the request's own scopes,
+        # so there is nothing to refuse at this level; a destructive hold is reflected in
+        # `held` once attached below, not as a denial.
         status = {"ok": ok, "summary": summary, "final_status": final_status, "raw": raw,
                 "tool_calls": [s["tool"] for s in steps], "wrote": wrote, "partial": partial,
                 "steps": [{"tool": s["tool"], "args": s["args"], "ok": s["ok"]} for s in steps],
                 "error": error or None, "engine": "jev", "jev_calls": judge.calls, "prose_calls": prose.calls,
-                "seconds": round(time.time() - started, 1), "probs": probs}
+                "seconds": round(time.time() - started, 1), "probs": probs,
+                "stop": False, "result_line": "", "note": "", "denied": [], "held": False,
+                "tool_results": [{"tool": s["tool"], "ok": s["ok"]} for s in steps],
+                "started_at": started, "finished_at": finished_at, "cost_usd": None}
         continued = next((s for s in reversed(steps)
                           if s["ok"] and s["tool"] == "mcp__host__schedule_continue"), None)
         if continued is not None:
             status["continue"] = dict(continued["args"])
+            status["note"] = str(continued["args"].get("note") or "")
         return status
 
 
