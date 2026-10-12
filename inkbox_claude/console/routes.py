@@ -65,6 +65,8 @@ def _endpoint(
             if mutation:
                 _same_origin(request)
             return await handler(request)
+        except api.ScheduleActionConflict as exc:
+            return _json({"error": str(exc)}, status=409)
         except api.ValidationError as exc:
             return _json({"error": str(exc)}, status=400)
         except PermissionError as exc:
@@ -238,7 +240,17 @@ async def get_tasks(request: web.Request) -> web.StreamResponse:
 
 
 async def get_schedules(request: web.Request) -> web.StreamResponse:
-    return _json(api.schedules(_manager(request).store))
+    manager = _manager(request)
+    return _json(api.schedule_list(manager.store, manager.schedules))
+
+
+async def get_schedule_runs(request: web.Request) -> web.StreamResponse:
+    try:
+        schedule_id = int(request.match_info["id"])
+    except (KeyError, ValueError):
+        raise api.ValidationError("schedule id must be an integer") from None
+    result = api.schedule_runs_view(_manager(request).store, schedule_id)
+    return _json(result) if result is not None else _json({"error": f"no schedule {schedule_id}"}, status=404)
 
 
 async def post_schedules(request: web.Request) -> web.StreamResponse:
@@ -253,8 +265,12 @@ async def post_schedules_action(request: web.Request) -> web.StreamResponse:
     return _json(await api.schedule_action(_manager(request), await _payload(request)))
 
 
+async def post_schedules_approve(request: web.Request) -> web.StreamResponse:
+    return _json(await api.approve_schedule(_manager(request), await _payload(request)))
+
+
 async def post_schedules_global(request: web.Request) -> web.StreamResponse:
-    return _json(api.schedules_global(_manager(request).store, await _payload(request)))
+    return _json(api.schedules_global(_manager(request), await _payload(request)))
 
 
 async def get_task(request: web.Request) -> web.StreamResponse:
@@ -327,9 +343,11 @@ def register(app: web.Application, gateway: Any) -> None:
     app.router.add_get("/console/api/tasks", _endpoint(get_tasks))
     app.router.add_get("/console/api/tasks/{id}", _endpoint(get_task))
     app.router.add_get("/console/api/schedules", _endpoint(get_schedules))
+    app.router.add_get("/console/api/schedules/{id}/runs", _endpoint(get_schedule_runs))
     app.router.add_post("/console/api/schedules", _endpoint(post_schedules, mutation=True))
     app.router.add_post("/console/api/schedules/edit", _endpoint(post_schedules_edit, mutation=True))
     app.router.add_post("/console/api/schedules/action", _endpoint(post_schedules_action, mutation=True))
+    app.router.add_post("/console/api/schedules/approve", _endpoint(post_schedules_approve, mutation=True))
     app.router.add_post("/console/api/schedules/global", _endpoint(post_schedules_global, mutation=True))
     app.router.add_get("/console/api/health", _endpoint(get_health))
     app.router.add_get("/console/api/settings", _endpoint(get_settings))
