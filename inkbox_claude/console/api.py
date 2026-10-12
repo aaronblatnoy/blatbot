@@ -9,7 +9,8 @@ from typing import Any, Dict, List, Optional
 
 from ..gate.scopes import SCOPES, SCOPE_SYSTEM
 from ..gate.store import Request, Store, role_names
-from ..gate.schedules import cadence as schedule_cadence, next_three as schedule_next_three
+from ..gate import cadence as cadence_mod, schedprop
+from ..gate.schedules import DEFAULT_TIMEZONE
 from . import events
 
 REQUEST_STATES = frozenset(
@@ -623,45 +624,247 @@ def tasks(store: Store) -> List[Dict[str, Any]]:
     return [dict(row) for row in store.recent_tasks(limit=50)]
 
 
-def schedules(store: Store) -> Dict[str, Any]:
-    rows = []
-    for schedule in store.schedules():
-        rows.append({
-            "id": schedule.id, "task_id": schedule.task_id, "title": schedule.title,
-            "prompt": schedule.prompt, "kind": schedule.kind, "cron": schedule.cron,
-            "run_at": schedule.run_at, "timezone": schedule.timezone,
-            "scopes": list(schedule.scopes), "report_mode": schedule.report_mode,
-            "state": schedule.state, "next_run": schedule.next_run,
-            "next_three": schedule_next_three(schedule), "last_run": schedule.last_run,
-            "last_outcome": schedule.last_outcome, "run_count": schedule.run_count,
-            "max_runs": schedule.max_runs, "deadline": schedule.deadline,
-            "notes": list(schedule.notes), "revision": schedule.revision,
-            "cadence": schedule_cadence(schedule),
-        })
-    paused = str(store.settings().get("GATE_SCHEDULES_PAUSED", "0")).lower() in {"1", "true", "yes", "on"}
-    return {"global_paused": paused, "schedules": rows}
+# ---------------------------------------------------------------------------
+# Schedules: list/create/edit/action/approve + run history, shaped exactly to
+# the "Console API contract" section of SPEC.md. Nothing here is encoded in a
+# front end -- cadence kinds, capability options, report wording options and
+# weekday names are all served from here so a console can render its forms
+# with nothing hardcoded.
+# ---------------------------------------------------------------------------
+
+CADENCE_KIND_FIELDS: Dict[str, List[str]] = {
+    "once": ["at"], "every": ["minutes"], "daily": ["time"],
+    "weekdays": ["time"], "weekly": ["day", "time"], "cron": ["expr"],
+}
+CADENCE_KIND_LABELS: Dict[str, str] = {
+    "once": "Once", "every": "Every N minutes or hours", "daily": "Every day",
+    "weekdays": "Weekdays", "weekly": "Weekly", "cron": "Cron (advanced)",
+}
+WEEKDAY_OPTIONS: List[Dict[str, str]] = [
+    {"value": "mon", "label": "Monday"}, {"value": "tue", "label": "Tuesday"},
+    {"value": "wed", "label": "Wednesday"}, {"value": "thu", "label": "Thursday"},
+    {"value": "fri", "label": "Friday"}, {"value": "sat", "label": "Saturday"},
+    {"value": "sun", "label": "Sunday"},
+]
+OUTCOME_LABELS: Dict[str, str] = {
+    "complete": "Finished", "incomplete": "Could not finish", "failed": "Failed",
+    "interrupted": "Interrupted", "skipped": "Skipped",
+}
+# Plain words for the handful of US zones the owner actually uses; anything
+# else falls back to the last path segment of the IANA name ("Europe/London"
+# -> "London") rather than guessing at a word that may be wrong.
+_TIMEZONE_LABELS: Dict[str, str] = {
+    "America/New_York": "Eastern", "America/Chicago": "Central",
+    "America/Denver": "Mountain", "America/Los_Angeles": "Pacific",
+    "America/Anchorage": "Alaska", "Pacific/Honolulu": "Hawaii", "UTC": "UTC",
+}
+# ended-state last_outcome values the owner caused directly, versus any other
+# text that led a schedule to stop (reached its until date, the model's own
+# STATUS: STOP, an unanswered proposal expiring). There is no separate "why"
+# column in the data model, so this is an inference from that free-text field.
+_OWNER_STOPPED_OUTCOMES = {"stopped", "rejected"}
+
+
+def _timezone_label(timezone_name: str) -> str:
+    if timezone_name in _TIMEZONE_LABELS:
+        return _TIMEZONE_LABELS[timezone_name]
+    return timezone_name.rsplit("/", 1)[-1].replace("_", " ")
+
+
+def _schedule_time_text(ts: Optional[float], timezone_name: str) -> Optional[str]:
+    """"Mon Oct 12, 2:33 AM EDT" in the schedule's own time zone. None in, None out."""
+    if ts is None:
+        return None
+    from datetime import datetime
+    from zoneinfo import ZoneInfo
+    try:
+        tz = ZoneInfo(timezone_name or DEFAULT_TIMEZONE)
+    except Exception:
+        tz = ZoneInfo(DEFAULT_TIMEZONE)
+    return datetime.fromtimestamp(ts, tz).strftime("%a %b %-d, %-I:%M %p %Z")
+
+
+def _cadence_text(schedule: Any) -> str:
+    try:
+        return cadence_mod.describe(schedule.cadence_kind, schedule.cadence, schedule.timezone)
+    except cadence_mod.CadenceError:
+        return "not set"  # a legacy/paused row with no cadence model yet
+
+
+def _capability_list(scopes: Any) -> List[Dict[str, str]]:
+    return [{"scope": s, "label": schedprop.label(s)} for s in scopes]
+
+
+def _scope_for_tool(tool: str) -> Optional[str]:
+    for name, info in SCOPES.items():
+        if tool in (info.get("tools") or []):
+            return name
+    return None
+
+
+def _denied_list(denied: Any) -> List[Dict[str, str]]:
+    out: List[Dict[str, str]] = []
+    for item in denied or []:
+        tool = str(item.get("tool")) if isinstance(item, dict) else str(item)
+        scope = _scope_for_tool(tool)
+        out.append({"tool": tool, "label": schedprop.label(scope) if scope else tool})
+    return out
+
+
+def _run_view(run: Dict[str, Any], timezone_name: str) -> Dict[str, Any]:
+    started = run.get("started_at")
+    finished = run.get("finished_at")
+    duration = (finished - started) if (started is not None and finished is not None) else None
+    outcome = str(run.get("outcome") or "")
+    return {
+        "id": run["id"], "started_at": started, "started_text": _schedule_time_text(started, timezone_name),
+        "duration_seconds": duration, "outcome": outcome,
+        "outcome_label": OUTCOME_LABELS.get(outcome, outcome),
+        "result_line": run.get("result_line") or "", "final_status": run.get("final_status") or "",
+        "denied": _denied_list(run.get("denied")), "note": run.get("note") or "",
+        "cost_usd": run.get("cost_usd"), "request_id": run.get("request_id"),
+    }
+
+
+def _last_non_skipped_run(store: Store, schedule_id: int) -> Optional[Dict[str, Any]]:
+    for row in store.schedule_runs(schedule_id):
+        if row.get("outcome") != "skipped":
+            return row
+    return None
+
+
+def _state_label(schedule: Any, running: bool) -> str:
+    if schedule.state == "proposed":
+        return "Needs your yes"
+    if schedule.state == "active":
+        return "Running" if running else "Waiting"
+    if schedule.state == "paused":
+        return "Paused"
+    if schedule.state == "ended":
+        return "Stopped" if schedule.last_outcome in _OWNER_STOPPED_OUTCOMES else "Ended"
+    return schedule.state
+
+
+def _paused_all(store: Store) -> bool:
+    return str(store.settings().get("GATE_SCHEDULES_PAUSED", "0")).lower() in {"1", "true", "yes", "on"}
+
+
+def _schedule_view(store: Store, service: Any, schedule: Any) -> Dict[str, Any]:
+    running = store.request_running_for_schedule(schedule.id) is not None
+    missing = schedprop.missing_capabilities(schedule.prompt, schedule.scopes)
+    last = _last_non_skipped_run(store, schedule.id)
+    next_run = schedule.next_run
+    return {
+        "id": schedule.id, "title": schedule.title, "prompt": schedule.prompt,
+        "state": schedule.state, "state_label": _state_label(schedule, running),
+        "cadence_kind": schedule.cadence_kind, "cadence": schedule.cadence,
+        "cadence_text": _cadence_text(schedule), "timezone": schedule.timezone,
+        "timezone_label": _timezone_label(schedule.timezone),
+        "next_run": next_run, "next_run_text": _schedule_time_text(next_run, schedule.timezone),
+        "next_run_in_seconds": (next_run - time.time()) if next_run is not None else None,
+        "report_every_time": schedule.report_every_time,
+        "report_text": ("Every time it runs" if schedule.report_every_time
+                        else "Only when something changed or it could not finish"),
+        "until": schedule.until,
+        "capabilities": _capability_list(schedule.scopes),
+        "missing_capabilities": _capability_list(missing),
+        "last_run": _run_view(last, schedule.timezone) if last else None,
+        "needs_approval": schedule.state == "proposed",
+        "approval_request_id": None,
+        "actions": service.valid_actions(schedule),
+    }
+
+
+def schedule_list(store: Store, service: Any) -> Dict[str, Any]:
+    rows = [_schedule_view(store, service, schedule) for schedule in store.schedules()]
+    capability_options = [
+        {"scope": name, "label": schedprop.label(name), "tools": list(info.get("tools") or [])}
+        for name, info in SCOPES.items()
+    ]
+    cadence_kinds = [
+        {"kind": kind, "label": CADENCE_KIND_LABELS[kind], "fields": CADENCE_KIND_FIELDS[kind]}
+        for kind in ("once", "every", "daily", "weekdays", "weekly", "cron")
+    ]
+    report_options = [
+        {"value": False, "label": "Only when something changed or it could not finish"},
+        {"value": True, "label": "Every time it runs"},
+    ]
+    return {
+        "schedules": rows, "paused_all": _paused_all(store), "cadence_kinds": cadence_kinds,
+        "capability_options": capability_options, "report_options": report_options,
+        "weekdays": WEEKDAY_OPTIONS,
+    }
+
+
+def schedule_runs_view(store: Store, schedule_id: int) -> Optional[Dict[str, Any]]:
+    schedule = store.get_schedule(schedule_id)
+    if schedule is None:
+        return None
+    rows = store.schedule_runs(schedule.id)
+    return {"runs": [_run_view(r, schedule.timezone) for r in rows]}
+
+
+def _valid_timezone(value: Any) -> Optional[str]:
+    text = _text(value, "timezone")
+    if not text:
+        return None
+    from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
+    try:
+        ZoneInfo(text)
+    except ZoneInfoNotFoundError as exc:
+        raise ValidationError(f"unknown timezone: {text}") from exc
+    return text
+
+
+def _until(value: Any) -> Optional[float]:
+    if value in (None, ""):
+        return None
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        raise ValidationError("until must be a number (epoch seconds) or null") from None
+
+
+def _cadence_payload(payload: Dict[str, Any]) -> Dict[str, Any]:
+    cadence = payload.get("cadence")
+    if not isinstance(cadence, dict):
+        raise ValidationError("cadence must be an object")
+    return cadence
+
+
+class ScheduleActionConflict(ValueError):
+    """An action/approve call that is not available for a schedule's current
+    state. Kept distinct from ValidationError (malformed input) because the
+    console contract requires HTTP 409 here, not 400."""
 
 
 async def create_schedule(manager: Any, payload: Dict[str, Any]) -> Dict[str, Any]:
     title = _required_text(payload.get("title"), "title")
     prompt = _required_text(payload.get("prompt"), "prompt")
-    task_id = payload.get("task_id")
-    if task_id in (None, ""):
-        task_id = manager.store.create_task(title)["id"]
+    cadence_kind = _required_text(payload.get("cadence_kind"), "cadence_kind")
+    cadence = _cadence_payload(payload)
     try:
-        task_id = int(task_id)
-    except (TypeError, ValueError):
-        raise ValidationError("task_id must be an integer") from None
-    spec = {k: payload.get(k) for k in ("kind", "cron", "run_at", "timezone", "report_mode",
-                                        "max_runs", "deadline")}
-    spec.update(title=title, prompt=prompt)
+        cadence_mod.validate(cadence_kind, cadence)
+    except cadence_mod.CadenceError as exc:
+        raise ValidationError(str(exc)) from exc
+    timezone = _valid_timezone(payload.get("timezone"))
+    report_every_time = bool(payload.get("report_every_time"))
+    until = _until(payload.get("until"))
+    scopes = _scopes(payload.get("scopes"))
+    task_id = manager.store.create_task(title)["id"]
     try:
-        schedule = await manager.schedules.propose(owner=True, chat_id="owner", task_id=task_id,
-                                                   spec=spec, scopes=_scopes(payload.get("scopes")))
+        schedule = await manager.schedules.propose(
+            owner=True, chat_id="owner", task_id=task_id, title=title, prompt=prompt,
+            cadence_kind=cadence_kind, cadence=cadence, timezone=timezone,
+            report_every_time=report_every_time, until=until, scopes=scopes,
+            origin_mode="console", origin_chat_id="owner",
+        )
     except ValueError as exc:
         raise ValidationError(str(exc)) from exc
     events.publish("schedules.changed", {"id": schedule.id, "state": schedule.state})
-    return schedules(manager.store)
+    message = schedprop.format_proposal(schedule)
+    return {"schedule": _schedule_view(manager.store, manager.schedules, schedule),
+            "applied": False, "needs_approval": True, "message": message}
 
 
 async def edit_schedule(manager: Any, payload: Dict[str, Any]) -> Dict[str, Any]:
@@ -669,16 +872,39 @@ async def edit_schedule(manager: Any, payload: Dict[str, Any]) -> Dict[str, Any]
         schedule_id = int(payload.get("id"))
     except (TypeError, ValueError):
         raise ValidationError("id must be an integer") from None
-    changes = {k: payload[k] for k in ("title", "prompt", "kind", "cron", "run_at", "timezone",
-                                                  "report_mode", "max_runs", "deadline", "scopes") if k in payload}
-    if "scopes" in changes:
-        changes["scopes"] = _scopes(changes["scopes"])
+    changes: Dict[str, Any] = {}
+    if "title" in payload:
+        changes["title"] = _required_text(payload.get("title"), "title")
+    if "cadence_kind" in payload or "cadence" in payload:
+        old = manager.store.get_schedule(schedule_id)
+        if old is None:
+            raise ValidationError(f"no such schedule: {schedule_id}")
+        kind = payload.get("cadence_kind", old.cadence_kind)
+        cadence = payload.get("cadence", old.cadence)
+        if not isinstance(cadence, dict):
+            raise ValidationError("cadence must be an object")
+        try:
+            cadence_mod.validate(kind, cadence)
+        except cadence_mod.CadenceError as exc:
+            raise ValidationError(str(exc)) from exc
+        changes["cadence_kind"] = kind
+        changes["cadence"] = cadence
+    if "report_every_time" in payload:
+        changes["report_every_time"] = bool(payload.get("report_every_time"))
+    if "until" in payload:
+        changes["until"] = _until(payload.get("until"))
+    if "prompt" in payload:
+        changes["prompt"] = _required_text(payload.get("prompt"), "prompt")
+    if "scopes" in payload:
+        changes["scopes"] = _scopes(payload.get("scopes"))
     try:
-        schedule = await manager.schedules.edit(schedule_id, owner=True, changes=changes)
+        result = await manager.schedules.edit(schedule_id, owner=True, changes=changes)
     except ValueError as exc:
         raise ValidationError(str(exc)) from exc
-    events.publish("schedules.changed", {"id": schedule.id, "state": schedule.state})
-    return schedules(manager.store)
+    events.publish("schedules.changed", {"id": result["schedule"].id, "state": result["schedule"].state})
+    return {"schedule": _schedule_view(manager.store, manager.schedules, result["schedule"]),
+            "applied": bool(result["applied"]), "needs_approval": bool(result["needs_approval"]),
+            "message": result["message"]}
 
 
 async def schedule_action(manager: Any, payload: Dict[str, Any]) -> Dict[str, Any]:
@@ -690,18 +916,39 @@ async def schedule_action(manager: Any, payload: Dict[str, Any]) -> Dict[str, An
     try:
         schedule = await manager.schedules.action(schedule_id, action, owner=True)
     except ValueError as exc:
-        raise ValidationError(str(exc)) from exc
+        raise ScheduleActionConflict(str(exc)) from exc
     events.publish("schedules.changed", {"id": schedule.id, "action": action})
-    return schedules(manager.store)
+    return {"schedule": _schedule_view(manager.store, manager.schedules, schedule),
+            "message": f"{action.replace('_', ' ')} done."}
 
 
-def schedules_global(store: Store, payload: Dict[str, Any]) -> Dict[str, Any]:
+def schedules_global(manager: Any, payload: Dict[str, Any]) -> Dict[str, Any]:
+    """The one remaining global knob: pause/resume every schedule's firing at once.
+    Not part of the Console API contract's enumerated endpoints, but paused_all in
+    the schedules list reads this setting, and the console keeps a toggle for it."""
     paused = payload.get("paused")
     if not isinstance(paused, bool):
         raise ValidationError("paused must be true or false")
-    store.set_setting("GATE_SCHEDULES_PAUSED", "1" if paused else "0")
+    manager.store.set_setting("GATE_SCHEDULES_PAUSED", "1" if paused else "0")
     events.publish("schedules.changed", {"global_paused": paused})
-    return schedules(store)
+    return schedule_list(manager.store, manager.schedules)
+
+
+async def approve_schedule(manager: Any, payload: Dict[str, Any]) -> Dict[str, Any]:
+    try:
+        schedule_id = int(payload.get("id"))
+    except (TypeError, ValueError):
+        raise ValidationError("id must be an integer") from None
+    approve = payload.get("approve")
+    if not isinstance(approve, bool):
+        raise ValidationError("approve must be true or false")
+    try:
+        schedule = await manager.schedules.decide(schedule_id, approve)
+    except ValueError as exc:
+        raise ValidationError(str(exc)) from exc
+    events.publish("schedules.changed", {"id": schedule.id, "state": schedule.state})
+    message = "Started." if approve else "Not started."
+    return {"schedule": _schedule_view(manager.store, manager.schedules, schedule), "message": message}
 
 
 def task(store: Store, task_id: int) -> Optional[Dict[str, Any]]:
@@ -794,24 +1041,28 @@ def home(gateway: Any, store: Store) -> Dict[str, Any]:
     recent = store.recent_requests(limit=8)  # newest first
     recent_activity = [_request_summary(r) for r in recent]
 
-    schedules_data = schedules(store)
+    # schedule_list() builds the full console view (actions, capabilities, run
+    # history) via ScheduleService; Home only needs the worded cadence and the
+    # next few firings, so it reads the store directly rather than paying for
+    # that whole shape.
+    active_schedules = store.schedules(states=["active"])
     now = time.time()
     upcoming = sorted(
         (
             {
-                "id": s["id"],
-                "title": s["title"],
-                "cadence": s["cadence"],
-                "next_run": s["next_run"],
-                "state": s["state"],
+                "id": s.id,
+                "title": s.title,
+                "cadence": _cadence_text(s),
+                "next_run": s.next_run,
+                "state": s.state,
             }
-            for s in schedules_data["schedules"]
-            if s.get("next_run") and s["next_run"] >= now and s["state"] == "active"
+            for s in active_schedules
+            if s.next_run and s.next_run >= now
         ),
         key=lambda s: s["next_run"],
     )[:5]
     coming_up = {
-        "schedules_paused": schedules_data["global_paused"],
+        "schedules_paused": _paused_all(store),
         "next": upcoming,
     }
 
