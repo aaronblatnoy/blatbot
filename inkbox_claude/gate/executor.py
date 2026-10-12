@@ -11,6 +11,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
+import time
 from typing import Any, Dict, List, Optional
 
 from claude_agent_sdk import (
@@ -20,13 +21,16 @@ from claude_agent_sdk import (
     PermissionResultDeny,
     ResultMessage,
     TextBlock,
+    ToolResultBlock,
     ToolUseBlock,
+    UserMessage,
     query,
 )
 
 from .router import now_line
 from .scopes import ORG_ACCOUNT, OWNER_ACCOUNT, SCOPES, blocks_requester_send, tools_for
 from . import hosttools
+from . import schedrun
 from .store import Request, sha256
 
 logger = logging.getLogger(__name__)
@@ -78,6 +82,35 @@ EXECUTOR_SYSTEM = (
     "and make the very last line exactly STATUS: OK or STATUS: FAILED."
 )
 
+# The schedule system prompt replaces the ordinary closing-line rule with the
+# three-line contract P1 parses: RESULT is the one sentence a notice is built
+# from, NOTE carries forward only what the next run needs, STATUS adds STOP
+# (the run's own request to end its schedule) to OK/FAILED.
+SCHEDULE_EXECUTOR_SYSTEM = (
+    "You are running ONE scheduled, unattended run for Blatbot, Executive Assistant to Aaron Blatnoy, inside "
+    "an approved schedule. Do what the schedule's prompt calls for using only the tools you have, then stop. Do "
+    "not ask questions; nobody is watching this run live. If an essential detail is missing, stop and report "
+    "what is missing. When something must be found in a document, sheet, calendar or inbox: search, open the "
+    "most likely result, and if it is not the right one open the next likely ones or search again with "
+    "different words before concluding it does not exist. The gateway delivers your result to Aaron: NEVER "
+    "text, iMessage or email him with it yourself unless the schedule's own prompt asks you to message him; "
+    "put it in RESULT instead.\n"
+    f"Accounts: every tamid-drive tool takes user_google_email={ORG_ACCOUNT}; every stern-drive tool "
+    f"takes user_google_email={OWNER_ACCOUNT} (Aaron's own calendar and mail). Never any other address. "
+    "The Inkbox mailbox is blatbot@inkboxmail.com. Timezone America/New_York.\n"
+    "Anything you write to another person (email, text, calendar invite) is from Blatbot, Aaron's assistant. "
+    "Never mention Claude, Claude Code, Anthropic, AI tooling, prompts or how the task was run, and never sign "
+    "as anything but Blatbot.\n"
+    "If a tool asks for authorization or a browser, stop and report it as a failure.\n"
+    "End with exactly these closing lines, in this order, and nothing after them:\n"
+    "RESULT: <one plain sentence for Aaron, no markdown, no lists, no bold>\n"
+    "NOTE: <what the next run of this schedule needs to know, or omit this line entirely>\n"
+    "STATUS: OK\n"
+    "Use STATUS: FAILED instead of STATUS: OK when the run could not finish what it was asked. Use "
+    "STATUS: STOP instead when this schedule should not run again (its job is done for good, or it asked to "
+    "end itself); STOP still needs a RESULT line saying why."
+)
+
 ORDINARY_DESTRUCTIVE_DENIAL = (
     "Deleting, cancelling or replacing anything requires Aaron's confirmation, which only the gateway can ask "
     "for. Report exactly what you would change (name, time, id) in your status and stop."
@@ -108,14 +141,21 @@ class Executor:
     _sessions: Dict[str, str] = {}      # thread -> the Claude session that thread is having
 
     async def run(self, req: Request, context: str = "", prior_work: str = "", model: Optional[str] = None,
-                  from_owner: bool = False) -> Dict[str, Any]:
+                  from_owner: bool = False, timezone: str = "America/New_York",
+                  note: Optional[str] = None) -> Dict[str, Any]:
         """Run an approved request. Returns a status dict; never raises.
 
         `context` is the task ledger for the person this request concerns. It is
         appended to the system prompt as read-only background; the task text
-        itself (req.prompt) is what was approved and is hash-checked unchanged."""
+        itself (req.prompt) is what was approved and is hash-checked unchanged.
+
+        `timezone` and `note` matter only for a scheduled run (req.schedule_id):
+        `timezone` is the schedule's own time zone, used for the run's start-time
+        line; `note` is the previous run's note, carried forward once. Neither is
+        used, and no task ledger is added, for an ordinary request."""
         if sha256(req.prompt) != req.prompt_sha256:
             return {"ok": False, "error": "prompt hash mismatch; refused to run", "tool_calls": []}
+        started_at = time.time()
         vault_prefixes = vault_prefixes_for_scopes(req.scopes)
         allowed = tools_for(req.scopes)
         if req.schedule_kind == "continue":
@@ -127,13 +167,17 @@ class Executor:
             from .jevagent import is_write_tool as _is_write
             allowed = [tool for tool in allowed if not _is_write(tool)]
         tool_calls: List[str] = []
+        tool_use_names: Dict[str, str] = {}
+        tool_results: List[Dict[str, Any]] = []
         texts: List[str] = []
         denied_steps: List[Dict[str, Any]] = []
         # The key this run's Claude Code session resumes under. A scheduled run never
-        # shares the owner's own thread's session: two runs (the owner talking live, a
-        # schedule firing) can be in flight on the owner's chat_id at once, and a
-        # scheduled run resuming the owner's live conversation would leak into it.
-        session_key = f"schedule:{req.schedule_id}" if req.schedule_id else req.chat_id
+        # resumes any session at all -- not the owner's thread, not even its own prior
+        # runs' session -- and its own session id is never stored for a later run to
+        # pick up: every run of a schedule starts cold, with only the carried `note`
+        # (not a reused conversation) linking it to the last one. An ordinary request
+        # still resumes its thread's session as before.
+        session_key = None if req.schedule_id else req.chat_id
 
         self.held_send = None
         held_destructive: Optional[Dict[str, Any]] = None
@@ -173,11 +217,12 @@ class Executor:
                                                     "result. Put the answer in your final status and stop.")
             return PermissionResultAllow()
 
-        system_append = EXECUTOR_SYSTEM + f"\nNow: {now_line()}. Resolve 'today', 'tomorrow', weekday names and relative dates from this.\n"
         if req.schedule_id:
-            system_append += ("This is a run of a schedule Aaron already approved. When the task says to message "
-                              "Aaron himself, send it with the send tool: that message is the job, and the rule "
-                              "above about not messaging the requester does not apply to it.\n")
+            system_append = SCHEDULE_EXECUTOR_SYSTEM + f"\nNow: {now_line()}. Resolve 'today', 'tomorrow', weekday names and relative dates from this.\n"
+            prompt_text = schedrun.build_prompt(req.prompt, started_at, timezone, note)
+        else:
+            system_append = EXECUTOR_SYSTEM + f"\nNow: {now_line()}. Resolve 'today', 'tomorrow', weekday names and relative dates from this.\n"
+            prompt_text = req.prompt
         if context.strip():
             system_append += (
                 "\n\nTASK LEDGER (read-only background on this person; the task text below is what to do):\n"
@@ -206,10 +251,11 @@ class Executor:
             permission_mode="default",
             allowed_tools=allowed,
             mcp_servers={"inkbox": self.mcp_server, "host": hosttools.sdk_server(continue_state, vault_prefixes=vault_prefixes)},
-            # One conversation per thread, continued rather than restarted. A request is a
-            # turn in it, so what was looked up an hour ago is still in view and a follow-up
-            # does not arrive as a stranger's first sentence.
-            resume=self._sessions.get(session_key),
+            # One conversation per thread, continued rather than restarted, for an ordinary
+            # request: what was looked up an hour ago is still in view and a follow-up does
+            # not arrive as a stranger's first sentence. A scheduled run never resumes:
+            # session_key is None for it, so resume is always None too.
+            resume=(self._sessions.get(session_key) if session_key is not None else None),
             can_use_tool=can_use,
             max_turns=30,
         )
@@ -220,7 +266,7 @@ class Executor:
             final: Optional[Any] = None
             # Consume the generator to completion; returning from inside the
             # loop leaves the SDK's async generator half-closed.
-            async for msg in query(prompt=req.prompt, options=options):
+            async for msg in query(prompt=prompt_text, options=options):
                 if isinstance(msg, AssistantMessage):
                     saw_tool_use = False
                     for block in msg.content:
@@ -228,6 +274,7 @@ class Executor:
                             texts.append(block.text)
                         elif isinstance(block, ToolUseBlock):
                             tool_calls.append(block.name)
+                            tool_use_names[block.id] = block.name
                             saw_tool_use = True
                     if saw_tool_use:
                         # A text block landed in the same turn as a tool call; it is
@@ -236,9 +283,18 @@ class Executor:
                         closing_texts.clear()
                     else:
                         closing_texts.extend(block.text for block in msg.content if isinstance(block, TextBlock))
+                elif isinstance(msg, UserMessage):
+                    # Only a call that actually ran produces a ToolResultBlock; a denied
+                    # or held call never reaches here, so tool_results never includes one.
+                    content = msg.content if isinstance(msg.content, list) else []
+                    for block in content:
+                        if isinstance(block, ToolResultBlock):
+                            name = tool_use_names.get(block.tool_use_id)
+                            if name:
+                                tool_results.append({"tool": name, "ok": not bool(block.is_error)})
                 elif isinstance(msg, ResultMessage):
                     sid = getattr(msg, "session_id", None)
-                    if sid:
+                    if sid and session_key is not None:
                         self._sessions[session_key] = sid
                     final = msg
             return final
@@ -246,34 +302,61 @@ class Executor:
         try:
             result = await asyncio.wait_for(_go(), timeout=self.timeout_s)
         except asyncio.TimeoutError:
+            finished_at = time.time()
             return {"ok": False, "error": f"timed out after {int(self.timeout_s)}s", "tool_calls": tool_calls,
-                    "raw": "\n".join(texts)}
+                    "raw": "\n".join(texts), "stop": False, "result_line": "", "final_status": "",
+                    "note": "", "denied": [{"tool": d["tool"], "reason": d.get("denied", "scope")}
+                                           for d in denied_steps],
+                    "held": bool(self.held_send or held_destructive), "tool_results": tool_results,
+                    "started_at": started_at, "finished_at": finished_at, "cost_usd": None}
         except Exception as exc:  # noqa: BLE001
             logger.exception("executor failed for request %s", req.id)
-            return {"ok": False, "error": str(exc), "tool_calls": tool_calls, "raw": "\n".join(texts)}
+            finished_at = time.time()
+            return {"ok": False, "error": str(exc), "tool_calls": tool_calls, "raw": "\n".join(texts),
+                    "stop": False, "result_line": "", "final_status": "", "note": "",
+                    "denied": [{"tool": d["tool"], "reason": d.get("denied", "scope")} for d in denied_steps],
+                    "held": bool(self.held_send or held_destructive), "tool_results": tool_results,
+                    "started_at": started_at, "finished_at": finished_at, "cost_usd": None}
 
+        finished_at = time.time()
         raw = "\n".join(texts).strip()
         is_error = bool(getattr(result, "is_error", False)) if result is not None else False
-        last = raw.strip().splitlines()[-1].strip().upper() if raw.strip() else ""
-        if last.startswith("STATUS:"):
-            is_error = is_error or ("FAILED" in last)
-        elif raw.lower().startswith("task failed") or "STATUS: FAILED" in raw.upper():
-            is_error = True
+        closing_full = "\n".join(closing_texts).strip()
+        parsed = schedrun.parse_closing(closing_full)
+        if parsed["status"] is not None:
+            ok = parsed["status"] in ("OK", "STOP")
+            is_error = is_error or parsed["status"] == "FAILED"
+        else:
+            # No RESULT/NOTE/STATUS contract matched (the ordinary, non-schedule system
+            # prompt just asks for a last line of STATUS: OK or STATUS: FAILED): fall
+            # back to the legacy check on the raw closing text.
+            last = raw.strip().splitlines()[-1].strip().upper() if raw.strip() else ""
+            if last.startswith("STATUS:"):
+                is_error = is_error or ("FAILED" in last)
+            elif raw.lower().startswith("task failed") or "STATUS: FAILED" in raw.upper():
+                is_error = True
+            ok = not is_error
         # final_status is the run's own closing status -- the text that arrived after
-        # the last tool call, with the STATUS: OK/FAILED line stripped. raw (the full
-        # step-by-step narration) stays available for the console and the record, but
-        # a notice to the owner is built from final_status, never raw.
-        final_status = "\n".join(closing_texts).strip()
-        final_lines = [ln for ln in final_status.splitlines() if not ln.strip().upper().startswith("STATUS:")]
-        final_status = "\n".join(final_lines).strip()
+        # the last tool call, with the RESULT:/NOTE:/STATUS: lines stripped. raw (the
+        # full step-by-step narration) stays available for the console and the record,
+        # but a notice to the owner is built from final_status, never raw.
+        final_status = parsed["final_status"] if closing_full else (raw if raw else "(no status text)")
         out = {
-            "ok": not is_error,
+            "ok": ok,
+            "stop": bool(parsed["stop"]),
+            "result_line": parsed["result_line"],
+            "note": parsed["note"],
             "engine": f"claude:{model or self.model}",
             "summary": raw if raw else "(no status text)",
-            "final_status": final_status or (raw if raw else "(no status text)"),
+            "final_status": final_status,
             "tool_calls": tool_calls,
+            "tool_results": tool_results,
+            "denied": [{"tool": d["tool"], "reason": d.get("denied", "scope")} for d in denied_steps],
+            "held": bool(self.held_send or held_destructive),
             "raw": raw,
             "steps": denied_steps,
+            "started_at": started_at,
+            "finished_at": finished_at,
             "cost_usd": getattr(result, "total_cost_usd", None) if result is not None else None,
         }
         if self.held_send is not None:
