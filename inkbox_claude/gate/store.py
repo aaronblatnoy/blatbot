@@ -732,18 +732,29 @@ class Store:
                 # Idempotent: a brand-new database already has every column
                 # from SCHEMA_PG above, so every ADD COLUMN here is a no-op
                 # for it, and running this twice changes nothing either way.
+                # The columns go on BEFORE SCHEMA_PG: SCHEMA_PG also creates an index
+                # on messages(schedule_id), which fails on an old-shape table. IF
+                # EXISTS on the table keeps this a no-op for a brand-new database.
+                # Only when a column is actually missing: ALTER TABLE takes an exclusive
+                # lock even when it has nothing to add, and would wait on any other
+                # open connection at every start-up.
+                have = {(r["table_name"], r["column_name"]) for r in self._db.execute(
+                    "SELECT table_name, column_name FROM information_schema.columns "
+                    "WHERE table_schema = current_schema() AND table_name IN ('schedules', 'messages')")}
+                tables = {t for t, _ in have}
+                for table, column, ddl in (
+                    ("schedules", "cadence_kind", "TEXT NOT NULL DEFAULT ''"),
+                    ("schedules", "cadence_json", "TEXT NOT NULL DEFAULT '{}'"),
+                    ("schedules", "report_every_time", "INTEGER NOT NULL DEFAULT 0"),
+                    ("schedules", "until", "DOUBLE PRECISION"),
+                    ("schedules", "origin_mode", "TEXT NOT NULL DEFAULT ''"),
+                    ("schedules", "origin_chat_id", "TEXT NOT NULL DEFAULT ''"),
+                    ("schedules", "last_note", "TEXT NOT NULL DEFAULT ''"),
+                    ("messages", "schedule_id", "BIGINT"),
+                ):
+                    if table in tables and (table, column) not in have:
+                        self._db.execute(f"ALTER TABLE {table} ADD COLUMN IF NOT EXISTS {column} {ddl}")
                 self._db.executescript(SCHEMA_PG)
-                self._db.executescript("""
-                    ALTER TABLE schedules ADD COLUMN IF NOT EXISTS cadence_kind TEXT NOT NULL DEFAULT '';
-                    ALTER TABLE schedules ADD COLUMN IF NOT EXISTS cadence_json TEXT NOT NULL DEFAULT '{}';
-                    ALTER TABLE schedules ADD COLUMN IF NOT EXISTS report_every_time INTEGER NOT NULL DEFAULT 0;
-                    ALTER TABLE schedules ADD COLUMN IF NOT EXISTS until DOUBLE PRECISION;
-                    ALTER TABLE schedules ADD COLUMN IF NOT EXISTS origin_mode TEXT NOT NULL DEFAULT '';
-                    ALTER TABLE schedules ADD COLUMN IF NOT EXISTS origin_chat_id TEXT NOT NULL DEFAULT '';
-                    ALTER TABLE schedules ADD COLUMN IF NOT EXISTS last_note TEXT NOT NULL DEFAULT '';
-                    ALTER TABLE messages ADD COLUMN IF NOT EXISTS schedule_id BIGINT;
-                    CREATE INDEX IF NOT EXISTS messages_schedule ON messages(schedule_id);
-                """)
                 self._migrate_schedule_cadence_model()
                 self._seed_contact_kinds_locked()
                 self._db.commit()
