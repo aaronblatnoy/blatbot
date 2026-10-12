@@ -467,6 +467,19 @@ class GateSession:
             "says as though you had just checked."
         )
 
+    def _schedules_context(self) -> str:
+        """Compact 'title: state' lines for the router's prompt, non-ended schedules
+        first -- only for the verified owner, and only when at least one schedule row
+        exists. Anyone else, or an empty store, gets "" (the router default): the
+        router must never be handed schedule data for a sender who cannot see it."""
+        if not self.is_approver():
+            return ""
+        rows = self.m.store.schedules()
+        if not rows:
+            return ""
+        rows = sorted(rows, key=lambda s: s.state == "ended")
+        return "\n".join(f"{s.title}: {s.state}" for s in rows)
+
     async def decide(self, *, body: str, message: str, prior: List[Dict[str, Any]], mode: str,
                      memory: str, found: str) -> "Tuple[RouterOutput, Optional[Dict[str, Any]]]":
         """One turn's decisions: which task, whether to act, the reply, the request.
@@ -484,7 +497,8 @@ class GateSession:
         if self.m.router_defines_requests or picker is None:
             out = await self.m.router.route(history=prior, message=message, mode=mode, sender=self._sender(),
                                             contact_notes=self._contact_notes(), is_approver=approver,
-                                            task_memory=memory, found_tasks=found)
+                                            task_memory=memory, found_tasks=found,
+                                            schedules_context=self._schedules_context())
             await self.jev_pick(message, prior, out)
             await self.jev_action(message, prior, out, self._peek_task(out))
             task = None
@@ -526,7 +540,8 @@ class GateSession:
         out = await self.m.router.route(history=prior, message=message, mode=mode, sender=self._sender(),
                                         contact_notes=self._contact_notes(), is_approver=approver,
                                         task_memory=memory, found_tasks=found, action=needs_action,
-                                        action_task=(peek or {}).get("title") or "")
+                                        action_task=(peek or {}).get("title") or "",
+                                        schedules_context=self._schedules_context())
         out.request = None  # the router never defines the request on this path
         if not needs_action and out.reply and _promises_action(out.reply):
             # No request exists, so a reply that says "on it" / "submitting now" would be a lie.
@@ -536,7 +551,8 @@ class GateSession:
                                              task_memory=memory, found_tasks=found, action=False,
                                              action_task="(NOTE: no request has been created and none will run for this "
                                                          "message; do not say you are doing, submitting or checking anything. "
-                                                         "Answer from what is known, or ask what is needed.)")
+                                                         "Answer from what is known, or ask what is needed.)",
+                                             schedules_context=self._schedules_context())
             out.reply = out2.reply if out2.reply and not _promises_action(out2.reply) else None
         if needs_action and out.reply and not _is_acknowledgement(out.reply):
             # A request will run and its result will be delivered. A reply that answers
@@ -1762,7 +1778,29 @@ class GateSessionManager:
             req = next(p for p in pending if p.id == int(m.group(1)))
             rest = m.group(2).strip()
         elif len(pending) == 1 and t.lower() in (_YES | _NO):
-            req = pending[0]
+            # A bare yes/no with exactly one pending request used to resolve it no
+            # matter which thread it was on -- wrong when THIS thread also has an
+            # open schedule proposal, which could then be skipped for an unrelated
+            # request elsewhere. Only grab the pending request here when this
+            # thread has no open proposal to disambiguate against; otherwise leave
+            # req unset so an open proposal on this thread (below) or the explicit
+            # disambiguation question can take it instead.
+            from . import schedcmd
+            chat_id = getattr(session, "record_id", None) or getattr(session, "chat_id", "")
+            this_thread_proposals = schedcmd._open_proposals(self.store, chat_id)
+            if this_thread_proposals:
+                if pending[0].chat_id == chat_id:
+                    # Both an open proposal and a pending approval on this same
+                    # thread: genuinely ambiguous. Ask, resolve neither.
+                    other = (pending[0].summary or pending[0].original_message or "").strip()
+                    await session.send_to_sender(
+                        f'Yes to which: starting "{this_thread_proposals[0].title}", or {other}?',
+                        role="answer")
+                    return True
+                # The pending request is on a different thread; this thread's own
+                # proposal (handled further below) answers the bare yes/no instead.
+            else:
+                req = pending[0]
         if req is not None:
             # Parsing stops here: what the words mean is decided in one place, so a text and a
             # click in the console cannot drift apart.

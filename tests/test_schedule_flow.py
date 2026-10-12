@@ -356,3 +356,128 @@ def test_notes_field_repurposed_for_edit_revert_round_trips(tmp_path):
     store.update_schedule(schedule.id, state="active")
     active = store.get_schedule(schedule.id)
     assert service._edit_revert(active) is None  # nothing stashed yet
+
+
+# ---------------------------------------------------------------------------
+# Gap 1: router.route() needs the owner's schedules, and only the owner's
+# ---------------------------------------------------------------------------
+
+class _RecordingRouter:
+    """Captures the kwargs the last route() call was made with, so a test can
+    assert on schedules_context without caring about the rest of the output."""
+
+    def __init__(self, out):
+        self.out = out
+        self.calls = []
+
+    async def route(self, **kw):
+        self.calls.append(kw)
+        return self.out.model_copy(deep=True)
+
+    async def plan_query(self, **kw):
+        return None
+
+
+@pytest.mark.asyncio
+async def test_router_gets_schedules_context_for_owner_with_schedules(tmp_path):
+    m, sent = make_manager(tmp_path)
+    task = m.store.create_task("watch the team page")
+    m.store.create_schedule(chat_id="other-thread", task_id=task["id"], title="Team total watch",
+                            prompt="p", kind="every", scopes=["web"], timezone="America/New_York",
+                            report_mode="changed", cadence_kind="every", cadence={"minutes": 240},
+                            report_every_time=False, origin_mode="imessage", origin_chat_id="other-thread")
+    router = _RecordingRouter(RouterOutput(reply="ok", request=None))
+    m.router = router
+    await m.get(APPROVER_CONV).handle_inbound("how's it going", mode="imessage",
+                                              meta={"sender": "+15550100001", "to": "+15550100001",
+                                                    "conversation_id": APPROVER_CONV})
+    assert router.calls, "route() was never called"
+    ctx = router.calls[-1].get("schedules_context") or ""
+    assert ctx != ""
+    assert "Team total watch" in ctx and "proposed" in ctx
+
+
+@pytest.mark.asyncio
+async def test_router_gets_no_schedules_context_for_non_owner(tmp_path):
+    m, sent = make_manager(tmp_path)
+    task = m.store.create_task("watch the team page")
+    m.store.create_schedule(chat_id="other-thread", task_id=task["id"], title="Team total watch",
+                            prompt="p", kind="every", scopes=["web"], timezone="America/New_York",
+                            report_mode="changed", cadence_kind="every", cadence={"minutes": 240},
+                            report_every_time=False, origin_mode="imessage", origin_chat_id="other-thread")
+    router = _RecordingRouter(RouterOutput(reply="ok", request=None))
+    m.router = router
+    await m.get("stranger@example.com").handle_inbound("how's it going", mode="email",
+                                                        meta={"sender": "stranger@example.com"})
+    assert router.calls, "route() was never called"
+    assert (router.calls[-1].get("schedules_context") or "") == ""
+
+
+@pytest.mark.asyncio
+async def test_router_gets_no_schedules_context_when_store_is_empty(tmp_path):
+    m, sent = make_manager(tmp_path)
+    router = _RecordingRouter(RouterOutput(reply="ok", request=None))
+    m.router = router
+    await m.get(APPROVER_CONV).handle_inbound("how's it going", mode="imessage",
+                                              meta={"sender": "+15550100001", "to": "+15550100001",
+                                                    "conversation_id": APPROVER_CONV})
+    assert router.calls, "route() was never called"
+    assert (router.calls[-1].get("schedules_context") or "") == ""
+
+
+# ---------------------------------------------------------------------------
+# Gap 2: a bare "yes" must not grab an unrelated pending request from another
+# thread when the CURRENT thread has its own open schedule proposal.
+# ---------------------------------------------------------------------------
+
+def _make_pending_request(m, chat_id):
+    task = m.store.create_task("an errand")
+    return m.store.create_request(chat_id=chat_id, sender="someone@example.com", sender_name="Someone",
+                                  mode="email", subject="", original_message="please do X",
+                                  summary="do X", scopes=["web"], prompt="P", state="pending",
+                                  task_id=task["id"])
+
+
+@pytest.mark.asyncio
+async def test_bare_yes_resolves_this_threads_proposal_not_unrelated_pending(tmp_path):
+    m, sent = make_manager(tmp_path)
+    # An unrelated pending request sits on a different thread.
+    other_req = _make_pending_request(m, "unrelated-thread")
+    # The approver's own thread has an open schedule proposal only.
+    await _propose_via_manager(m, title="Team total watch", scopes=["web"])
+    schedule = m.store.schedules(states=["proposed"])[0]
+    sent.clear()
+
+    session = m.get(APPROVER_CONV)
+    await session.handle_inbound("yes", mode="imessage",
+                                 meta={"sender": "+15550100001", "to": "+15550100001",
+                                       "conversation_id": APPROVER_CONV})
+    await asyncio.sleep(0.05)
+
+    activated = m.store.get_schedule(schedule.id)
+    assert activated.state == "active"                       # the proposal was resolved
+    assert m.store.get_request(other_req.id).state == "pending"  # the unrelated request was left alone
+
+
+@pytest.mark.asyncio
+async def test_bare_yes_on_same_thread_with_both_open_asks_which(tmp_path):
+    m, sent = make_manager(tmp_path)
+    await _propose_via_manager(m, title="Team total watch", scopes=["web"])
+    schedule = m.store.schedules(states=["proposed"])[0]
+    # A pending, non-schedule approval request also sits on THIS same thread
+    # (the owner's private record thread, which is where the proposal lives too).
+    same_thread_req = _make_pending_request(m, gm.OWNER_THREAD)
+    sent.clear()
+
+    session = m.get(APPROVER_CONV)
+    await session.handle_inbound("yes", mode="imessage",
+                                 meta={"sender": "+15550100001", "to": "+15550100001",
+                                       "conversation_id": APPROVER_CONV})
+    await asyncio.sleep(0.05)
+
+    assert m.store.get_schedule(schedule.id).state == "proposed"       # untouched
+    assert m.store.get_request(same_thread_req.id).state == "pending"  # untouched
+    reply = sent[-1][1]
+    assert reply.startswith("Yes to which:")
+    assert "Team total watch" in reply
+    assert "do X" in reply
