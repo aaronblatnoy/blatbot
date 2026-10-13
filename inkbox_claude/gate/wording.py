@@ -494,6 +494,14 @@ def _non_call_title(summary: str, created_at: Any) -> str:
 _SENTENCE_PIECE_RE = re.compile(r"(?<=[.!?])\s+")
 
 
+def call_time_text(created_at: Any, timezone_name: str = "America/New_York") -> str:
+    """Public wrapper for _call_time_text: "10:12 AM" for today, "Oct 13,
+    10:12 AM" otherwise, "" when unknown. Used wherever a call is named by
+    when it happened outside of a single request's own title (overview.py's
+    usage-limit Stuck/Done-today collapsing, in particular)."""
+    return _call_time_text(created_at, timezone_name)
+
+
 def plain_title(store: Any, req: Any) -> str:
     """The request named to the owner, anywhere a request is named (overview
     rows, failure/success messages, the progress reply): a call request is

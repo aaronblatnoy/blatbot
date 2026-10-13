@@ -216,11 +216,12 @@ def test_coming_up_flags_a_schedule_whose_last_run_failed(tmp_path):
 
 def test_the_count_shown_equals_the_rows_shown(tmp_path):
     store = make_store(tmp_path)
-    # Three genuinely distinct failed asks on the same thread, close together in
-    # time: before the fix these all collapsed into one row (or fewer) because
-    # clustering keyed only on thread + time window, not task or title.
+    # Three genuinely distinct failed asks, each the most recent (and only)
+    # request on its own thread -- each stays its own Stuck row, and the
+    # reported count always matches the rows actually returned.
     for i in range(3):
-        req = _make_request(store, title_task=store.create_task(f"ask {i}")["id"],
+        req = _make_request(store, chat_id=f"thread-{i}",
+                            title_task=store.create_task(f"ask {i}")["id"],
                             summary=f"Find document {i}.", state="failed",
                             status={"error": "could not reach the page"})
         _backdate(store, req.id, created_at=time.time() - 10 * i, updated_at=time.time() - 10 * i)
@@ -231,15 +232,17 @@ def test_the_count_shown_equals_the_rows_shown(tmp_path):
     assert result["counts"]["stuck"] == 3
 
 
-def test_distinct_asks_on_the_same_thread_are_not_merged_into_one(tmp_path):
-    """The real-data bug: seven failed requests for three different asks on one
-    thread used to collapse into a single row and make two asks vanish."""
+def test_distinct_asks_on_different_threads_are_not_merged_into_one(tmp_path):
+    """Three different asks on three different threads, each still the most
+    recent (and only) request on its own thread, each keep their own row --
+    the real-data bug this guards against made two of three vanish."""
     store = make_store(tmp_path)
     titles = ["Find the sponsorship deck.", "Pull last month's numbers.", "Draft the recap email."]
     for i, title in enumerate(titles):
         for _ in range(2):  # two failed attempts per ask, close together
-            req = _make_request(store, title_task=store.create_task(title)["id"], summary=title,
-                                state="failed", status={"error": "could not reach the page"})
+            req = _make_request(store, chat_id=f"thread-{i}", title_task=store.create_task(title)["id"],
+                                summary=title, state="failed",
+                                status={"error": "could not reach the page"})
             _backdate(store, req.id, created_at=time.time() - i, updated_at=time.time() - i)
 
     result = api.overview(FakeGateway(FakeManager(store)), store)
@@ -248,6 +251,41 @@ def test_distinct_asks_on_the_same_thread_are_not_merged_into_one(tmp_path):
     assert len(request_rows) == 3
     seen_titles = {r["title"] for r in request_rows}
     assert seen_titles == set(titles)
+
+
+def test_only_the_most_recent_failure_on_a_thread_stays_stuck(tmp_path):
+    """Several distinct failed asks on the SAME thread: only the latest stays
+    Stuck (nothing more can be done about the earlier ones -- they are not
+    the most recent request on the thread and were not refused a
+    permission), so they are not nagged about forever."""
+    store = make_store(tmp_path)
+    older = _make_request(store, summary="Find document 0.", state="failed",
+                          status={"error": "could not reach the page"})
+    _backdate(store, older.id, created_at=time.time() - 120, updated_at=time.time() - 120)
+    newer = _make_request(store, summary="Find document 1.", state="failed",
+                          status={"error": "could not reach the page"})
+    _backdate(store, newer.id, created_at=time.time() - 10, updated_at=time.time() - 10)
+
+    result = api.overview(FakeGateway(FakeManager(store)), store)
+
+    request_rows = [r for r in result["stuck"] if r["kind"] == "request"]
+    assert len(request_rows) == 1
+    assert request_rows[0]["id"] == newer.id
+
+
+def test_a_refused_permission_stays_stuck_even_when_not_the_latest_on_its_thread(tmp_path):
+    store = make_store(tmp_path)
+    denied = _make_request(store, summary="Edit the contact.", state="failed",
+                           status={"denied": [{"tool": "mcp__tamid-drive__update_contact"}]})
+    _backdate(store, denied.id, created_at=time.time() - 120, updated_at=time.time() - 120)
+    newer = _make_request(store, summary="Find document 1.", state="failed",
+                          status={"error": "could not reach the page"})
+    _backdate(store, newer.id, created_at=time.time() - 10, updated_at=time.time() - 10)
+
+    result = api.overview(FakeGateway(FakeManager(store)), store)
+
+    request_rows = [r for r in result["stuck"] if r["kind"] == "request"]
+    assert {r["id"] for r in request_rows} == {denied.id, newer.id}
 
 
 def test_retry_action_wired_to_the_real_endpoint(tmp_path):

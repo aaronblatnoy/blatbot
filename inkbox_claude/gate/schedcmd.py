@@ -593,11 +593,46 @@ def status_reply(manager: Any) -> str:
 
 
 def _stuck_sayable(manager: Any) -> List[Dict[str, Any]]:
-    """Stuck rows that have a chat fix at all (say is not None) -- a
-    proposal or a plain approval already has its own yes/no mechanism, so
-    those are left to "list"/the open-proposal flow, not this reply."""
+    """Stuck rows a chat reply can say anything about at all: every row except
+    a plain approval/proposal (kind "approval"), which already has its own
+    yes/no mechanism, so is left to "list"/the open-proposal flow instead. A
+    collapsed usage-limit group has no say (nothing can be said to fix a
+    session limit) but still belongs in the reply -- it is kind
+    "request_cluster", not "approval"."""
     rows = overview_mod.stuck_rows(manager.store, manager.schedules)
-    return [r for r in rows if r.get("say")]
+    return [r for r in rows if r.get("say") or r.get("kind") == "request_cluster"]
+
+
+def _stuck_tail(item: Dict[str, Any]) -> str:
+    """The "Say ..." phrase that follows one stuck item's sentence, or "" when
+    nothing can be said about it at all (a collapsed usage-limit group). A
+    one-off request can never be "stopped" -- only a schedule can -- so a
+    request's tail never offers "stop it"."""
+    say = item.get("say")
+    stoppable = item.get("kind") != "request" and item.get("kind") != "request_cluster"
+    if not say:
+        return ""
+    if say == "stop it":
+        return f'Say "{say}".'
+    if stoppable:
+        return f'Say "{say}" or "stop it".'
+    return f'Say "{say}".'
+
+
+def _stuck_tail_named(item: Dict[str, Any], word: str) -> str:
+    say = item.get("say")
+    stoppable = item.get("kind") != "request" and item.get("kind") != "request_cluster"
+    if not say:
+        return ""
+    named_say = _named_say(say, word)
+    if say == "stop it":
+        return f'Say "{named_say}".'
+    if stoppable:
+        return f'Say "{named_say}" or "stop the {word} one".'
+    return f'Say "{named_say}".'
+
+
+_STUCK_REPLY_SHOWN = 3
 
 
 def stuck_reply(manager: Any) -> str:
@@ -606,16 +641,20 @@ def stuck_reply(manager: Any) -> str:
         return "Nothing is stuck."
     if len(items) == 1:
         it = items[0]
-        say = it["say"]
-        tail = f'Say "{say}".' if say == "stop it" else f'Say "{say}" or "stop it".'
-        return f"One thing is stuck. {it['sentence']} {tail}"
-    parts = []
-    for it in items:
+        tail = _stuck_tail(it)
+        sentence = f"{it['sentence']} {tail}".strip() if tail else it["sentence"]
+        return f"One thing is stuck. {sentence}"
+    shown = items[:_STUCK_REPLY_SHOWN]
+    lines = []
+    for it in shown:
         word = _title_word(it["title"])
-        say = _named_say(it["say"], word)
-        tail = f'Say "{say}".' if it["say"] == "stop it" else f'Say "{say}" or "stop the {word} one".'
-        parts.append(f"{it['sentence']} {tail}")
-    return f"{_count_word(len(items))} things are stuck. " + " ".join(parts)
+        tail = _stuck_tail_named(it, word)
+        line = f"{it['sentence']} {tail}".strip() if tail else it["sentence"]
+        lines.append(line)
+    reply = f"{_count_word(len(items))} things are stuck. " + "\n".join(lines)
+    if len(items) > _STUCK_REPLY_SHOWN:
+        reply += f"\nAnd {len(items) - _STUCK_REPLY_SHOWN} more on the console."
+    return reply
 
 
 def today_reply(manager: Any) -> str:

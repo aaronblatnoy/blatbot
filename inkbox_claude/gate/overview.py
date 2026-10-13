@@ -158,78 +158,162 @@ def _stuck_pending_requests(store: Store) -> List[Dict[str, Any]]:
     return out
 
 
+_USAGE_LIMIT_DEFAULT_EXPIRY_HOURS = 2.0
+
+
 def _failed_request_candidates(store: Store, now: float) -> List[Dict[str, Any]]:
-    """Requests that failed in the last 24 hours, were never followed by a later
-    successful request on the same task, and are not a schedule's own run (that
-    is represented by the schedule's Stuck row instead). Each candidate carries
-    its task id, for clustering "the same ask" together."""
-    cutoff = now - 86400.0
+    """Non-usage-limit failed one-off requests still worth their own Stuck row:
+    failed within the last 6 hours, and either refused a permission or are the
+    most recent request on their own thread. A usage-limit failure is never
+    reported here -- it is never an individual row at all, see
+    _usage_limit_groups/_usage_limit_cluster_rows below. Not a schedule's own
+    run either (that is represented by the schedule's Stuck row instead)."""
+    cutoff = now - 6 * 3600.0
     recent = store.recent_requests(limit=500)
-    by_task: Dict[int, List[Request]] = {}
+    latest_created_by_chat: Dict[str, float] = {}
     for request in recent:
-        task_id = store.task_id_for_request(request.id)
-        if task_id is not None:
-            by_task.setdefault(task_id, []).append(request)
+        if not request.chat_id:
+            continue
+        prior = latest_created_by_chat.get(request.chat_id)
+        if prior is None or request.created_at > prior:
+            latest_created_by_chat[request.chat_id] = request.created_at
     out = []
     for request in recent:
         if request.schedule_id or request.state != "failed" or request.updated_at < cutoff:
             continue
-        task_id = store.task_id_for_request(request.id)
-        if task_id is not None:
-            later_success = any(
-                other.id != request.id and other.state == "done" and other.created_at >= request.created_at
-                for other in by_task.get(task_id, [])
-            )
-            if later_success:
-                continue
+        status = request.status or {}
+        if wording.failure_category(status) == "usage_limit":
+            continue
+        is_latest_on_thread = bool(request.chat_id) and request.created_at >= latest_created_by_chat.get(
+            request.chat_id, request.created_at)
+        was_refused = bool(status.get("denied"))
+        if not (was_refused or is_latest_on_thread):
+            continue
         title, _plain = _request_title_and_plain(store, request)
-        out.append({"request": request, "task_id": task_id, "title": title})
+        out.append({"request": request, "title": title})
     return out
-
-
-def _cluster_same_ask(candidates: List[Dict[str, Any]]) -> List[List[Dict[str, Any]]]:
-    """Group failed-request candidates that are the same ask: sharing a task, or
-    carrying the same plain title (so distinct asks on the same thread never
-    collapse into one just for landing close together in time -- the window
-    that used to gate this on its own chained ANY failure on a thread, which
-    silently merged several different asks into one Stuck row and made the
-    others vanish). Each cluster is returned oldest-first; the caller reports
-    only its latest member."""
-    clusters: List[List[Dict[str, Any]]] = []
-    for item in sorted(candidates, key=lambda c: c["request"].created_at):
-        placed = False
-        for cluster in clusters:
-            rep = cluster[-1]
-            same_task = item["task_id"] is not None and item["task_id"] == rep["task_id"]
-            same_title = item["title"] == rep["title"]
-            if same_task or same_title:
-                cluster.append(item)
-                placed = True
-                break
-        if not placed:
-            clusters.append([item])
-    return clusters
 
 
 def _stuck_failed_requests(store: Store, now: float) -> List[Dict[str, Any]]:
-    """One row per distinct failed ask (see _cluster_same_ask), reported from its
-    latest attempt. The sentence is always "<plain title>: <why, in plain
-    words>." -- wording.failure_in_words never returns the raw error string
-    or a run's own first-person text, so this is already clean on both
-    surfaces. "say" is "try again": the one phrase a failed one-off task
-    can actually be retried with."""
-    candidates = _failed_request_candidates(store, now)
+    """One row per still-actionable failed ask (see _failed_request_candidates).
+    The sentence is always "<plain title>: <why, in plain words>." --
+    wording.failure_in_words never returns the raw error string or a run's own
+    first-person text, so this is already clean on both surfaces. "say" is
+    "try again": the one phrase a failed one-off task can actually be retried
+    with."""
     out = []
-    for cluster in _cluster_same_ask(candidates):
-        latest = cluster[-1]["request"]
-        title, _plain = _request_title_and_plain(store, latest)
-        reason = wording.failure_in_words(latest.status or {})
+    for item in _failed_request_candidates(store, now):
+        request, title = item["request"], item["title"]
+        reason = wording.failure_in_words(request.status or {})
         sentence = f"{title}: {reason}."
         actions = [{"action": "retry", "label": "Try again",
-                    "target": {"endpoint": "requests/retry", "id": latest.id}}]
-        out.append(_request_row(latest, store, kind="request", since_field="since_text",
+                    "target": {"endpoint": "requests/retry", "id": request.id}}]
+        out.append(_request_row(request, store, kind="request", since_field="since_text",
                                  sentence=sentence, title=title, actions=actions, say="try again"))
     return out
+
+
+def _usage_limit_groups(store: Store) -> List[Dict[str, Any]]:
+    """Failed one-off requests whose own thread hit a usage limit, grouped by
+    thread and by the clock hour they failed in -- what collapses several
+    failed requests from the same call into one Stuck/Done-today row instead
+    of one per request. Each group carries its own expiry: the parsed reset
+    time if the error named one, else _USAGE_LIMIT_DEFAULT_EXPIRY_HOURS after
+    its latest member's failure -- past that, the group is no longer Stuck at
+    all (it only still shows under Done today, as plain individual rows)."""
+    recent = store.recent_requests(limit=500)
+    groups: Dict[Any, List[Request]] = {}
+    for request in recent:
+        if request.schedule_id or request.state != "failed":
+            continue
+        if wording.failure_category(request.status or {}) != "usage_limit":
+            continue
+        bucket = int(request.created_at // 3600)
+        groups.setdefault((request.chat_id, bucket), []).append(request)
+    out = []
+    for reqs in groups.values():
+        reqs = sorted(reqs, key=lambda r: r.created_at)
+        latest = reqs[-1]
+        reset_text = wording.usage_limit_reset_text(latest.status or {})
+        latest_failed_at = max(r.updated_at for r in reqs)
+        expiry = _usage_limit_expiry(reset_text, latest_failed_at)
+        out.append({"reqs": reqs, "reset_text": reset_text, "expiry": expiry})
+    return out
+
+
+def _usage_limit_expiry(reset_text: Optional[str], latest_failed_at: float) -> float:
+    if reset_text:
+        parsed = _parse_reset_epoch(reset_text, latest_failed_at)
+        if parsed is not None:
+            return parsed
+    return latest_failed_at + _USAGE_LIMIT_DEFAULT_EXPIRY_HOURS * 3600.0
+
+
+def _parse_reset_epoch(reset_text: str, ref_ts: float) -> Optional[float]:
+    """The next occurrence (at or after `ref_ts`) of the clock time `reset_text`
+    names, in whatever time zone it carries in parentheses (else the default
+    zone). None when the text names no parseable clock time at all."""
+    from datetime import datetime, timedelta
+    from zoneinfo import ZoneInfo
+    m = re.match(r"(\d{1,2})(?::(\d{2}))?\s*(am|pm)?(?:\s*\(([^)]*)\))?", reset_text.strip(), re.I)
+    if not m:
+        return None
+    hour = int(m.group(1))
+    minute = int(m.group(2) or 0)
+    ampm = (m.group(3) or "").lower()
+    tzname = m.group(4) or DEFAULT_TIMEZONE
+    if ampm == "pm" and hour != 12:
+        hour += 12
+    elif ampm == "am" and hour == 12:
+        hour = 0
+    try:
+        tz = ZoneInfo(tzname)
+    except Exception:
+        tz = ZoneInfo(DEFAULT_TIMEZONE)
+    ref = datetime.fromtimestamp(ref_ts, tz)
+    candidate = ref.replace(hour=hour, minute=minute, second=0, microsecond=0)
+    if (ref - candidate).total_seconds() > 3600:
+        candidate = candidate + timedelta(days=1)
+    return candidate.timestamp()
+
+
+def _usage_limit_cluster_rows(store: Store, now: float) -> List[Dict[str, Any]]:
+    """One Stuck row per still-live usage-limit group: "<n> requests from the
+    <time> call failed: it had hit a usage limit until <reset>." (or "...
+    around <time> failed: ..." when the thread is not a phone call). No
+    action and no say -- nothing can be said to fix a session limit."""
+    out = []
+    for group in _usage_limit_groups(store):
+        if now > group["expiry"]:
+            continue
+        reqs = group["reqs"]
+        latest = reqs[-1]
+        is_call = wording.is_call_request(latest)
+        when = wording.call_time_text(reqs[0].created_at)
+        count = len(reqs)
+        plural = "" if count == 1 else "s"
+        clause = (f"it had hit a usage limit until {group['reset_text']}" if group["reset_text"]
+                  else "it had hit a usage limit")
+        if is_call and when:
+            sentence = f"{count} request{plural} from the {when} call failed: {clause}."
+        elif when:
+            sentence = f"{count} request{plural} from around {when} failed: {clause}."
+        else:
+            sentence = f"{count} request{plural} failed: {clause}."
+        out.append({
+            "kind": "request_cluster", "id": latest.id, "title": wording.plain_title(store, latest),
+            "sentence": sentence, "since_text": _schedule_time_text(latest.updated_at, DEFAULT_TIMEZONE),
+            "actions": [], "say": None,
+        })
+    return out
+
+
+def _usage_limit_stuck_request_ids(store: Store, now: float) -> "set[int]":
+    ids: "set[int]" = set()
+    for group in _usage_limit_groups(store):
+        if now <= group["expiry"]:
+            ids.update(r.id for r in group["reqs"])
+    return ids
 
 
 def _stuck_schedule_proposals(store: Store) -> List[Dict[str, Any]]:
@@ -391,7 +475,8 @@ def _done_today_items(store: Store, now: float) -> List[Dict[str, Any]]:
     run's own result line is passed through _normalize_reason too, so its
     first-person RESULT text never shows up as the scheduler's own words."""
     cutoff = _midnight_epoch(DEFAULT_TIMEZONE, now)
-    stuck_failed_ids = {c["request"].id for c in _failed_request_candidates(store, now)}
+    stuck_failed_ids = ({c["request"].id for c in _failed_request_candidates(store, now)}
+                        | _usage_limit_stuck_request_ids(store, now))
     items: List[Dict[str, Any]] = []
     for request in store.recent_requests(limit=500):
         if request.schedule_id or request.state not in ("done", "failed", "rejected"):
@@ -449,11 +534,13 @@ def _coming_up_items(store: Store, now: float) -> List[Dict[str, Any]]:
     out = []
     for s in upcoming:
         last = _last_non_skipped_run(store, s.id)
+        last_run_failed = bool(last and last.get("outcome") not in ("complete", "skipped"))
         out.append({
             "id": s.id, "title": s.title, "cadence_text": _cadence_text(s),
             "next_run_text": _schedule_time_text(s.next_run, s.timezone),
             "next_run_in_seconds": s.next_run - now,
-            "last_run_failed": bool(last and last.get("outcome") not in ("complete", "skipped")),
+            "last_run_failed": last_run_failed,
+            "note": "last run could not finish" if last_run_failed else None,
         })
     return out
 
@@ -484,12 +571,14 @@ def _overview_sources(store: Store) -> List[Dict[str, Any]]:
 
 def stuck_rows(store: Store, service: Any) -> List[Dict[str, Any]]:
     """Every stuck row, in the console's own order: schedules first (repair or
-    plain), then pending approvals, then failed one-off asks, then schedule
-    proposals waiting on a yes."""
+    plain), then pending approvals, then failed one-off asks, then collapsed
+    usage-limit groups (no action, no say -- a session limit is never fixed
+    by saying anything), then schedule proposals waiting on a yes."""
     now = time.time()
     return (
         _stuck_schedules(store, service) + _stuck_pending_requests(store)
-        + _stuck_failed_requests(store, now) + _stuck_schedule_proposals(store)
+        + _stuck_failed_requests(store, now) + _usage_limit_cluster_rows(store, now)
+        + _stuck_schedule_proposals(store)
     )
 
 
