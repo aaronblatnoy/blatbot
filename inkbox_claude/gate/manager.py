@@ -27,6 +27,7 @@ from .scopes import SCOPES
 from .store import Person, Request, Store, TaskRequired, task_key
 from .schedules import ScheduleService
 from . import schedprop
+from . import wording
 
 logger = logging.getLogger(__name__)
 
@@ -2177,6 +2178,12 @@ class GateSessionManager:
         self.store.set_thread(req.chat_id, "idle")
         outcome = "done" if ok else "FAILED"
         result = _clean_result(status.get("summary") or status.get("error") or "")
+        # The message a person actually reads for this result: the cleaned result on
+        # success, or a plain failure message (never the raw SDK/provider error, never
+        # "That failed.") on failure. `result`/`note` below stay as they were -- the
+        # grounding fallback downstream (ground_reply) still works from the run's own
+        # findings -- only the text actually sent or returned here uses `message`.
+        message = wording.success_message(result) if ok else wording.failure_message(req.summary, status)
         self.task_note(req, "done" if ok else "failed", f"{req.summary} -> {result}",
                        state="open" if req.schedule_id else ("done" if ok else "failed"))
         if await self.schedules.finished(req, status):
@@ -2187,7 +2194,7 @@ class GateSessionManager:
             return ""
         if not notify:
             self.store.add_message(req.chat_id, "system", f"Task #{req.id} {outcome}: {req.summary}\nResult:\n{result}")
-            return f"{'Done' if ok else 'That failed'}. {result}"
+            return message
         from_aaron = session.is_approver() or session.is_aaron_on_phone() or req.chat_id in self._approver_chat_ids()
         note = f"Task #{req.id} {outcome}: {req.summary}\nResult:\n{result}"
         # Messages live on the person's record, which for the owner spans every surface.
@@ -2210,14 +2217,14 @@ class GateSessionManager:
             try:
                 replied = await session.notify_after_request(note, inbound_id=req.inbound_id)
                 if not replied:
-                    await self.send_to_approver(f"{'Done' if ok else 'Failed'}: {req.summary}\n{result}")
+                    await self.send_to_approver(f"{'Done' if ok else 'Failed'}: {req.summary}\n{message}")
             finally:
                 session.typing_stop()
             return ""
         # Someone else's request: short status to Aaron, and the router may
         # tell the sender the outcome (never Claude's raw text).
         try:
-            await self.send_to_approver(f"[Blatbot #{req.id} {outcome}] {req.summary}\n{result}")
+            await self.send_to_approver(f"[Blatbot #{req.id} {outcome}] {req.summary}\n{message}")
             await session.notify_after_request(note, inbound_id=req.inbound_id)
         finally:
             session.typing_stop()
