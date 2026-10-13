@@ -1924,8 +1924,14 @@ class GateSessionManager:
                   "said the work was already done. It was not. Whatever the record above says was "
                   "answered before, answer it again now by looking, and report what you find this "
                   "time. If a tool you need is not available to you, say which one and stop.")
+        run_kwargs: Dict[str, Any] = {}
+        if req.schedule_id:
+            sched = self.store.get_schedule(req.schedule_id)
+            if sched is not None:
+                run_kwargs = {"timezone": sched.timezone, "note": sched.last_note}
         again = await self.executor.run(req, context=insist, model=model,
-                                        from_owner=_owner_request(self, req) and not req.schedule_id)
+                                        from_owner=_owner_request(self, req) or bool(req.schedule_id),
+                                        **run_kwargs)
         if again.get("tool_calls") or again.get("confirm"):
             return again
         return {**again, "ok": False,
@@ -1947,7 +1953,7 @@ class GateSessionManager:
                 if sched is not None:
                     run_kwargs = {"timezone": sched.timezone, "note": sched.last_note}
             status = await self.executor.run(req, context=context, model=model,
-                                             from_owner=_owner_request(self, req) and not req.schedule_id,
+                                             from_owner=_owner_request(self, req) or bool(req.schedule_id),
                                              **run_kwargs)
             status = await self._grant_what_it_asked_for(req, status, context, model)
             return await self._insist_it_actually_ran(req, status, context, model)
@@ -1972,7 +1978,7 @@ class GateSessionManager:
         logger.info("[gate] jev agent gave up on #%s (%s); falling back to claude code", req.id, status.get("error"))
         findings = status.get("raw") or ""
         fallback = await self.executor.run(req, context=context, prior_work=findings,
-                                           from_owner=_owner_request(self, req) and not req.schedule_id)
+                                           from_owner=_owner_request(self, req) or bool(req.schedule_id))
         fallback["escalated"] = True
         fallback["jev_attempt"] = {k: status.get(k) for k in ("error", "tool_calls", "jev_calls", "prose_calls", "seconds", "steps", "raw")}
         return fallback

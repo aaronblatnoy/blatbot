@@ -757,3 +757,23 @@ async def test_unparseable_until_gets_a_plain_reply_and_no_schedule(tmp_path):
                                scopes=["web"], until="whenever", timezone="America/New_York")
     assert m.store.schedules(states=["proposed"]) == []
     assert "didn't understand" in sent[-1][1]
+
+
+@pytest.mark.asyncio
+async def test_scheduled_run_is_marked_from_owner_so_its_sends_are_held(tmp_path):
+    """A scheduled run's third-party sends must be held for his yes exactly like an
+    ordinary request of his own -- executor.run only takes sends off the pre-approved
+    tool list (routing them through the confirmation hook) when from_owner is true."""
+    m, sent = make_manager(tmp_path)
+    await _propose_via_manager(m, said="every 4 hours check the team page", scopes=["web"])
+    schedule = m.store.schedules(states=["proposed"])[0]
+    activated = await m.schedules.decide(schedule.id, True)
+
+    m.executor.results.append({"ok": True, "result_line": "no change", "final_status": "checked",
+                               "note": "", "denied": [], "tool_calls": [], "held": False,
+                               "started_at": time.time(), "finished_at": time.time(), "cost_usd": None})
+    await m.schedules.tick(now=activated.next_run)
+    await asyncio.sleep(0)
+
+    call = m.executor.calls[-1]
+    assert call["kw"]["from_owner"] is True
