@@ -2316,6 +2316,52 @@ class Store:
                 ).fetchone()
         return Request.from_row(r) if r else None
 
+    def last_failed_for_thread_or_person(self, chat_id: str, sender: str, *,
+                                         exclude_scheduled: bool = False) -> Optional[Request]:
+        """last_failed_for_thread(chat_id), or -- when nothing matches there -- the most
+        recent failed request anywhere whose sender resolves, through the contacts
+        table, to the same person as `sender`. A call's rows can land on a different
+        thread record than the same person's texts (an unverified caller on the
+        owner's own number: is_aaron_on_phone() is true but is_approver() is not, so
+        record_id never becomes the owner thread), so a texted "try again" after that
+        call would otherwise never find the call's failed request.
+
+        This only widens how the request is FOUND. It grants no owner power: whatever
+        approval the texter's own sender identity would normally need to retry a
+        request, still applies exactly as it did before -- finding a person's own
+        failed request is not a permission."""
+        req = self.last_failed_for_thread(chat_id, exclude_scheduled=exclude_scheduled)
+        if req is not None:
+            return req
+        res = self.resolve_handles([sender])
+        pid = res.get("person_id")
+        if not pid or res.get("conflict"):
+            return None
+        with self._lock:
+            rows = self._db.execute(
+                "SELECT DISTINCT value FROM contacts WHERE person_id=? AND kind IN ('phone','email','telegram','imessage')",
+                (pid,),
+            ).fetchall()
+        senders = {r["value"] for r in rows}
+        if not senders:
+            return None
+        # requests.sender is stored as the caller gave it (e.g. "+15550100099"), not
+        # the contacts table's normalised form ("5550100099"): normalise each
+        # candidate row's sender the same way before comparing, rather than compare
+        # raw strings.
+        with self._lock:
+            clause = "state='failed'"
+            if exclude_scheduled:
+                clause += " AND schedule_id IS NULL"
+            rows2 = self._db.execute(
+                f"SELECT * FROM requests WHERE {clause} ORDER BY updated_at DESC LIMIT 50"
+            ).fetchall()
+        for row in rows2:
+            norm = self.contact_value(self.guess_contact_kind(row["sender"]), row["sender"])
+            if norm in senders:
+                return Request.from_row(row)
+        return None
+
     def last_outbound_at(self, chat_id: str) -> Optional[float]:
         """When the most recent outbound message on this thread went out, or None
         if the thread has sent nothing -- used to tell whether a failure notice is

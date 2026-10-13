@@ -2117,7 +2117,12 @@ class GateSessionManager:
         # A schedule's own failed run shares the owner's chat_id; "try again" said
         # about something else entirely must never re-create the schedule's prompt
         # as a one-off (_handle_let_it_label already excludes it the same way).
-        req = self.store.last_failed_for_thread(chat_id, exclude_scheduled=True)
+        # last_failed_for_thread_or_person also finds a failed request that landed
+        # on a DIFFERENT thread record for the same person -- a call from the
+        # owner's number that never verified as the approver writes its rows to
+        # its own chat_id, while his texts land on the owner thread; this is a
+        # lookup only, it grants no owner power.
+        req = self.store.last_failed_for_thread_or_person(chat_id, session._sender(), exclude_scheduled=True)
         if req is None:
             return False
         now = time.time()
@@ -2149,7 +2154,7 @@ class GateSessionManager:
     async def _handle_send_what_you_have(self, session: "GateSession", text: str) -> bool:
         if not wording.is_send_what_you_have(text):
             return False
-        req = self.store.last_failed_for_thread(session.chat_id)
+        req = self.store.last_failed_for_thread_or_person(session.chat_id, session._sender())
         if req is None or not wording.within_retry_window(req.updated_at, time.time()):
             return False   # nothing recent it could mean; the message goes on as usual
         text_out = wording.send_what_you_have_text(req.status or {})

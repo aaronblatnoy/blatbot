@@ -624,3 +624,53 @@ async def test_group_thread_second_senders_ask_is_not_swallowed_by_the_first(tmp
     rows = m.store._db.execute("SELECT sender FROM requests WHERE chat_id=?", ("group-conv",)).fetchall()
     senders = sorted(r["sender"] for r in rows)
     assert senders == ["alice", "bob"]
+
+
+# ---------------------------------------------------------------------------
+# Extra fix: a call's rows can land on the call's own thread (chat_id) while
+# the same person's texts land on the owner thread -- an unverified caller on
+# the owner's own number (is_aaron_on_phone() true, is_approver() false) is
+# exactly this case. A texted "try again" must still find that call's failed
+# request, by resolving sender -> person -> that other sender, never by
+# granting the texter any extra power.
+# ---------------------------------------------------------------------------
+
+@pytest.mark.asyncio
+async def test_try_again_finds_a_failed_request_on_a_different_thread_for_the_same_person(manager, tmp_path):
+    m, sent = manager
+    m.executor = RecordingExecutor()
+    m.router.next = RouterOutput(reply="Got it.", request=None)
+    person = m.store.create_person(display="Aaron")
+    # The call's own number and his iMessage address both belong to this one person.
+    m.store.add_contact(person["id"], "phone", "+15550100099")
+    m.store.add_contact(person["id"], "email", "aaron@example.com")
+    # A call's failed request lives on the call's own chat_id -- not the owner
+    # thread -- with sender = the call's phone number.
+    _fail_request(m, chat_id="call-xyz", sender="+15550100099", sender_name="Aaron", mode="voice")
+    # He texts "try again" from imessage, verified as the approver there (a
+    # different thread, a different sender identity -- his email/imessage handle).
+    session = m.get(APPROVER_CONV)
+    await session.handle_inbound("try again", mode="imessage",
+                                 meta={"sender": "aaron@example.com", "conversation_id": APPROVER_CONV})
+    await _drain()
+    assert m.executor.ran, "the call's failed request should have been retried"
+
+
+@pytest.mark.asyncio
+async def test_try_again_never_finds_an_unrelated_persons_failed_request(manager, tmp_path):
+    """Resolving sender -> person only ever finds that SAME person's other
+    requests -- never a stranger's, and never grants power a direct match
+    would not already have given."""
+    m, sent = manager
+    m.executor = RecordingExecutor()
+    m.router.next = RouterOutput(reply="Got it.", request=None)
+    aaron = m.store.create_person(display="Aaron")
+    m.store.add_contact(aaron["id"], "email", "aaron@example.com")
+    stranger_person = m.store.create_person(display="Cand")
+    m.store.add_contact(stranger_person["id"], "phone", "+15559990000")
+    _fail_request(m, chat_id="call-stranger", sender="+15559990000", sender_name="Cand", mode="voice")
+    session = m.get(APPROVER_CONV)
+    await session.handle_inbound("try again", mode="imessage",
+                                 meta={"sender": "aaron@example.com", "conversation_id": APPROVER_CONV})
+    assert m.executor.ran == []
+    assert any("Got it." in s[1] for s in sent)
