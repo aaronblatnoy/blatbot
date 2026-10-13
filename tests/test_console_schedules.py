@@ -305,6 +305,73 @@ ALLOWED_ORIGIN = "https://console.example.com"
 
 
 @pytest.mark.asyncio
+async def test_cadence_dict_hides_anchor_and_start_now(tmp_path):
+    manager = make_manager(tmp_path)
+    schedule = _make_schedule(manager.store, cadence_kind="every", cadence={"minutes": 240, "anchor": 1000.0})
+    manager.store.update_schedule(schedule.id, cadence={"minutes": 240, "anchor": 1000.0, "start_now": True})
+    body = api.schedule_list(manager.store, manager.schedules)
+    row = next(r for r in body["schedules"] if r["id"] == schedule.id)
+    assert "anchor" not in row["cadence"]
+    assert "start_now" not in row["cadence"]
+    assert row["cadence"]["minutes"] == 240
+
+
+@pytest.mark.asyncio
+async def test_edit_same_interval_preserves_anchor(tmp_path, monkeypatch):
+    monkeypatch.setenv("CONSOLE_ALLOWED_ORIGINS", ALLOWED_ORIGIN)
+    manager = make_manager(tmp_path)
+    schedule = _make_schedule(manager.store, cadence_kind="every", cadence={"minutes": 240, "anchor": 1000.0})
+    out = await manager.schedules.edit(schedule.id, owner=True,
+                                       changes={"title": "Renamed watch", "cadence_kind": "every",
+                                                "cadence": {"minutes": 240}})
+    assert out["schedule"].cadence.get("anchor") == 1000.0
+
+
+@pytest.mark.asyncio
+async def test_edit_different_interval_does_not_preserve_old_anchor(tmp_path):
+    manager = make_manager(tmp_path)
+    schedule = _make_schedule(manager.store, cadence_kind="every", cadence={"minutes": 240, "anchor": 1000.0})
+    out = await manager.schedules.edit(schedule.id, owner=True,
+                                       changes={"cadence_kind": "every", "cadence": {"minutes": 60}})
+    assert out["schedule"].cadence.get("anchor") != 1000.0
+
+
+@pytest.mark.asyncio
+async def test_untimed_paused_schedule_shows_no_timing_set_yet_and_attention(tmp_path):
+    manager = make_manager(tmp_path)
+    task_id = manager.store.create_task("Needs a cadence watch")["id"]
+    schedule = manager.store.create_schedule(
+        chat_id="owner", task_id=task_id, title="Needs a cadence watch", prompt="check something",
+        kind="every", scopes=["web"], timezone="America/New_York", report_mode="changed",
+        cadence_kind="", cadence={}, report_every_time=False, origin_mode="console", origin_chat_id="owner",
+    )
+    schedule = manager.store.update_schedule(schedule.id, state="paused", next_run=None,
+                                             last_outcome="needs a cadence")
+    body = api.schedule_list(manager.store, manager.schedules)
+    row = next(r for r in body["schedules"] if r["id"] == schedule.id)
+    assert row["cadence_text"] == "No timing set yet"
+    assert row["attention"] == "Tell it how often to run, then resume it."
+
+
+@pytest.mark.asyncio
+async def test_attention_is_null_when_paused_for_another_reason(tmp_path):
+    manager = make_manager(tmp_path)
+    schedule = _make_schedule(manager.store, state="paused")
+    body = api.schedule_list(manager.store, manager.schedules)
+    row = next(r for r in body["schedules"] if r["id"] == schedule.id)
+    assert row["attention"] is None
+
+
+@pytest.mark.asyncio
+async def test_attention_is_null_when_active(tmp_path):
+    manager = make_manager(tmp_path)
+    schedule = _make_schedule(manager.store, state="active")
+    body = api.schedule_list(manager.store, manager.schedules)
+    row = next(r for r in body["schedules"] if r["id"] == schedule.id)
+    assert row["attention"] is None
+
+
+@pytest.mark.asyncio
 async def test_action_valid_pauses_an_active_schedule(tmp_path, monkeypatch):
     monkeypatch.setenv("CONSOLE_ALLOWED_ORIGINS", ALLOWED_ORIGIN)
     manager = make_manager(tmp_path)

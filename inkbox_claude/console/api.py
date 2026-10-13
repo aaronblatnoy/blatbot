@@ -688,7 +688,25 @@ def _cadence_text(schedule: Any) -> str:
     try:
         return cadence_mod.describe(schedule.cadence_kind, schedule.cadence, schedule.timezone)
     except cadence_mod.CadenceError:
-        return "not set"  # a legacy/paused row with no cadence model yet
+        return "No timing set yet"  # a legacy/paused row with no cadence model yet
+
+
+def _public_cadence(cadence: Any) -> Dict[str, Any]:
+    """The cadence dict as the owner (or the console) should see it: no `anchor` or
+    `start_now`, which are bookkeeping for cadence.next_run, not anything he set."""
+    out = dict(cadence or {})
+    out.pop("anchor", None)
+    out.pop("start_now", None)
+    return out
+
+
+def _attention(schedule: Any) -> Optional[str]:
+    """The one case the console calls out by name: paused specifically because no
+    cadence has ever been set (never a cadence_kind at all). Any other paused reason,
+    or an active schedule, has nothing to say here."""
+    if schedule.state == "paused" and not schedule.cadence_kind:
+        return "Tell it how often to run, then resume it."
+    return None
 
 
 def _capability_list(scopes: Any) -> List[Dict[str, str]]:
@@ -760,7 +778,7 @@ def _schedule_view(store: Store, service: Any, schedule: Any) -> Dict[str, Any]:
     return {
         "id": schedule.id, "title": schedule.title, "prompt": schedule.prompt,
         "state": schedule.state, "state_label": _state_label(schedule, running),
-        "cadence_kind": schedule.cadence_kind, "cadence": schedule.cadence,
+        "cadence_kind": schedule.cadence_kind, "cadence": _public_cadence(schedule.cadence),
         "cadence_text": _cadence_text(schedule), "timezone": schedule.timezone,
         "timezone_label": _timezone_label(schedule.timezone),
         "next_run": next_run, "next_run_text": _schedule_time_text(next_run, schedule.timezone),
@@ -772,6 +790,7 @@ def _schedule_view(store: Store, service: Any, schedule: Any) -> Dict[str, Any]:
         "capabilities": _capability_list(schedule.scopes),
         "missing_capabilities": _capability_list(missing),
         "last_run": _run_view(last, schedule.timezone) if last else None,
+        "attention": _attention(schedule),
         "needs_approval": schedule.state == "proposed",
         "approval_request_id": None,
         "actions": service.valid_actions(schedule),

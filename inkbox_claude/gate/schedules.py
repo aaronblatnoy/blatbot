@@ -409,7 +409,14 @@ class ScheduleService:
             immediate["title"] = changes["title"]
         if "cadence_kind" in changes or "cadence" in changes:
             kind = changes.get("cadence_kind", old.cadence_kind)
-            cadence = changes.get("cadence", old.cadence)
+            cadence = dict(changes.get("cadence", old.cadence) or {})
+            # Saving a title/report change alongside the SAME every-N-minutes interval
+            # should not restart the firing window: keep the old anchor rather than
+            # letting the next_run recompute below treat this as a brand new interval.
+            old_cadence = old.cadence or {}
+            if (kind == "every" and old.cadence_kind == "every" and "anchor" in old_cadence
+                    and cadence.get("minutes") == old_cadence.get("minutes")):
+                cadence["anchor"] = old_cadence["anchor"]
             cadence_module.validate(kind, cadence)
             if kind == "once" and cadence_module.next_run(kind, cadence, old.timezone, time.time()) is None:
                 raise ValueError("That time has already passed.")
