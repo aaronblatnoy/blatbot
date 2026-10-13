@@ -296,7 +296,12 @@ async def test_blanket_permission_grants_denied_plus_read_only(manager, tmp_path
     assert scope_name in granted
     from inkbox_claude.gate import wording as _wording
     for read_scope in gm.READ_SCOPES:
-        if _wording.truly_read_only(read_scope):
+        if read_scope == "vault_read":
+            # The whole vault is excluded from the auto-add (item 8): it is granted
+            # only when the run was actually refused it, never just for being
+            # read-only -- it is not refused here, so it stays out.
+            assert read_scope not in granted
+        elif _wording.truly_read_only(read_scope):
             assert read_scope in granted
         elif read_scope != scope_name:
             # a "read" scope that can also create or change things is never added on its own
@@ -305,7 +310,11 @@ async def test_blanket_permission_grants_denied_plus_read_only(manager, tmp_path
     for name, spec in gm.SCOPES.items():
         if name in granted and name != scope_name:
             assert spec.get("read"), f"{name} was granted but is not read-only and was never refused"
-    assert any("Okay. For this task it can now" in s[1] for s in sent)
+    # The confirmation names only what was actually refused (scope_name), never the
+    # read-only scopes the grant also quietly added alongside it.
+    confirmations = [s[1] for s in sent if "Okay. For this task it can now" in s[1]]
+    assert confirmations
+    assert all("vault" not in c.lower() for c in confirmations)
 
 
 @pytest.mark.asyncio
@@ -382,6 +391,37 @@ async def test_blanket_permission_with_nothing_recent(manager, tmp_path):
     await session.handle_inbound("You have my personal permission for everything.", mode="imessage",
                                  meta=approver_meta())
     assert any("I don't keep a blanket permission." in s[1] for s in sent)
+
+
+@pytest.mark.asyncio
+async def test_blanket_permission_mid_run_replies_once(manager, tmp_path):
+    """Item 8: said while a run is still going, it used to reply nothing at all.
+    Now it replies once, and the grant/confirmation for THIS run still only fires
+    later, when the run actually fails and shows what it was refused."""
+    m, sent = manager
+
+    class SlowExecutor:
+        def __init__(self):
+            self.ran = []
+        async def run(self, req, context="", prior_work="", model=None, **kw):
+            self.ran.append(req.id)
+            await asyncio.sleep(10)  # never actually finishes within this test
+            return {"ok": True, "summary": "too late", "tool_calls": ["x"], "raw": "too late"}
+    m.executor = SlowExecutor()
+    t = m.store.create_task("long task")
+    req = m.store.create_request(chat_id=APPROVER_CONV, sender="+15550100001", sender_name="Aaron",
+                                 mode="imessage", subject="", original_message="do the long task",
+                                 summary="do the long task", scopes=["web"], prompt="do the long task",
+                                 state="approved", task_id=t["id"])
+    asyncio.create_task(m.execute(req))
+    await _drain()
+    session = m.get(APPROVER_CONV)
+    await session.handle_inbound("You have my personal permission for everything.", mode="imessage",
+                                 meta=approver_meta())
+    await _drain()
+    replies = [row for row in sent if "If it gets refused something, I'll let it and continue." in row[1]]
+    assert len(replies) == 1
+    assert req.id in m._blanket_pending
 
 
 # ---------------------------------------------------------------------------

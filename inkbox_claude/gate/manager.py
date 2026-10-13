@@ -2200,6 +2200,8 @@ class GateSessionManager:
         running = self.store.running_for_thread(chat_id)
         if running is not None:
             self._blanket_pending.add(running.id)
+            await session.send_to_sender(
+                "Okay. If it gets refused something, I'll let it and continue.", role="answer")
             return True
         await session.send_to_sender(
             "I don't keep a blanket permission. Tell me what to do and I'll ask for anything it needs.",
@@ -2211,9 +2213,16 @@ class GateSessionManager:
         registry -- never a scope that sends, posts, writes, deletes, deploys or
         controls anything unless it was actually refused. "read-only" is the
         `read` field scopes.yaml gives each scope (exposed as scopes.READ_SCOPES);
-        where a scope carries no such field it is treated as not read-only."""
+        where a scope carries no such field it is treated as not read-only.
+
+        vault_read (the WHOLE vault of Aaron's own notes) is excluded from the
+        auto-add: it is never granted on its own just for being read-only, only
+        when the run was actually refused it -- the vault can hold anything he has
+        ever written down, so a blanket "permission for everything" must not open
+        all of it as a side effect of a run that never asked for it."""
         denied = set(wording.denied_scopes(status))
-        granted = [sc for sc in SCOPES if sc in denied or wording.truly_read_only(sc)]
+        granted = [sc for sc in SCOPES if sc in denied or
+                  (wording.truly_read_only(sc) and sc != "vault_read")]
         return [sc for sc in granted if sc not in (req.scopes or [])]
 
     async def _grant_blanket_and_retry(self, session: "GateSession", req: Request) -> None:
@@ -2225,8 +2234,17 @@ class GateSessionManager:
         if new_scopes:
             self.store.set_scopes(grown.id, list(req.scopes) + new_scopes)
             grown = self.store.get_request(grown.id)
-            await session.send_to_sender(
-                f"Okay. For this task it can now {schedprop.short_labels(new_scopes)}. Continuing.", role="answer")
+            # Named here: only what the run had actually been refused, never every
+            # read-only scope the grant also quietly added alongside it.
+            denied_now = [sc for sc in wording.denied_scopes(req.status or {}) if sc in new_scopes]
+            if denied_now:
+                await session.send_to_sender(
+                    f"Okay. For this task it can now {schedprop.short_labels(denied_now)}. Continuing.",
+                    role="answer")
+            else:
+                # Only read-only scopes were auto-added (nothing was actually denied
+                # to name); still confirm, without claiming a capability was refused.
+                await session.send_to_sender("Okay. Continuing.", role="answer")
         asyncio.create_task(self.execute(grown))
 
     # -- executor --------------------------------------------------------------
