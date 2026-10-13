@@ -2714,7 +2714,9 @@ class GateSessionManager:
             return ""
         if not notify:
             self.store.add_message(req.chat_id, "system", f"Task #{req.id} {outcome}: {req.summary}\nResult:\n{result}")
-            return "" if told_already else message
+            if told_already:
+                return wording.same_limit_message(status)
+            return message
         from_aaron = session.is_approver() or session.is_aaron_on_phone() or req.chat_id in self._approver_chat_ids()
         note = f"Task #{req.id} {outcome}: {req.summary}\nResult:\n{result}"
         # Messages live on the person's record, which for the owner spans every surface.
@@ -2728,7 +2730,10 @@ class GateSessionManager:
                 # into something the grounding check then threw away). The raw status
                 # still lands on the ledger/log via `note`.
                 if told_already:
-                    self.store.add_message(self.get(req.chat_id).record_id, "system", note)
+                    same_limit = wording.same_limit_message(status)
+                    replied = await session.notify_failure(same_limit, note, inbound_id=req.inbound_id)
+                    if not replied:
+                        await self.send_to_approver(same_limit)
                 else:
                     replied = await session.notify_failure(message, note, inbound_id=req.inbound_id)
                     if not replied:
@@ -2758,7 +2763,9 @@ class GateSessionManager:
         # wording.py's own text, never the router's rewrite of it.
         if not ok:
             if told_already:
-                self.store.add_message(self.get(req.chat_id).record_id, "system", note)
+                same_limit = wording.same_limit_message(status)
+                await self.send_to_approver(f"[Blatbot #{req.id} FAILED, same limit] {title}")
+                await session.notify_failure(same_limit, note, inbound_id=req.inbound_id)
             else:
                 await self.send_to_approver(f"[Blatbot #{req.id} FAILED] {title}\n{message}")
                 await session.notify_failure(message, note, inbound_id=req.inbound_id)

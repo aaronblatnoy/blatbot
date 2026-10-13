@@ -224,6 +224,18 @@ def failure_message(summary: str, status: Dict[str, Any]) -> str:
     return msg
 
 
+def same_limit_message(status: Dict[str, Any]) -> str:
+    """Item C8: the one short line said or sent when a second, different ask fails
+    on the same usage-limit outage a thread was already told about once within the
+    suppression window. Not nothing (the old behavior), and not the full
+    failure_message again -- a short pointer back to the same limit, with the reset
+    time when the status gives one."""
+    reset = usage_limit_reset_text(status)
+    if reset:
+        return f"Same limit. I can't run that until {reset}."
+    return "Same limit. I can't run that right now."
+
+
 def success_message(result: str) -> str:
     """The whole message for a finished request that succeeded: the result as
     is, without a leading 'Done.' when the result already reads as a sentence

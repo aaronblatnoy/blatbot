@@ -176,6 +176,11 @@ def test_a_second_usage_limit_failure_within_ten_minutes_is_told_once(tmp_path):
     asyncio.run(go2())
     told_again = [row for row in sent if "usage limit" in row[1].lower()]
     assert len(told_again) == 1, f"should not be told a second time, got {told_again}"
+    # Item C8: the second, different ask is not left with no reply at all -- it gets
+    # a short "same limit" line with the reset time, since it's known here.
+    same_limit = [row for row in sent if "same limit" in row[1].lower()]
+    assert len(same_limit) == 1, f"expected the suppressed line, got {sent[-3:]}"
+    assert "3:10pm" in same_limit[0][1]
 
 
 def test_fragments_of_the_same_failed_ask_do_not_start_a_second_run(tmp_path):

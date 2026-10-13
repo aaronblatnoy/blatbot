@@ -2021,3 +2021,33 @@ def test_vault_scope_reads_notes_and_stays_inside_the_vault(tmp_path, monkeypatc
     assert hosttools.vault_read({"path": "../secret.md"}).startswith("ERROR")
     assert hosttools.vault_read({"path": ".obsidian/hidden.md"}).startswith("ERROR")
     assert hosttools.vault_list({"folder": "../"}).startswith("ERROR")
+
+
+def test_second_usage_limit_failure_on_text_says_same_limit_not_nothing(tmp_path):
+    """Item C8: a thread already told about a usage-limit outage once within the
+    suppression window gets a short "Same limit" line for a second, different ask
+    that fails the same way -- not silence."""
+    from inkbox_claude.gate import wording as wording_mod
+    SESSION_LIMIT_ERROR = ("Claude Code returned an error result: You've hit your "
+                          "session limit \u00b7 resets 3:10pm (America/New_York) (exit code: 1)")
+    m, sent = make_manager(tmp_path)
+    m.router.next = RouterOutput(reply="On it.", request=RouterRequest(
+        prompt="Check the schedule", scopes=["web"], summary="check the schedule"))
+    m.executor.result = {"ok": False, "error": SESSION_LIMIT_ERROR, "tool_calls": [], "raw": SESSION_LIMIT_ERROR}
+
+    async def go():
+        await m.get("aaron").handle_inbound("what's on my schedule", "imessage", approver_meta())
+        await asyncio.sleep(0.05)
+    asyncio.run(go())
+    assert any(wording_mod.is_usage_limit_failure({"error": x[1]}) or "usage limit" in x[1].lower() for x in sent)
+
+    m.router.next = RouterOutput(reply="On it.", request=RouterRequest(
+        prompt="Email the report", scopes=["web"], summary="email the report"))
+
+    async def go2():
+        await m.get("aaron").handle_inbound("send the report to Bob", "imessage", approver_meta())
+        await asyncio.sleep(0.05)
+    asyncio.run(go2())
+    same_limit = [x for x in sent if "same limit" in x[1].lower()]
+    assert len(same_limit) == 1, f"expected the short suppressed line, got {sent[-3:]}"
+    assert "3:10pm" in same_limit[0][1]
