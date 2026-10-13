@@ -211,6 +211,7 @@ scopes:
     description: 'TAMID calendar: read and write the club''s Google Calendar (org@example.org; interviews, club
       events; NOT Aaron''s own calendar): list, free/busy, create/update events'
     label: look up and manage the TAMID calendar
+    ask: 'look up and manage the TAMID calendar'
     synonyms:
     - tamid calendar
     - club calendar
@@ -224,6 +225,7 @@ scopes:
     description: read Blatbot's own Inkbox mailbox blatbot@inkboxmail.com (list recent inbound/outbound emails,
       read one by id) and its SMS/iMessage threads
     label: read its own email and texts
+    ask: 'read its own email and texts'
     synonyms:
     - check its email
     - check its messages
@@ -239,6 +241,7 @@ scopes:
   email_send:
     description: send email from the Inkbox mailbox blatbot@inkboxmail.com and read that mailbox
     label: send email from its own account
+    ask: 'send email as itself'
     synonyms:
     - send email
     - send an email
@@ -251,6 +254,7 @@ scopes:
   imessage_send:
     description: send iMessages from Blatbot's line and read its iMessage threads
     label: send iMessages
+    ask: 'send iMessages as itself'
     synonyms:
     - send an imessage
     - send him an imessage
@@ -262,6 +266,7 @@ scopes:
   sms_send:
     description: send SMS from Blatbot's number and read its text threads
     label: send text messages
+    ask: 'send text messages as itself'
     synonyms:
     - send a text
     - send them a text
@@ -274,6 +279,7 @@ scopes:
   contacts:
     description: look up, create, or update Inkbox address-book contacts and their notes
     label: look up and edit contacts
+    ask: 'look up and edit contacts'
     synonyms:
     - edit contacts
     - update the contact
@@ -291,6 +297,7 @@ scopes:
   tamid_drive_read:
     description: read TAMID Google Drive, Sheets, Docs, Forms, and Gmail (org@example.org)
     label: 'read TAMID''s Drive, Sheets, Docs and Forms'
+    ask: 'read TAMID Drive, Sheets, Docs and Forms'
     synonyms:
     - tamid drive
     - the team sheet
@@ -318,6 +325,7 @@ scopes:
   tamid_drive_write:
     description: write to TAMID Google Sheets, Docs, Forms, and Drive folders (no sharing, no Gmail send)
     label: 'edit TAMID''s Drive, Sheets, Docs and Forms'
+    ask: 'edit TAMID Drive, Sheets, Docs and Forms'
     synonyms:
     - edit the sheet
     - update the sheet
@@ -340,6 +348,7 @@ scopes:
     description: 'read and write Aaron''s own NYU Stern Google Calendar (tool address owner@example.edu): list,
       free/busy, create/update events and invites'
     label: look up and manage your Stern calendar
+    ask: 'look up and manage your Stern calendar'
     synonyms:
     - my calendar
     - my stern calendar
@@ -352,6 +361,7 @@ scopes:
   stern_email_read:
     description: read Aaron's Stern Gmail (tool address owner@example.edu); no sending
     label: read your Stern email
+    ask: 'read your Stern email'
     synonyms:
     - my stern email
     - check my email
@@ -364,6 +374,7 @@ scopes:
     description: 'read the SJBA (Stern Jewish Business Association) website admin backend: board members and bios,
       events, club members, semesters, site config, contact requests, newsletter signups'
     label: read the SJBA website admin
+    ask: 'read the SJBA website admin'
     synonyms:
     - sjba website
     - the sjba site
@@ -387,6 +398,7 @@ scopes:
       (incl. bios and headshots), events and flyers, members, semesters, site config; manage contact requests and
       newsletter signups. Includes read.'
     label: edit the SJBA website
+    ask: 'edit the SJBA website'
     synonyms:
     - edit the sjba website
     - update the sjba site
@@ -431,6 +443,7 @@ scopes:
     description: 'read the TAMID at NYU website admin backend: board members and bios, events, club members, semesters,
       site config, contact requests, newsletter signups'
     label: read the TAMID website admin
+    ask: 'read the TAMID website admin'
     synonyms:
     - tamid website
     - the tamid site
@@ -454,6 +467,7 @@ scopes:
       events and flyers, members, semesters, site config; manage contact requests and newsletter signups. Includes
       read.'
     label: edit the TAMID website
+    ask: 'edit the TAMID website'
     synonyms:
     - edit the tamid website
     - update the tamid site
@@ -499,6 +513,7 @@ scopes:
       (a person's LinkedIn or employer, an outside club's leadership, news, a public page). Not for anything in
       TAMID/SJBA Drive, sheets, forms, calendars, inboxes or the club websites' admin backends.
     label: read public web pages
+    ask: 'search and read public web pages'
     synonyms:
     - look it up online
     - search the web
@@ -516,6 +531,7 @@ scopes:
     description: 'search and read Aaron''s second brain (his Obsidian vault of personal notes on projects, people,
       decisions, preferences, daily notes). Read-only; cannot add or change a note. Not Drive, not the web.'
     label: read your notes
+    ask: 'read your notes'
     synonyms:
     - my notes
     - my vault
@@ -529,6 +545,7 @@ scopes:
     description: 'see what is running on the server Blatbot itself runs on (black-sky): containers, services, uptime,
       disk, memory, GPUs. Read-only status only; no commands, no changes.'
     label: 'check the server''s status'
+    ask: 'check the server status'
     synonyms:
     - check the server
     - check black-sky
@@ -540,6 +557,7 @@ scopes:
     description: 'read a public web page in a headless browser (navigate, snapshot, find, screenshot), for things
       that are only online and not in Aaron''s own systems. Read-only: no clicking, typing or form filling.'
     label: open and read a web page in a browser
+    ask: 'open and read a specific web page'
     synonyms:
     - read the page
     - open the page
@@ -562,6 +580,7 @@ scopes:
       dialogs) for something that can only be done through a website's own UI and has no tool of its own. Last resort,
       never the first choice when a Drive, calendar, inbox, contacts or site-admin tool covers it. Includes browser_read.
     label: operate public web pages like a person
+    ask: 'operate a web page like a person'
     synonyms:
     - fill out the form
     - click through the site
@@ -594,6 +613,7 @@ scopes:
   tamid_instagram_read:
     description: 'read TAMID''s Instagram: account, recent posts, insights, audience; check a caption'
     label: 'read TAMID''s Instagram'
+    ask: 'read TAMID''s Instagram'
     synonyms:
     - tamid instagram
     - the instagram account
@@ -610,6 +630,7 @@ scopes:
   tamid_instagram_post:
     description: stage and publish posts on TAMID's Instagram (publishing is public and needs Aaron's yes)
     label: 'post to TAMID''s Instagram'
+    ask: 'post to TAMID''s Instagram'
     synonyms:
     - post on instagram
     - publish on instagram
@@ -621,6 +642,7 @@ scopes:
   tamid_linkedin_read:
     description: read TAMID's LinkedIn account and check post text
     label: 'read TAMID''s LinkedIn'
+    ask: 'read TAMID''s LinkedIn'
     synonyms:
     - tamid linkedin
     - the linkedin account
@@ -632,6 +654,7 @@ scopes:
   tamid_linkedin_post:
     description: stage, publish and delete posts on TAMID's LinkedIn (publishing is public and needs Aaron's yes)
     label: 'post to TAMID''s LinkedIn'
+    ask: 'post to TAMID''s LinkedIn'
     synonyms:
     - post on linkedin
     - publish on linkedin
@@ -645,6 +668,7 @@ scopes:
     description: 'read TAMID''s Google Analytics property configuration: dimensions, metrics, key events, streams,
       retention, access'
     label: 'read TAMID''s website analytics'
+    ask: 'read TAMID''s website analytics'
     synonyms:
     - tamid analytics
     - the analytics property
@@ -656,6 +680,7 @@ scopes:
   tamid_analytics_write:
     description: 'change TAMID''s Google Analytics property: create, update, archive, delete, grant or revoke'
     label: 'change TAMID''s website analytics settings'
+    ask: 'change TAMID''s website analytics settings'
     synonyms:
     - change the analytics
     - edit the analytics property
@@ -670,6 +695,7 @@ scopes:
     description: 'read Aaron''s NYU Brightspace: courses, assignments, due dates, grades, announcements, quizzes,
       discussions, content, notifications'
     label: read your Brightspace courses and grades
+    ask: 'read your Brightspace courses and grades'
     synonyms:
     - my classes
     - my grades
@@ -699,6 +725,7 @@ scopes:
     description: 'act in Aaron''s NYU Brightspace: submit an assignment, post or reply in a discussion, mark complete,
       create a calendar event, pin a course, dismiss an announcement (submitting and posting need Aaron''s yes)'
     label: act in Brightspace (submit, post, mark complete)
+    ask: 'act in Brightspace (submit, post, mark complete)'
     synonyms:
     - submit the assignment
     - post in brightspace
@@ -717,6 +744,7 @@ scopes:
     description: 'read the black-sky Coolify: infrastructure overview, apps, services, databases, deployments, logs,
       env var names, health, docs'
     label: read the black-sky Coolify
+    ask: 'check the black-sky Coolify apps'
     synonyms:
     - the coolify
     - black-sky coolify
@@ -746,6 +774,7 @@ scopes:
     description: 'change the black-sky Coolify: deploy, restart, stop, start, redeploy, edit env vars (each needs
       Aaron''s yes)'
     label: deploy and control the black-sky Coolify
+    ask: 'deploy and control the black-sky Coolify'
     synonyms:
     - deploy it
     - restart the app
@@ -766,6 +795,7 @@ scopes:
   coolify_vox_read:
     description: 'read the Vox Coolify instance: overview, apps, services, databases, deployments, logs, health'
     label: read the Vox Coolify
+    ask: 'check the Vox Coolify apps'
     synonyms:
     - the vox instance
     - vox coolify
@@ -795,6 +825,7 @@ scopes:
     description: 'change the Vox Coolify instance: deploy, restart, stop, start, edit env vars (each needs Aaron''s
       yes)'
     label: deploy and control the Vox Coolify
+    ask: 'deploy and control the Vox Coolify'
     synonyms:
     - deploy to vox
     - restart vox
@@ -816,6 +847,7 @@ scopes:
       one plan and its history, find service providers and their client plans, find lookalike plans, search plan
       events and funds, map consultants, run a read-only SQL query'
     label: query the pension filings database
+    ask: 'look up pension filings'
     synonyms:
     - pension filings
     - the pension database
