@@ -310,7 +310,13 @@ def test_manager_calls_propose_with_the_new_keyword_arguments_and_origin_thread(
     assert call["start_now"] is True
     assert call["owner"] is True
     assert call["origin_mode"] == "imessage"
-    assert call["origin_chat_id"] == session.record_id
+    # origin_chat_id carries the real address to reach him on later -- the
+    # session's own chat_id and reply meta, not the owner-thread record_id (which
+    # is not an address any channel can send to).
+    import json
+    origin = json.loads(call["origin_chat_id"])
+    assert origin["chat_id"] == session.chat_id == "aaron-origin-route"
+    assert origin["meta"] == meta
 
 
 def test_manager_relays_a_propose_valueerror_as_the_reply(tmp_path):

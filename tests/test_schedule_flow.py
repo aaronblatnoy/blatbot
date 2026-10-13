@@ -55,7 +55,8 @@ def make_manager(tmp_path):
 async def _propose_via_manager(m, *, title="Team total watch",
                                prompt="check the team page", said="every 4 hours check the team page",
                                cadence_kind="every", cadence=None, scopes=None,
-                               report_every_time=None, start_now=False):
+                               report_every_time=None, start_now=False,
+                               session_mode="imessage", session_chat_id=None, session_meta=None):
     task = m.store.create_task(title)
     proposal = ScheduleProposal(title=title, prompt=prompt, cadence_kind=cadence_kind,
                                 cadence=cadence or {"minutes": 240}, timezone=None,
@@ -71,9 +72,11 @@ async def _propose_via_manager(m, *, title="Team total watch",
             return None
 
     m.router = _Router()
-    session = m.get(APPROVER_CONV)
-    await session.handle_inbound(said, mode="imessage", meta={"sender": "+15550100001", "to": "+15550100001",
-                                                               "conversation_id": APPROVER_CONV})
+    chat_id = session_chat_id or APPROVER_CONV
+    meta = session_meta if session_meta is not None else {
+        "sender": "+15550100001", "to": "+15550100001", "conversation_id": APPROVER_CONV}
+    session = m.get(chat_id)
+    await session.handle_inbound(said, mode=session_mode, meta=meta)
 
 
 async def _afut(value):
@@ -533,3 +536,87 @@ async def test_a_proposed_schedule_never_fires_and_refuses_run_now(tmp_path):
         await m.schedules.action(schedule.id, "run_now", owner=True)
     with pytest.raises(PermissionError):
         await m.schedules.action(schedule.id, "pause", owner=False)
+
+
+@pytest.mark.asyncio
+async def test_telegram_schedule_notices_go_to_telegram(tmp_path, monkeypatch):
+    monkeypatch.setenv("GATE_APPROVER_TELEGRAM_ID", "1")
+    m, sent = make_manager(tmp_path)
+    await _propose_via_manager(m, said="every 4 hours check the team page", scopes=["web"],
+                               session_mode="telegram", session_chat_id="tg:555",
+                               session_meta={"telegram_chat_id": "555", "sender": "telegram:1",
+                                             "telegram_user_id": "1"})
+    schedule = m.store.schedules(states=["proposed"])[0]
+    assert schedule.origin_mode == "telegram"
+    proposal_target, _text, proposal_mode, proposal_meta = sent[-1]
+    assert proposal_mode == "telegram"
+    assert proposal_target == "tg:555"
+    assert proposal_meta.get("telegram_chat_id") == "555"
+
+    activated = await m.schedules.decide(schedule.id, True)
+    started_target, _text, started_mode, _meta = sent[-1]
+    assert started_mode == "telegram"
+    assert started_target == "tg:555"
+
+    m.executor.results.append({"ok": True, "result_line": "no change", "final_status": "checked",
+                               "note": "", "denied": [], "tool_calls": ["mcp__fake__tool"], "held": False,
+                               "started_at": time.time(), "finished_at": time.time(), "cost_usd": None})
+    await m.schedules.tick(now=activated.next_run)
+    await asyncio.sleep(0)
+    run_target, _run_text, run_mode, _meta = sent[-1]
+    assert run_mode == "telegram"
+    assert run_target == "tg:555"
+
+
+@pytest.mark.asyncio
+async def test_imessage_schedule_notices_go_to_imessage(tmp_path):
+    m, sent = make_manager(tmp_path)
+    await _propose_via_manager(m, said="every 4 hours check the team page", scopes=["web"])
+    schedule = m.store.schedules(states=["proposed"])[0]
+    assert schedule.origin_mode == "imessage"
+    target, _text, mode, meta = sent[-1]
+    assert mode == "imessage"
+    assert target == APPROVER_CONV
+    assert meta.get("conversation_id") == APPROVER_CONV
+
+
+@pytest.mark.asyncio
+async def test_failing_telegram_send_falls_back_once_to_imessage(tmp_path, monkeypatch):
+    monkeypatch.setenv("GATE_APPROVER_TELEGRAM_ID", "1")
+    sent = []
+
+    async def flaky_send_fn(chat_id, text, mode, meta):
+        if mode == "telegram":
+            raise RuntimeError("telegram send failed")
+        sent.append((chat_id, text, mode, meta))
+
+    cfg = SimpleNamespace(deepseek_api_key="x", deepseek_model="m", claude_model="sonnet",
+                          approver_imessage_conversation_id=APPROVER_CONV)
+    m = gm.GateSessionManager(cfg=cfg, send_fn=flaky_send_fn, mcp_server=None, identity_info={},
+                              store_path=str(tmp_path / "gate.db"), exec_cwd=str(tmp_path))
+    m.jev_agent = None
+    m.caller = None
+    m.executor = FakeExecutor()
+    await _propose_via_manager(m, said="every 4 hours check the team page", scopes=["web"],
+                               session_mode="telegram", session_chat_id="tg:555",
+                               session_meta={"telegram_chat_id": "555", "sender": "telegram:1",
+                                             "telegram_user_id": "1"})
+    target, _text, mode, _meta = sent[-1]
+    assert mode == "imessage"
+    assert target == f"imessage:{APPROVER_CONV}"
+
+
+@pytest.mark.asyncio
+async def test_console_created_schedule_goes_to_owner_default_thread(tmp_path):
+    m, sent = make_manager(tmp_path)
+    task = m.store.create_task("Console watch")
+    await m.schedules.propose(
+        owner=True, chat_id="owner", task_id=int(task["id"]), title="Console watch",
+        prompt="check the page", cadence_kind="every", cadence={"minutes": 240},
+        scopes=["web"], origin_mode="console", origin_chat_id="owner",
+    )
+    target, _text, mode, _meta = sent[-1]
+    assert mode == "imessage"
+    assert target == f"imessage:{APPROVER_CONV}"
+    rows = m.store.history(gm.OWNER_THREAD, limit=5)
+    assert any(r.get("text") for r in rows)

@@ -1027,7 +1027,8 @@ class GateSession:
                     cadence_kind=out.schedule.cadence_kind, cadence=out.schedule.cadence,
                     timezone=out.schedule.timezone, report_every_time=out.schedule.report_every_time,
                     until=out.schedule.until, scopes=scopes, start_now=out.schedule.start_now,
-                    origin_mode=self.mode, origin_chat_id=self.record_id,
+                    origin_mode=self.mode,
+                    origin_chat_id=json.dumps({"chat_id": self.chat_id, "meta": self.reply_meta or {}}),
                 )
             except ValueError as exc:
                 out.request = None
@@ -1446,17 +1447,27 @@ class GateSessionManager:
 
     async def send_schedule_notice(self, schedule: Any, text: str) -> int:
         """Every schedule notice and proposal (schedules.py's only way to speak)
-        goes through here: send on the schedule's own origin thread, falling back
-        to the owner's iMessage thread when there is no origin or that send fails,
-        and tag the stored outbound row with schedule_id so a bare reply on that
-        thread is understood as answering this schedule."""
-        target = str(getattr(schedule, "origin_chat_id", "") or "")
+        goes through here: send the same way an ordinary owner reply on that channel
+        is sent (the real chat_id and reply meta captured at proposal time, packed into
+        origin_chat_id as JSON by the caller), falling back to the owner's iMessage
+        thread when there is no real origin (console-created, or an old plain-string
+        row) or that send fails. The stored row always lands on the owner's own
+        thread, tagged with schedule_id, so a bare reply there is understood as
+        answering this schedule regardless of which channel it went out on."""
+        raw = str(getattr(schedule, "origin_chat_id", "") or "")
         mode = str(getattr(schedule, "origin_mode", "") or "")
-        chat_id = target
-        sent = False
-        if target and mode:
+        target = raw
+        meta: Dict[str, Any] = {}
+        if raw.startswith("{"):
             try:
-                meta = {"conversation_id": target} if mode == "imessage" else {}
+                parsed = json.loads(raw)
+                target = str(parsed.get("chat_id") or "")
+                meta = dict(parsed.get("meta") or {})
+            except Exception:
+                target = raw
+        sent = False
+        if target and mode and mode != "console":
+            try:
                 await self.send_fn(target, text, mode, meta)
                 sent = True
             except Exception:
@@ -1466,9 +1477,8 @@ class GateSessionManager:
             conv = self.approver_conv
             mode = "imessage"
             target = f"imessage:{conv}"
-            chat_id = OWNER_THREAD
             await self.send_fn(target, text, mode, {"conversation_id": conv})
-        return self.store.add_message(chat_id or target, "outbound", text, mode, role="notice",
+        return self.store.add_message(OWNER_THREAD, "outbound", text, mode, role="notice",
                                       schedule_id=getattr(schedule, "id", None))
 
     _outage_notified: Dict[str, float] = {}
