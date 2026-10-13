@@ -351,6 +351,21 @@ def looks_like_fallback_title(title: Optional[str], message: str) -> bool:
     return title == fallback_title_from_message(message)
 
 
+def _call_time_text(created_at: Any, timezone_name: str = "America/New_York") -> str:
+    """"10:12 AM" for a call today, "Oct 13, 10:12 AM" otherwise; "" when unknown."""
+    try:
+        from datetime import datetime
+        from zoneinfo import ZoneInfo
+        tz = ZoneInfo(timezone_name)
+        at = datetime.fromtimestamp(float(created_at), tz)
+    except (TypeError, ValueError, OSError):
+        return ""
+    clock = at.strftime("%I:%M %p").lstrip("0")
+    if at.date() == datetime.now(tz).date():
+        return clock
+    return f"{at.strftime('%b')} {at.day}, {clock}"
+
+
 def plain_title(store: Any, req: Any) -> str:
     """The request named to the owner, anywhere a request is named (overview
     rows, failure/success messages, the progress reply): its own summary when
@@ -366,7 +381,9 @@ def plain_title(store: Any, req: Any) -> str:
     original = (getattr(req, "original_message", "") or "").strip()
     if summary and not _is_handoff_shaped(summary) and not _is_cut_of(summary, original):
         return summary
-    lines = caller_lines(original)
-    if lines:
-        return " ".join(lines)
-    return "a phone call"
+    # A raw speech transcript is not a title: it rambles and repeats. A row whose
+    # only name is its hand-off transcript is named by when it was asked instead;
+    # the caller's own words stay available through caller_lines() for anyone who
+    # wants the detail.
+    when = _call_time_text(getattr(req, "created_at", None))
+    return f"the request from the {when} call" if when else "the request from a call"
