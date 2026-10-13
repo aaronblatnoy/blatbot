@@ -95,6 +95,25 @@ async def answer_proposal(manager: Any, session: Any, text: str) -> Optional[str
 _HANDLE_RE = re.compile(r"^s(\d+)$", re.I)
 _RECENT_NOTICE_WINDOW_S = 12 * 3600
 
+# Words that carry no identifying content when he refers to a schedule ("the
+# team one", "that thing") -- dropped before matching against titles.
+_FILLER_WORDS = {
+    "the", "a", "an", "one", "that", "this", "it", "thing", "schedule",
+    "job", "check", "monitor", "my", "please",
+}
+
+
+def _word_matches_title_word(word: str, title_word: str) -> bool:
+    if word == title_word:
+        return True
+    return len(title_word) >= 4 and title_word.startswith(word)
+
+
+def _schedule_matches_words(schedule: Schedule, words: List[str]) -> bool:
+    title_words = [w for w in re.split(r"\s+", schedule.title.lower()) if w]
+    return bool(words) and all(
+        any(_word_matches_title_word(w, tw) for tw in title_words) for w in words)
+
 
 def _recent_notice_schedule(store: Any, chat_id: str) -> Optional[Schedule]:
     """The schedule of the most recent schedule notice or proposal on this
@@ -160,13 +179,17 @@ def resolve(store: Any, text_target: Optional[str], chat_id: str,
         if len(exact) > 1:
             return exact
         words = [w for w in re.split(r"\s+", target.lower()) if w]
-        partial = [s for s in all_schedules
-                   if words and all(w in s.title.lower() for w in words)]
-        if len(partial) == 1:
-            return partial[0]
-        if len(partial) > 1:
-            return partial
-        return None
+        words = [w for w in words if w not in _FILLER_WORDS]
+        if words:
+            partial = [s for s in all_schedules if _schedule_matches_words(s, words)]
+            if len(partial) == 1:
+                return partial[0]
+            if len(partial) > 1:
+                return partial
+            return None
+        # Nothing was left after dropping filler words ("that one"): treat the
+        # target as if he had named none, and fall through to the empty-target
+        # rules below instead of reporting no match.
     recent = _recent_notice_schedule(store, chat_id)
     if recent is not None:
         return recent

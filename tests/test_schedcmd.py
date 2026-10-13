@@ -590,3 +590,43 @@ async def test_change_until_unparseable_gets_plain_reply_and_no_store_change(env
     assert "didn't understand" in reply
     updated = store.get_schedule(schedule.id)
     assert updated.until == schedule.until
+
+
+# ---------------------------------------------------------------------------
+# resolve(): filler words dropped, prefix match on title words (item C)
+# ---------------------------------------------------------------------------
+
+@pytest.mark.asyncio
+async def test_resolve_drops_filler_words_and_prefix_matches(env):
+    store, manager, task_id = env
+    await _active(manager, task_id, title="Team total watch")
+    found = schedcmd.resolve(store, "the team one", "owner", None)
+    assert found is not None and found.title == "Team total watch"
+
+
+@pytest.mark.asyncio
+async def test_resolve_filler_only_target_treated_as_empty(env):
+    store, manager, task_id = env
+    schedule = await _active(manager, task_id, title="Team total watch")
+    # "that one" is all filler words -- with exactly one non-ended schedule on
+    # the thread, the empty-target path should resolve it.
+    found = schedcmd.resolve(store, "that one", "owner", None)
+    assert found is not None and found.id == schedule.id
+
+
+@pytest.mark.asyncio
+async def test_resolve_prefix_match_requires_four_letter_title_word(env):
+    store, manager, task_id = env
+    await _active(manager, task_id, title="Fix bug")
+    # "b" is a prefix of "bug" (3 letters) -- too short to count as a match.
+    found = schedcmd.resolve(store, "the b", "owner", None)
+    assert found is None
+
+
+@pytest.mark.asyncio
+async def test_resolve_two_prefix_matches_still_ask_which(env):
+    store, manager, task_id = env
+    await _active(manager, task_id, title="Monday brief")
+    await _active(manager, task_id, title="Monthly report")
+    found = schedcmd.resolve(store, "the mon one", "owner", None)
+    assert isinstance(found, list) and len(found) == 2
