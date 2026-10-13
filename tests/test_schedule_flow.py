@@ -188,7 +188,7 @@ async def test_denied_contact_tool_gives_incomplete_notice_with_phrase(tmp_path)
     # back to the vague recovery phrase add_capability's "do that" already
     # understands, not an invented "let it do part of this".
     assert "could not finish" in notice
-    assert '"let it do that" to try again.' in notice
+    assert '"let it do that" and I will run it again, or "stop it".' in notice
     assert "do part of this" in notice
 
 
@@ -207,7 +207,7 @@ async def test_failed_run_notice_has_retry_countdown(tmp_path):
 
     notice = sent[-1][1]
     assert "I will try again at" in notice
-    assert "After 2 more misses" in notice
+    assert "pause it" not in notice  # first miss: no pause warning yet
 
 
 @pytest.mark.asyncio

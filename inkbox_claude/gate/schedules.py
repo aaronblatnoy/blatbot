@@ -49,17 +49,77 @@ def names_tool(prompt: str, tool: str) -> str:
 
 
 def run_outcome(status: Dict[str, Any]) -> str:
-    """complete / incomplete / failed, from the executor's status contract. A run
-    that was denied a tool or had a call held is incomplete even when the model's
-    own STATUS line said OK -- the model does not get the last word on whether its
-    own run was complete."""
+    """complete / incomplete / blocked / failed, from the executor's status
+    contract. A run that was denied a tool or had a call held is incomplete
+    even when the model's own STATUS line said OK -- the model does not get
+    the last word on whether its own run was complete.
+
+    blocked is its own outcome, distinct from both: the run itself said so
+    (STATUS: BLOCKED, parsed by schedrun.parse_closing into status["blocked"]),
+    or every tool call it tried was refused and none at all succeeded --
+    meaning the same capabilities it has now could never finish this job, so
+    retrying on the current cadence would only fail identically forever.
+    incomplete stays for a run that did part of its job (some tool calls
+    denied/held, but at least one succeeded)."""
+    if status.get("blocked"):
+        return "blocked"
     if status.get("error"):
         return "failed"
-    if status.get("denied") or status.get("held"):
+    denied = status.get("denied") or []
+    held = status.get("held")
+    if denied and "tool_results" in status and not status.get("tool_results"):
+        return "blocked"
+    if denied or held:
         return "incomplete"
     if status.get("ok"):
         return "complete"
     return "failed"
+
+
+# Rewriting the run's own first-person "I" so it never sits next to the
+# scheduler's own first-person "I" in the same notice (item 2). Checked
+# longest-phrase-first so "i was unable to" is not shadowed by a shorter
+# prefix that happens to also match.
+_I_REWRITES = [
+    ("i was unable to", "it was unable to"),
+    ("i could not", "it could not"),
+    ("i couldn't", "it couldn't"),
+    ("i cannot", "it cannot"),
+    ("i can't", "it can't"),
+]
+
+# First words common enough to be an ordinary sentence opener rather than a
+# capitalized name ("Telegram group", "Aaron's calendar"): only these get
+# lower-cased when normalize_reason otherwise would read oddly mid-sentence.
+_LOWER_STARTERS = {
+    "the", "a", "an", "this", "that", "these", "those", "it", "its", "there",
+    "no", "not", "we", "you", "they", "he", "she", "when", "after", "before",
+    "once", "each", "every", "if", "since", "because", "while", "so", "and",
+    "but", "i", "i'm", "i've", "i'd", "it's",
+}
+
+
+def _normalize_reason(line: str) -> str:
+    """The run's own RESULT sentence, reworded to read as the scheduler's own
+    words: trailing punctuation and whitespace stripped, a leading "I could
+    not"/"I can't"/etc rewritten to "it ...", and the first letter lower-cased
+    unless it looks like a capitalized name. Never returns "", ".", " ." or
+    anything ending in "..": a blank or punctuation-only line falls back to
+    "it did not say why"."""
+    text = (line or "").strip().rstrip(". \t")
+    if not text:
+        return "it did not say why"
+    low = text.lower()
+    for prefix, repl in _I_REWRITES:
+        if low.startswith(prefix):
+            text = repl + text[len(prefix):]
+            break
+    first_word = re.match(r"[A-Za-z']+", text)
+    word = first_word.group(0).lower() if first_word else ""
+    if text[:1].isupper() and word in _LOWER_STARTERS:
+        text = text[0].lower() + text[1:]
+    text = text.strip().rstrip(".")
+    return text or "it did not say why"
 
 
 def _first_sentence(text: str) -> str:
@@ -107,6 +167,14 @@ class ScheduleService:
         from . import schedprop
         return schedprop.missing_capabilities(prompt, scopes)
 
+    def _default_report_every_time(self, prompt: str, cadence_kind: str) -> bool:
+        from . import schedprop
+        return schedprop.default_report_every_time(prompt, cadence_kind)
+
+    def _capability_match(self, text: str) -> Optional[str]:
+        from . import schedprop
+        return schedprop.capability_match(text)
+
     async def _notice(self, schedule: Schedule, text: str) -> None:
         await self.manager.send_schedule_notice(schedule, text)
 
@@ -139,7 +207,7 @@ class ScheduleService:
         if missing:
             raise ValueError(f"missing capability: {self._labels(missing)}")
         report_every = (bool(report_every_time) if report_every_time is not None
-                        else cadence_kind == "once")
+                        else self._default_report_every_time(prompt, cadence_kind))
         stored_cadence = dict(cadence or {})
         stored_cadence["start_now"] = bool(start_now)
         schedule = self.store.create_schedule(
@@ -640,7 +708,7 @@ class ScheduleService:
             # run" line (there may not be one any more) and no change to what he set.
             run_dict = {"outcome": outcome, "result_line": result_line, "final_status": final_status,
                        "denied": denied, "note": note, "changed": changed, "cost_usd": status.get("cost_usd"),
-                       "error": status.get("error")}
+                       "needs": str(status.get("needs") or ""), "error": status.get("error")}
             send = (not complete) or schedule.report_every_time or changed
             if send:
                 await self._notice(schedule, self.notice_text(schedule, run_dict, None))
@@ -649,7 +717,19 @@ class ScheduleService:
             self.store.update_schedule(schedule.id, last_note=note)
         run_dict = {"outcome": outcome, "result_line": result_line, "final_status": final_status,
                    "denied": denied, "note": note, "changed": changed, "cost_usd": status.get("cost_usd"),
-                       "error": status.get("error")}
+                       "needs": str(status.get("needs") or ""), "error": status.get("error")}
+        if outcome == "blocked":
+            # Blocked never counts toward the three-strikes pause and is never
+            # retried on its own -- retrying with the same tools could not
+            # succeed, so there is nothing a later tick could do that this run
+            # did not already rule out. It pauses immediately, with next_run
+            # cleared, and stays paused until the owner grants a capability
+            # ("let it <label>") or tells it where to find the thing.
+            updated = self.store.update_schedule(schedule.id, state="paused", next_run=None,
+                                                 last_outcome=result_line or "blocked")
+            logger.info("[schedules] %s paused: blocked (%s)", schedule.id, result_line or "no reason given")
+            await self._notice(updated, self.notice_text(updated, run_dict, None))
+            return True
         stop = bool(status.get("stop"))
         failures = 0 if complete else schedule.consecutive_failures + 1
         if stop:
@@ -687,12 +767,15 @@ class ScheduleService:
 
     @staticmethod
     def _failure_reason(run: Dict[str, Any]) -> str:
-        """result_line -> the run's own error in plain words -> the first sentence of
-        final_status. Never degenerates to the bare word "failed": one of these three
-        always has something to say, even if it is only "it could not finish"."""
+        """result_line (normalized, see _normalize_reason) -> the run's own error in
+        plain words -> the first sentence of final_status. Never degenerates to the
+        bare word "failed": one of these three always has something to say, even if
+        it is only "it could not finish". Only the result_line branch is normalized:
+        the error and final_status fallbacks are already plain narration text, kept
+        verbatim (including capitalization) as today."""
         result_line = str(run.get("result_line") or "").strip()
         if result_line:
-            return result_line
+            return _normalize_reason(result_line)
         err = str(run.get("error") or "").strip()
         if err:
             low = err.lower()
@@ -703,6 +786,18 @@ class ScheduleService:
         if final_status:
             return final_status
         return "it could not finish"
+
+    @staticmethod
+    def _blocked_reason(run: Dict[str, Any]) -> str:
+        """What a blocked run could not do, in the scheduler's own words: its
+        RESULT sentence normalized, or its NEEDS text, or the plain fallback."""
+        result_line = str(run.get("result_line") or "").strip()
+        if result_line:
+            return _normalize_reason(result_line)
+        needs = str(run.get("needs") or "").strip()
+        if needs:
+            return _normalize_reason(needs)
+        return "it did not say why"
 
     def notice_text(self, schedule: Schedule, run: Dict[str, Any], next_run: Optional[float]) -> str:
         if run.get("paused"):
@@ -728,14 +823,23 @@ class ScheduleService:
                 # the vague-approval phrase add_capability already understands
                 # is the only sound recovery to suggest.
                 return (f'{schedule.title} could not finish: it is not allowed to do part of this. '
-                        f'{result_line} Reply "let it do that" to try again.')
+                        f'{result_line} Say "let it do that" and I will run it again, or "stop it".')
             labels = self._labels(sorted(scope_names))
             return (f"{schedule.title} could not finish: it is not allowed to {labels}. {result_line} "
-                    f'Reply "let it {labels}" to fix that, or "stop it".')
+                    f'Say "let it {labels}" and I will run it again, or "stop it".')
+        if outcome == "blocked":
+            reason = self._blocked_reason(run)
+            match = self._capability_match(str(run.get("needs") or "")) or self._capability_match(result_line)
+            if match:
+                fix = f'Say "let it {self._labels([match])}" and I will run it now, or "stop it".'
+            else:
+                fix = 'Tell me where to find it or what to change, or say "stop it".'
+            return f"{schedule.title} could not run: {reason}. {fix} I won't retry on my own."
         if outcome == "failed":
-            remaining = max(0, 3 - schedule.consecutive_failures)
             when = _shown(next_run, schedule.timezone) if next_run is not None else "soon"
             reason = self._failure_reason(run)
-            return (f"{schedule.title} could not finish: {reason}. I will try again at {when}. "
-                    f"After {remaining} more misses I will pause it and tell you.")
+            text = f"{schedule.title} could not finish: {reason}. I will try again at {when}."
+            if schedule.consecutive_failures == 2:
+                text += " One more miss and I will pause it."
+            return text
         return f"{schedule.title}: {result_line}"

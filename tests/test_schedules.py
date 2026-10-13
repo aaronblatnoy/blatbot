@@ -35,6 +35,20 @@ class FakeSchedprop:
             return ["contacts"]
         return []
 
+    def default_report_every_time(self, prompt, cadence_kind):
+        # Deterministic stand-in for the real word-matching default: a prompt
+        # that says "digest" hears every time, anything else falls back to
+        # the once-vs-repeating rule the real function also uses.
+        if "digest" in prompt.lower():
+            return True
+        return cadence_kind == "once"
+
+    def capability_match(self, text):
+        for name, label in self.LABELS.items():
+            if label in (text or "").lower() or name in (text or "").lower():
+                return name
+        return None
+
 
 @pytest.fixture(autouse=True)
 def fake_schedprop(monkeypatch):
@@ -417,7 +431,7 @@ async def test_denied_tool_records_incomplete_and_names_capability_even_when_ok(
 
 
 @pytest.mark.asyncio
-async def test_failed_run_wording_has_countdown(env):
+async def test_first_failure_has_no_pause_warning(env):
     store, manager, service, task_id = env
     schedule = await _propose(service, task_id)
     activated = await service.decide(schedule.id, True)
@@ -430,7 +444,26 @@ async def test_failed_run_wording_has_countdown(env):
     store.set_state(req.id, "done")
     text = manager.notices[-1][1]
     assert "I will try again at" in text
-    assert "After 2 more misses" in text
+    assert "pause it" not in text
+
+
+@pytest.mark.asyncio
+async def test_second_consecutive_failure_warns_one_more_miss(env):
+    store, manager, service, task_id = env
+    schedule = await _propose(service, task_id)
+    activated = await service.decide(schedule.id, True)
+    for _ in range(2):
+        await service._fire(activated, activated.next_run)
+        await asyncio.sleep(0)
+        req = manager.executed[-1]
+        status = {"ok": False, "error": "timed out", "result_line": "", "final_status": "timed out",
+                 "finished_at": time.time(), "denied": [], "held": False}
+        await service.finished(req, status)
+        store.set_state(req.id, "done")
+        activated = store.get_schedule(schedule.id)
+    text = manager.notices[-1][1]
+    assert "I will try again at" in text
+    assert "One more miss and I will pause it." in text
 
 
 @pytest.mark.asyncio

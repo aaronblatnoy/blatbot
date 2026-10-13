@@ -33,11 +33,14 @@ def build_prompt(prompt: str, started_at: float, timezone: str, note: Optional[s
 
 
 def parse_closing(text: str) -> Dict[str, Any]:
-    """Pull RESULT:/NOTE:/STATUS: out of a run's closing text.
+    """Pull RESULT:/NOTE:/NEEDS:/STATUS: out of a run's closing text.
 
-    Returns {"result_line", "note", "status" (None|"OK"|"FAILED"|"STOP"), "stop",
-    "final_status"} where final_status is the text with those three blocks
-    removed, kept whole (never cut) however long it runs."""
+    Returns {"result_line", "note", "needs", "status" (None|"OK"|"FAILED"|"STOP"|
+    "BLOCKED"), "stop", "blocked", "final_status"} where final_status is the
+    text with those blocks removed, kept whole (never cut) however long it
+    runs. NEEDS is the run's own plain words for what would make the work
+    possible -- only meaningful when status is BLOCKED, but parsed whenever
+    present so a caller never has to guess at its absence."""
     lines = text.splitlines()
     headers: List[tuple] = []
     for i, ln in enumerate(lines):
@@ -46,6 +49,8 @@ def parse_closing(text: str) -> Dict[str, Any]:
             headers.append((i, "RESULT"))
         elif s.startswith("NOTE:"):
             headers.append((i, "NOTE"))
+        elif s.startswith("NEEDS:"):
+            headers.append((i, "NEEDS"))
         elif s.startswith("STATUS:"):
             headers.append((i, "STATUS"))
         elif s.startswith("CHANGED:"):
@@ -58,30 +63,35 @@ def parse_closing(text: str) -> Dict[str, Any]:
             status_idx = i
     if status_idx is not None:
         val = lines[status_idx].strip()[len("STATUS:"):].strip().upper()
-        if val in ("OK", "FAILED", "STOP"):
+        if val in ("OK", "FAILED", "STOP", "BLOCKED"):
             status = val
 
-    result_idx = None
-    for i, kind in headers:
-        if kind == "RESULT" and (status_idx is None or i < status_idx):
-            result_idx = i
-    note_idx = None
-    for i, kind in headers:
-        if kind == "NOTE" and (status_idx is None or i < status_idx):
-            note_idx = i
+    # RESULT/NOTE/NEEDS all appear (when present) before STATUS; each block
+    # runs from its own header to whichever of the other two headers (or
+    # STATUS) comes next, so a block never swallows a header that follows it.
+    pre_status = [(i, kind) for i, kind in headers
+                  if kind in ("RESULT", "NOTE", "NEEDS") and (status_idx is None or i < status_idx)]
+    pre_status.sort(key=lambda t: t[0])
 
-    def _block(start_idx: Optional[int], header: str, stop_idx: Optional[int]) -> str:
-        if start_idx is None:
-            return ""
-        end = stop_idx if stop_idx is not None else len(lines)
-        chunk = lines[start_idx:end]
-        first = chunk[0].strip()[len(header):].strip()
-        rest = chunk[1:]
-        return "\n".join([first] + rest).strip()
+    def _next_boundary(idx: int) -> Optional[int]:
+        for j, _ in pre_status:
+            if j > idx:
+                return j
+        return status_idx
 
-    result_end = note_idx if (note_idx is not None and note_idx > (result_idx or -1)) else status_idx
-    result_line = _block(result_idx, "RESULT:", result_end)
-    note = _block(note_idx, "NOTE:", status_idx)
+    def _block(header: str) -> str:
+        for idx, kind in pre_status:
+            if kind == header:
+                end = _next_boundary(idx)
+                chunk = lines[idx:end] if end is not None else lines[idx:]
+                first = chunk[0].strip()[len(header) + 1:].strip()
+                rest = chunk[1:]
+                return "\n".join([first] + rest).strip()
+        return ""
+
+    result_line = _block("RESULT")
+    note = _block("NOTE")
+    needs = _block("NEEDS")
 
     changed_idx = None
     for i, kind in headers:
@@ -94,10 +104,9 @@ def parse_closing(text: str) -> Dict[str, Any]:
             changed = val == "yes"
 
     remove_idxs = set()
-    if result_idx is not None:
-        remove_idxs.update(range(result_idx, result_end if result_end is not None else len(lines)))
-    if note_idx is not None:
-        remove_idxs.update(range(note_idx, status_idx if status_idx is not None else len(lines)))
+    for idx, kind in pre_status:
+        end = _next_boundary(idx)
+        remove_idxs.update(range(idx, end if end is not None else len(lines)))
     if status_idx is not None:
         remove_idxs.add(status_idx)
     if changed_idx is not None:
@@ -107,8 +116,10 @@ def parse_closing(text: str) -> Dict[str, Any]:
     return {
         "result_line": result_line,
         "note": note,
+        "needs": needs,
         "status": status,
         "stop": status == "STOP",
+        "blocked": status == "BLOCKED",
         "final_status": final_status,
         "changed": changed,
     }

@@ -227,6 +227,45 @@ def capabilities_from_permission(said_text: str, denied_scopes: Optional[List[st
     return []
 
 
+def capability_match(text: str) -> Optional[str]:
+    """The first known scope whose label or a synonym appears in `text` (a
+    run's own NEEDS or RESULT sentence), or None. Used to decide whether a
+    blocked run's notice can offer a concrete "let it <label>" fix, or must
+    fall back to asking the owner where the thing is -- never guesses a
+    capability that is not actually in the registry."""
+    found = _said_scopes(text or "")
+    return found[0] if found else None
+
+
+# ---------------------------------------------------------------------------
+# Report-every-time default (item 4): a digest hears every time by default, a
+# watch only on change, unless the router states a value explicitly (that
+# check happens in the caller -- this function is only ever consulted when no
+# explicit value was given).
+# ---------------------------------------------------------------------------
+
+_DIGEST_WORDS = [
+    "summary", "summarize", "summarise", "recap", "digest", "brief", "briefing",
+    "report", "roundup", "send me", "text me", "tell me every", "each morning",
+    "every morning",
+]
+_WATCH_WORDS = ["when ", "if ", "changes", "alert me", "let me know if"]
+
+
+def default_report_every_time(text: str, cadence_kind: str) -> bool:
+    """True (hear from it every time) when the owner's words or the schedule's
+    prompt read as a digest; False (only on change) when they read as a watch.
+    Neither matching, a one-time schedule defaults to every time (there is
+    only ever one run to hear about); a repeating one defaults to only on
+    change, per the specification's default for a watch."""
+    low = (text or "").lower()
+    if any(w in low for w in _DIGEST_WORDS):
+        return True
+    if any(w in low for w in _WATCH_WORDS):
+        return False
+    return cadence_kind == "once"
+
+
 def missing_capabilities(prompt: str, scopes: Iterable[str]) -> List[str]:
     """Scopes whose tools the prompt names literally but that are not in
     `scopes` -- what a proposal or an activation attempt is missing."""
