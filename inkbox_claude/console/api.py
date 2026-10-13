@@ -648,7 +648,7 @@ WEEKDAY_OPTIONS: List[Dict[str, str]] = [
     {"value": "sun", "label": "Sunday"},
 ]
 OUTCOME_LABELS: Dict[str, str] = {
-    "complete": "Finished", "incomplete": "Could not finish", "failed": "Failed",
+    "complete": "Finished", "incomplete": "Could not finish", "failed": "Failed", "blocked": "Could not run",
     "interrupted": "Interrupted", "skipped": "Skipped",
 }
 # Plain words for the handful of US zones the owner actually uses; anything

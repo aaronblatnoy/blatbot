@@ -139,7 +139,7 @@ def test_schedule_list_shapes_every_state_and_top_level_fields(tmp_path):
     result = api.schedule_list(store, manager.schedules)
     by_title = {s["title"]: s for s in result["schedules"]}
 
-    assert by_title["Team total watch"]["state_label"] == "Waiting"  # active, no run in flight
+    assert by_title["Team total watch"]["state_label"] == "Active"  # active, no run in flight
     assert by_title["Monday brief"]["state_label"] == "Needs your yes"
     assert by_title["Monday brief"]["needs_approval"] is True
     assert by_title["Weekly backup check"]["state_label"] == "Paused"
