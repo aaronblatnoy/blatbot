@@ -147,3 +147,32 @@ def test_plain_title_used_for_a_call_hand_off_transcript_not_the_raw_transcript(
     out = asyncio.run(go())
     assert handoff_summary not in out
     assert "blatbot:" not in out.lower()
+
+
+def test_a_second_usage_limit_failure_within_ten_minutes_is_told_once(tmp_path):
+    """Item 7's remainder: two different asks on the same thread both hit the
+    session limit within the 10-minute window; the second one is not re-announced
+    in full (he was already told), but it still shows up on the ledger."""
+    m, sent = phone_manager(tmp_path, trust=True, active=False)
+    m.executor.result = {"ok": False, "error": SESSION_LIMIT_ERROR, "tool_calls": [],
+                         "raw": SESSION_LIMIT_ERROR}
+    m.router.next = RouterOutput(reply="On it.", request=RouterRequest(
+        prompt="Check the schedule", scopes=["web"], summary="check the schedule"))
+
+    async def go():
+        await m.get("p1").voice_consult("what's on my schedule", _voice_meta())
+        await asyncio.sleep(0.05)
+    asyncio.run(go())
+    first_told = [row for row in sent if "usage limit" in row[1].lower()]
+    assert len(first_told) == 1
+
+    # A second, different ask on the same thread fails the same way shortly after.
+    m.router.next = RouterOutput(reply="On it.", request=RouterRequest(
+        prompt="Email the report", scopes=["web"], summary="email the report"))
+
+    async def go2():
+        await m.get("p1").voice_consult("send the report to Bob", _voice_meta())
+        await asyncio.sleep(0.05)
+    asyncio.run(go2())
+    told_again = [row for row in sent if "usage limit" in row[1].lower()]
+    assert len(told_again) == 1, f"should not be told a second time, got {told_again}"

@@ -2334,6 +2334,30 @@ class Store:
             ).fetchone()
         return Request.from_row(r) if r else None
 
+    def recent_failed_statuses_for_thread(self, chat_id: str, *, window_seconds: float = 600,
+                                          exclude_request_id: Optional[int] = None) -> List[Dict[str, Any]]:
+        """Every failed request's status dict on this thread within the last
+        window_seconds, newest first (excluding one request id, typically the one
+        whose own failure is being decided right now). Used to tell whether a
+        usage-limit failure was already reported recently on this thread, so a
+        further ask that fails the same way within the window is not re-announced
+        in full -- he is told once, not once per ask."""
+        with self._lock:
+            rows = self._db.execute(
+                "SELECT id, status_json FROM requests WHERE chat_id=? AND state='failed' AND updated_at>? "
+                "ORDER BY updated_at DESC",
+                (chat_id, time.time() - window_seconds),
+            ).fetchall()
+        out: List[Dict[str, Any]] = []
+        for r in rows:
+            if exclude_request_id is not None and r["id"] == exclude_request_id:
+                continue
+            try:
+                out.append(json.loads(r["status_json"] or "{}"))
+            except Exception:
+                out.append({})
+        return out
+
     def last_failed_for_thread_or_person(self, chat_id: str, sender: str, *,
                                          exclude_scheduled: bool = False) -> Optional[Request]:
         """last_failed_for_thread(chat_id), or -- when nothing matches there -- the most

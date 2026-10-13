@@ -1048,13 +1048,17 @@ class GateSession:
             self.mode, self.reply_meta = "voice", dict(call_meta or {})
             rid = self.record_id
             still_on_call = self.m.call_active(self.chat_id)
-            if still_on_call:
+            if still_on_call and text:
                 # Still on the call: this is spoken, not sent, so it is recorded here as
-                # the one row for this result -- the only place that happens.
+                # the one row for this result -- the only place that happens. A blank
+                # text (a usage-limit failure already told once within the window --
+                # item 7) means nothing is spoken and nothing is recorded here either.
                 self.m.store.add_message(rid, "outbound", text, "voice")
             self.mode, self.reply_meta = prev
         if still_on_call:
             return text
+        if not text:
+            return ""
         # They hung up first: deliver on exactly one channel -- the owner's own primary
         # (send_to_approver, iMessage) when it was Aaron, or back to the number that
         # called otherwise -- and let that one send record the one outbound row. Two
@@ -2582,6 +2586,16 @@ class GateSessionManager:
         # grounding fallback downstream (ground_reply) still works from the run's own
         # findings -- only the text actually sent or returned here uses `message`.
         message = wording.success_message(result) if ok else wording.failure_message(title, status)
+        # Item 7's remainder: a usage-limit failure is told once, not once per ask.
+        # If this thread already heard one within the last 10 minutes, this one
+        # still fails the same way but says nothing further -- the raw status and
+        # the plain-worded message both still land on the ledger/log via `note`
+        # below, just never a second time in front of a person.
+        told_already = False
+        if not ok and wording.is_usage_limit_failure(status):
+            prior = self.store.recent_failed_statuses_for_thread(
+                req.chat_id, window_seconds=600, exclude_request_id=req.id)
+            told_already = any(wording.is_usage_limit_failure(st) for st in prior)
         self.task_note(req, "done" if ok else "failed", f"{req.summary} -> {result}",
                        state="open" if req.schedule_id else ("done" if ok else "failed"))
         if await self.schedules.finished(req, status):
@@ -2592,7 +2606,7 @@ class GateSessionManager:
             return ""
         if not notify:
             self.store.add_message(req.chat_id, "system", f"Task #{req.id} {outcome}: {req.summary}\nResult:\n{result}")
-            return message
+            return "" if told_already else message
         from_aaron = session.is_approver() or session.is_aaron_on_phone() or req.chat_id in self._approver_chat_ids()
         note = f"Task #{req.id} {outcome}: {req.summary}\nResult:\n{result}"
         # Messages live on the person's record, which for the owner spans every surface.
@@ -2605,9 +2619,12 @@ class GateSessionManager:
                 # to leak through, and how a correctly-worded failure line got rewritten
                 # into something the grounding check then threw away). The raw status
                 # still lands on the ledger/log via `note`.
-                replied = await session.notify_failure(message, note, inbound_id=req.inbound_id)
-                if not replied:
-                    await self.send_to_approver(f"Failed: {title}\n{message}")
+                if told_already:
+                    self.store.add_message(self.get(req.chat_id).record_id, "system", note)
+                else:
+                    replied = await session.notify_failure(message, note, inbound_id=req.inbound_id)
+                    if not replied:
+                        await self.send_to_approver(f"Failed: {title}\n{message}")
                 if meanwhile:
                     # Aaron said more while it ran (a hint, a correction): the failure
                     # above is the answer to the request itself; this is a separate,
@@ -2632,8 +2649,11 @@ class GateSessionManager:
         # tell the sender the outcome -- except on failure, which is always
         # wording.py's own text, never the router's rewrite of it.
         if not ok:
-            await self.send_to_approver(f"[Blatbot #{req.id} FAILED] {title}\n{message}")
-            await session.notify_failure(message, note, inbound_id=req.inbound_id)
+            if told_already:
+                self.store.add_message(self.get(req.chat_id).record_id, "system", note)
+            else:
+                await self.send_to_approver(f"[Blatbot #{req.id} FAILED] {title}\n{message}")
+                await session.notify_failure(message, note, inbound_id=req.inbound_id)
             session.typing_stop()
             return ""
         try:

@@ -124,6 +124,14 @@ def _is_network_or_login(text: str) -> bool:
     return any(w in low for w in _NETWORK_WORDS) or any(w in low for w in _LOGIN_WORDS)
 
 
+def is_usage_limit_failure(status: Dict[str, Any]) -> bool:
+    """Whether a failed run's status classifies as a usage/session/rate-limit,
+    quota, overload or exhausted-credit failure -- public so a caller deciding
+    whether to suppress a repeat notice (item 7's "told once, not once per
+    ask") does not need to reach into _classify."""
+    return _classify(status) == "usage_limit"
+
+
 def _classify(status: Dict[str, Any]) -> str:
     """One category for a failed run: 'usage_limit', 'buffer', 'timeout', 'refusal',
     'network', or 'other'. Order matters: usage_limit is checked first (an exhausted
