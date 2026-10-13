@@ -628,6 +628,14 @@ class ScheduleService:
             self.store.task_event(schedule.task_id, "note",
                                   f"Run finished but {schedule.title} had moved on ({schedule.state}); "
                                   "not reactivated.", chat_id=schedule.chat_id)
+            # The owner paused or edited this schedule while the run was in flight. Its
+            # result still happened and is still worth telling him -- just with no "next
+            # run" line (there may not be one any more) and no change to what he set.
+            run_dict = {"outcome": outcome, "result_line": result_line, "final_status": final_status,
+                       "denied": denied, "note": note, "changed": changed, "cost_usd": status.get("cost_usd")}
+            send = (not complete) or schedule.report_every_time or changed
+            if send:
+                await self._notice(schedule, self.notice_text(schedule, run_dict, None))
             return True
         if note:
             self.store.update_schedule(schedule.id, last_note=note)

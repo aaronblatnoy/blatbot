@@ -198,6 +198,30 @@ async def test_complete_run_different_result_sends_short_notice_with_next_time(e
 
 
 @pytest.mark.asyncio
+async def test_finished_still_notices_a_paused_mid_flight_run_with_no_next_run_line(env):
+    # The owner paused the schedule while a run was in flight. The run's result is still
+    # told to him (no silent drop), but with no "Next check" line and the schedule stays
+    # paused -- the run finishing does not reactivate anything.
+    store, manager, service, task_id = env
+    schedule = await _propose(service, task_id)
+    activated = await service.decide(schedule.id, True)
+    await service._fire(activated, activated.next_run)
+    await asyncio.sleep(0)
+    req = manager.executed[-1]
+
+    await service.action(schedule.id, "pause", owner=True)
+
+    before = len(manager.notices)
+    await service.finished(req, {"ok": True, "result_line": "found something before the pause landed",
+                                 "finished_at": time.time(), "denied": [], "held": False, "changed": True})
+    assert len(manager.notices) == before + 1
+    text = manager.notices[-1][1]
+    assert "found something before the pause landed" in text
+    assert "Next check" not in text
+    assert store.get_schedule(schedule.id).state == "paused"
+
+
+@pytest.mark.asyncio
 async def test_finished_uses_reported_changed_true_even_if_text_is_unchanged(env):
     # The model said CHANGED: yes even though result_line/note text is identical to
     # the previous run's -- its judgment is the source of truth, not the text diff.
