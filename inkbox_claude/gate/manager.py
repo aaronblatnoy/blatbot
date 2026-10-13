@@ -38,10 +38,23 @@ HANDOFF_LINE = (
     "Blatbot\nExecutive Assistant to Aaron Blatnoy"
 )
 EXPIRE_SECONDS = 24 * 3600
-# Item 4: how long a call's failed ask is still "the same ask" for folding purposes
-# -- long enough to cover a real call, short enough that a much later, unrelated
-# call from the same person is never folded into an old failure by mistake.
-CALL_ASK_FOLD_WINDOW_S = 300
+# Item C2: how long a call's failed ask is still "the same ask" for folding purposes
+# on timing alone -- long enough to cover the tail end of one spoken turn, short
+# enough that a later fragment on the same task but a genuinely different ask (the
+# other test of _is_same_ask_as_failed, caller-words continuation) is the one doing
+# the real work past this window.
+CALL_ASK_FOLD_WINDOW_S = 45
+
+
+def _normalize_caller_words(text: str) -> str:
+    """The caller's own words from a voice hand-off transcript (wording.caller_lines),
+    joined and normalized (whitespace collapsed, lower-cased) for a containment
+    comparison (item C2). Falls back to the whole message, same normalization, when
+    the text is not hand-off shaped or has no caller lines at all -- a plain spoken
+    fragment compares on its own words rather than always failing to match."""
+    lines = wording.caller_lines(text or "")
+    words = " ".join(lines) if lines else (text or "")
+    return " ".join(words.split()).lower()
 
 
 _EMAIL = re.compile(r"[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}")
@@ -913,7 +926,26 @@ class GateSession:
             "or more detailed."
         )
 
-    async def _fold_into_failed_ask(self, task_id: int, call_id: Optional[str]) -> Optional[str]:
+    def _is_same_ask_as_failed(self, failed: Request, body: str) -> bool:
+        """Item C2: a repeated call fragment only folds into an already-failed request
+        when it is genuinely the same ask, not merely the same task within a loose
+        5-minute window (which used to swallow a different ask on the same topic).
+        Same ask means either: this fragment arrived within CALL_ASK_FOLD_WINDOW_S
+        (45s) of the failed request's own inbound, so it reads as the tail end of
+        the same spoken turn; or the two fragments' caller words are a continuation
+        of the same utterance -- after normalizing whitespace and case, one set of
+        "what was just said" caller lines contains, or is contained in, the other.
+        Anything else is a new ask and is never folded."""
+        if (time.time() - failed.updated_at) <= CALL_ASK_FOLD_WINDOW_S:
+            return True
+        failed_said = _normalize_caller_words(failed.original_message)
+        this_said = _normalize_caller_words(body)
+        if not failed_said or not this_said:
+            return False
+        return failed_said in this_said or this_said in failed_said
+
+    async def _fold_into_failed_ask(self, task_id: int, call_id: Optional[str],
+                                    body: str = "") -> Optional[str]:
         """Item 4: when a voice fragment's ask is the SAME ask (same task) as a
         request that already failed on this thread -- the realtime voice model
         can hand off several fragments of one spoken request a few seconds apart,
@@ -938,7 +970,7 @@ class GateSession:
         failed_task_id = self.m.store.task_id_for_request(failed.id)
         if failed_task_id != task_id:
             return None
-        if (time.time() - failed.updated_at) > CALL_ASK_FOLD_WINDOW_S:
+        if not self._is_same_ask_as_failed(failed, body):
             return None
         key = (call_id, failed.id)
         count = self._call_ask_replies.get(key, 0)
@@ -1019,7 +1051,7 @@ class GateSession:
                 if task is not None and out.request is not None:
                     # Item 4: this ask's task may be the same one a request already
                     # failed under on this call -- never start a second run of it.
-                    folded = await self._fold_into_failed_ask(task["id"], call_meta.get("call_id"))
+                    folded = await self._fold_into_failed_ask(task["id"], call_meta.get("call_id"), body)
                     if folded is not None:
                         if t is not None:
                             self._ensure_inbound_on_task(t, body)

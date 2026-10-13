@@ -9,6 +9,7 @@ no network, no live executor."""
 from __future__ import annotations
 
 import asyncio
+import time
 
 import pytest
 
@@ -294,3 +295,70 @@ def test_still_stuck_line_also_texts_the_failure_exactly_once(tmp_path):
     asyncio.run(fourth())
     texted_again = [row for row in sent if row[2] in ("sms", "imessage") and "it could not reach Coolify" in row[1]]
     assert len(texted_again) == 1, "the failure must never be texted a second time"
+
+
+def test_different_ask_on_same_task_outside_the_window_is_not_folded(tmp_path):
+    """Item C2: a fragment on the same task but arriving more than 45 seconds after
+    the failed request's own inbound, with caller words that are NOT a continuation
+    of what the failed request said, is a new ask -- it runs, not folds."""
+    m, sent = phone_manager(tmp_path, trust=True, active=True)
+    m.executor.result = {"ok": False, "error": "connection refused",
+                         "tool_calls": ["mcp__coolify__deploy"], "raw": "connection refused"}
+    m.router.next = RouterOutput(reply="On it.", task="new", task_title="Deploy the app",
+                                 request=RouterRequest(prompt="Deploy the app", scopes=["web"],
+                                                       summary="deploy the app"))
+
+    async def first():
+        return await m.get("p1").voice_consult("deploy the app for me", _voice_meta())
+    asyncio.run(first())
+    task_id = m.store.task_id_for_request(1)
+
+    # Push the failed request's updated_at well past the 45-second fold window.
+    m.store._db.execute("UPDATE requests SET updated_at=? WHERE id=1", (time.time() - 120,))
+    m.store._db.commit()
+
+    # A later fragment on the SAME task, but asking something unrelated to what the
+    # failed request's own words were -- not a continuation.
+    m.router.next = RouterOutput(reply="On it.", task=f"T{task_id}",
+                                 request=RouterRequest(prompt="what time is it", scopes=["web"],
+                                                       summary="what time is it"))
+
+    async def second():
+        return await m.get("p1").voice_consult("actually what time is it right now", _voice_meta())
+    asyncio.run(second())
+
+    # A genuinely new ask: it ran, rather than folding into the old failure.
+    assert m.executor.ran == [1, 2]
+
+
+def test_continuation_fragment_outside_the_window_still_folds(tmp_path):
+    """Item C2: a fragment well past the 45-second window still folds when its
+    caller words are a continuation of the failed request's own words (one set of
+    normalized "what was just said" caller lines contains the other)."""
+    m, sent = phone_manager(tmp_path, trust=True, active=True)
+    m.executor.result = {"ok": False, "error": "connection refused",
+                         "tool_calls": ["mcp__coolify__deploy"], "raw": "connection refused"}
+    m.router.next = RouterOutput(reply="On it.", task="new", task_title="Deploy the app",
+                                 request=RouterRequest(prompt="Deploy the app", scopes=["web"],
+                                                       summary="deploy the app"))
+
+    async def first():
+        return await m.get("p1").voice_consult("please deploy the app for me now", _voice_meta())
+    asyncio.run(first())
+    task_id = m.store.task_id_for_request(1)
+
+    m.store._db.execute("UPDATE requests SET updated_at=? WHERE id=1", (time.time() - 120,))
+    m.store._db.commit()
+
+    m.router.next = RouterOutput(reply="On it.", task=f"T{task_id}",
+                                 request=RouterRequest(prompt="deploy it", scopes=["web"], summary="deploy it"))
+
+    async def second():
+        # A continuation: these words are contained within the failed request's own
+        # original message, after normalizing whitespace/case.
+        return await m.get("p1").voice_consult("deploy the app for me", _voice_meta())
+    out2 = asyncio.run(second())
+
+    assert "it could not reach Coolify" in out2
+    # No second run: the fragment folded into the existing failed request.
+    assert m.executor.ran == [1]
