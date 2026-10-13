@@ -261,6 +261,11 @@ async def post_request_decision(request: web.Request) -> web.StreamResponse:
     return _json(result, status=200 if result.get("ok") else 409)
 
 
+async def post_request_retry(request: web.Request) -> web.StreamResponse:
+    result = await api.retry_request_endpoint(_manager(request), await _payload(request))
+    return _json(result)
+
+
 async def get_tasks(request: web.Request) -> web.StreamResponse:
     return _json(api.tasks(_manager(request).store))
 
@@ -384,6 +389,9 @@ def register(app: web.Application, gateway: Any) -> None:
     app.router.add_get("/console/api/requests", _endpoint(get_requests))
     app.router.add_post(
         "/console/api/requests/decide", _endpoint(post_request_decision, mutation=True)
+    )
+    app.router.add_post(
+        "/console/api/requests/retry", _endpoint(post_request_retry, mutation=True)
     )
     app.router.add_get("/console/api/tasks", _endpoint(get_tasks))
     app.router.add_get("/console/api/tasks/{id}", _endpoint(get_task))

@@ -29,13 +29,6 @@ _EMAIL_RE = re.compile(r"[\w.+-]+@[\w-]+\.[\w.-]+")
 _PHONE_RE = re.compile(r"(?:\+?1[-.\s]?)?\(?\d{3}\)?[-.\s]?\d{3}[-.\s]?\d{4}")
 _SENTENCE_SPLIT_RE = re.compile(r"(?<=[.!?])\s+")
 
-# Two failed requests count as "the same ask" (collapsed into one Stuck row)
-# when they share a task, or landed on the same thread within this window of
-# each other (a voice hand-off that failed and was retried a few seconds
-# later, before a task link is in place yet).
-_SAME_ASK_WINDOW_S = 120.0
-
-
 def _schedule_time_text(ts: Optional[float], timezone_name: str) -> Optional[str]:
     """"Mon Oct 12, 2:33 AM EDT" in the schedule's own time zone. None in, None out."""
     if ts is None:
@@ -189,26 +182,27 @@ def _failed_request_candidates(store: Store, now: float) -> List[Dict[str, Any]]
             )
             if later_success:
                 continue
-        out.append({"request": request, "task_id": task_id})
+        title, _plain = _request_title_and_plain(store, request)
+        out.append({"request": request, "task_id": task_id, "title": title})
     return out
 
 
 def _cluster_same_ask(candidates: List[Dict[str, Any]]) -> List[List[Dict[str, Any]]]:
     """Group failed-request candidates that are the same ask: sharing a task, or
-    the same thread within _SAME_ASK_WINDOW_S of the cluster's latest member so
-    far. Each cluster is returned oldest-first; the caller reports only its
-    latest member."""
+    carrying the same plain title (so distinct asks on the same thread never
+    collapse into one just for landing close together in time -- the window
+    that used to gate this on its own chained ANY failure on a thread, which
+    silently merged several different asks into one Stuck row and made the
+    others vanish). Each cluster is returned oldest-first; the caller reports
+    only its latest member."""
     clusters: List[List[Dict[str, Any]]] = []
     for item in sorted(candidates, key=lambda c: c["request"].created_at):
         placed = False
         for cluster in clusters:
             rep = cluster[-1]
             same_task = item["task_id"] is not None and item["task_id"] == rep["task_id"]
-            same_thread_soon = (
-                item["request"].chat_id == rep["request"].chat_id
-                and abs(item["request"].created_at - rep["request"].created_at) <= _SAME_ASK_WINDOW_S
-            )
-            if same_task or same_thread_soon:
+            same_title = item["title"] == rep["title"]
+            if same_task or same_title:
                 cluster.append(item)
                 placed = True
                 break
@@ -231,8 +225,10 @@ def _stuck_failed_requests(store: Store, now: float) -> List[Dict[str, Any]]:
         title, _plain = _request_title_and_plain(store, latest)
         reason = wording.failure_in_words(latest.status or {})
         sentence = f"{title}: {reason}."
+        actions = [{"action": "retry", "label": "Try again",
+                    "target": {"endpoint": "requests/retry", "id": latest.id}}]
         out.append(_request_row(latest, store, kind="request", since_field="since_text",
-                                 sentence=sentence, title=title, actions=[], say="try again"))
+                                 sentence=sentence, title=title, actions=actions, say="try again"))
     return out
 
 
@@ -266,6 +262,12 @@ def _schedule_fix_actions(schedule: Any, *, paused: bool) -> List[Dict[str, Any]
     if paused:
         actions.append({"action": "resume", "label": "Resume",
                          "target": {"endpoint": "schedules/action", "id": schedule.id, "action": "resume"}})
+    else:
+        # Still active, merely had a failed/incomplete last run: offer to try it
+        # again right now rather than only Stop, which is all an active schedule
+        # used to be offered here.
+        actions.append({"action": "run_now", "label": "Run now",
+                         "target": {"endpoint": "schedules/action", "id": schedule.id, "action": "run_now"}})
     actions.append({"action": "stop", "label": "Stop",
                     "target": {"endpoint": "schedules/action", "id": schedule.id, "action": "stop"}})
     return actions
@@ -437,18 +439,23 @@ def _done_today_items(store: Store, now: float) -> List[Dict[str, Any]]:
 
 
 def _coming_up_items(store: Store, now: float) -> List[Dict[str, Any]]:
+    """The next few active schedules due to fire -- each flagged with
+    last_run_failed when its last run did not complete, so one is never shown
+    here looking perfectly healthy while it is also sitting in Stuck."""
     upcoming = sorted(
         (s for s in store.schedules(states=["active"]) if s.next_run and s.next_run >= now),
         key=lambda s: s.next_run,
     )[:3]
-    return [
-        {
+    out = []
+    for s in upcoming:
+        last = _last_non_skipped_run(store, s.id)
+        out.append({
             "id": s.id, "title": s.title, "cadence_text": _cadence_text(s),
             "next_run_text": _schedule_time_text(s.next_run, s.timezone),
             "next_run_in_seconds": s.next_run - now,
-        }
-        for s in upcoming
-    ]
+            "last_run_failed": bool(last and last.get("outcome") not in ("complete", "skipped")),
+        })
+    return out
 
 
 def _overview_sources(store: Store) -> List[Dict[str, Any]]:

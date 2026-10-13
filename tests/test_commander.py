@@ -414,9 +414,12 @@ def test_console_person_model_flags_commander_person(tmp_path):
 
 
 def test_console_update_person_endpoint_refuses_role_drop_on_commander(tmp_path):
+    """The console endpoint now refuses this itself (a plain ValidationError /
+    400) before ever reaching the store's own PermissionError guard -- see
+    test_people_model.py for direct coverage of the store's guard."""
     s = _store(tmp_path)
     pid = _pin(s)
-    with pytest.raises(PermissionError):
+    with pytest.raises(console_api.ValidationError):
         console_api.update_person_endpoint(s, {"id": pid, "role": "helper"})
 
 

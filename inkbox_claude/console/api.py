@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import os
 import re
 import time
@@ -9,7 +10,7 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 from ..gate.scopes import SCOPES, SCOPE_SYSTEM
-from ..gate.store import Request, Store, role_names
+from ..gate.store import Request, Store, TaskRequired, role_names
 from ..gate import cadence as cadence_mod, schedprop, wording
 from ..gate import schedules as sched_mod
 from ..gate.schedules import DEFAULT_TIMEZONE
@@ -671,6 +672,30 @@ async def decide_request(manager: Any, payload: Dict[str, Any]) -> Dict[str, Any
             {"id": request_id, "state": result.get("state"), "decision": decision},
         )
     return dict(result)
+
+
+async def retry_request_endpoint(manager: Any, payload: Dict[str, Any]) -> Dict[str, Any]:
+    """POST /console/api/requests/retry: re-ask a failed request exactly as it
+    was, through the manager's own retry_request (never a shortcut around
+    approval) -- the same path try again in chat already uses -- then runs
+    it right away, owner-console only, same gate as every other console
+    write."""
+    try:
+        request_id = int(payload.get("id"))
+    except (TypeError, ValueError):
+        raise ValidationError("id must be an integer") from None
+    req = manager.store.get_request(request_id)
+    if req is None:
+        raise ValidationError(f"no such request: {request_id}")
+    if req.state != "failed":
+        raise ValidationError(f"that request is {req.state}, not failed -- nothing to retry")
+    try:
+        new_req = manager.retry_request(req, approved=True)
+    except TaskRequired as exc:
+        raise ValidationError(str(exc)) from exc
+    asyncio.create_task(manager.execute(new_req))
+    events.publish("requests.changed", {"id": new_req.id, "action": "retry"})
+    return {"ok": True, "id": new_req.id}
 
 
 def tasks(store: Store) -> List[Dict[str, Any]]:

@@ -4,6 +4,7 @@ rows against the real store (not faked)."""
 
 from __future__ import annotations
 
+import asyncio
 import re
 import time
 
@@ -34,6 +35,14 @@ class FakeManager:
 
     async def execute(self, req):
         self.store.set_state(req.id, "running")
+
+    def retry_request(self, req, *, approved):
+        task_id = self.store.task_id_for_request(req.id)
+        return self.store.create_request(
+            chat_id=req.chat_id, sender=req.sender, sender_name=req.sender_name, mode=req.mode,
+            subject=req.subject, original_message=req.original_message, summary=req.summary,
+            scopes=list(req.scopes), prompt=req.prompt, state="approved" if approved else "pending",
+            task_id=task_id, inbound_id=req.inbound_id)
 
 
 class FakeGateway:
@@ -177,6 +186,108 @@ def test_active_schedule_whose_last_run_did_not_complete_is_stuck(tmp_path):
     assert "the total did change" in row["sentence"]
 
 
+def test_active_schedule_with_a_failed_run_offers_run_now_and_stop_not_resume(tmp_path):
+    store = make_store(tmp_path)
+    schedule = _make_schedule(store, title="Donor tracker sync", state="active")
+    _add_run(store, schedule.id, outcome="failed", result_line="could not reach the page")
+
+    result = api.overview(FakeGateway(FakeManager(store)), store)
+
+    row = next(r for r in result["stuck"] if r["id"] == schedule.id)
+    actions = {a["action"] for a in row["actions"]}
+    assert "run_now" in actions
+    assert "stop" in actions
+    assert "resume" not in actions  # it was never paused
+
+
+def test_coming_up_flags_a_schedule_whose_last_run_failed(tmp_path):
+    store = make_store(tmp_path)
+    schedule = _make_schedule(store, title="Donor tracker sync", state="active")
+    _add_run(store, schedule.id, outcome="failed", result_line="could not reach the page")
+    healthy = _make_schedule(store, title="Fine schedule", state="active")
+    _add_run(store, healthy.id, outcome="complete", result_line="all clear")
+
+    result = api.overview(FakeGateway(FakeManager(store)), store)
+
+    rows = {r["id"]: r for r in result["coming_up"]}
+    assert rows[schedule.id]["last_run_failed"] is True
+    assert rows[healthy.id]["last_run_failed"] is False
+
+
+def test_the_count_shown_equals_the_rows_shown(tmp_path):
+    store = make_store(tmp_path)
+    # Three genuinely distinct failed asks on the same thread, close together in
+    # time: before the fix these all collapsed into one row (or fewer) because
+    # clustering keyed only on thread + time window, not task or title.
+    for i in range(3):
+        req = _make_request(store, title_task=store.create_task(f"ask {i}")["id"],
+                            summary=f"Find document {i}.", state="failed",
+                            status={"error": "could not reach the page"})
+        _backdate(store, req.id, created_at=time.time() - 10 * i, updated_at=time.time() - 10 * i)
+
+    result = api.overview(FakeGateway(FakeManager(store)), store)
+
+    assert result["counts"]["stuck"] == len(result["stuck"])
+    assert result["counts"]["stuck"] == 3
+
+
+def test_distinct_asks_on_the_same_thread_are_not_merged_into_one(tmp_path):
+    """The real-data bug: seven failed requests for three different asks on one
+    thread used to collapse into a single row and make two asks vanish."""
+    store = make_store(tmp_path)
+    titles = ["Find the sponsorship deck.", "Pull last month's numbers.", "Draft the recap email."]
+    for i, title in enumerate(titles):
+        for _ in range(2):  # two failed attempts per ask, close together
+            req = _make_request(store, title_task=store.create_task(title)["id"], summary=title,
+                                state="failed", status={"error": "could not reach the page"})
+            _backdate(store, req.id, created_at=time.time() - i, updated_at=time.time() - i)
+
+    result = api.overview(FakeGateway(FakeManager(store)), store)
+
+    request_rows = [r for r in result["stuck"] if r["kind"] == "request"]
+    assert len(request_rows) == 3
+    seen_titles = {r["title"] for r in request_rows}
+    assert seen_titles == set(titles)
+
+
+def test_retry_action_wired_to_the_real_endpoint(tmp_path):
+    store = make_store(tmp_path)
+    request = _make_request(store, summary="Wire the vendor invoice.", state="failed",
+                            status={"error": "could not reach the page"})
+
+    result = api.overview(FakeGateway(FakeManager(store)), store)
+
+    row = next(r for r in result["stuck"] if r["kind"] == "request" and r["id"] == request.id)
+    assert row["actions"] == [{"action": "retry", "label": "Try again",
+                               "target": {"endpoint": "requests/retry", "id": request.id}}]
+
+
+@pytest.mark.asyncio
+async def test_retry_endpoint_recreates_and_runs_the_request(tmp_path):
+    store = make_store(tmp_path)
+    manager = FakeManager(store)
+    request = _make_request(store, summary="Wire the vendor invoice.", state="failed",
+                            status={"error": "could not reach the page"})
+
+    result = await api.retry_request_endpoint(manager, {"id": request.id})
+    assert result["ok"] is True
+    new_id = result["id"]
+    assert new_id != request.id
+    await asyncio.sleep(0)  # let the scheduled execute() task run
+    new_req = store.get_request(new_id)
+    assert new_req.prompt == request.prompt
+    assert new_req.state in ("running", "approved")
+
+
+@pytest.mark.asyncio
+async def test_retry_endpoint_refuses_a_request_that_is_not_failed(tmp_path):
+    store = make_store(tmp_path)
+    manager = FakeManager(store)
+    request = _make_request(store, summary="Still pending.", state="pending")
+    with pytest.raises(api.ValidationError):
+        await api.retry_request_endpoint(manager, {"id": request.id})
+
+
 def test_schedule_proposal_waiting_for_yes_is_stuck_with_approve_and_reject(tmp_path):
     store = make_store(tmp_path)
     schedule = _make_schedule(store, title="Monday brief", state="proposed")
@@ -203,7 +314,8 @@ def test_a_failed_request_in_the_last_day_is_stuck(tmp_path):
     # timeout-shaped error.
     assert "vendor portal timed out" not in row["sentence"]
     assert row["sentence"] == "Wire the vendor invoice.: it took too long."
-    assert row["actions"] == []  # no retry endpoint exists
+    assert row["actions"] == [{"action": "retry", "label": "Try again",
+                               "target": {"endpoint": "requests/retry", "id": request.id}}]
 
 
 def test_failed_request_older_than_a_day_is_not_stuck(tmp_path):
@@ -561,3 +673,23 @@ async def test_overview_route_is_gated_by_the_tailnet_origin_check_like_the_othe
             # not a tailnet address, so the gate refuses it before the handler
             # (and its store lookup) ever runs.
             assert resp.status == 404
+
+
+def _retry_test_app(manager):
+    app = web.Application()
+    app["console.gateway"] = FakeGateway(manager)
+    r = console_routes
+    app.router.add_post("/console/api/requests/retry", r._endpoint(r.post_request_retry, mutation=True))
+    return app
+
+
+@pytest.mark.asyncio
+async def test_retry_route_is_behind_the_same_origin_gate(tmp_path):
+    store = make_store(tmp_path)
+    manager = FakeManager(store)
+    request = _make_request(store, summary="Wire the vendor invoice.", state="failed",
+                            status={"error": "could not reach the page"})
+    app = _retry_test_app(manager)
+    async with TestClient(TestServer(app)) as client:
+        resp = await client.post("/console/api/requests/retry", json={"id": request.id})
+        assert resp.status == 403
