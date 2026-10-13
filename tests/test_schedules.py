@@ -213,6 +213,8 @@ async def test_complete_run_different_result_sends_short_notice_with_next_time(e
 
 @pytest.mark.asyncio
 async def test_failed_notice_falls_back_to_error_in_plain_words_when_no_result_line(env):
+    # wording.failure_in_words classifies this as a network-shaped failure --
+    # never the raw error string.
     store, manager, service, task_id = env
     schedule = await _propose(service, task_id)
     activated = await service.decide(schedule.id, True)
@@ -223,12 +225,13 @@ async def test_failed_notice_falls_back_to_error_in_plain_words_when_no_result_l
                                  "final_status": "", "finished_at": time.time(),
                                  "denied": [], "held": False})
     text = manager.notices[-1][1]
-    assert "connection refused" in text
+    assert "connection refused" not in text
+    assert "did not respond" in text
     assert "it failed" not in text
 
 
 @pytest.mark.asyncio
-async def test_failed_notice_renders_a_timeout_as_ran_out_of_time(env):
+async def test_failed_notice_renders_a_timeout_as_it_took_too_long(env):
     store, manager, service, task_id = env
     schedule = await _propose(service, task_id)
     activated = await service.decide(schedule.id, True)
@@ -239,7 +242,7 @@ async def test_failed_notice_renders_a_timeout_as_ran_out_of_time(env):
                                  "final_status": "", "finished_at": time.time(),
                                  "denied": [], "held": False})
     text = manager.notices[-1][1]
-    assert "it ran out of time" in text
+    assert "it took too long" in text
     assert "timed out after 600s" not in text
 
 
@@ -691,3 +694,26 @@ async def test_a_once_cadence_edited_into_the_past_is_refused(env):
     past = time.strftime("%Y-%m-%dT%H:%M:%S", time.localtime(time.time() - 3600))
     with pytest.raises(ValueError, match="already passed"):
         await service.edit(schedule.id, owner=True, changes={"cadence_kind": "once", "cadence": {"at": past}})
+
+
+@pytest.mark.asyncio
+async def test_failed_notice_title_ending_in_punctuation_does_not_double_up(env):
+    """R5: a title that already ends in punctuation must not collide with the
+    sentence's own colon ("Title.: reason" never happens)."""
+    store, manager, service, task_id = env
+    schedule = await _propose(service, task_id, title="Nightly check!")
+    activated = await service.decide(schedule.id, True)
+    await service._fire(activated, activated.next_run)
+    await asyncio.sleep(0)
+    req = manager.executed[-1]
+    await service.finished(req, {"ok": False, "error": "timed out after 600s", "result_line": "",
+                                 "final_status": "", "finished_at": time.time(),
+                                 "denied": [], "held": False})
+    text = manager.notices[-1][1]
+    assert "Nightly check!:" not in text
+    assert text.startswith("Nightly check could not finish:")
+
+
+def test_blocked_reason_fallback_is_it_did_not_give_a_reason():
+    from inkbox_claude.gate.schedules import ScheduleService
+    assert ScheduleService._blocked_reason({}) == "it did not give a reason"

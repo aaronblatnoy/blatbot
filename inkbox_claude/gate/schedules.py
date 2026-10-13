@@ -134,6 +134,13 @@ def _first_sentence(text: str) -> str:
     return text.splitlines()[0].strip()
 
 
+def _title_for_sentence(title: str) -> str:
+    """A schedule's title, trailing punctuation stripped, so composing "<title>
+    could not finish: ..." never collides a title that already ends in a period
+    or colon with the sentence's own one right after it."""
+    return (title or "").rstrip(".!?:;,")
+
+
 def _shown(ts: Optional[float], timezone_name: str) -> str:
     """"2:30 PM", with the day added when it is not today, in the schedule's zone."""
     if ts is None:
@@ -926,21 +933,19 @@ class ScheduleService:
 
     @staticmethod
     def _failure_reason(run: Dict[str, Any]) -> str:
-        """result_line (normalized, see _normalize_reason) -> the run's own error in
-        plain words -> the first sentence of final_status. Never degenerates to the
-        bare word "failed": one of these three always has something to say, even if
-        it is only "it could not finish". Only the result_line branch is normalized:
-        the error and final_status fallbacks are already plain narration text, kept
-        verbatim (including capitalization) as today."""
+        """result_line (normalized, see _normalize_reason) -> wording.failure_in_words
+        for an executor/provider error (never the raw error string) -> the first
+        sentence of final_status. Never degenerates to the bare word "failed": one
+        of these three always has something to say, even if it is only "it could
+        not finish". Only the result_line branch is normalized here: failure_in_words
+        already returns plain, owner-facing clauses on its own, and the final_status
+        fallback is kept verbatim (including capitalization) as today."""
         result_line = str(run.get("result_line") or "").strip()
         if result_line:
             return _normalize_reason(result_line)
-        err = str(run.get("error") or "").strip()
-        if err:
-            low = err.lower()
-            if "timed out" in low or "timeout" in low:
-                return "it ran out of time"
-            return err
+        if str(run.get("error") or "").strip():
+            from . import wording
+            return wording.failure_in_words(run)
         final_status = _first_sentence(str(run.get("final_status") or ""))
         if final_status:
             return final_status
@@ -956,16 +961,17 @@ class ScheduleService:
         needs = str(run.get("needs") or "").strip()
         if needs:
             return _normalize_reason(needs)
-        return "it did not say why"
+        return "it did not give a reason"
 
     def notice_text(self, schedule: Schedule, run: Dict[str, Any], next_run: Optional[float]) -> str:
+        title = _title_for_sentence(schedule.title)
         if run.get("paused"):
-            return (f'{schedule.title} is paused after three runs that could not finish. '
+            return (f'{title} is paused after three runs that could not finish. '
                     'Say "start it again" when it is fixed.')
         outcome = run.get("outcome")
         result_line = run.get("result_line") or ""
         if outcome == "complete":
-            text = f"{schedule.title}: {result_line or self._shown_text(run)}"
+            text = f"{title}: {result_line or self._shown_text(run)}"
             if schedule.cadence_kind != "once" and next_run is not None:
                 text += f" Next check {_shown(next_run, schedule.timezone)}."
             return text
@@ -981,10 +987,10 @@ class ScheduleService:
                 # offer back ("let it do part of this" names nothing real);
                 # the vague-approval phrase add_capability already understands
                 # is the only sound recovery to suggest.
-                return (f'{schedule.title} could not finish: it is not allowed to do part of this. '
+                return (f'{title} could not finish: it is not allowed to do part of this. '
                         f'{result_line} Say "let it do that" and I will run it again, or "stop it".')
             labels = self._labels(sorted(scope_names))
-            return (f"{schedule.title} could not finish: it is not allowed to {labels}. {result_line} "
+            return (f"{title} could not finish: it is not allowed to {labels}. {result_line} "
                     f'Say "let it {labels}" and I will run it again, or "stop it".')
         if outcome == "blocked":
             reason = self._blocked_reason(run)
@@ -993,12 +999,12 @@ class ScheduleService:
                 fix = f'Say "let it {self._labels([match])}" and I will run it now, or "stop it".'
             else:
                 fix = 'Tell me where to find it or what to change, or say "stop it".'
-            return f"{schedule.title} could not run: {reason}. {fix} I won't retry on my own."
+            return f"{title} could not run: {reason}. {fix} I won't retry on my own."
         if outcome == "failed":
             when = _shown(next_run, schedule.timezone) if next_run is not None else "soon"
             reason = self._failure_reason(run)
-            text = f"{schedule.title} could not finish: {reason}. I will try again at {when}."
+            text = f"{title} could not finish: {reason}. I will try again at {when}."
             if schedule.consecutive_failures == 2:
                 text += " One more miss and I will pause it."
             return text
-        return f"{schedule.title}: {result_line}"
+        return f"{title}: {result_line}"

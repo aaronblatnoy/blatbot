@@ -257,7 +257,7 @@ async def test_failed_notice_whole_string_first_miss(tmp_path):
     await asyncio.sleep(0)
     updated = m.store.get_schedule(schedule.id)
     when = schedcmd._clock_text(updated.next_run, updated.timezone)
-    assert sent[-1][1] == f"Price watch could not finish: it ran out of time. I will try again at {when}."
+    assert sent[-1][1] == f"Price watch could not finish: it took too long. I will try again at {when}."
 
 
 @pytest.mark.asyncio
