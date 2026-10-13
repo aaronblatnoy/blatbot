@@ -441,23 +441,22 @@ async def _handle_change(manager: Any, schedule: Schedule, changes: Dict[str, An
 
 async def _handle_add_capability(manager: Any, schedule: Schedule, changes: Dict[str, Any],
                                  said_text: str) -> str:
+    # The router's own changes["scopes"] suggestion is NEVER granted here --
+    # that would make whatever the model lists permission at once (item D).
+    # Only his own permission words, optionally narrowed to what the last run
+    # was actually denied, can widen an already-active schedule's scopes.
     store = manager.store
-    suggested = list(changes.get("scopes") or [])
-    try:
-        mapped = schedprop.capabilities_for(prompt="", named_scopes=[], suggested_scopes=suggested,
-                                            said_text=said_text or "")
-    except schedprop.UnknownScopes:
-        mapped = []
+    last = store.last_schedule_run(schedule.id)
+    denied_names: List[str] = []
+    if last:
+        for item in last.get("denied") or []:
+            tool = item.get("tool") if isinstance(item, dict) else item
+            for name in manager.schedules._scopes_for_tool(str(tool)):
+                if name not in denied_names:
+                    denied_names.append(name)
+    mapped = schedprop.capabilities_from_permission(said_text or "", denied_names)
     added = [s for s in mapped if s not in schedule.scopes]
     if not added:
-        last = store.last_schedule_run(schedule.id)
-        denied_names: List[str] = []
-        if last:
-            for item in last.get("denied") or []:
-                tool = item.get("tool") if isinstance(item, dict) else item
-                for name in manager.schedules._scopes_for_tool(str(tool)):
-                    if name not in denied_names:
-                        denied_names.append(name)
         if denied_names:
             return f"What should it be allowed to do: {schedprop.labels(sorted(denied_names))}?"
         return "What should it be allowed to do?"

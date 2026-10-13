@@ -464,12 +464,41 @@ async def test_change_while_proposal_open_revises_and_resends_it(env):
 async def test_add_capability_applies_and_replies_with_labels(env):
     store, manager, task_id = env
     schedule = await _active(manager, task_id)
-    session = FakeSession()
+    said_id = store.add_message("owner", "inbound", "let it edit contacts", "imessage")
+    session = FakeSession(inbound_id=said_id)
     reply = await schedcmd.handle(manager, session, _command(
         "add_capability", target="Team total watch", scopes=["contacts"]))
     assert reply.startswith("Done. It can now ")
     updated = store.get_schedule(schedule.id)
     assert "contacts" in updated.scopes
+
+
+@pytest.mark.asyncio
+async def test_add_capability_ignores_the_routers_suggested_scope(env):
+    # Item D: changes["scopes"] is the router's own guess at what the prompt
+    # needs -- it must never become permission on its own, only his words do.
+    store, manager, task_id = env
+    schedule = await _active(manager, task_id)
+    said_id = store.add_message("owner", "inbound", "sounds fine, go ahead", "imessage")
+    session = FakeSession(inbound_id=said_id)
+    reply = await schedcmd.handle(manager, session, _command(
+        "add_capability", target="Team total watch", scopes=["contacts"]))
+    assert reply == "What should it be allowed to do?"
+    assert "contacts" not in store.get_schedule(schedule.id).scopes
+
+
+@pytest.mark.asyncio
+async def test_add_capability_but_not_clause_grants_only_the_permitted_scope(env):
+    store, manager, task_id = env
+    schedule = await _active(manager, task_id)
+    said_id = store.add_message(
+        "owner", "inbound", "let it edit contacts but don't send email", "imessage")
+    session = FakeSession(inbound_id=said_id)
+    reply = await schedcmd.handle(manager, session, _command(
+        "add_capability", target="Team total watch", scopes=["contacts", "email_send"]))
+    assert "contacts" in store.get_schedule(schedule.id).scopes
+    assert "email_send" not in store.get_schedule(schedule.id).scopes
+    assert reply.startswith("Done. It can now ")
 
 
 @pytest.mark.asyncio
@@ -479,9 +508,10 @@ async def test_add_capability_reruns_after_an_incomplete_run(env):
     run = store.create_schedule_run(schedule.id, None, time.time() - 10)
     store.finish_schedule_run(run, finished_at=time.time() - 5, complete=False, outcome="incomplete",
                               result_line="could not update the tracker note", final_status="",
-                              denied=[{"tool": "x__y", "reason": "scope"}], note="", changed=True,
-                              cost_usd=None)
-    session = FakeSession()
+                              denied=[{"tool": "mcp__inkbox__inkbox_update_contact", "reason": "scope"}], note="",
+                              changed=True, cost_usd=None)
+    said_id = store.add_message("owner", "inbound", "let it edit contacts", "imessage")
+    session = FakeSession(inbound_id=said_id)
     reply = await schedcmd.handle(manager, session, _command(
         "add_capability", target="Team total watch", scopes=["contacts"]))
     assert "Running the check again now" in reply
@@ -489,6 +519,22 @@ async def test_add_capability_reruns_after_an_incomplete_run(env):
     # not execute synchronously inside the chat reply.
     updated = store.get_schedule(schedule.id)
     assert updated.next_run is not None and updated.next_run <= time.time() + 1
+
+
+@pytest.mark.asyncio
+async def test_add_capability_vague_yes_after_denial_grants_exactly_what_was_denied(env):
+    store, manager, task_id = env
+    schedule = await _active(manager, task_id)
+    run = store.create_schedule_run(schedule.id, None, time.time() - 10)
+    store.finish_schedule_run(run, finished_at=time.time() - 5, complete=False, outcome="incomplete",
+                              result_line="could not update the tracker note", final_status="",
+                              denied=[{"tool": "mcp__inkbox__inkbox_update_contact", "reason": "scope"}], note="",
+                              changed=True, cost_usd=None)
+    said_id = store.add_message("owner", "inbound", "let it do that", "imessage")
+    session = FakeSession(inbound_id=said_id)
+    reply = await schedcmd.handle(manager, session, _command("add_capability", target="Team total watch"))
+    assert "contacts" in store.get_schedule(schedule.id).scopes
+    assert reply.startswith("Done. It can now ")
 
 
 @pytest.mark.asyncio

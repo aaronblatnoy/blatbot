@@ -113,6 +113,58 @@ def capabilities_for(prompt: str, named_scopes: Optional[List[str]], suggested_s
     return [name for name in SCOPES if name in matched]
 
 
+# Phrases that open a permission grant ("let it edit contacts") and words that
+# close one off within the same clause ("but don't send email"). Used only by
+# capabilities_from_permission -- the mid-run, no-fresh-approval widening path
+# (item D) -- never by capabilities_for, whose said_text is read at proposal
+# time where a plain description of the work ("update the contact note") is
+# not itself a permission grant.
+_PERMISSION_PHRASES = [
+    "let it", "allow it to", "it can", "it may", "give it", "it should be able to",
+]
+_NEGATION_WORDS = ["don't", "do not", "not", "never", "without", "except", "but not"]
+_VAGUE_PHRASES = ["do that", "fix that", "fix it"]
+_CLAUSE_SPLIT_RE = re.compile(r"[.;,]| but | except | without ")
+
+
+def _permitted_scopes_from_words(said_text: str) -> List[str]:
+    """Scopes named by a synonym inside a clause that a permission phrase
+    opens, never inside a clause (or the part of one) that a negation word
+    closes off first."""
+    text = (said_text or "").lower()
+    clauses = [c.strip() for c in _CLAUSE_SPLIT_RE.split(text) if c.strip()]
+    found: List[str] = []
+    for clause in clauses:
+        if not any(phrase in clause for phrase in _PERMISSION_PHRASES):
+            continue
+        cut = len(clause)
+        for neg in _NEGATION_WORDS:
+            idx = clause.find(neg)
+            if idx != -1:
+                cut = min(cut, idx)
+        for name in _said_scopes(clause[:cut]):
+            if name not in found:
+                found.append(name)
+    return [name for name in SCOPES if name in found]
+
+
+def capabilities_from_permission(said_text: str, denied_scopes: Optional[List[str]] = None) -> List[str]:
+    """What a mid-run "let it ..."/"it can't ... yet" exchange grants (item D):
+    only scopes matched from a permission clause in his own words, never the
+    router's suggestion. When nothing matches but his words are a vague
+    approval ("let it do that", "fix that") and a previous run was refused
+    something, narrow to exactly those denied scopes; otherwise grant
+    nothing, so the caller can ask what it should be allowed to do."""
+    found = _permitted_scopes_from_words(said_text)
+    if found:
+        return found
+    text = (said_text or "").lower()
+    if denied_scopes and any(phrase in text for phrase in _VAGUE_PHRASES):
+        denied = set(denied_scopes)
+        return [name for name in SCOPES if name in denied]
+    return []
+
+
 def missing_capabilities(prompt: str, scopes: Iterable[str]) -> List[str]:
     """Scopes whose tools the prompt names literally but that are not in
     `scopes` -- what a proposal or an activation attempt is missing."""
