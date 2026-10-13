@@ -310,6 +310,10 @@ class Executor:
             resume=(self._sessions.get(session_key) if session_key is not None else None),
             can_use_tool=can_use,
             max_turns=30,
+            # The SDK's default is 1 MB per message from the CLI; one large tool result
+            # (a page snapshot, a slide deck, a long listing) is bigger than that and
+            # killed the whole run with a JSON decode error.
+            max_buffer_size=64 * 1024 * 1024,
         )
 
         closing_texts: List[str] = []
