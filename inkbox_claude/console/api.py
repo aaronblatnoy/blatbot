@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+import re
 import time
 from pathlib import Path
 from typing import Any, Dict, List, Optional
@@ -752,10 +753,13 @@ def _last_non_skipped_run(store: Store, schedule_id: int) -> Optional[Dict[str, 
 
 
 def _state_label(schedule: Any, running: bool) -> str:
+    """The schedule's state in plain words. An active schedule is always "Active" --
+    never "Waiting" -- its next firing is a separate field (next_run_text), not part
+    of the state label."""
     if schedule.state == "proposed":
         return "Needs your yes"
     if schedule.state == "active":
-        return "Running" if running else "Waiting"
+        return "Running" if running else "Active"
     if schedule.state == "paused":
         return "Paused"
     if schedule.state == "ended":
@@ -1028,12 +1032,350 @@ def health(gateway: Any, store: Store) -> Dict[str, Any]:
     }
 
 
-def overview(gateway: Any, store: Store) -> Dict[str, Any]:
-    waiting = [_request_model(row) for row in store.pending()]
+# ---------------------------------------------------------------------------
+# Overview: the Home page's single source of rows -- stuck / running / done
+# today / coming up -- every sentence and label built here, never in the
+# front end. See the "Builder P5" brief in SPEC.md for the full contract.
+# ---------------------------------------------------------------------------
+
+_EMAIL_RE = re.compile(r"[\w.+-]+@[\w-]+\.[\w.-]+")
+_PHONE_RE = re.compile(r"(?:\+?1[-.\s]?)?\(?\d{3}\)?[-.\s]?\d{3}[-.\s]?\d{4}")
+# A hand-off prompt is the internal text a surface (a phone call, an inbound
+# channel) wrote for the model to act on, not something the owner would
+# recognize as a plain request. Recognized two ways: it opens with a phrase
+# like "Live phone call with ...", or it runs past one sentence (a plain
+# request summary is one short sentence).
+_HANDOFF_PREFIXES = ("live phone call with", "phone call with", "call with")
+_SENTENCE_SPLIT_RE = re.compile(r"(?<=[.!?])\s+")
+
+
+def _redact_contacts(text: str, store: Store) -> str:
+    """Replace a phone number or email address in `text` with the person's name,
+    when the store can resolve that contact. Anything it cannot resolve (a
+    stranger's number, a made-up test value) is left exactly as it was."""
+    if not text:
+        return text
+
+    def _sub(match: Any) -> str:
+        value = match.group(0)
+        try:
+            kind = store.guess_contact_kind(value)
+            contact = store.find_contact(kind, value)
+        except Exception:
+            contact = None
+        if contact and contact.get("person"):
+            return str(contact["person"])
+        return value
+
+    return _PHONE_RE.sub(_sub, _EMAIL_RE.sub(_sub, text))
+
+
+def _is_handoff_text(summary: str) -> bool:
+    text = (summary or "").strip()
+    if not text:
+        return True
+    if text.lower().startswith(_HANDOFF_PREFIXES):
+        return True
+    sentences = [s for s in _SENTENCE_SPLIT_RE.split(text) if s.strip()]
+    return len(sentences) > 1
+
+
+def _request_plain_text(request: Request) -> str:
+    """The owner-facing text for a request: its summary, unless that summary
+    is an internal hand-off prompt, in which case his own original message
+    stands in for it -- whole, never cut."""
+    summary = (request.summary or "").strip()
+    if _is_handoff_text(summary):
+        original = (request.original_message or "").strip()
+        return original or summary
+    return summary
+
+
+def _first_sentence(text: str) -> str:
+    for piece in _SENTENCE_SPLIT_RE.split((text or "").strip()):
+        if piece.strip():
+            return piece.strip()
+    return ""
+
+
+def _request_display(request: Request, store: Store) -> str:
+    name = (request.sender_name or request.sender or "Someone").strip() or "Someone"
+    return _redact_contacts(name, store)
+
+
+def _request_row(request: Request, store: Store, *, kind: str, since_field: str,
+                  sentence: str, title: str, actions: List[Dict[str, Any]]) -> Dict[str, Any]:
+    ts = request.updated_at if since_field == "updated_at" else request.created_at
     return {
-        "counts": store.console_overview(),
-        "health": health(gateway, store),
-        "waiting": waiting,
+        "kind": kind, "id": request.id, "title": title, "sentence": sentence,
+        since_field: _schedule_time_text(ts, DEFAULT_TIMEZONE), "actions": actions,
+    }
+
+
+def _stuck_pending_requests(store: Store) -> List[Dict[str, Any]]:
+    out = []
+    for request in store.pending():
+        plain = _redact_contacts(_request_plain_text(request), store)
+        who = _request_display(request, store)
+        title = _first_sentence(plain) or f"{who} is waiting on you"
+        sentence = f"{who} is asking: {plain}" if plain else f"{who} is waiting on your yes."
+        actions = [
+            {"action": "approve", "label": "Approve",
+             "target": {"endpoint": "requests/decide", "id": request.id, "decision": "yes"}},
+            {"action": "decline", "label": "Decline",
+             "target": {"endpoint": "requests/decide", "id": request.id, "decision": "no"}},
+        ]
+        out.append(_request_row(request, store, kind="approval", since_field="since_text",
+                                 sentence=sentence, title=title, actions=actions))
+    return out
+
+
+def _failure_reason(request: Request) -> str:
+    status = request.status or {}
+    for field in ("summary", "error"):
+        text = str(status.get(field) or "").strip()
+        if text:
+            return _first_sentence(text) or text
+    return "it could not finish"
+
+
+def _stuck_failed_requests(store: Store, now: float) -> List[Dict[str, Any]]:
+    """Requests that failed in the last 24 hours and were never followed by a
+    later successful request on the same task -- a retry that worked clears
+    the earlier failure from this list."""
+    cutoff = now - 86400.0
+    recent = store.recent_requests(limit=500)
+    by_task: Dict[int, List[Request]] = {}
+    for request in recent:
+        task_id = store.task_id_for_request(request.id)
+        if task_id is not None:
+            by_task.setdefault(task_id, []).append(request)
+    out = []
+    for request in recent:
+        if request.state != "failed" or request.updated_at < cutoff:
+            continue
+        task_id = store.task_id_for_request(request.id)
+        if task_id is not None:
+            later_success = any(
+                other.id != request.id and other.state == "done" and other.created_at >= request.created_at
+                for other in by_task.get(task_id, [])
+            )
+            if later_success:
+                continue
+        plain = _redact_contacts(_request_plain_text(request), store)
+        title = _first_sentence(plain) or "A request"
+        reason = _failure_reason(request)
+        sentence = f"{plain}: {reason}." if plain else f"A request could not finish: {reason}."
+        out.append(_request_row(request, store, kind="request", since_field="since_text",
+                                 sentence=sentence, title=title, actions=[]))
+    return out
+
+
+def _stuck_schedule_proposals(store: Store) -> List[Dict[str, Any]]:
+    out = []
+    for schedule in store.schedules(states=["proposed"]):
+        sentence = f"{schedule.title} wants your yes to start: {_cadence_text(schedule)}."
+        actions = [
+            {"action": "approve", "label": "Approve",
+             "target": {"endpoint": "schedules/approve", "id": schedule.id, "approve": True}},
+            {"action": "reject", "label": "Reject",
+             "target": {"endpoint": "schedules/approve", "id": schedule.id, "approve": False}},
+        ]
+        out.append({
+            "kind": "approval", "id": schedule.id, "title": schedule.title, "sentence": sentence,
+            "since_text": _schedule_time_text(schedule.created_at, schedule.timezone), "actions": actions,
+        })
+    return out
+
+
+def _schedule_fix_actions(schedule: Any, *, paused: bool) -> List[Dict[str, Any]]:
+    actions: List[Dict[str, Any]] = []
+    missing = schedprop.missing_capabilities(schedule.prompt, schedule.scopes)
+    if missing:
+        merged = list(dict.fromkeys(list(schedule.scopes) + missing))
+        actions.append({
+            "action": "add_capability", "label": f"Let it {schedprop.labels(missing)}",
+            "target": {"endpoint": "schedules/edit", "id": schedule.id, "scopes": merged},
+        })
+    if paused:
+        actions.append({"action": "resume", "label": "Resume",
+                         "target": {"endpoint": "schedules/action", "id": schedule.id, "action": "resume"}})
+    actions.append({"action": "stop", "label": "Stop",
+                    "target": {"endpoint": "schedules/action", "id": schedule.id, "action": "stop"}})
+    return actions
+
+
+def _stuck_schedules(store: Store) -> List[Dict[str, Any]]:
+    """Schedules paused with a reason, or active schedules whose last run did
+    not complete (so the owner sees trouble before it gets to three strikes
+    and pauses itself)."""
+    out = []
+    for schedule in store.schedules(states=["paused"]):
+        if not schedule.cadence_kind:
+            why = "it has no timing set yet"
+            actions = [{"action": "edit_timing", "label": "Edit timing",
+                        "target": {"endpoint": "schedules", "id": schedule.id}},
+                       {"action": "stop", "label": "Stop",
+                        "target": {"endpoint": "schedules/action", "id": schedule.id, "action": "stop"}}]
+        else:
+            why = schedule.last_outcome or "it stopped running"
+            actions = _schedule_fix_actions(schedule, paused=True)
+        out.append({
+            "kind": "schedule", "id": schedule.id, "title": schedule.title,
+            "sentence": f"{schedule.title}: {why}.".replace("..", "."),
+            "since_text": _schedule_time_text(schedule.updated_at, schedule.timezone), "actions": actions,
+        })
+    for schedule in store.schedules(states=["active"]):
+        last = _last_non_skipped_run(store, schedule.id)
+        if not last or last.get("outcome") == "complete":
+            continue
+        why = last.get("result_line") or "it did not finish"
+        out.append({
+            "kind": "schedule", "id": schedule.id, "title": schedule.title,
+            "sentence": f"{schedule.title}: {why}.".replace("..", "."),
+            "since_text": _schedule_time_text(last.get("finished_at") or last.get("started_at"), schedule.timezone),
+            "actions": _schedule_fix_actions(schedule, paused=False),
+        })
+    return out
+
+
+def _running_items(store: Store) -> List[Dict[str, Any]]:
+    out = []
+    for request in store.recent_requests(state="running", limit=50):
+        schedule = store.get_schedule(request.schedule_id) if request.schedule_id else None
+        status = request.status or {}
+        latest_step = ""
+        calls = status.get("tool_calls") or []
+        if calls:
+            last = calls[-1]
+            latest_step = str(last.get("tool") or last.get("name") or "") if isinstance(last, dict) else str(last)
+        if schedule is not None:
+            title = schedule.title
+            sentence = f"{schedule.title} is running now."
+            kind = "schedule"
+        else:
+            plain = _redact_contacts(_request_plain_text(request), store)
+            who = _request_display(request, store)
+            title = _first_sentence(plain) or f"A request from {who}"
+            sentence = f"{who}: {plain}" if plain else f"{who}'s request is running."
+            kind = "request"
+        out.append({
+            "kind": kind, "id": request.id, "title": title, "sentence": sentence,
+            "started_text": _schedule_time_text(request.created_at, DEFAULT_TIMEZONE),
+            "latest_step": latest_step, "actions": [],
+        })
+    return out
+
+
+def _midnight_epoch(timezone_name: str, now: float) -> float:
+    from datetime import datetime
+    from zoneinfo import ZoneInfo
+    try:
+        tz = ZoneInfo(timezone_name or DEFAULT_TIMEZONE)
+    except Exception:
+        tz = ZoneInfo(DEFAULT_TIMEZONE)
+    local = datetime.fromtimestamp(now, tz)
+    midnight = local.replace(hour=0, minute=0, second=0, microsecond=0)
+    return midnight.timestamp()
+
+
+def _done_today_items(store: Store, now: float) -> List[Dict[str, Any]]:
+    cutoff = _midnight_epoch(DEFAULT_TIMEZONE, now)
+    items: List[Dict[str, Any]] = []
+    for request in store.recent_requests(limit=500):
+        if request.schedule_id or request.state not in ("done", "failed", "rejected"):
+            continue
+        if request.updated_at < cutoff:
+            continue
+        plain = _redact_contacts(_request_plain_text(request), store)
+        who = _request_display(request, store)
+        title = _first_sentence(plain) or f"A request from {who}"
+        outcome = "finished" if request.state == "done" else (
+            "failed" if request.state == "failed" else "could_not_finish")
+        result = request.summary or plain or "No result recorded."
+        sentence = f"{who}: {_redact_contacts(result, store)}"
+        items.append({
+            "kind": "request", "id": request.id, "title": title, "sentence": sentence,
+            "outcome": outcome, "time_text": _schedule_time_text(request.updated_at, DEFAULT_TIMEZONE),
+            "actions": [], "_ts": request.updated_at,
+        })
+    for schedule in store.schedules():
+        for run in store.schedule_runs(schedule.id):
+            finished = run.get("finished_at")
+            if finished is None or finished < _midnight_epoch(schedule.timezone, now):
+                continue
+            if run.get("outcome") == "skipped":
+                continue
+            outcome = "finished" if run.get("outcome") == "complete" else (
+                "failed" if run.get("outcome") == "failed" else "could_not_finish")
+            result = run.get("result_line") or run.get("final_status") or "No result recorded."
+            items.append({
+                "kind": "schedule", "id": schedule.id, "title": schedule.title,
+                "sentence": f"{schedule.title}: {result}",
+                "outcome": outcome, "time_text": _schedule_time_text(finished, schedule.timezone),
+                "actions": [], "_ts": finished,
+            })
+    items.sort(key=lambda row: row["_ts"], reverse=True)
+    for row in items:
+        del row["_ts"]
+    return items
+
+
+def _coming_up_items(store: Store, now: float) -> List[Dict[str, Any]]:
+    upcoming = sorted(
+        (s for s in store.schedules(states=["active"]) if s.next_run and s.next_run >= now),
+        key=lambda s: s.next_run,
+    )[:3]
+    return [
+        {
+            "id": s.id, "title": s.title, "cadence_text": _cadence_text(s),
+            "next_run_text": _schedule_time_text(s.next_run, s.timezone),
+            "next_run_in_seconds": s.next_run - now,
+        }
+        for s in upcoming
+    ]
+
+
+def _overview_sources(store: Store) -> List[Dict[str, Any]]:
+    requests = store.recent_requests(limit=1)
+    schedule_rows = store.schedules()
+    newest_run_ts: Optional[float] = None
+    for schedule in schedule_rows:
+        last = _last_non_skipped_run(store, schedule.id)
+        if last and last.get("finished_at"):
+            if newest_run_ts is None or last["finished_at"] > newest_run_ts:
+                newest_run_ts = last["finished_at"]
+    request_count = len(store.recent_requests(limit=100000))
+    requests_detail = (
+        f"{request_count} total, newest {_schedule_time_text(requests[0].updated_at, DEFAULT_TIMEZONE)}"
+        if requests else f"{request_count} total, none yet"
+    )
+    schedules_detail = (
+        f"{len(schedule_rows)} total, newest run {_schedule_time_text(newest_run_ts, DEFAULT_TIMEZONE)}"
+        if newest_run_ts is not None else f"{len(schedule_rows)} total, no runs yet"
+    )
+    return [
+        {"label": "Requests", "detail": requests_detail},
+        {"label": "Schedules and their runs", "detail": schedules_detail},
+    ]
+
+
+def overview(gateway: Any, store: Store) -> Dict[str, Any]:
+    """Everything the Home page's four sections need, already sentenced,
+    sorted and counted -- nothing is encoded in the front end beyond section
+    headings and button chrome."""
+    now = time.time()
+    stuck = (
+        _stuck_schedules(store) + _stuck_pending_requests(store)
+        + _stuck_failed_requests(store, now) + _stuck_schedule_proposals(store)
+    )
+    running = _running_items(store)
+    done_today = _done_today_items(store, now)
+    coming_up = _coming_up_items(store, now)
+    return {
+        "stuck": stuck, "running": running, "done_today": done_today, "coming_up": coming_up,
+        "counts": {"stuck": len(stuck), "running": len(running), "done_today": len(done_today)},
+        "sources": _overview_sources(store),
     }
 
 
@@ -1103,7 +1445,11 @@ def home(gateway: Any, store: Store) -> Dict[str, Any]:
     people_rows = people(store)
     role_rows = roles(store)
     people_summary = {
-        "total": len(people_rows),
+        # store.list_people() is what the People page itself counts (linked
+        # people only); people(store) above also yields one row per
+        # not-yet-linked directory contact, which is why that count ran
+        # ahead of what People showed -- this field always matches it.
+        "total": len(store.list_people()),
         "with_role": sum(1 for row in people_rows if row.get("role")),
         "roles": [{"name": r["name"], "members": r["people_count"]} for r in role_rows],
         "last_sync": people_last_sync(store),
