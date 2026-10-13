@@ -83,7 +83,10 @@ def _denied_label(status: Dict[str, Any]) -> str:
         if sc and sc not in scope_names:
             scope_names.append(sc)
     if scope_names:
-        return schedprop.labels(scope_names)
+        # The short, re-sayable form: "act in Brightspace", never the parenthetical
+        # detail ("...submit, post, mark complete)") -- a person asked to say this
+        # phrase back ("let it <label>") must be able to say it whole.
+        return schedprop.short_labels(scope_names)
     return "do part of this"
 
 
@@ -252,6 +255,37 @@ def is_try_again(body: str) -> bool:
 
 def is_send_what_you_have(body: str) -> bool:
     return (body or "").strip().rstrip("?!. ").lower() in _SEND_WHAT_YOU_HAVE_PHRASES
+
+
+# A small fixed list, whole-message match: the owner granting blanket permission
+# for whatever the currently failed/running request needs, never a standing grant
+# (see GateSessionManager._handle_blanket_permission in manager.py).
+_EVERYTHING_PHRASES = {
+    "you have my permission for everything",
+    "you have my personal permission for everything",
+    "you have permission for everything",
+    "do whatever you need",
+    "you're allowed to do all of it",
+    "you are allowed to do all of it",
+    "full permission",
+    "go ahead with everything",
+}
+
+
+def is_blanket_permission(body: str) -> bool:
+    return (body or "").strip().rstrip("?!. ").lower().replace("’", "'") in _EVERYTHING_PHRASES
+
+
+def denied_scopes(status: Dict[str, Any]) -> List[str]:
+    """Scope names behind each tool a failed run's status denied, de-duplicated --
+    what "let it <label>" (item 3) and a blanket grant (item 4) narrow to when
+    nothing more specific is named."""
+    out: List[str] = []
+    for tool in _denied_tools(status):
+        sc = _tool_scope(tool)
+        if sc and sc not in out:
+            out.append(sc)
+    return out
 
 
 def within_retry_window(failed_at: Optional[float], now: float, hours: float = RETRY_WINDOW_HOURS) -> bool:

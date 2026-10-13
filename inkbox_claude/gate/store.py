@@ -2247,6 +2247,28 @@ class Store:
             ).fetchone()
         return Request.from_row(r) if r else None
 
+    def last_failed_for_thread(self, chat_id: str) -> Optional[Request]:
+        """The most recent failed (non-schedule state semantics aside) request on
+        this thread, if any -- what a "try again"/"send what you have"/"let it
+        <label>" reply after a failure notice acts on."""
+        with self._lock:
+            r = self._db.execute(
+                "SELECT * FROM requests WHERE chat_id=? AND state='failed' ORDER BY updated_at DESC LIMIT 1",
+                (chat_id,),
+            ).fetchone()
+        return Request.from_row(r) if r else None
+
+    def last_outbound_at(self, chat_id: str) -> Optional[float]:
+        """When the most recent outbound message on this thread went out, or None
+        if the thread has sent nothing -- used to tell whether a failure notice is
+        still the last word on the thread (vs. a newer, unrelated conversation)."""
+        with self._lock:
+            r = self._db.execute(
+                "SELECT created_at FROM messages WHERE chat_id=? AND kind='outbound' ORDER BY id DESC LIMIT 1",
+                (chat_id,),
+            ).fetchone()
+        return float(r["created_at"]) if r else None
+
     RUN_STALE_S = 15 * 60  # longer than any executor timeout: a run this old died without reporting
 
     def running_for_thread(self, chat_id: str) -> Optional[Request]:

@@ -23,7 +23,7 @@ from . import settings as _settings
 from .jevagent import JevAgent, enabled as jev_agent_enabled
 from .taskpick import TaskPicker, enabled as jev_enabled
 from .router import Router, RouterOutput, RouterRequest
-from .scopes import SCOPES
+from .scopes import SCOPES, READ_SCOPES
 from .store import Person, Request, Store, TaskRequired, task_key
 from .schedules import ScheduleService
 from . import schedprop
@@ -782,6 +782,8 @@ class GateSession:
             try:
                 if self.is_approver() and self.mode != "voice" and await self.m.handle_approver_command(self, body):
                     return
+                if self.mode != "voice" and await self.m.handle_followup_phrase(self, body):
+                    return
                 if not self.is_approver() and self.mode != "voice":
                     # Deterministic FYI to Aaron for every inbound from anyone else.
                     await self.m.notify_inbound(self, body)
@@ -1468,6 +1470,12 @@ class GateSessionManager:
         # request id -> the notes the vault traversal chose, most relevant first. Held in
         # memory only: after a restart a run falls back to its knowledge scopes' own notes.
         self._knowledge_notes: Dict[int, List[str]] = {}
+        # Request ids a blanket "you have my permission for everything" (item 4) was
+        # said about while still running: applied to that request's own retry, once,
+        # the moment it actually fails and shows what it was refused. Held in memory
+        # only -- a restart loses an in-flight blanket grant, same as other in-flight
+        # judgments here (_knowledge_notes, _voice_trust_override).
+        self._blanket_pending: set = set()
         self.schedules = ScheduleService(self)
         self._expiry_task: Optional[asyncio.Task] = None
         self._schedule_task: Optional[asyncio.Task] = None
@@ -2010,6 +2018,136 @@ class GateSessionManager:
             return True
         return False
 
+    # -- follow-up phrases on a one-off request (never a schedule) -------------
+    # The fixed phrases wording.failure_message tells any sender to say about a
+    # request that just failed or is still running. Recognized here, in code,
+    # before the router ever sees the message -- after the precedence above
+    # (a pending approval or an open schedule proposal on this thread still
+    # wins a bare "yes"/"no"), for owner and non-owner senders alike.
+
+    async def handle_followup_phrase(self, session: "GateSession", text: str) -> bool:
+        if await self._handle_try_again(session, text):
+            return True
+        if await self._handle_send_what_you_have(session, text):
+            return True
+        if session.is_approver():
+            # "let it <label>" and the blanket grant are powers only the verified
+            # owner has; for anyone else these fall through to the router like any
+            # other message (a stranger cannot widen what a request may do).
+            if await self._handle_let_it_label(session, text):
+                return True
+            if await self._handle_blanket_permission(session, text):
+                return True
+        return False
+
+    def _retry_approval(self, session: "GateSession", req: Request) -> bool:
+        """Whether a retry of `req` runs at once: the owner's own always does;
+        anyone else's runs at once only if they are trusted for exactly the
+        scopes the original request already carried -- the same rule a brand
+        new request from them is held to."""
+        if session.is_approver():
+            return True
+        t = session.trust()
+        allowed = set(t.get("scopes") or [])
+        return bool(allowed) and set(req.scopes or []) <= allowed
+
+    async def _handle_try_again(self, session: "GateSession", text: str) -> bool:
+        if not wording.is_try_again(text):
+            return False
+        chat_id = session.chat_id
+        req = self.store.last_failed_for_thread(chat_id)
+        if req is None:
+            return False
+        now = time.time()
+        if not wording.within_retry_window(req.updated_at, now):
+            return False
+        last_out = self.store.last_outbound_at(chat_id)
+        # The failure notice is still the last word on the thread (no newer,
+        # unrelated outbound landed after it), or it is recent enough (30 min)
+        # that "try again" plainly still means it even if something else was
+        # said meanwhile.
+        is_latest = last_out is None or last_out <= req.updated_at + 1
+        if not (is_latest or (now - req.updated_at) <= 1800):
+            return False
+        approved = self._retry_approval(session, req)
+        new_req = self.retry_request(req, approved=approved)
+        if approved:
+            asyncio.create_task(self.execute(new_req))
+        else:
+            self.store.set_thread(chat_id, "awaiting_aaron")
+            await self.send_approval_text(new_req)
+        return True
+
+    async def _handle_send_what_you_have(self, session: "GateSession", text: str) -> bool:
+        if not wording.is_send_what_you_have(text):
+            return False
+        req = self.store.last_failed_for_thread(session.chat_id)
+        if req is None:
+            await session.send_to_sender("I don't have anything from that run.", role="answer")
+        else:
+            await session.send_to_sender(wording.send_what_you_have_text(req.status or {}), role="answer")
+        return True
+
+    async def _handle_let_it_label(self, session: "GateSession", text: str) -> bool:
+        if not schedprop.looks_like_permission_grant(text):
+            return False
+        req = self.store.last_failed_for_thread(session.chat_id)
+        if req is None or req.schedule_id:
+            return False
+        denied = wording.denied_scopes(req.status or {})
+        if not denied or not wording.within_retry_window(req.updated_at, time.time()):
+            return False
+        mapped = schedprop.capabilities_from_permission(text, denied)
+        if not mapped:
+            await session.send_to_sender(
+                f"What should it be allowed to do: {schedprop.short_labels(denied)}?", role="answer")
+            return True
+        new_scopes = [sc for sc in mapped if sc not in req.scopes]
+        grown = self.retry_request(req, approved=True)
+        if new_scopes:
+            self.store.set_scopes(grown.id, list(req.scopes) + new_scopes)
+            grown = self.store.get_request(grown.id)
+        asyncio.create_task(self.execute(grown))
+        return True
+
+    async def _handle_blanket_permission(self, session: "GateSession", text: str) -> bool:
+        if not wording.is_blanket_permission(text):
+            return False
+        chat_id = session.chat_id
+        now = time.time()
+        failed = self.store.last_failed_for_thread(chat_id)
+        if failed is not None and wording.within_retry_window(failed.updated_at, now, hours=0.5):
+            await self._grant_blanket_and_retry(session, failed)
+            return True
+        running = self.store.running_for_thread(chat_id)
+        if running is not None:
+            self._blanket_pending.add(running.id)
+            return True
+        await session.send_to_sender(
+            "I don't keep a blanket permission. Tell me what to do and I'll ask for anything it needs.",
+            role="answer")
+        return True
+
+    def _blanket_grant_scopes(self, req: Request, status: Dict[str, Any]) -> List[str]:
+        """Every scope this run was refused, plus every read-only scope in the
+        registry -- never a scope that sends, posts, writes, deletes, deploys or
+        controls anything unless it was actually refused. "read-only" is the
+        `read` field scopes.yaml gives each scope (exposed as scopes.READ_SCOPES);
+        where a scope carries no such field it is treated as not read-only."""
+        denied = set(wording.denied_scopes(status))
+        granted = [sc for sc in SCOPES if sc in denied or sc in READ_SCOPES]
+        return [sc for sc in granted if sc not in (req.scopes or [])]
+
+    async def _grant_blanket_and_retry(self, session: "GateSession", req: Request) -> None:
+        new_scopes = self._blanket_grant_scopes(req, req.status or {})
+        grown = self.retry_request(req, approved=True)
+        if new_scopes:
+            self.store.set_scopes(grown.id, list(req.scopes) + new_scopes)
+            grown = self.store.get_request(grown.id)
+            await session.send_to_sender(
+                f"Okay. For this task it can now {schedprop.short_labels(new_scopes)}. Continuing.", role="answer")
+        asyncio.create_task(self.execute(grown))
+
     # -- executor --------------------------------------------------------------
     async def _grant_what_it_asked_for(self, req: Request, status: Dict[str, Any], context: str,
                                        model: Optional[str]) -> Dict[str, Any]:
@@ -2284,6 +2422,16 @@ class GateSessionManager:
         self.store.set_state(req.id, "done" if ok else "failed",
                              status=status, raw_output=status.get("raw"))
         self.store.set_thread(req.chat_id, "idle")
+        if req.id in self._blanket_pending:
+            # "You have my permission for everything" was said about this request
+            # while it was still running (item 4): it applies to this request's
+            # own retry, once, the moment it actually fails and shows what it was
+            # refused. A run that succeeds leaves the grant unconsumed and moot.
+            self._blanket_pending.discard(req.id)
+            if not ok:
+                await self._grant_blanket_and_retry(session, self.store.get_request(req.id) or req)
+                session.typing_stop()
+                return ""
         outcome = "done" if ok else "FAILED"
         result = _clean_result(status.get("summary") or status.get("error") or "")
         # The message a person actually reads for this result: the cleaned result on
