@@ -1328,7 +1328,11 @@ class GateSessionManager:
         # the next turn rather than the next restart.
         _settings.bind(self.store)
         self.router = Router(api_key=cfg.deepseek_api_key, model=cfg.deepseek_model, standing_path=standing_path)
-        protected = [str(cfg.approver_imessage_conversation_id or ""), str(getattr(cfg, "approver_phone", "") or "")]
+        from .. import telegram as _tg
+        # Every handle the gate already treats as the owner's own: the protected list a
+        # scheduled run's sends are checked against is exactly this, nothing wider.
+        protected = [str(cfg.approver_imessage_conversation_id or ""), str(getattr(cfg, "approver_phone", "") or ""),
+                     str(_tg.approver_id() or "")]
         self.executor = Executor(mcp_server=mcp_server, cwd=exec_cwd, model=cfg.claude_model or "sonnet",
                                  protected=protected)
         # GATE_EXECUTOR=jev runs requests through the typed-judgment agent
@@ -1351,7 +1355,6 @@ class GateSessionManager:
         logger.info("[gate] task picker: %s", "jev (TypeSafe)" if self.task_picker else "router")
         self.approver_conv = cfg.approver_imessage_conversation_id
         self.approver_phone = str(getattr(cfg, "approver_phone", "") or "")
-        from .. import telegram as _tg
         self.approver_telegram_id = _tg.approver_id()
         # The commander role's one legitimate assignment: tell the store the owner's two
         # verified handles (never logged, never read from the environment by the store
@@ -1930,7 +1933,7 @@ class GateSessionManager:
             if sched is not None:
                 run_kwargs = {"timezone": sched.timezone, "note": sched.last_note}
         again = await self.executor.run(req, context=insist, model=model,
-                                        from_owner=_owner_request(self, req) or bool(req.schedule_id),
+                                        from_owner=_owner_request(self, req),
                                         **run_kwargs)
         if again.get("tool_calls") or again.get("confirm"):
             return again
@@ -1953,7 +1956,7 @@ class GateSessionManager:
                 if sched is not None:
                     run_kwargs = {"timezone": sched.timezone, "note": sched.last_note}
             status = await self.executor.run(req, context=context, model=model,
-                                             from_owner=_owner_request(self, req) or bool(req.schedule_id),
+                                             from_owner=_owner_request(self, req),
                                              **run_kwargs)
             status = await self._grant_what_it_asked_for(req, status, context, model)
             return await self._insist_it_actually_ran(req, status, context, model)
@@ -1978,7 +1981,7 @@ class GateSessionManager:
         logger.info("[gate] jev agent gave up on #%s (%s); falling back to claude code", req.id, status.get("error"))
         findings = status.get("raw") or ""
         fallback = await self.executor.run(req, context=context, prior_work=findings,
-                                           from_owner=_owner_request(self, req) or bool(req.schedule_id))
+                                           from_owner=_owner_request(self, req))
         fallback["escalated"] = True
         fallback["jev_attempt"] = {k: status.get(k) for k in ("error", "tool_calls", "jev_calls", "prose_calls", "seconds", "steps", "raw")}
         return fallback

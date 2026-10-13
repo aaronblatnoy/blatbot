@@ -111,6 +111,27 @@ SCHEDULE_EXECUTOR_SYSTEM = (
     "end itself); STOP still needs a RESULT line saying why."
 )
 
+def _norm_handle(v: str) -> str:
+    """Same normalization the gate already uses to recognize the owner's own
+    phone/iMessage/Telegram handle (scopes._norm): digits-only for anything that is
+    not an email, last 10 digits for a phone, case-folded otherwise."""
+    v = (v or "").strip().lower()
+    digits = "".join(ch for ch in v if ch.isdigit())
+    return digits[-10:] if digits and "@" not in v and len(digits) >= 7 else v
+
+
+def _is_owner_handle(value: str, protected: List[str]) -> bool:
+    """True when  (a recipient a scheduled run would send to) is one of the
+    handles the gate already treats as Aaron's own: his iMessage conversation id, his
+    phone, his Telegram id -- exactly the  list the executor already holds,
+    nothing newly invented here (a bare email is never treated as his unless the gate
+    already does so elsewhere)."""
+    norm = _norm_handle(value)
+    if not norm:
+        return False
+    return norm in {_norm_handle(p) for p in protected if p}
+
+
 ORDINARY_DESTRUCTIVE_DENIAL = (
     "Deleting, cancelling or replacing anything requires Aaron's confirmation, which only the gateway can ask "
     "for. Report exactly what you would change (name, time, id) in your status and stop."
@@ -184,7 +205,11 @@ class Executor:
         # was already read and approved by him in full, so answering it needs nothing more.
         from .settings import get as _setting
         confirm_sends = bool(from_owner) and bool(_setting("GATE_CONFIRM_SENDS"))
-        if confirm_sends:
+        # A scheduled run's sends are routed through the hook too, but never on a blanket
+        # from_owner basis: can_use below decides each one by its own recipients, letting a
+        # send to Aaron himself through and holding anything to a third party (or anything
+        # whose recipients cannot be told at all).
+        if confirm_sends or req.schedule_id:
             # A tool listed in allowed_tools is pre-approved and the permission hook is never
             # consulted for it. Sends are therefore taken off that list, which is what routes
             # them through the hook so they can be held and shown to him first.
@@ -196,14 +221,27 @@ class Executor:
                 denied_steps.append({"tool": tool_name, "args": dict(input_data or {}), "ok": False, "denied": "scope"})
                 return PermissionResultDeny(message=f"{tool_name} is outside this task's scope; do not retry it.")
             from .jevagent import is_destructive, is_outbound_message, recipients_of
-            if confirm_sends and is_outbound_message(tool_name, input_data or {}) and not self.allow_send:
-                who = ", ".join(recipients_of(input_data or {})) or "(no recipient in the call)"
-                self.held_send = {"tool": tool_name, "args": dict(input_data or {}), "to": who}
-                return PermissionResultDeny(message=(
-                    "Nothing goes out to another person without Aaron seeing it first, including when he "
-                    f"asked for it. This would have reached: {who}. Do not try another tool or another "
-                    "route to send it. Put the whole thing in your final status, exactly as you would send "
-                    "it: every recipient, every cc, the subject, and the full text, then stop."))
+            if is_outbound_message(tool_name, input_data or {}):
+                if req.schedule_id:
+                    recips = recipients_of(input_data or {})
+                    if recips and all(_is_owner_handle(r, self.protected) for r in recips):
+                        pass   # every recipient is Aaron himself; the schedule's own job, not a hold
+                    else:
+                        who = ", ".join(recips) or "(no recipient in the call)"
+                        self.held_send = {"tool": tool_name, "args": dict(input_data or {}), "to": who}
+                        return PermissionResultDeny(message=(
+                            "A scheduled run only sends on its own to Aaron himself. This would have "
+                            f"reached: {who}. Do not try another tool or another route to send it. Put the "
+                            "whole thing in your final status, exactly as you would send it: every "
+                            "recipient, every cc, the subject, and the full text, then stop."))
+                elif confirm_sends and not self.allow_send:
+                    who = ", ".join(recipients_of(input_data or {})) or "(no recipient in the call)"
+                    self.held_send = {"tool": tool_name, "args": dict(input_data or {}), "to": who}
+                    return PermissionResultDeny(message=(
+                        "Nothing goes out to another person without Aaron seeing it first, including when he "
+                        f"asked for it. This would have reached: {who}. Do not try another tool or another "
+                        "route to send it. Put the whole thing in your final status, exactly as you would send "
+                        "it: every recipient, every cc, the subject, and the full text, then stop."))
             if is_destructive(tool_name, input_data or {}):
                 nonlocal held_destructive
                 held_destructive, message = destructive_policy(req, tool_name, input_data or {})

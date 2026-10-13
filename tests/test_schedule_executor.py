@@ -192,6 +192,62 @@ def test_narration_before_last_tool_call_excluded_from_final_status(tmp_path, mo
     assert out["final_status"] == "Checked the team page."
 
 
+# -- scheduled-run sends: owner-only goes through, anyone else is held ------
+
+def test_scheduled_send_to_owner_own_verified_phone_is_allowed(tmp_path, monkeypatch):
+    req = make_request(schedule_id=9, schedule_kind="every", scopes=["sms_send", "email_send"])
+    scripted = ScriptedQuery([
+        {"calls": [{"tool": "mcp__inkbox__inkbox_send_sms", "args": {"to": "5125550100", "text": "hi"}, "ok": True}]},
+        {"closing_texts": ["RESULT: texted Aaron the total.\nSTATUS: OK"]},
+    ])
+    ex = Executor(mcp_server=None, cwd=str(tmp_path), protected=["5125550100"])
+    monkeypatch.setattr(gate_executor, "query", scripted)
+    out = asyncio.run(ex.run(req))
+    assert out["tool_results"] == [{"tool": "mcp__inkbox__inkbox_send_sms", "ok": True}]
+    assert ex.held_send is None
+    assert out.get("confirm") is None
+
+
+def test_scheduled_send_to_third_party_is_held(tmp_path, monkeypatch):
+    req = make_request(schedule_id=9, schedule_kind="every", scopes=["sms_send", "email_send"])
+    scripted = ScriptedQuery([
+        {"calls": [{"tool": "mcp__inkbox__inkbox_send_sms", "args": {"to": "9995551234", "text": "hi"}, "ok": True}]},
+        {"closing_texts": ["RESULT: tried to text someone else.\nSTATUS: OK"]},
+    ])
+    ex = Executor(mcp_server=None, cwd=str(tmp_path), protected=["5125550100"])
+    monkeypatch.setattr(gate_executor, "query", scripted)
+    out = asyncio.run(ex.run(req))
+    assert out["tool_results"] == []
+    assert ex.held_send is not None and ex.held_send["to"] == "9995551234"
+    assert out["confirm"]["kind"] == "send"
+
+
+def test_scheduled_send_mixed_owner_and_third_party_is_held(tmp_path, monkeypatch):
+    req = make_request(schedule_id=9, schedule_kind="every", scopes=["sms_send", "email_send"])
+    scripted = ScriptedQuery([
+        {"calls": [{"tool": "mcp__inkbox__inkbox_send_email", "args": {"to": ["5125550100", "9995551234"], "text": "hi"}, "ok": True}]},
+        {"closing_texts": ["RESULT: tried to email two people.\nSTATUS: OK"]},
+    ])
+    ex = Executor(mcp_server=None, cwd=str(tmp_path), protected=["5125550100"])
+    monkeypatch.setattr(gate_executor, "query", scripted)
+    out = asyncio.run(ex.run(req))
+    assert out["tool_results"] == []
+    assert ex.held_send is not None
+
+
+def test_scheduled_send_with_no_recipient_determinable_is_held(tmp_path, monkeypatch):
+    req = make_request(schedule_id=9, schedule_kind="every", scopes=["sms_send", "email_send"])
+    scripted = ScriptedQuery([
+        {"calls": [{"tool": "mcp__inkbox__inkbox_send_sms", "args": {"text": "hi"}, "ok": True}]},
+        {"closing_texts": ["RESULT: could not tell who this reaches.\nSTATUS: OK"]},
+    ])
+    ex = Executor(mcp_server=None, cwd=str(tmp_path), protected=["5125550100"])
+    monkeypatch.setattr(gate_executor, "query", scripted)
+    out = asyncio.run(ex.run(req))
+    assert out["tool_results"] == []
+    assert ex.held_send is not None and ex.held_send["to"] == "(no recipient in the call)"
+
+
 # -- schedrun.parse_closing pure-function coverage -------------------------
 
 def test_parse_closing_basic_result_note_status():
