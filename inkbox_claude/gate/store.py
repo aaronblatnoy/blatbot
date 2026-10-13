@@ -2511,6 +2511,40 @@ class Store:
                 (chat_id,)).fetchone()
         return Schedule.from_row(row) if row else None
 
+    def backfill_schedule_runs(self, schedule_id: int) -> int:
+        """Create a schedule_runs row for every past request of this schedule
+        (one that finished, done or failed) that has none yet, taking times
+        and outcome from the request row itself. Idempotent: a request that
+        already has a row -- from a real run, or from an earlier backfill --
+        is left alone, so running this twice creates nothing the second time."""
+        with self._lock:
+            existing = {int(r["request_id"]) for r in self._db.execute(
+                "SELECT request_id FROM schedule_runs WHERE schedule_id=? AND request_id IS NOT NULL",
+                (int(schedule_id),)).fetchall()}
+            rows = self._db.execute(
+                "SELECT * FROM requests WHERE schedule_id=? AND state IN ('done','failed') ORDER BY id",
+                (int(schedule_id),)).fetchall()
+        created = 0
+        for row in rows:
+            rid = int(row["id"])
+            if rid in existing:
+                continue
+            req = Request.from_row(row)
+            status = req.status or {}
+            outcome = "complete" if req.state == "done" else "failed"
+            result_line = str(status.get("result_line") or status.get("summary") or status.get("error") or "")
+            final_status = str(status.get("final_status") or result_line)
+            with self._lock:
+                self._db.execute(
+                    "INSERT INTO schedule_runs(schedule_id,request_id,started_at,finished_at,complete,outcome,"
+                    "result_line,final_status,denied_json,note,changed) VALUES(?,?,?,?,?,?,?,?,?,?,?)",
+                    (int(schedule_id), rid, float(row["created_at"]), float(row["updated_at"]),
+                     int(outcome == "complete"), outcome, result_line, final_status, "[]", "", 0),
+                )
+                self._db.commit()
+            created += 1
+        return created
+
     def _migrate_schedule_cadence_model(self) -> None:
         """One-time-per-row, idempotent: carry every schedule row forward from the old
         kind/report_mode/notes model to cadence_kind/cadence_json/report_every_time/last_note.
