@@ -176,3 +176,75 @@ def test_a_second_usage_limit_failure_within_ten_minutes_is_told_once(tmp_path):
     asyncio.run(go2())
     told_again = [row for row in sent if "usage limit" in row[1].lower()]
     assert len(told_again) == 1, f"should not be told a second time, got {told_again}"
+
+
+def test_fragments_of_the_same_failed_ask_do_not_start_a_second_run(tmp_path):
+    """Item 4, the incident's actual shape: the realtime voice model hands off
+    several fragments of one spoken request a few seconds apart. The first
+    fragment's request fails in a few seconds -- too fast for the existing
+    running_for_thread fold to catch a later fragment. A further fragment of
+    the SAME ask (the router names the same task) never starts a second run:
+    the failure is spoken once, then \"Still stuck on that\" at most once more,
+    then nothing further."""
+    m, sent = phone_manager(tmp_path, trust=True, active=True)
+    m.executor.result = {"ok": False, "error": "connection refused",
+                         "tool_calls": ["mcp__coolify__deploy"], "raw": "connection refused"}
+    m.router.next = RouterOutput(reply="On it.", task="new", task_title="Deploy the app",
+                                 request=RouterRequest(prompt="Deploy the app", scopes=["web"],
+                                                       summary="deploy the app"))
+
+    async def first():
+        return await m.get("p1").voice_consult("deploy the app for me", _voice_meta())
+    out1 = asyncio.run(first())
+    assert "it could not reach Coolify" in out1
+    task_id = m.store.task_id_for_request(1)
+    assert task_id is not None
+
+    # A second fragment of the same ask: the router names the same task.
+    m.router.next = RouterOutput(reply="On it.", task=f"T{task_id}",
+                                 request=RouterRequest(prompt="deploy it", scopes=["web"], summary="deploy it"))
+
+    async def second():
+        return await m.get("p1").voice_consult("go ahead and deploy it", _voice_meta())
+    out2 = asyncio.run(second())
+    assert "it could not reach Coolify" in out2, "the failure is spoken once per ask"
+
+    async def third():
+        return await m.get("p1").voice_consult("did that work", _voice_meta())
+    out3 = asyncio.run(third())
+    assert out3 == "Still stuck on that. I'll text you."
+
+    async def fourth():
+        return await m.get("p1").voice_consult("please try", _voice_meta())
+    out4 = asyncio.run(fourth())
+    assert out4 == "Got it."
+
+    # Never a second run: only the first fragment's request was ever executed.
+    assert m.executor.ran == [1]
+    rows = m.store._db.execute("SELECT id FROM requests WHERE chat_id=?", ("p1",)).fetchall()
+    assert len(rows) == 1
+
+
+def test_a_genuinely_new_ask_on_the_same_call_still_creates_a_request(tmp_path):
+    """A different ask (a different task) on the same call, right after a failure,
+    is not folded -- it creates and runs its own request."""
+    m, sent = phone_manager(tmp_path, trust=True, active=True)
+    m.executor.result = {"ok": False, "error": "connection refused",
+                         "tool_calls": ["mcp__coolify__deploy"], "raw": "connection refused"}
+    m.router.next = RouterOutput(reply="On it.", task="new", task_title="Deploy the app",
+                                 request=RouterRequest(prompt="Deploy the app", scopes=["web"],
+                                                       summary="deploy the app"))
+    asyncio.run(m.get("p1").voice_consult("deploy the app for me", _voice_meta()))
+
+    m.executor.result = {"ok": True, "summary": "Two events tomorrow.",
+                         "tool_calls": ["mcp__google-workspace__get_events"], "raw": "x"}
+    m.router.next = RouterOutput(reply="On it.", task="new", task_title="Check tomorrow's calendar",
+                                 request=RouterRequest(prompt="list events", scopes=["stern_calendar"],
+                                                       summary="list tomorrow's events"))
+    m.router.next_note = RouterOutput(reply="Two events tomorrow.", request=None)
+
+    async def go():
+        return await m.get("p1").voice_consult("actually, what's on my calendar tomorrow", _voice_meta())
+    out = asyncio.run(go())
+    assert out == "Two events tomorrow."
+    assert m.executor.ran == [1, 2]

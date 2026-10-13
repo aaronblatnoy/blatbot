@@ -38,6 +38,11 @@ HANDOFF_LINE = (
     "Blatbot\nExecutive Assistant to Aaron Blatnoy"
 )
 EXPIRE_SECONDS = 24 * 3600
+# Item 4: how long a call's failed ask is still "the same ask" for folding purposes
+# -- long enough to cover a real call, short enough that a much later, unrelated
+# call from the same person is never folded into an old failure by mistake.
+CALL_ASK_FOLD_WINDOW_S = 300
+
 
 _EMAIL = re.compile(r"[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}")
 _CANDIDATE_STOP = {"the", "and", "for", "with", "from", "that", "this", "what", "which", "who", "how", "many", "did",
@@ -125,6 +130,12 @@ class GateSession:
         self._typing: Optional[asyncio.Task] = None
         self.deferred_ack: Optional[str] = None   # the writer's "on it" line, sent only if the run is slow
         self.room: str = ""                       # set when this thread is a group chat: who is in it
+        # Item 4: how many times a voice fragment has already folded into THIS
+        # call's already-failed ask, keyed by (call_id, failed request id) so a
+        # different call from the same person never shares the count. In-memory
+        # only -- it resets with the session, which is the documented fallback
+        # ("the voice session object's lifetime") when no call_id is available.
+        self._call_ask_replies: Dict[Tuple[Optional[str], int], int] = {}
 
     @property
     def record_id(self) -> str:
@@ -893,6 +904,36 @@ class GateSession:
             "or more detailed."
         )
 
+    def _fold_into_failed_ask(self, task_id: int, call_id: Optional[str]) -> Optional[str]:
+        """Item 4: when a voice fragment's ask is the SAME ask (same task) as a
+        request that already failed on this thread -- the realtime voice model
+        can hand off several fragments of one spoken request a few seconds apart,
+        and a run that fails in a few seconds leaves nothing "running" for the
+        existing fold (above) to catch -- a further fragment never starts a
+        second run of it. The failure is spoken once, then a short "still stuck"
+        line at most once more, then nothing further for this ask. Returns None
+        when this is not that case (a genuinely new ask proceeds as normal)."""
+        failed = self.m.store.last_failed_for_thread(self.chat_id, exclude_scheduled=True)
+        if failed is None:
+            return None
+        failed_task_id = self.m.store.task_id_for_request(failed.id)
+        if failed_task_id != task_id:
+            return None
+        if (time.time() - failed.updated_at) > CALL_ASK_FOLD_WINDOW_S:
+            return None
+        key = (call_id, failed.id)
+        count = self._call_ask_replies.get(key, 0)
+        self._call_ask_replies[key] = count + 1
+        if count == 0:
+            text = wording.failure_message(wording.plain_title(self.m.store, failed), failed.status or {})
+        elif count == 1:
+            text = "Still stuck on that. I'll text you."
+        else:
+            text = ""
+        if text:
+            self.m.store.add_message(self.record_id, "outbound", text, "voice")
+        return text or "Got it."
+
     async def voice_consult(self, query: str, meta: Dict[str, Any]) -> str:
         """One consult from the realtime voice model during a live call.
 
@@ -945,6 +986,14 @@ class GateSession:
                     return reply
                 out, task = await self.decide(body=body, message=body, prior=history[:-1], mode="voice",
                                               memory=memory, found=found)
+                if task is not None and out.request is not None:
+                    # Item 4: this ask's task may be the same one a request already
+                    # failed under on this call -- never start a second run of it.
+                    folded = self._fold_into_failed_ask(task["id"], call_meta.get("call_id"))
+                    if folded is not None:
+                        if t is not None:
+                            self._ensure_inbound_on_task(t, body)
+                        return folded
                 reply = out.reply or ""
                 if reply:
                     self.m.store.add_message(self.record_id, "outbound", reply, "voice")
