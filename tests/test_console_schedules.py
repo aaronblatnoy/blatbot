@@ -417,6 +417,26 @@ async def test_action_invalid_for_state_returns_409(tmp_path, monkeypatch):
         body = await resp.json()
         assert resp.status == 409
         assert "error" in body
+        # Never the raw service text; the same plain mapping chat uses.
+        assert "is not valid for" not in body["error"]
+        assert "valid actions" not in body["error"]
+
+
+@pytest.mark.asyncio
+async def test_action_on_a_proposed_schedule_names_the_state_plainly(tmp_path, monkeypatch):
+    monkeypatch.setenv("CONSOLE_ALLOWED_ORIGINS", ALLOWED_ORIGIN)
+    manager = make_manager(tmp_path)
+    schedule = _make_schedule(manager.store, state="proposed")
+    app = _test_app(manager)
+    async with TestClient(TestServer(app)) as client:
+        resp = await client.post(
+            "/console/api/schedules/action",
+            json={"id": schedule.id, "action": "pause"},
+            headers={"Origin": ALLOWED_ORIGIN},
+        )
+        body = await resp.json()
+        assert resp.status == 409
+        assert body["error"] == f"{schedule.title} has not started yet; say yes or no first."
 
 
 @pytest.mark.asyncio

@@ -882,7 +882,7 @@ async def create_schedule(manager: Any, payload: Dict[str, Any]) -> Dict[str, An
             origin_mode="console", origin_chat_id="owner",
         )
     except ValueError as exc:
-        raise ValidationError(str(exc)) from exc
+        raise ValidationError(schedprop.friendly_error(exc)) from exc
     events.publish("schedules.changed", {"id": schedule.id, "state": schedule.state})
     message = schedprop.format_proposal(schedule)
     return {"schedule": _schedule_view(manager.store, manager.schedules, schedule),
@@ -922,7 +922,7 @@ async def edit_schedule(manager: Any, payload: Dict[str, Any]) -> Dict[str, Any]
     try:
         result = await manager.schedules.edit(schedule_id, owner=True, changes=changes)
     except ValueError as exc:
-        raise ValidationError(str(exc)) from exc
+        raise ValidationError(schedprop.friendly_error(exc)) from exc
     events.publish("schedules.changed", {"id": result["schedule"].id, "state": result["schedule"].state})
     return {"schedule": _schedule_view(manager.store, manager.schedules, result["schedule"]),
             "applied": bool(result["applied"]), "needs_approval": bool(result["needs_approval"]),
@@ -938,10 +938,22 @@ async def schedule_action(manager: Any, payload: Dict[str, Any]) -> Dict[str, An
     try:
         schedule = await manager.schedules.action(schedule_id, action, owner=True)
     except ValueError as exc:
-        raise ScheduleActionConflict(str(exc)) from exc
+        # Never the raw "<action> is not valid for a schedule that is <state>
+        # (valid actions: ...)" or "missing capability: ..." service text --
+        # the same plain mapping chat uses (schedcmd), so the console reads
+        # the same sentence a reply in chat would.
+        raise ScheduleActionConflict(_console_action_error(manager, schedule_id, action, exc)) from exc
     events.publish("schedules.changed", {"id": schedule.id, "action": action})
     return {"schedule": _schedule_view(manager.store, manager.schedules, schedule),
             "message": f"{action.replace('_', ' ')} done."}
+
+
+def _console_action_error(manager: Any, schedule_id: int, action: str, exc: ValueError) -> str:
+    from ..gate import schedcmd
+    schedule = manager.store.get_schedule(schedule_id)
+    if schedule is not None and str(exc).startswith(f"{action} is not valid for a schedule that is "):
+        return schedcmd._state_error_reply(schedule, action)
+    return schedprop.friendly_error(exc)
 
 
 def schedules_global(manager: Any, payload: Dict[str, Any]) -> Dict[str, Any]:
