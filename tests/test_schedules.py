@@ -552,9 +552,26 @@ async def test_valid_actions_per_state(env):
     activated = await service.decide(schedule.id, True)
     assert set(service.valid_actions(activated)) == {"pause", "stop", "run_now", "edit"}
     paused = await service.action(schedule.id, "pause", owner=True)
-    assert set(service.valid_actions(paused)) == {"resume", "stop", "edit"}
+    assert set(service.valid_actions(paused)) == {"resume", "stop", "run_now", "edit"}
     ended = await service.action(schedule.id, "stop", owner=True)
     assert set(service.valid_actions(ended)) == {"start_again", "edit"}
+
+
+@pytest.mark.asyncio
+async def test_run_now_on_a_paused_schedule_resumes_it_first(env):
+    """The console's run_now action on a paused schedule behaves the same as
+    chat's "run it now" after a fix: resume (same cadence it already has),
+    then fire immediately -- never a run_now that silently does nothing
+    because the schedule never left paused."""
+    store, manager, service, task_id = env
+    schedule = await _propose(service, task_id)
+    activated = await service.decide(schedule.id, True)
+    paused = await service.action(schedule.id, "pause", owner=True)
+    assert paused.state == "paused" and paused.next_run is None
+
+    fired = await service.action(schedule.id, "run_now", owner=True)
+    assert fired.state == "active"
+    assert fired.next_run is not None and fired.next_run <= time.time() + 1
 
 
 @pytest.mark.asyncio

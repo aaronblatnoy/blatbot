@@ -414,7 +414,7 @@ async def test_action_invalid_for_state_returns_409(tmp_path, monkeypatch):
     async with TestClient(TestServer(app)) as client:
         resp = await client.post(
             "/console/api/schedules/action",
-            json={"id": schedule.id, "action": "run_now"},  # run_now is not valid while paused
+            json={"id": schedule.id, "action": "pause"},  # already paused, not valid again
             headers={"Origin": ALLOWED_ORIGIN},
         )
         body = await resp.json()
@@ -423,6 +423,26 @@ async def test_action_invalid_for_state_returns_409(tmp_path, monkeypatch):
         # Never the raw service text; the same plain mapping chat uses.
         assert "is not valid for" not in body["error"]
         assert "valid actions" not in body["error"]
+
+
+@pytest.mark.asyncio
+async def test_action_run_now_on_a_paused_schedule_resumes_then_runs(tmp_path, monkeypatch):
+    """A paused schedule's Home row offers run_now alongside resume (console
+    parity with chat's "run it now"): the console action resumes it first,
+    same cadence, then fires at once -- it is not a 409."""
+    monkeypatch.setenv("CONSOLE_ALLOWED_ORIGINS", ALLOWED_ORIGIN)
+    manager = make_manager(tmp_path)
+    schedule = _make_schedule(manager.store, state="paused")
+    app = _test_app(manager)
+    async with TestClient(TestServer(app)) as client:
+        resp = await client.post(
+            "/console/api/schedules/action",
+            json={"id": schedule.id, "action": "run_now"},
+            headers={"Origin": ALLOWED_ORIGIN},
+        )
+        body = await resp.json()
+        assert resp.status == 200
+        assert body["schedule"]["state"] == "active"
 
 
 @pytest.mark.asyncio

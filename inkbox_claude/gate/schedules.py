@@ -33,7 +33,10 @@ _ACTION_NAMES = {"pause", "resume", "run_now", "stop", "start_again"}
 _ACTIONS_BY_STATE: Dict[str, set] = {
     "proposed": {"approve", "reject"},
     "active": {"pause", "stop", "run_now"},
-    "paused": {"resume", "stop"},
+    # A paused schedule also offers run_now (item: console parity with chat's
+    # "run it now" on a paused schedule) -- action() resumes it first, same as
+    # the chat path, rather than firing a run that will not actually happen.
+    "paused": {"resume", "stop", "run_now"},
     "ended": {"start_again"},
 }
 
@@ -600,6 +603,16 @@ class ScheduleService:
         if action == "run_now":
             if self.store.request_running_for_schedule(schedule_id) is not None:
                 raise ValueError(f"{schedule.title} already has a run in flight; wait for it to finish")
+            if schedule.state == "paused":
+                # Same resume-then-run behavior the chat path uses: a paused
+                # schedule has to be running again before "run it now" means
+                # anything, or the fired run would never actually happen.
+                if not schedule.cadence_kind:
+                    raise ValueError(f"{schedule.title} needs to be told how often to run first")
+                missing = self._missing(schedule.prompt, schedule.scopes)
+                if missing:
+                    raise ValueError(f"missing capability: {self._labels(missing)}")
+                self.store.update_schedule(schedule_id, state="active", consecutive_failures=0)
             return self.store.update_schedule(schedule_id, next_run=now)
         if action == "stop":
             return self.store.update_schedule(schedule_id, state="ended", next_run=None,
