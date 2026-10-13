@@ -1973,8 +1973,14 @@ class GateSessionManager:
         escalation inside this call, not a second execution: nothing is delivered,
         noted, or phrased for the Jev attempt when it escalates; only the final
         status leaves this function. Executors themselves never message anyone who
-        asked (denied at the tool call)."""
-        if not self.jev_agent:
+        asked (denied at the tool call).
+
+        A scheduled run always takes the Claude Code branch, GATE_EXECUTOR=jev
+        or not: the Jev agent has no time zone, no carried-forward note, no
+        scheduled-run prompt, no RESULT/NOTE/STATUS closing-line contract and
+        no third-party-send hold, all of which the scheduled-run contract
+        (schedrun.py, schedules.py) requires."""
+        if not self.jev_agent or req.schedule_id:
             model = await self._pick_model(req)
             run_kwargs: Dict[str, Any] = {}
             if req.schedule_id:

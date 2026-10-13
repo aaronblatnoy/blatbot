@@ -996,6 +996,35 @@ async def test_a_cadence_set_by_edit_does_not_fire_on_every_tick(tmp_path):
 
 
 @pytest.mark.asyncio
+async def test_scheduled_run_never_uses_the_jev_agent_even_when_enabled(tmp_path):
+    # GATE_EXECUTOR=jev must not touch a scheduled run: it has no time zone,
+    # no carried-forward note, no scheduled-run prompt and no closing-line
+    # contract, none of which schedrun.py's contract can do without.
+    m, sent = make_manager(tmp_path)
+
+    class _ExplodingJevAgent:
+        async def run(self, req, **kw):
+            raise AssertionError("the Jev agent must never run a scheduled request")
+
+    m.jev_agent = _ExplodingJevAgent()
+    await _propose_via_manager(m, said="every 4 hours check the team page", scopes=["web"])
+    schedule = m.store.schedules(states=["proposed"])[0]
+    activated = await m.schedules.decide(schedule.id, True)
+
+    m.executor.results.append({"ok": True, "result_line": "all clear", "final_status": "checked",
+                               "note": "", "denied": [], "tool_calls": ["mcp__fake__tool"], "held": False,
+                               "finished_at": time.time(), "cost_usd": None})
+    await m.schedules.tick(now=activated.next_run)
+    await asyncio.sleep(0)
+
+    # No AssertionError means the Jev agent was never called; the plain
+    # Claude Code executor (FakeExecutor) is what actually ran.
+    assert m.executor.calls
+    run = m.store.last_schedule_run(schedule.id)
+    assert run["outcome"] == "complete"
+
+
+@pytest.mark.asyncio
 async def test_listing_survives_a_schedule_with_no_timing(tmp_path):
     from inkbox_claude.gate import schedcmd
     m, _sent = make_manager(tmp_path)
