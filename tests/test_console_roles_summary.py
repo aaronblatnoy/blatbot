@@ -72,7 +72,7 @@ def test_level_derivation_none_read_change_custom(tmp_path):
     store.set_role("nothing", [])
     store.set_role("reader", ["tamid_drive_read"])
     store.set_role("changer", ["tamid_drive_read", "tamid_drive_write"])
-    store.set_role("custom-role", ["inbox_read"])  # blatbot_inkbox read set is {inbox_read, contacts}
+    store.set_role("custom-role", ["contacts"])  # blatbot_inkbox read set is {inbox_read}; contacts changes things
 
     summary = api.roles_summary(store)
     by_name = {r["name"]: r for r in summary["roles"]}
@@ -85,7 +85,7 @@ def test_level_derivation_none_read_change_custom(tmp_path):
     assert level("changer", "tamid_workspace") == "change"
     assert level("custom-role", "blatbot_inkbox") == "custom"
     custom_sys = next(sy for sy in by_name["custom-role"]["systems"] if sy["system"] == "blatbot_inkbox")
-    assert custom_sys["phrases"] == [ASK["inbox_read"]]
+    assert custom_sys["phrases"] == [ASK["contacts"]]
 
 
 def test_set_level_read_grants_exactly_read_set_and_leaves_other_systems_alone(tmp_path):
@@ -93,7 +93,11 @@ def test_set_level_read_grants_exactly_read_set_and_leaves_other_systems_alone(t
     store.set_role("r1", ["stern_calendar", "brightspace_read", "brightspace_act"])
     result = api.roles_set_level(store, {"role": "r1", "system": "aaron_stern", "level": "read"})
     row = next(r for r in store.roles() if r["name"] == "r1")
-    assert set(row["scopes"]) == {"stern_calendar", "stern_email_read", "brightspace_read", "brightspace_act"}
+    # stern_calendar carries manage_event (a change tool), so "Read" no longer
+    # keeps it -- selecting Read must not silently also grant change. The
+    # brightspace scopes are a different system (nyu_brightspace); this call
+    # only ever touches aaron_stern's own scopes.
+    assert set(row["scopes"]) == {"stern_email_read", "brightspace_read", "brightspace_act"}
     sy = next(s for s in result["systems"] if s["system"] == "aaron_stern")
     assert sy["level"] == "read"
     brightspace_sy = next(s for s in result["systems"] if s["system"] == "nyu_brightspace")
@@ -118,11 +122,15 @@ def test_set_send_is_independent_of_level(tmp_path):
     result = api.roles_set_send(store, {"role": "r3", "system": "blatbot_inkbox", "on": True})
     sy = next(s for s in result["systems"] if s["system"] == "blatbot_inkbox")
     assert sy["send"] is True
-    assert sy["level"] == "read"
+    # inbox_read + contacts is this system is whole read+change set now that
+    # contacts (a create/update tool) no longer silently counts as read.
+    assert sy["level"] == "change"
     result = api.roles_set_send(store, {"role": "r3", "system": "blatbot_inkbox", "on": False})
     sy = next(s for s in result["systems"] if s["system"] == "blatbot_inkbox")
     assert sy["send"] is False
-    assert sy["level"] == "read"
+    # level is unaffected by the send toggle either way: inbox_read + contacts was
+    # already this system's whole read+change set before, during and after it.
+    assert sy["level"] == "change"
 
 
 def test_set_notes_none_some_all(tmp_path):
@@ -284,10 +292,11 @@ def test_sources_have_no_file_paths_or_table_names_and_include_counts(tmp_path):
 
 
 def test_custom_level_phrases_are_nonempty_and_scope_name_free(tmp_path):
-    # blatbot_inkbox's read set is {inbox_read, contacts}; holding only inbox_read
-    # is a genuine subset of that system's read scopes, so it reads as "custom".
+    # blatbot_inkbox's read set is {inbox_read} now that contacts (a create/update
+    # tool) no longer silently counts as read; holding just contacts is a genuine
+    # partial slice of that system's read+change set, so it reads as "custom".
     store = make_store(tmp_path)
-    store.set_role("partial", ["inbox_read"])
+    store.set_role("partial", ["contacts"])
     summary = api.roles_summary(store)
     role = next(r for r in summary["roles"] if r["name"] == "partial")
     sy = next(s for s in role["systems"] if s["system"] == "blatbot_inkbox")
@@ -295,3 +304,45 @@ def test_custom_level_phrases_are_nonempty_and_scope_name_free(tmp_path):
     assert sy["phrases"], "custom level must list what it currently holds"
     for phrase in sy["phrases"]:
         assert not _SCOPE_SHAPED.search(phrase), phrase
+
+
+_CHANGING_TOOL_SHAPE = re.compile(
+    r"(^|_)(create|update|delete|manage|send|write)(_|$)", re.IGNORECASE)
+# Not "post": this registry has a legitimate read-only analytics tool named
+# ig_post_insights (reads how a past post performed), which "post" alone as a
+# trigger word would wrongly flag -- genuine posting tools are always under a
+# separate, not-read-flagged scope (tamid_instagram_post etc), never one this
+# test would be checking in the first place.
+
+
+def test_every_systems_read_set_contains_no_scope_with_a_changing_tool():
+    """R2: a role at "Read" for any system must never silently also be able to
+    change something. _system_scope_sets's "read" bucket is built only from
+    wording.truly_read_only, so no scope in it should carry a tool whose name
+    looks like create/update/delete/manage/send/post/write."""
+    sets_by_system = api._system_scope_sets()
+    for system, sets in sets_by_system.items():
+        for scope in sets["read"]:
+            tools = [str(t).rsplit("__", 1)[-1] for t in (SCOPES.get(scope) or {}).get("tools") or []]
+            bad = [t for t in tools if _CHANGING_TOOL_SHAPE.search(t)]
+            assert not bad, f"{system}/{scope} is in the read set but has changing tool(s): {bad}"
+
+
+def test_every_system_with_a_changing_scope_offers_read_and_change():
+    """R2: a system with anything in its change set must offer the "Read and
+    change" level -- never an implicit, unlabeled escalation."""
+    sets_by_system = api._system_scope_sets()
+    for system, sets in sets_by_system.items():
+        if sets["change"]:
+            levels = {lv["value"] for lv in api._system_level_labels(sets)}
+            assert "change" in levels, f"{system} has change scopes but no 'change' level offered"
+
+
+def test_tamid_calendar_scope_is_in_change_not_read():
+    """The specific case the coordinator named: the TAMID calendar system's one
+    scope carries manage_event, so it must never be silently granted by "Read"."""
+    sets_by_system = api._system_scope_sets()
+    tamid_calendar_sets = sets_by_system.get("tamid_calendar")
+    assert tamid_calendar_sets is not None
+    assert "calendar" not in tamid_calendar_sets["read"]
+    assert "calendar" in tamid_calendar_sets["change"]

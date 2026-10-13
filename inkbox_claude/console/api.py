@@ -383,12 +383,13 @@ def link_people_endpoint(store: Store, payload: Dict[str, Any]) -> Dict[str, Any
 
 
 def _scope_kind(name: str, spec: Dict[str, Any]) -> str:
-    """read | write | send. Everything in SCOPES is read or write already (`read` bool);
-    a scope is "send" instead of plain "write" when it can make Blatbot speak as itself
-    (its tools end in _send, or its own name says so) -- that is the one category the
-    console calls out with a standing warning, because a person who holds it can have
-    Blatbot send a message Aaron never saw."""
-    if spec.get("read"):
+    """read | write | send. The registry's read flag alone is not enough: several
+    scopes it marks read also carry a tool that creates, updates, deletes or manages
+    something, so a role at Read there would silently also be able to change things.
+    A scope counts as read here only when wording.truly_read_only agrees its tools
+    cannot change anything; everything else is write (or send, when it can make
+    Blatbot speak as itself)."""
+    if spec.get("read") and wording.truly_read_only(name):
         return "read"
     tools = [str(t).lower() for t in (spec.get("tools") or [])]
     if "send" in name.lower() or any(t.endswith("_send") or "_send_" in t for t in tools):
