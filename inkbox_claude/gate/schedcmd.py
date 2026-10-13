@@ -268,10 +268,20 @@ def _count_word(n: int) -> str:
 
 
 def _last_result_phrase(last: Dict[str, Any]) -> str:
-    if last.get("outcome") == "complete" and not last.get("changed"):
-        return "found no change"
-    rl = str(last.get("result_line") or "").strip()
-    return rl if rl else "ran"
+    """The last run's outcome in plain words -- never "Waiting", and never
+    the raw outcome string (finished / could not finish / could not run /
+    failed). Detail (the actual result sentence) belongs to the "last"
+    question (_last_sentence), not this one-line summary."""
+    outcome = last.get("outcome")
+    if outcome == "complete":
+        return "found no change" if not last.get("changed") else "finished"
+    if outcome == "incomplete":
+        return "could not finish"
+    if outcome == "blocked":
+        return "could not run"
+    if outcome == "failed":
+        return "failed"
+    return str(last.get("result_line") or "").strip() or "ran"
 
 
 def _schedule_line(store: Any, schedule: Schedule) -> str:
@@ -287,9 +297,10 @@ def _schedule_line(store: Any, schedule: Schedule) -> str:
     if schedule.state == "active" and schedule.next_run is not None:
         bits.append(f"next {_clock_text(schedule.next_run, schedule.timezone)}")
     elif schedule.state == "paused":
-        bits.append("paused")
+        reason = (schedule.last_outcome or "").strip()
+        bits.append(f"paused: {reason}" if reason else "paused")
     elif schedule.state == "proposed":
-        bits.append("waiting on your yes")
+        bits.append("not started yet")
     return ", ".join(bits) + "."
 
 
@@ -457,18 +468,40 @@ async def _handle_add_capability(manager: Any, schedule: Schedule, changes: Dict
     mapped = label_match or schedprop.capabilities_from_permission(said_text or "", denied_names)
     added = [s for s in mapped if s not in schedule.scopes]
     if not added:
+        if last is not None and last.get("outcome") == "blocked" and schedule.state == "paused":
+            # Not a permission grant -- he is telling it where the thing is
+            # or what to change ("it's the Telegram group called X"). Record
+            # it for the next run and wait for an explicit "run it now"; a
+            # blocked schedule never auto-runs off a reply alone (item 3).
+            note_text = (said_text or "").strip()
+            addition = f"The owner says: {note_text}" if note_text else "The owner replied, but said nothing."
+            existing_note = (schedule.last_note or "").strip()
+            new_note = f"{existing_note}\n{addition}" if existing_note else addition
+            store.update_schedule(schedule.id, last_note=new_note)
+            return 'Got it. Say "run it now" to try with that.'
         if denied_names:
             return f"What should it be allowed to do: {schedprop.labels(sorted(denied_names))}?"
         return "What should it be allowed to do?"
     new_scopes = list(schedule.scopes) + added
     updated = store.update_schedule(schedule.id, scopes=new_scopes)
-    reply = f"Done. It can now {schedprop.labels(added)}."
     last = store.last_schedule_run(schedule.id)
-    if last is not None and last.get("outcome") in ("incomplete", "failed") and \
-            "run_now" in manager.schedules.valid_actions(updated):
-        reply += " Running the check again now."
-        await manager.schedules.action(updated.id, "run_now", owner=True)
-    return reply
+    # A blocked or incomplete schedule's last run is exactly what granting
+    # this capability was meant to fix: resume it (a blocked schedule sits
+    # "paused") and run it right now, so he gets one further message -- the
+    # run's own result or a fresh notice -- instead of this "Done..." reply
+    # plus a second message once the run lands. No rerun follows (nothing
+    # was actually blocking it, or it is not in a runnable state) -> this
+    # reply is the only thing he gets, so it says what changed.
+    should_rerun = last is not None and last.get("outcome") in ("incomplete", "blocked", "failed")
+    if should_rerun:
+        valid = manager.schedules.valid_actions(updated)
+        if updated.state == "paused" and "resume" in valid:
+            updated = await manager.schedules.action(updated.id, "resume", owner=True)
+            valid = manager.schedules.valid_actions(updated)
+        if "run_now" in valid:
+            await manager.schedules.action(updated.id, "run_now", owner=True)
+            return ""
+    return f"Done. It can now {schedprop.labels(added)}."
 
 
 async def handle(manager: Any, session: Any, command: Any) -> str:

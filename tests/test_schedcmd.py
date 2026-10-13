@@ -573,9 +573,10 @@ async def test_add_capability_reruns_after_an_incomplete_run(env):
     session = FakeSession(inbound_id=said_id)
     reply = await schedcmd.handle(manager, session, _command(
         "add_capability", target="Team total watch", scopes=["contacts"]))
-    assert "Running the check again now" in reply
-    # run_now sets next_run so the tick loop picks it up right away; it does
-    # not execute synchronously inside the chat reply.
+    # Granting a capability that fixes the last run's problem runs the check
+    # again right away, so he gets exactly one further message -- the run's
+    # own result -- not this reply plus a second message once it lands.
+    assert reply == ""
     updated = store.get_schedule(schedule.id)
     assert updated.next_run is not None and updated.next_run <= time.time() + 1
 
@@ -593,7 +594,7 @@ async def test_add_capability_vague_yes_after_denial_grants_exactly_what_was_den
     session = FakeSession(inbound_id=said_id)
     reply = await schedcmd.handle(manager, session, _command("add_capability", target="Team total watch"))
     assert "contacts" in store.get_schedule(schedule.id).scopes
-    assert reply.startswith("Done. It can now ")
+    assert reply == ""  # a run follows; it is the only further message
 
 
 @pytest.mark.asyncio
@@ -613,7 +614,74 @@ async def test_add_capability_bare_label_reply_grants_the_refused_scope(env):
     session = FakeSession(inbound_id=said_id)
     reply = await schedcmd.handle(manager, session, _command("add_capability", target="Team total watch"))
     assert "contacts" in store.get_schedule(schedule.id).scopes
+    assert reply == ""  # a run follows; it is the only further message
+
+
+@pytest.mark.asyncio
+async def test_add_capability_with_nothing_runnable_still_confirms(env):
+    # A schedule that cannot run or resume right now (ended) still gets the
+    # "Done." confirmation -- there is nothing else that will ever tell him
+    # the capability landed.
+    store, manager, task_id = env
+    schedule = await _active(manager, task_id)
+    run = store.create_schedule_run(schedule.id, None, time.time() - 10)
+    store.finish_schedule_run(run, finished_at=time.time() - 5, complete=False, outcome="incomplete",
+                              result_line="could not update the tracker note", final_status="",
+                              denied=[{"tool": "mcp__inkbox__inkbox_update_contact", "reason": "scope"}], note="",
+                              changed=True, cost_usd=None)
+    store.update_schedule(schedule.id, state="ended", next_run=None)
+    said_id = store.add_message("owner", "inbound", "let it edit contacts", "imessage")
+    session = FakeSession(inbound_id=said_id)
+    reply = await schedcmd.handle(manager, session, _command(
+        "add_capability", target="Team total watch", scopes=["contacts"]))
     assert reply.startswith("Done. It can now ")
+
+
+@pytest.mark.asyncio
+async def test_blocked_schedule_let_it_label_resumes_and_runs_with_one_message(env):
+    # Item 3: granting the fix capability on a blocked (paused) schedule sets
+    # it active again and runs it now -- same one-message contract as an
+    # incomplete schedule, but it has to resume first.
+    store, manager, task_id = env
+    schedule = await _active(manager, task_id)
+    run = store.create_schedule_run(schedule.id, None, time.time() - 10)
+    store.finish_schedule_run(run, finished_at=time.time() - 5, complete=False, outcome="blocked",
+                              result_line="it could not read that Telegram group", final_status="",
+                              denied=[], note="", changed=True, cost_usd=None)
+    await manager.schedules.action(schedule.id, "pause", owner=True)
+    store.update_schedule(schedule.id, state="paused", last_outcome="it could not read that Telegram group")
+    said_id = store.add_message("owner", "inbound", "let it edit contacts", "imessage")
+    session = FakeSession(inbound_id=said_id)
+    reply = await schedcmd.handle(manager, session, _command(
+        "add_capability", target="Team total watch", scopes=["contacts"]))
+    assert reply == ""
+    updated = store.get_schedule(schedule.id)
+    assert "contacts" in updated.scopes
+    assert updated.state == "active"
+    assert updated.next_run is not None and updated.next_run <= time.time() + 1
+
+
+@pytest.mark.asyncio
+async def test_blocked_schedule_location_reply_is_recorded_as_a_note_and_does_not_auto_run(env):
+    # Item 3: a reply that explains where the thing is, on a blocked
+    # schedule, is a note for the next run, not a permission grant -- it
+    # never runs on its own.
+    store, manager, task_id = env
+    schedule = await _active(manager, task_id)
+    run = store.create_schedule_run(schedule.id, None, time.time() - 10)
+    store.finish_schedule_run(run, finished_at=time.time() - 5, complete=False, outcome="blocked",
+                              result_line="it could not find a Telegram group", final_status="",
+                              denied=[], note="", changed=True, cost_usd=None)
+    store.update_schedule(schedule.id, state="paused", next_run=None,
+                          last_outcome="it could not find a Telegram group")
+    said_id = store.add_message("owner", "inbound", "it's the Telegram group called Team Chat", "imessage")
+    session = FakeSession(inbound_id=said_id)
+    reply = await schedcmd.handle(manager, session, _command("add_capability", target="Team total watch"))
+    assert reply == 'Got it. Say "run it now" to try with that.'
+    updated = store.get_schedule(schedule.id)
+    assert updated.state == "paused"
+    assert updated.next_run is None
+    assert "The owner says: it's the Telegram group called Team Chat" in updated.last_note
 
 
 @pytest.mark.asyncio
@@ -857,7 +925,7 @@ async def test_stop_on_a_proposed_schedule_rejects_it(env):
 # No raw error text anywhere a schedcmd path replies (item L)
 # ---------------------------------------------------------------------------
 
-_FORBIDDEN_SUBSTRINGS = ["cadence", "scope", "valid actions", "proposed", "#", "*", "_", "`", "["]
+_FORBIDDEN_SUBSTRINGS = ["cadence", "scope", "valid actions", "proposed", "#", "*", "_", "`", "[", "waiting"]
 
 
 def _assert_clean(reply: str) -> None:
@@ -933,6 +1001,27 @@ def test_friendly_action_error_maps_cadence_too_short():
         None, schedcmd.cadence_module.CadenceError("an every cadence must be at least 5 minutes"))
     assert reply == "It has to run at least every 5 minutes."
     _assert_clean(reply)
+
+
+@pytest.mark.asyncio
+async def test_list_shows_paused_reason_in_a_clause(env):
+    store, manager, task_id = env
+    schedule = await _active(manager, task_id)
+    store.update_schedule(schedule.id, state="paused", next_run=None,
+                          last_outcome="it could not read that Telegram group")
+    session = FakeSession()
+    reply = await schedcmd.handle(manager, session, _command("list"))
+    assert "paused: it could not read that Telegram group" in reply
+    assert "waiting" not in reply.lower()
+
+
+@pytest.mark.asyncio
+async def test_list_never_says_waiting_for_a_proposed_schedule(env):
+    store, manager, task_id = env
+    await _propose(manager, task_id)
+    session = FakeSession()
+    reply = await schedcmd.handle(manager, session, _command("list"))
+    assert "waiting" not in reply.lower()
 
 
 @pytest.mark.asyncio
