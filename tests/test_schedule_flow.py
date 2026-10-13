@@ -777,3 +777,33 @@ async def test_scheduled_run_is_marked_from_owner_so_its_sends_are_held(tmp_path
 
     call = m.executor.calls[-1]
     assert call["kw"]["from_owner"] is True
+
+
+@pytest.mark.asyncio
+async def test_an_exception_during_a_scheduled_run_is_recorded_not_swallowed(tmp_path):
+    """_fire's asyncio.create_task(self.manager.execute(req)) runs detached -- an
+    uncaught exception inside it must not leave the run row blank and the request
+    stuck 'running' forever (which would silently skip every later firing)."""
+    m, sent = make_manager(tmp_path)
+    await _propose_via_manager(m, said="every 4 hours check the team page", scopes=["web"])
+    schedule = m.store.schedules(states=["proposed"])[0]
+    activated = await m.schedules.decide(schedule.id, True)
+
+    class RaisingExecutor:
+        async def run(self, req, context="", prior_work="", model=None, **kw):
+            raise RuntimeError("boom")
+
+    m.executor = RaisingExecutor()
+    await m.schedules.tick(now=activated.next_run)
+    await asyncio.sleep(0)
+    await asyncio.sleep(0)
+
+    run = m.store.last_schedule_run(schedule.id)
+    assert run["outcome"] == "failed"
+    assert "boom" in run["final_status"]
+    schedule_after = m.store.get_schedule(schedule.id)
+    req = m.store.get_request(schedule_after.last_request_id)
+    assert req.state == "failed"
+    # the schedule is not left stuck: the next firing is not skipped as "still running"
+    still_running = m.store.request_running_for_schedule(schedule.id)
+    assert still_running is None

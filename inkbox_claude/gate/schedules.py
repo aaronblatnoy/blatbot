@@ -514,7 +514,25 @@ class ScheduleService:
         self.store.task_event(schedule.task_id, "request", f"Scheduled run: {schedule.title}",
                               chat_id=schedule.chat_id, request_id=req.id, state="running")
         logger.info("[schedules] %s fired: request #%s", schedule.id, req.id)
-        asyncio.create_task(self.manager.execute(req))
+        asyncio.create_task(self._run_fired(req))
+
+    async def _run_fired(self, req: Request) -> None:
+        """manager.execute() runs detached (nothing here awaits it), so an exception
+        inside it would otherwise vanish: the request stays "running" forever (stale,
+        so later firings are skipped by request_running_for_schedule), the run row
+        this firing created stays blank, and the owner hears nothing. Catch it, log
+        it, and route it through finished() like any other outcome so the row is
+        filled in, the schedule's consecutive-failure count moves, and he gets a
+        notice."""
+        try:
+            await self.manager.execute(req)
+        except Exception as exc:
+            logger.exception("[schedules] run #%s for schedule %s raised", req.id, req.schedule_id)
+            self.store.set_state(req.id, "failed", status={"error": str(exc)})
+            await self.finished(req, {"ok": False, "error": str(exc), "result_line": "",
+                                      "final_status": f"the run raised an exception: {exc}",
+                                      "denied": [], "note": "", "tool_calls": [],
+                                      "finished_at": time.time()})
 
     # -- restart recovery --------------------------------------------------
     async def interrupted(self, req: Request) -> None:
