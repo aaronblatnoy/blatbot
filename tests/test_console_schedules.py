@@ -509,3 +509,36 @@ async def test_approve_with_no_origin_header_at_all_is_also_refused(tmp_path, mo
         resp = await client.post("/console/api/schedules/approve", json={"id": schedule.id, "approve": True})
         assert resp.status == 403
     assert manager.store.get_schedule(schedule.id).state == "proposed"
+
+
+
+# ---------------------------------------------------------------------------
+# ran_before_history: a schedule that ran before schedule_runs existed shows
+# "Last ran before history was kept." (via this field), never "No runs yet."
+# ---------------------------------------------------------------------------
+
+def test_ran_before_history_true_when_no_runs_but_last_outcome_shows_it_ran(tmp_path):
+    manager = make_manager(tmp_path)
+    schedule = _make_schedule(manager.store, title="Old pledge watch",
+                              last_outcome="found no change")
+    rows = api.schedule_list(manager.store, manager.schedules)["schedules"]
+    row = next(r for r in rows if r["id"] == schedule.id)
+    assert row["ran_before_history"] is True
+
+
+def test_ran_before_history_false_for_a_genuinely_new_schedule(tmp_path):
+    manager = make_manager(tmp_path)
+    schedule = _make_schedule(manager.store, title="Brand new watch")
+    rows = api.schedule_list(manager.store, manager.schedules)["schedules"]
+    row = next(r for r in rows if r["id"] == schedule.id)
+    assert row["ran_before_history"] is False
+
+
+def test_ran_before_history_false_once_a_real_run_exists(tmp_path):
+    manager = make_manager(tmp_path)
+    schedule = _make_schedule(manager.store, title="Already tracked watch",
+                              last_outcome="found no change")
+    _add_run(manager.store, schedule.id)
+    rows = api.schedule_list(manager.store, manager.schedules)["schedules"]
+    row = next(r for r in rows if r["id"] == schedule.id)
+    assert row["ran_before_history"] is False

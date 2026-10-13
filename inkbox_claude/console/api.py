@@ -823,10 +823,23 @@ def _paused_all(store: Store) -> bool:
     return str(store.settings().get("GATE_SCHEDULES_PAUSED", "0")).lower() in {"1", "true", "yes", "on"}
 
 
+def _ran_before_history(store: Store, schedule: Any) -> bool:
+    """True when `schedule` has no rows in schedule_runs at all (so the
+    console has nothing to show in a run-history list) but its own
+    last_outcome shows it has in fact run before -- from a time before
+    schedule_runs existed. The console shows "Last ran before history was
+    kept." for this, never "No runs yet." (which means it has truly never
+    run)."""
+    if store.schedule_runs(schedule.id):
+        return False
+    return bool((schedule.last_outcome or "").strip())
+
+
 def _schedule_view(store: Store, service: Any, schedule: Any) -> Dict[str, Any]:
     running = store.request_running_for_schedule(schedule.id) is not None
     missing = schedprop.missing_capabilities(schedule.prompt, schedule.scopes)
     last = _last_non_skipped_run(store, schedule.id)
+    ran_before_history = _ran_before_history(store, schedule)
     # A schedule that is not active has no next run, whatever is still sitting in the
     # next_run column (paused/ended clear it on their own route in, but this is belt
     # and suspenders: the console never shows a time that will not actually fire).
@@ -853,6 +866,7 @@ def _schedule_view(store: Store, service: Any, schedule: Any) -> Dict[str, Any]:
         "capabilities": _capability_list(schedule.scopes),
         "missing_capabilities": _capability_list(missing),
         "last_run": _run_view(last, schedule.timezone) if last else None,
+        "ran_before_history": ran_before_history,
         "attention": attention,
         "needs_approval": schedule.state == "proposed",
         "approval_request_id": None,
