@@ -295,6 +295,19 @@ async def post_schedules_approve(request: web.Request) -> web.StreamResponse:
     return _json(await api.approve_schedule(_manager(request), await _payload(request)))
 
 
+async def get_schedule_repair(request: web.Request) -> web.StreamResponse:
+    try:
+        schedule_id = int(request.match_info["id"])
+    except (KeyError, ValueError):
+        raise api.ValidationError("schedule id must be an integer") from None
+    result = api.schedule_repair_plan(_manager(request), schedule_id)
+    return _json(result) if result is not None else _json({"error": f"no schedule {schedule_id}"}, status=404)
+
+
+async def post_schedules_repair(request: web.Request) -> web.StreamResponse:
+    return _json(await api.schedule_repair_apply(_manager(request), await _payload(request)))
+
+
 async def post_schedules_global(request: web.Request) -> web.StreamResponse:
     return _json(api.schedules_global(_manager(request), await _payload(request)))
 
@@ -381,6 +394,8 @@ def register(app: web.Application, gateway: Any) -> None:
     app.router.add_post("/console/api/schedules/action", _endpoint(post_schedules_action, mutation=True))
     app.router.add_post("/console/api/schedules/approve", _endpoint(post_schedules_approve, mutation=True))
     app.router.add_post("/console/api/schedules/global", _endpoint(post_schedules_global, mutation=True))
+    app.router.add_get("/console/api/schedules/{id}/repair", _endpoint(get_schedule_repair))
+    app.router.add_post("/console/api/schedules/repair", _endpoint(post_schedules_repair, mutation=True))
     app.router.add_get("/console/api/health", _endpoint(get_health))
     app.router.add_get("/console/api/settings", _endpoint(get_settings))
     app.router.add_post("/console/api/settings", _endpoint(post_settings, mutation=True))

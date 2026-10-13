@@ -146,7 +146,7 @@ def test_paused_schedule_with_a_reason_is_stuck_with_resume_and_stop(tmp_path):
     assert "resume" in actions and "stop" in actions
 
 
-def test_paused_schedule_with_no_cadence_gets_edit_timing_action(tmp_path):
+def test_paused_schedule_with_no_cadence_gets_repair_action(tmp_path):
     store = make_store(tmp_path)
     schedule = _make_schedule(store, title="Half-built schedule", state="proposed")
     store.update_schedule(schedule.id, state="paused", cadence_kind="", cadence={},
@@ -156,7 +156,7 @@ def test_paused_schedule_with_no_cadence_gets_edit_timing_action(tmp_path):
 
     row = next(r for r in result["stuck"] if r["id"] == schedule.id)
     actions = {a["action"] for a in row["actions"]}
-    assert "edit_timing" in actions
+    assert "repair" in actions
     assert "resume" not in actions  # nothing to resume into until it has a timing
 
 

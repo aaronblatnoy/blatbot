@@ -104,6 +104,8 @@ def _test_app(manager):
     app.router.add_post("/console/api/schedules/edit", r._endpoint(r.post_schedules_edit, mutation=True))
     app.router.add_post("/console/api/schedules/action", r._endpoint(r.post_schedules_action, mutation=True))
     app.router.add_post("/console/api/schedules/approve", r._endpoint(r.post_schedules_approve, mutation=True))
+    app.router.add_get("/console/api/schedules/{id}/repair", r._endpoint(r.get_schedule_repair))
+    app.router.add_post("/console/api/schedules/repair", r._endpoint(r.post_schedules_repair, mutation=True))
     return app
 
 
@@ -350,7 +352,8 @@ async def test_untimed_paused_schedule_shows_no_timing_set_yet_and_attention(tmp
     body = api.schedule_list(manager.store, manager.schedules)
     row = next(r for r in body["schedules"] if r["id"] == schedule.id)
     assert row["cadence_text"] == "No timing set yet"
-    assert row["attention"] == "Tell it how often to run, then resume it."
+    assert row["attention"] == "It needs a timing you need to choose."
+    assert "repair" in row["actions"]
 
 
 @pytest.mark.asyncio

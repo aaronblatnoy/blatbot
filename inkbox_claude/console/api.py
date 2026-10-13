@@ -812,6 +812,13 @@ def _schedule_view(store: Store, service: Any, schedule: Any) -> Dict[str, Any]:
     # next_run column (paused/ended clear it on their own route in, but this is belt
     # and suspenders: the console never shows a time that will not actually fire).
     next_run = schedule.next_run if schedule.state == "active" else None
+    repair_plan = service.repair_plan(schedule.id)
+    actions = list(service.valid_actions(schedule))
+    attention = _attention(schedule)
+    if repair_plan["needed"]:
+        attention = repair_plan["sentence"]
+        if "repair" not in actions:
+            actions = ["repair"] + actions
     return {
         "id": schedule.id, "title": schedule.title, "prompt": schedule.prompt,
         "state": schedule.state, "state_label": _state_label(schedule, running),
@@ -827,10 +834,11 @@ def _schedule_view(store: Store, service: Any, schedule: Any) -> Dict[str, Any]:
         "capabilities": _capability_list(schedule.scopes),
         "missing_capabilities": _capability_list(missing),
         "last_run": _run_view(last, schedule.timezone) if last else None,
-        "attention": _attention(schedule),
+        "attention": attention,
         "needs_approval": schedule.state == "proposed",
         "approval_request_id": None,
-        "actions": service.valid_actions(schedule),
+        "actions": actions,
+        "repair_plan": repair_plan if repair_plan["needed"] else None,
     }
 
 
@@ -991,6 +999,34 @@ def _console_action_error(manager: Any, schedule_id: int, action: str, exc: Valu
     if schedule is not None and str(exc).startswith(f"{action} is not valid for a schedule that is "):
         return schedcmd._state_error_reply(schedule, action)
     return schedprop.friendly_error(exc)
+
+
+def schedule_repair_plan(manager: Any, schedule_id: int) -> Optional[Dict[str, Any]]:
+    schedule = manager.store.get_schedule(schedule_id)
+    if schedule is None:
+        return None
+    return manager.schedules.repair_plan(schedule_id)
+
+
+async def schedule_repair_apply(manager: Any, payload: Dict[str, Any]) -> Dict[str, Any]:
+    try:
+        schedule_id = int(payload.get("id"))
+    except (TypeError, ValueError):
+        raise ValidationError("id must be an integer") from None
+    timing = None
+    if "timing" in payload and payload["timing"] is not None:
+        raw = payload["timing"]
+        if not isinstance(raw, dict) or "cadence_kind" not in raw or "cadence" not in raw:
+            raise ValidationError("timing must be an object with cadence_kind and cadence")
+        timing = {"cadence_kind": raw["cadence_kind"], "cadence": raw["cadence"]}
+    try:
+        result = await manager.schedules.repair_apply(schedule_id, owner=True, timing=timing)
+    except ValueError as exc:
+        raise ValidationError(schedprop.friendly_error(exc)) from exc
+    events.publish("schedules.changed", {"id": result["schedule"].id, "state": result["schedule"].state})
+    return {"schedule": _schedule_view(manager.store, manager.schedules, result["schedule"]),
+            "applied": bool(result["applied"]), "needs_approval": bool(result["needs_approval"]),
+            "message": result["message"]}
 
 
 def schedules_global(manager: Any, payload: Dict[str, Any]) -> Dict[str, Any]:
@@ -1282,23 +1318,32 @@ def _schedule_fix_actions(schedule: Any, *, paused: bool) -> List[Dict[str, Any]
     return actions
 
 
-def _stuck_schedules(store: Store) -> List[Dict[str, Any]]:
+def _stuck_schedules(store: Store, service: Any) -> List[Dict[str, Any]]:
     """Schedules paused with a reason, or active schedules whose last run did
     not complete (so the owner sees trouble before it gets to three strikes
     and pauses itself). Exactly one row per schedule: the reason always goes
     through sched_mod._normalize_reason, so a run's own first-person RESULT
-    text ("I could not find ...") never shows up as the scheduler's words."""
+    text ("I could not find ...") never shows up as the scheduler's words.
+    A schedule repair_plan() finds something to fix for gets a "repair" action
+    first and the plan's own sentence in place of the generic reason."""
     out = []
+    repair_action = lambda schedule: {"action": "repair", "label": "Repair and resume",
+                                       "target": {"endpoint": "schedules/repair", "id": schedule.id}}
     for schedule in store.schedules(states=["paused"]):
-        if not schedule.cadence_kind:
-            why = "it has no timing set yet"
-            actions = [{"action": "edit_timing", "label": "Edit timing",
-                        "target": {"endpoint": "schedules", "id": schedule.id}},
+        plan = service.repair_plan(schedule.id)
+        if plan["needed"]:
+            why = plan["sentence"]
+            actions = [repair_action(schedule),
                        {"action": "stop", "label": "Stop",
                         "target": {"endpoint": "schedules/action", "id": schedule.id, "action": "stop"}}]
-        else:
-            why = sched_mod._normalize_reason(schedule.last_outcome) if schedule.last_outcome else "it stopped running"
-            actions = _schedule_fix_actions(schedule, paused=True)
+            out.append({
+                "kind": "schedule", "id": schedule.id, "title": schedule.title,
+                "sentence": f"{schedule.title}: {why}",
+                "since_text": _schedule_time_text(schedule.updated_at, schedule.timezone), "actions": actions,
+            })
+            continue
+        why = sched_mod._normalize_reason(schedule.last_outcome) if schedule.last_outcome else "it stopped running"
+        actions = _schedule_fix_actions(schedule, paused=True)
         out.append({
             "kind": "schedule", "id": schedule.id, "title": schedule.title,
             "sentence": f"{schedule.title}: {why}.",
@@ -1458,7 +1503,7 @@ def overview(gateway: Any, store: Store) -> Dict[str, Any]:
     headings and button chrome."""
     now = time.time()
     stuck = (
-        _stuck_schedules(store) + _stuck_pending_requests(store)
+        _stuck_schedules(store, gateway.sessions.schedules) + _stuck_pending_requests(store)
         + _stuck_failed_requests(store, now) + _stuck_schedule_proposals(store)
     )
     running = _running_items(store)
