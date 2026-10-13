@@ -2252,7 +2252,11 @@ class GateSessionManager:
     async def _handle_let_it_label(self, session: "GateSession", text: str) -> bool:
         if not schedprop.looks_like_permission_grant(text):
             return False
-        req = self.store.last_failed_for_thread(session.chat_id)
+        # Same restricted person lookup "try again" uses (item C4): a call's
+        # failed request can live on a different thread record than the texted
+        # reply granting it permission. is_approver() still gates everything
+        # below exactly as it did -- this only widens how the request is found.
+        req = self.store.last_failed_for_thread_or_person(session.chat_id, session._sender())
         if req is None or req.schedule_id:
             return False
         denied = wording.denied_scopes(req.status or {})
@@ -2281,7 +2285,9 @@ class GateSessionManager:
         now = time.time()
         # Never a schedule's own failed run: the blanket grant would otherwise widen
         # the SCHEDULE's standing scopes from an unrelated "permission for everything".
-        failed = self.store.last_failed_for_thread(chat_id, exclude_scheduled=True)
+        # Same restricted person lookup as "try again" (item C4): a call and the
+        # text granting blanket permission can land on different thread records.
+        failed = self.store.last_failed_for_thread_or_person(chat_id, session._sender(), exclude_scheduled=True)
         if failed is not None and wording.within_retry_window(failed.updated_at, now, hours=0.5):
             await self._grant_blanket_and_retry(session, failed)
             return True

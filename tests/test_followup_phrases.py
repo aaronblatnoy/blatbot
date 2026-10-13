@@ -792,3 +792,92 @@ async def test_a_genuinely_new_question_mark_ask_still_creates_a_request_after_a
     await session.handle_inbound("when is it?", mode="imessage", meta=approver_meta())
     await _drain()
     assert m.executor.ran, "a genuinely new question-shaped ask must still create a request"
+
+
+
+# ---------------------------------------------------------------------------
+# Item C4: the person-fallback lookup is restricted to one-to-one threads and
+# to phone/iMessage/Telegram contacts, so a shared number or a group thread
+# can never let one person's "try again" re-run another's request.
+# ---------------------------------------------------------------------------
+
+@pytest.mark.asyncio
+async def test_try_again_shared_number_contact_finds_nothing(manager, tmp_path):
+    """Two different people sharing one phone contact value must never cross-match:
+    the fallback only widens how a person's OWN failed request is found, never
+    someone else's, even if a contacts-table merge made the values collide."""
+    m, sent = manager
+    m.executor = RecordingExecutor()
+    m.router.next = RouterOutput(reply="Got it.", request=None)
+    aaron = m.store.create_person(display="Aaron")
+    m.store.add_contact(aaron["id"], "email", "aaron@example.com")
+    stranger = m.store.create_person(display="Cand")
+    # The stranger's phone contact happens to be the same value some other
+    # failed request's sender used -- not Aaron's own.
+    m.store.add_contact(stranger["id"], "phone", "+15550100099")
+    _fail_request(m, chat_id="call-xyz", sender="+15550100099", sender_name="Cand", mode="voice")
+    session = m.get(APPROVER_CONV)
+    await session.handle_inbound("try again", mode="imessage",
+                                 meta={"sender": "aaron@example.com", "conversation_id": APPROVER_CONV})
+    assert m.executor.ran == []
+    assert any("Got it." in s[1] for s in sent)
+
+
+@pytest.mark.asyncio
+async def test_try_again_never_crosses_into_a_group_thread(manager, tmp_path):
+    """A failed request that landed on a group thread is never picked up by the
+    person fallback, even if the group member is the same person the owner is
+    texting about elsewhere."""
+    m, sent = manager
+    m.executor = RecordingExecutor()
+    m.router.next = RouterOutput(reply="Got it.", request=None)
+    aaron = m.store.create_person(display="Aaron")
+    m.store.add_contact(aaron["id"], "phone", "+15550100099")
+    m.store.add_contact(aaron["id"], "email", "aaron@example.com")
+    _fail_request(m, chat_id="group-abc", sender="+15550100099", sender_name="Aaron", mode="imessage")
+    m.store.set_thread("group-abc", "idle", "imessage", {"conversation_kind": "group"})
+    session = m.get(APPROVER_CONV)
+    await session.handle_inbound("try again", mode="imessage",
+                                 meta={"sender": "aaron@example.com", "conversation_id": APPROVER_CONV})
+    assert m.executor.ran == []
+    assert any("Got it." in s[1] for s in sent)
+
+
+# ---------------------------------------------------------------------------
+# Item C3: "let it <label>" and the blanket permission use the same restricted
+# person lookup "try again" uses, so they also find a call's failed request
+# on a different thread -- while still requiring the owner's is_approver().
+# ---------------------------------------------------------------------------
+
+@pytest.mark.asyncio
+async def test_let_it_label_finds_a_failed_request_on_a_different_thread(manager, tmp_path):
+    m, sent = manager
+    m.executor = RecordingExecutor()
+    person = m.store.create_person(display="Aaron")
+    m.store.add_contact(person["id"], "phone", "+15550100099")
+    m.store.add_contact(person["id"], "email", "aaron@example.com")
+    scope_name = next(name for name, spec in gm.SCOPES.items() if spec.get("tools"))
+    tool = gm.SCOPES[scope_name]["tools"][0]
+    label = schedprop.short_label(scope_name)
+    req = _fail_request(m, chat_id="call-xyz", sender="+15550100099", sender_name="Aaron", mode="voice",
+                        status=_denied_status(tool))
+    session = m.get(APPROVER_CONV)
+    await session.handle_inbound(f"let it {label}", mode="imessage",
+                                 meta={"sender": "aaron@example.com", "conversation_id": APPROVER_CONV})
+    await _drain()
+    assert m.executor.ran, "the retry should have actually run"
+
+
+@pytest.mark.asyncio
+async def test_blanket_permission_finds_a_failed_request_on_a_different_thread(manager, tmp_path):
+    m, sent = manager
+    m.executor = RecordingExecutor()
+    person = m.store.create_person(display="Aaron")
+    m.store.add_contact(person["id"], "phone", "+15550100099")
+    m.store.add_contact(person["id"], "email", "aaron@example.com")
+    req = _fail_request(m, chat_id="call-xyz", sender="+15550100099", sender_name="Aaron", mode="voice")
+    session = m.get(APPROVER_CONV)
+    await session.handle_inbound("you have my permission for everything", mode="imessage",
+                                 meta={"sender": "aaron@example.com", "conversation_id": APPROVER_CONV})
+    await _drain()
+    assert m.executor.ran, "blanket permission should have retried the call's failed request"

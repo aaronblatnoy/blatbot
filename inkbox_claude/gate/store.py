@@ -2358,20 +2358,35 @@ class Store:
                 out.append({})
         return out
 
+    def _is_one_to_one_thread(self, chat_id: str) -> bool:
+        """Whether `chat_id` is a single-person thread, never a group -- the gate
+        tells the two apart by the last routing meta it recorded for the thread
+        (conversation_kind == "group"); a thread never seen before is treated as
+        one-to-one, since it cannot be a group thread the gate has ever spoken in."""
+        route = self.thread_route(chat_id)
+        if not route:
+            return True
+        return (route.get("meta") or {}).get("conversation_kind") != "group"
+
     def last_failed_for_thread_or_person(self, chat_id: str, sender: str, *,
-                                         exclude_scheduled: bool = False) -> Optional[Request]:
+                                         exclude_scheduled: bool = False,
+                                         window_hours: float = 24.0) -> Optional[Request]:
         """last_failed_for_thread(chat_id), or -- when nothing matches there -- the most
-        recent failed request anywhere whose sender resolves, through the contacts
-        table, to the same person as `sender`. A call's rows can land on a different
-        thread record than the same person's texts (an unverified caller on the
-        owner's own number: is_aaron_on_phone() is true but is_approver() is not, so
+        recent failed request within `window_hours` whose sender resolves, through the
+        contacts table, to the same person as `sender`. A call's rows can land on a
+        different thread record than the same person's texts (an unverified caller on
+        the owner's own number: is_aaron_on_phone() is true but is_approver() is not, so
         record_id never becomes the owner thread), so a texted "try again" after that
         call would otherwise never find the call's failed request.
 
-        This only widens how the request is FOUND. It grants no owner power: whatever
-        approval the texter's own sender identity would normally need to retry a
-        request, still applies exactly as it did before -- finding a person's own
-        failed request is not a permission."""
+        This only widens how the request is FOUND, and only within tight limits: never
+        onto a group thread (a shared number or a wrongly merged contact must not let
+        one person's "try again" re-run another's request there), and only by a contact
+        of a phone, iMessage or Telegram kind -- never email, since a sender address can
+        be faked. Ambiguous contact resolution (a conflict) finds nothing. It grants no
+        owner power: whatever approval the texter's own sender identity would normally
+        need to retry a request, still applies exactly as it did before -- finding a
+        person's own failed request is not a permission."""
         req = self.last_failed_for_thread(chat_id, exclude_scheduled=exclude_scheduled)
         if req is not None:
             return req
@@ -2381,7 +2396,7 @@ class Store:
             return None
         with self._lock:
             rows = self._db.execute(
-                "SELECT DISTINCT value FROM contacts WHERE person_id=? AND kind IN ('phone','email','telegram','imessage')",
+                "SELECT DISTINCT value FROM contacts WHERE person_id=? AND kind IN ('phone','telegram','imessage')",
                 (pid,),
             ).fetchall()
         senders = {r["value"] for r in rows}
@@ -2392,13 +2407,16 @@ class Store:
         # candidate row's sender the same way before comparing, rather than compare
         # raw strings.
         with self._lock:
-            clause = "state='failed'"
+            clause = "state='failed' AND updated_at>?"
+            args: List[Any] = [time.time() - window_hours * 3600]
             if exclude_scheduled:
                 clause += " AND schedule_id IS NULL"
             rows2 = self._db.execute(
-                f"SELECT * FROM requests WHERE {clause} ORDER BY updated_at DESC LIMIT 50"
+                f"SELECT * FROM requests WHERE {clause} ORDER BY updated_at DESC LIMIT 50", args
             ).fetchall()
         for row in rows2:
+            if not self._is_one_to_one_thread(row["chat_id"]):
+                continue
             norm = self.contact_value(self.guess_contact_kind(row["sender"]), row["sender"])
             if norm in senders:
                 return Request.from_row(row)
