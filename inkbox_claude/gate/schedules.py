@@ -181,10 +181,10 @@ class ScheduleService:
         was_edit = self._edit_revert(schedule) is not None
         if not approve:
             revert = self._edit_revert(schedule)
-            if revert is not None:
-                # A rejected change to an existing schedule puts it back as it was;
-                # only a brand-new proposal ends when he says no.
-                state = revert.get("state") if revert.get("state") in ("active", "paused") else "paused"
+            if revert is not None and revert.get("state") in ("active", "paused"):
+                # A rejected change to an existing, already-approved schedule puts it
+                # back as it was; only a brand-new proposal ends when he says no.
+                state = revert.get("state")
                 next_run = (cadence_module.next_run(schedule.cadence_kind, schedule.cadence,
                                                     schedule.timezone, now) if state == "active" else None)
                 updated = self.store.update_schedule(
@@ -193,6 +193,10 @@ class ScheduleService:
                 logger.info("[schedules] %s edit rejected; reverted", schedule_id)
                 await self._notice(updated, f"Left {updated.title} as it was.")
                 return updated
+            # Either a brand-new proposal, or an edit snapshot whose own pre-edit state
+            # was "proposed" (he never actually said yes to it even once): either way
+            # there is no approved version to revert to, so this ends rather than
+            # becoming a "paused" schedule that resume could restart unapproved.
             updated = self.store.update_schedule(schedule_id, state="ended", next_run=None,
                                                  last_outcome="rejected")
             logger.info("[schedules] %s rejected", schedule_id)
@@ -293,13 +297,22 @@ class ScheduleService:
                     next_run=next_run, notes=[], last_outcome="an edit expired unanswered; kept as it was")
                 logger.info("[schedules] %s edit proposal expired; reverted to the previous version", schedule.id)
                 await self._notice(updated, f"{updated.title}: that change expired unanswered, so I kept it as it was.")
-            else:
+            elif revert.get("state") == "paused":
                 updated = self.store.update_schedule(
                     schedule.id, prompt=revert["prompt"], scopes=revert["scopes"], state="paused",
                     next_run=None, notes=[],
                     last_outcome="an edit expired unanswered and could not resume automatically")
                 logger.info("[schedules] %s edit proposal expired; left paused", schedule.id)
                 await self._notice(updated, f"{updated.title} is paused: that change expired unanswered.")
+            else:
+                # The pre-edit snapshot was itself "proposed" -- he never said yes to
+                # this schedule even once, so there is nothing approved to revert to
+                # or pause; ending it (not pausing) keeps resume from ever restarting
+                # something he never approved.
+                updated = self.store.update_schedule(schedule.id, state="ended", next_run=None,
+                                                     last_outcome="never approved; expired unanswered")
+                logger.info("[schedules] %s edit proposal expired; never approved, ended", schedule.id)
+                await self._notice(updated, f"{updated.title} was not approved in time, so it was not set up.")
 
     async def held(self, req: Request, status: Dict[str, Any]) -> None:
         """A scheduled run's call is parked for the owner's yes. Record the run's

@@ -420,3 +420,32 @@ def test_no_jev_import_anywhere_in_schedule_files():
     for mod in (s, c):
         source = inspect.getsource(mod)
         assert "jev" not in source.lower()
+
+
+@pytest.mark.asyncio
+async def test_rejecting_an_edit_of_a_never_approved_proposal_ends_it(env):
+    """edit() stashes a revert snapshot even when the schedule being edited was
+    itself still 'proposed' (he never said yes to it even once). Rejecting that
+    edit must not leave a 'paused' schedule resume could restart unapproved."""
+    store, manager, service, task_id = env
+    schedule = await _propose(service, task_id)
+    assert schedule.state == "proposed"
+    await service.edit(schedule.id, owner=True, changes={"prompt": "check the other page"})
+    edited = store.get_schedule(schedule.id)
+    assert edited.state == "proposed"
+
+    rejected = await service.decide(schedule.id, False)
+    assert rejected.state == "ended"
+    assert "resume" not in service.valid_actions(rejected)
+
+
+@pytest.mark.asyncio
+async def test_expiring_an_edit_of_a_never_approved_proposal_ends_it(env):
+    store, manager, service, task_id = env
+    schedule = await _propose(service, task_id)
+    await service.edit(schedule.id, owner=True, changes={"prompt": "check the other page"})
+
+    await service.expire_stale_proposals(max_age=0, now=time.time() + 100000)
+    ended = store.get_schedule(schedule.id)
+    assert ended.state == "ended"
+    assert "resume" not in service.valid_actions(ended)
