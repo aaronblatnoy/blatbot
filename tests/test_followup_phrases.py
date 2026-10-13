@@ -475,3 +475,152 @@ async def test_pending_approval_still_wins_bare_yes(manager, tmp_path):
     await session.handle_inbound("yes", mode="imessage", meta=approver_meta())
     row = m.store._db.execute("SELECT state FROM requests WHERE id=?", (pend.id,)).fetchone()
     assert row["state"] == "approved"
+
+
+# ---------------------------------------------------------------------------
+# Item 6: a schedule's own failed run shares the owner's chat_id -- "try again"
+# and the blanket permission must never act on it (as _handle_let_it_label
+# already refused to, via req.schedule_id).
+# ---------------------------------------------------------------------------
+
+def _fail_scheduled_request(m, *, chat_id, sender, sender_name, mode, schedule_id, age_seconds=60.0, status=None):
+    t = m.store.create_task("watch the page")
+    req = m.store.create_request(chat_id=chat_id, sender=sender, sender_name=sender_name, mode=mode,
+                                 subject="", original_message="watch the page", summary="watch the page",
+                                 scopes=["web"], prompt="watch the page", state="approved", task_id=t["id"],
+                                 schedule_id=schedule_id)
+    m.store.set_state(req.id, "failed", status=status or {"ok": False, "error": "boom"})
+    if age_seconds:
+        m.store._db.execute("UPDATE requests SET updated_at=? WHERE id=?",
+                            (time.time() - age_seconds, req.id))
+        m.store._db.commit()
+    return m.store.get_request(req.id)
+
+
+@pytest.mark.asyncio
+async def test_try_again_ignores_a_schedules_own_failed_run(manager, tmp_path):
+    m, sent = manager
+    m.executor = RecordingExecutor()
+    m.router.next = RouterOutput(reply="Got it.", request=None)
+    sched = _fail_scheduled_request(m, chat_id=APPROVER_CONV, sender="+15550100001", sender_name="Aaron",
+                                    mode="imessage", schedule_id=999)
+    session = m.get(APPROVER_CONV)
+    await session.handle_inbound("try again", mode="imessage", meta=approver_meta())
+    # Never re-created as a one-off: the only request on the thread is still the
+    # schedule's own failed row, unchanged.
+    assert m.executor.ran == []
+    assert m.store.get_request(sched.id).state == "failed"
+    assert any("Got it." in s[1] for s in sent)
+
+
+@pytest.mark.asyncio
+async def test_blanket_permission_ignores_a_schedules_own_failed_run(manager, tmp_path):
+    m, sent = manager
+    m.executor = RecordingExecutor()
+    scope_name = next(name for name, spec in gm.SCOPES.items() if spec.get("tools") and not spec.get("read"))
+    tool = gm.SCOPES[scope_name]["tools"][0]
+    sched = _fail_scheduled_request(m, chat_id=APPROVER_CONV, sender="+15550100001", sender_name="Aaron",
+                                    mode="imessage", schedule_id=999, status=_denied_status(tool))
+    session = m.get(APPROVER_CONV)
+    await session.handle_inbound("You have my personal permission for everything.", mode="imessage",
+                                 meta=approver_meta())
+    await _drain()
+    # Nothing ran, nothing widened: the schedule's own scopes are untouched.
+    assert m.executor.ran == []
+    import json as _json
+    row = m.store._db.execute("SELECT scopes_json FROM requests WHERE id=?", (sched.id,)).fetchone()
+    assert _json.loads(row["scopes_json"]) == ["web"]
+
+
+# ---------------------------------------------------------------------------
+# Item 5 (unsafe): create_request_once's dedupe is scoped by sender as well as
+# thread, a caller that gets an existing request back never acknowledges,
+# executes or widens it, and retry_request never dedupes against a different
+# request.
+# ---------------------------------------------------------------------------
+
+def test_create_request_once_dedupe_is_scoped_by_sender(tmp_path):
+    from inkbox_claude.gate.store import Store
+    s = Store(str(tmp_path / "g.db"))
+    t = s.create_task("do x")
+    req_a, created_a = s.create_request_once(
+        chat_id="group-1", sender="alice", sender_name="Alice", mode="imessage", subject="",
+        original_message="book a flight", summary="book a flight", scopes=["web"], prompt="book a flight",
+        state="approved", task_id=t["id"])
+    assert created_a
+    # Bob asks something in the same group thread within the dedupe window: his
+    # own request, never folded into Alice's.
+    req_b, created_b = s.create_request_once(
+        chat_id="group-1", sender="bob", sender_name="Bob", mode="imessage", subject="",
+        original_message="book a different flight", summary="book a different flight", scopes=["web"],
+        prompt="book a different flight", state="approved", task_id=t["id"])
+    assert created_b
+    assert req_b.id != req_a.id
+    # Alice asking again right away (same sender, same thread, still approved/running)
+    # IS deduped -- the sender-scoping narrows the match, it doesn't remove it.
+    req_a2, created_a2 = s.create_request_once(
+        chat_id="group-1", sender="alice", sender_name="Alice", mode="imessage", subject="",
+        original_message="book a flight again", summary="book a flight again", scopes=["web"],
+        prompt="book a flight again", state="approved", task_id=t["id"])
+    assert not created_a2
+    assert req_a2.id == req_a.id
+
+
+def test_retry_request_bypasses_dedupe_against_a_different_request(tmp_path):
+    from inkbox_claude.gate.store import Store
+    s = Store(str(tmp_path / "g.db"))
+    t = s.create_task("do x")
+    # One request from this sender is already approved/running (unrelated to the
+    # one about to be retried).
+    other, _ = s.create_request_once(
+        chat_id="c1", sender="alice", sender_name="Alice", mode="imessage", subject="",
+        original_message="unrelated ask", summary="unrelated ask", scopes=["web"], prompt="unrelated ask",
+        state="approved", task_id=t["id"])
+    # A retry (bypass_dedupe=True) for a different, failed request from the same
+    # sender must not fold into `other" -- it gets its own fresh row.
+    retried, created = s.create_request_once(
+        chat_id="c1", sender="alice", sender_name="Alice", mode="imessage", subject="",
+        original_message="the failed ask", summary="the failed ask", scopes=["web"], prompt="the failed ask",
+        state="approved", task_id=t["id"], bypass_dedupe=True)
+    assert created
+    assert retried.id != other.id
+
+
+@pytest.mark.asyncio
+async def test_retry_refuses_when_the_request_is_itself_still_running(manager, tmp_path):
+    m, sent = manager
+    req = _fail_request(m, chat_id=APPROVER_CONV, sender="+15550100001", sender_name="Aaron", mode="imessage")
+    # The request has since moved back to "running" (a race: the failure notice
+    # went out just before a stale retry landed, or two fragments overlapped).
+    m.store.set_state(req.id, "running")
+    assert m.retry_request(req, approved=True) is None
+
+
+@pytest.mark.asyncio
+async def test_group_thread_second_senders_ask_is_not_swallowed_by_the_first(tmp_path):
+    """The actual unsafe shape in item 5: two different people ask in the same
+    group thread within the dedupe window. Before the sender-scoped dedupe, the
+    second person's ask could be folded into the first person's request, with
+    its ack already sent for work that would never separately run.
+
+    Legacy manager only: the decide-graph manager builds its requests from the
+    task picker rather than the router's own `request` field, which is a
+    separate concern from the dedupe this test is about."""
+    m, sent = make_legacy_manager(tmp_path)
+    m.executor = RecordingExecutor()
+    t = m.store.create_task("group ask")
+
+    def group_meta(sender):
+        return {"sender": sender, "conversation_id": "group-conv", "conversation_kind": "group"}
+
+    m.router.next = RouterOutput(reply="On it.", task=f"T{t['id']}",
+                                 request=RouterRequest(prompt="help alice", scopes=["web"], summary="help alice"))
+    session_a = m.get("group-conv")
+    await session_a.handle_inbound("can you help me", mode="imessage", meta=group_meta("alice"))
+    m.router.next = RouterOutput(reply="On it.", task=f"T{t['id']}",
+                                 request=RouterRequest(prompt="help bob", scopes=["web"], summary="help bob"))
+    session_b = m.get("group-conv")
+    await session_b.handle_inbound("can you help me too", mode="imessage", meta=group_meta("bob"))
+    rows = m.store._db.execute("SELECT sender FROM requests WHERE chat_id=?", ("group-conv",)).fetchall()
+    senders = sorted(r["sender"] for r in rows)
+    assert senders == ["alice", "bob"]

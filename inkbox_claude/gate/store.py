@@ -11,7 +11,7 @@ import threading
 import time
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 from .pgdb import PGConnection, is_postgres_target
 
@@ -2193,30 +2193,63 @@ class Store:
                        original_message: str, summary: str, scopes: List[str], prompt: str,
                        state: str, task_id: int, inbound_id: Optional[int] = None,
                        schedule_id: Optional[int] = None, schedule_kind: str = "") -> Request:
-        """Create a request. ``task_id`` is mandatory: a request is always part of a task.
+        """Create a request, the old (pre-item-5) return shape: just the request, with no
+        way for the caller to tell a fresh insert from a dedupe hit. Kept for callers that
+        were never migrated to the guarded create_request_once below; a caller that needs
+        to know whether it is looking at its own new request or someone else's existing
+        one -- so it can skip acknowledging, executing or widening scopes for the latter --
+        uses create_request_once instead."""
+        req, _created = self.create_request_once(
+            chat_id=chat_id, sender=sender, sender_name=sender_name, mode=mode, subject=subject,
+            original_message=original_message, summary=summary, scopes=scopes, prompt=prompt,
+            state=state, task_id=task_id, inbound_id=inbound_id,
+            schedule_id=schedule_id, schedule_kind=schedule_kind)
+        return req
+
+    def create_request_once(self, *, chat_id: str, sender: str, sender_name: str, mode: str, subject: str,
+                            original_message: str, summary: str, scopes: List[str], prompt: str,
+                            state: str, task_id: int, inbound_id: Optional[int] = None,
+                            schedule_id: Optional[int] = None, schedule_kind: str = "",
+                            bypass_dedupe: bool = False) -> Tuple[Request, bool]:
+        """Create a request, or hand back an existing one that already covers it, and say
+        which happened: ``(request, created)``. ``task_id`` is mandatory: a request is
+        always part of a task.
 
         Refuses (returning the already-existing request instead of inserting a second
-        one) when this is a non-schedule request and a non-schedule request on the same
-        thread is already approved or running and was created within the last
-        DEDUPE_WINDOW_S seconds. The check and the insert happen under the same lock,
-        on both the sqlite and the Postgres code paths (both go through self._db under
-        self._lock here), so a second caller that raced the first in past the read
-        still lands inside this one critical section and sees the row the first one
-        just committed."""
+        one, with created=False) when this is a non-schedule request and a non-schedule
+        request from the SAME SENDER on the same thread is already approved or running
+        and was created within the last DEDUPE_WINDOW_S seconds. Scoping the dedupe by
+        sender as well as thread matters in a group thread (a second person's ask within
+        the window must get their own request, not be folded into the first person's)
+        and for a retry/follow-up phrase, which never shares this sender-scoped dedupe at
+        all -- see `bypass_dedupe`, used only by GateSessionManager.retry_request, which
+        re-creates a request for the SAME sender as the one it is retrying and must not
+        have that retry fold into the very request it is retrying (or into some other
+        unrelated approved/running request of that sender's that raced it).
+
+        A caller that gets created=False back owns none of the consequences of having
+        just made a request: it must not acknowledge it, must not execute it a second
+        time, and must not widen its scopes -- the caller that actually created the row
+        this call found already owns all three.
+
+        The check and the insert happen under the same lock, on both the sqlite and the
+        Postgres code paths (both go through self._db under self._lock here), so a
+        second caller that raced the first in past the read still lands inside this one
+        critical section and sees the row the first one just committed."""
         if not task_id:
             raise TaskRequired("a request must belong to a task")
         now = time.time()
         with self._lock:
             if not self._db.execute("SELECT 1 FROM tasks WHERE id=?", (task_id,)).fetchone():
                 raise TaskRequired(f"task T{task_id} does not exist")
-            if schedule_id is None:
+            if schedule_id is None and not bypass_dedupe:
                 dupe = self._db.execute(
-                    "SELECT * FROM requests WHERE chat_id=? AND state IN ('approved','running') "
+                    "SELECT * FROM requests WHERE chat_id=? AND sender=? AND state IN ('approved','running') "
                     "AND schedule_id IS NULL AND created_at>? ORDER BY id DESC LIMIT 1",
-                    (chat_id, now - self.DEDUPE_WINDOW_S),
+                    (chat_id, sender, now - self.DEDUPE_WINDOW_S),
                 ).fetchone()
                 if dupe:
-                    return Request.from_row(dupe)
+                    return Request.from_row(dupe), False
             cur = self._db.execute(
                 "INSERT INTO requests(chat_id,sender,sender_name,mode,subject,original_message,summary,"
                 "scopes_json,prompt,prompt_sha256,state,created_at,updated_at,task_id,inbound_id,schedule_id,schedule_kind) "
@@ -2227,7 +2260,7 @@ class Store:
             )
             self._db.commit()
             rid = cur.lastrowid
-        return self.get_request(rid)  # type: ignore[return-value]
+        return self.get_request(rid), True  # type: ignore[return-value]
 
     def get_request(self, rid: int) -> Optional[Request]:
         with self._lock:
@@ -2239,23 +2272,48 @@ class Store:
             rows = self._db.execute("SELECT * FROM requests WHERE state='pending' ORDER BY id").fetchall()
         return [Request.from_row(r) for r in rows]
 
-    def pending_for_thread(self, chat_id: str) -> Optional[Request]:
+    def pending_for_thread(self, chat_id: str, *, sender: Optional[str] = None) -> Optional[Request]:
+        """The most recent not-yet-finished request on this thread -- or, when `sender`
+        is given, the most recent not-yet-finished request on this thread FROM THAT
+        SENDER. Group threads share one chat_id across everyone in them: without the
+        sender scope, a second person's ask within the dedupe window reads as "a
+        request is already waiting" and is silently dropped, even though it is an
+        entirely different person's ask. Callers that still want the old thread-wide
+        behaviour (e.g. a genuine one-sender thread) simply omit `sender`."""
         with self._lock:
-            r = self._db.execute(
-                "SELECT * FROM requests WHERE chat_id=? AND state IN ('pending','approved','running') ORDER BY id DESC LIMIT 1",
-                (chat_id,),
-            ).fetchone()
+            if sender is not None:
+                r = self._db.execute(
+                    "SELECT * FROM requests WHERE chat_id=? AND sender=? "
+                    "AND state IN ('pending','approved','running') ORDER BY id DESC LIMIT 1",
+                    (chat_id, sender),
+                ).fetchone()
+            else:
+                r = self._db.execute(
+                    "SELECT * FROM requests WHERE chat_id=? AND state IN ('pending','approved','running') ORDER BY id DESC LIMIT 1",
+                    (chat_id,),
+                ).fetchone()
         return Request.from_row(r) if r else None
 
-    def last_failed_for_thread(self, chat_id: str) -> Optional[Request]:
-        """The most recent failed (non-schedule state semantics aside) request on
-        this thread, if any -- what a "try again"/"send what you have"/"let it
-        <label>" reply after a failure notice acts on."""
+    def last_failed_for_thread(self, chat_id: str, *, exclude_scheduled: bool = False) -> Optional[Request]:
+        """The most recent failed request on this thread, if any -- what a "try again"/
+        "send what you have"/"let it <label>"/blanket-permission reply after a failure
+        notice acts on. `exclude_scheduled=True` leaves out a scheduled run's own failed
+        row: a schedule shares the owner's chat_id, so without this a follow-up phrase
+        said about something else entirely could re-create the schedule's own prompt as
+        a one-off ("try again") or widen its scopes (the blanket grant) -- the owner's
+        actual one-off requests are schedule_id IS NULL and are never excluded."""
         with self._lock:
-            r = self._db.execute(
-                "SELECT * FROM requests WHERE chat_id=? AND state='failed' ORDER BY updated_at DESC LIMIT 1",
-                (chat_id,),
-            ).fetchone()
+            if exclude_scheduled:
+                r = self._db.execute(
+                    "SELECT * FROM requests WHERE chat_id=? AND state='failed' AND schedule_id IS NULL "
+                    "ORDER BY updated_at DESC LIMIT 1",
+                    (chat_id,),
+                ).fetchone()
+            else:
+                r = self._db.execute(
+                    "SELECT * FROM requests WHERE chat_id=? AND state='failed' ORDER BY updated_at DESC LIMIT 1",
+                    (chat_id,),
+                ).fetchone()
         return Request.from_row(r) if r else None
 
     def last_outbound_at(self, chat_id: str) -> Optional[float]:

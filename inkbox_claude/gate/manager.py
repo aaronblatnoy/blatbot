@@ -952,14 +952,22 @@ class GateSession:
                         self.m.store.task_event(t["id"], "outbound", f"(phone) {reply}", chat_id=self.record_id)
                 if out.request is None:
                     return reply or "I don't have anything on that."
-                if self.m.store.pending_for_thread(self.chat_id) and not approver:
+                if self.m.store.pending_for_thread(self.chat_id, sender=self._sender()) and not approver:
                     return reply or "I already have a request waiting on Aaron for you."
                 assert task is not None
-                req = self.m.store.create_request(
+                req, created = self.m.store.create_request_once(
                     chat_id=self.chat_id, sender=self._sender(), sender_name=self._sender_name(), mode="voice",
                     subject="", original_message=body, summary=out.request.summary,
                     scopes=out.request.scopes, prompt=out.request.prompt,
                     state="approved" if approver else "pending", task_id=task["id"], inbound_id=self.inbound_id)
+                if not created:
+                    # Another fragment of this same ask, from this same caller, already
+                    # has a request approved or running on this thread within the dedupe
+                    # window: never execute a second run of it, and never treat this
+                    # fragment as having just created or widened anything.
+                    logger.info("[gate %s] voice fragment deduped onto existing request #%s; "
+                                "not running it a second time", self.chat_id, req.id)
+                    return reply or "Got it."
                 self.m.remember_knowledge_notes(req.id, getattr(out.request, "knowledge_notes", None))
                 self.m.record_request_on_task(req, task, self)
                 if not approver:
@@ -1172,17 +1180,16 @@ class GateSession:
             from . import schedcmd
             reply = await schedcmd.handle(self.m, self, out.schedule_command)
             return await self.send_to_sender(reply, role="answer")
-        sent_reply = False
-        if out.reply:
-            # Alongside a request the reply is an acknowledgement; on its own, or when
-            # phrasing a result, it is THE answer to that inbound message.
-            sent_reply = await self.send_to_sender(out.reply, role="ack" if out.request is not None else "answer")
         if out.request is None:
-            return sent_reply
+            if out.reply:
+                return await self.send_to_sender(out.reply, role="answer")
+            return False
         # Validate scopes (pydantic already rejected unknown ones).
-        if self.m.store.pending_for_thread(self.chat_id) and not approver:
+        if self.m.store.pending_for_thread(self.chat_id, sender=self._sender()) and not approver:
             self.m.store.add_message(self.record_id, "system", "A request is already awaiting Aaron; new request not created.")
-            return sent_reply
+            if out.reply:
+                return await self.send_to_sender(out.reply, role="ack")
+            return False
         assert task is not None
         # Someone Aaron has trusted for exactly these scopes does not need him woken up.
         # Anyone else, and any scope outside what they were given, still waits for his yes.
@@ -1194,13 +1201,25 @@ class GateSession:
             if trusted:
                 logger.info("[gate %s] %s is trusted for %s; running without asking Aaron",
                             self.chat_id, t.get("person") or self._sender(), sorted(out.request.scopes))
-        req = self.m.store.create_request(
+        req, created = self.m.store.create_request_once(
             chat_id=self.chat_id, sender=self._sender(), sender_name=self._sender_name(), mode=self.mode,
             subject=str(self.reply_meta.get("subject") or ""), original_message=body,
             summary=out.request.summary, scopes=out.request.scopes, prompt=out.request.prompt,
             state="approved" if (approver or trusted) else "pending", task_id=task["id"],
             inbound_id=self.inbound_id,
         )
+        if not created:
+            # Another message from this same sender on this thread already has a
+            # request approved or running within the dedupe window: the ack for a
+            # second one is never sent (there is no second run to acknowledge), it
+            # is never executed again, and its scopes are never widened -- all three
+            # belong to whichever turn actually created the row this one found.
+            logger.info("[gate %s] request deduped onto #%s for sender %s; not acknowledging or running again",
+                        self.chat_id, req.id, self._sender())
+            return False
+        # Alongside a request the reply is an acknowledgement, sent only now that
+        # this turn is known to own a genuinely new request.
+        sent_reply = await self.send_to_sender(out.reply, role="ack") if out.reply else False
         self.m.remember_knowledge_notes(req.id, getattr(out.request, "knowledge_notes", None))
         self.m.record_request_on_task(req, task, self)
         if approver or trusted:
@@ -2095,7 +2114,10 @@ class GateSessionManager:
         if not wording.is_try_again(text):
             return False
         chat_id = session.chat_id
-        req = self.store.last_failed_for_thread(chat_id)
+        # A schedule's own failed run shares the owner's chat_id; "try again" said
+        # about something else entirely must never re-create the schedule's prompt
+        # as a one-off (_handle_let_it_label already excludes it the same way).
+        req = self.store.last_failed_for_thread(chat_id, exclude_scheduled=True)
         if req is None:
             return False
         now = time.time()
@@ -2111,6 +2133,12 @@ class GateSessionManager:
             return False
         approved = self._retry_approval(session, req)
         new_req = self.retry_request(req, approved=approved)
+        if new_req is None:
+            # The request being retried is itself still approved/running (a race:
+            # it had not actually finished failing when this phrase arrived). Never
+            # dedupe a retry against a different request -- there is simply nothing
+            # to retry yet.
+            return True
         if approved:
             asyncio.create_task(self.execute(new_req))
         else:
@@ -2144,6 +2172,9 @@ class GateSessionManager:
             return True
         new_scopes = [sc for sc in mapped if sc not in req.scopes]
         grown = self.retry_request(req, approved=True)
+        if grown is None:
+            # Already running again (a race); nothing left to widen or start.
+            return True
         if new_scopes:
             self.store.set_scopes(grown.id, list(req.scopes) + new_scopes)
             grown = self.store.get_request(grown.id)
@@ -2155,7 +2186,9 @@ class GateSessionManager:
             return False
         chat_id = session.chat_id
         now = time.time()
-        failed = self.store.last_failed_for_thread(chat_id)
+        # Never a schedule's own failed run: the blanket grant would otherwise widen
+        # the SCHEDULE's standing scopes from an unrelated "permission for everything".
+        failed = self.store.last_failed_for_thread(chat_id, exclude_scheduled=True)
         if failed is not None and wording.within_retry_window(failed.updated_at, now, hours=0.5):
             await self._grant_blanket_and_retry(session, failed)
             return True
@@ -2181,6 +2214,9 @@ class GateSessionManager:
     async def _grant_blanket_and_retry(self, session: "GateSession", req: Request) -> None:
         new_scopes = self._blanket_grant_scopes(req, req.status or {})
         grown = self.retry_request(req, approved=True)
+        if grown is None:
+            # Already running again (a race); nothing left to widen or start.
+            return
         if new_scopes:
             self.store.set_scopes(grown.id, list(req.scopes) + new_scopes)
             grown = self.store.get_request(grown.id)
@@ -2405,23 +2441,38 @@ class GateSessionManager:
                         req.id, len(attachment.included), len(attachment.overflow))
         return attachment.block
 
-    def retry_request(self, req: Request, *, approved: bool) -> Request:
+    def retry_request(self, req: Request, *, approved: bool) -> Optional[Request]:
         """Re-create a failed request exactly as it was asked: the same prompt,
-        scopes and task, through the store's own create_request -- never a shortcut
-        around approval. The caller recognizes "try again" on an inbound message
-        (wording.is_try_again, within wording.within_retry_window of the failure
-        notice) and decides `approved` the same way any new request's approval is
-        decided for that sender; when it is False, the caller still owes this
-        fresh pending request whatever a new pending request normally gets
-        (an approval text to the owner), the same as request creation always has."""
+        scopes and task, through the store's own create_request_once -- never a
+        shortcut around approval. The caller recognizes "try again" on an inbound
+        message (wording.is_try_again, within wording.within_retry_window of the
+        failure notice) and decides `approved` the same way any new request's
+        approval is decided for that sender; when it is False, the caller still owes
+        this fresh pending request whatever a new pending request normally gets
+        (an approval text to the owner), the same as request creation always has.
+
+        Bypasses the sender-scoped dedupe entirely (a retry recreates a request for
+        the exact sender `req` already belongs to, so that dedupe would otherwise
+        fold the retry into some other approved/running request of theirs that
+        happened to race it, or even into `req` itself before its own "failed" state
+        had committed). In its place: refuses -- returns None -- when `req` itself
+        is, right now, already approved or running. That is the one case a retry
+        must never hand back a second, concurrent run of the same work; the caller
+        treats None as "nothing to retry yet" and does not acknowledge, execute, or
+        widen scopes for anything."""
         task_id = self.store.task_id_for_request(req.id)
         if not task_id:
             raise TaskRequired(f"request #{req.id} has no task to retry under")
-        return self.store.create_request(
+        fresh = self.store.get_request(req.id) or req
+        if fresh.state in ("approved", "running"):
+            logger.info("[gate] retry of #%s refused: it is already %s", req.id, fresh.state)
+            return None
+        new_req, _created = self.store.create_request_once(
             chat_id=req.chat_id, sender=req.sender, sender_name=req.sender_name, mode=req.mode,
             subject=req.subject, original_message=req.original_message, summary=req.summary,
             scopes=list(req.scopes), prompt=req.prompt, state="approved" if approved else "pending",
-            task_id=task_id, inbound_id=req.inbound_id)
+            task_id=task_id, inbound_id=req.inbound_id, bypass_dedupe=True)
+        return new_req
 
     async def execute(self, req: Request, notify: bool = True) -> str:
         """Run an approved request. With notify=False the caller delivers the
