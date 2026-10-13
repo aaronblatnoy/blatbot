@@ -362,3 +362,37 @@ def test_continuation_fragment_outside_the_window_still_folds(tmp_path):
     assert "it could not reach Coolify" in out2
     # No second run: the fragment folded into the existing failed request.
     assert m.executor.ran == [1]
+
+
+def test_voice_dedupe_hit_says_got_it_not_the_models_acknowledgement(tmp_path):
+    """Item A5: when a voice fragment's create_request_once call dedupes onto a
+    request that landed concurrently (a race during decide() -- the only way this
+    branch is reached, since running_for_thread already folds every non-racing
+    case earlier), the caller is told the fixed "Got it." line, never the model's
+    own acknowledgement from decide()."""
+    m, sent = phone_manager(tmp_path, trust=True, active=True)
+    m.router.next = RouterOutput(reply="On it, deploying now.", task="new", task_title="Deploy the app",
+                                 request=RouterRequest(prompt="Deploy the app", scopes=["web"],
+                                                       summary="deploy the app"))
+
+    session = m.get("p1")
+    real_create = m.store.create_request_once
+
+    def racy_create(*args, **kwargs):
+        # Simulate another fragment's request landing on this thread/sender between
+        # running_for_thread's check and this call, so the dedupe inside
+        # create_request_once fires for real.
+        m.store.create_request_once = real_create
+        t = m.store.create_task("deploy the app (race)")
+        real_create(chat_id="p1", sender="+15550100001", sender_name="Caller", mode="voice",
+                   subject="", original_message="deploy the app", summary="deploy the app",
+                   scopes=["web"], prompt="deploy the app", state="approved", task_id=t["id"])
+        return real_create(*args, **kwargs)
+    m.store.create_request_once = racy_create
+
+    async def go():
+        return await session.voice_consult("go ahead and deploy it", _voice_meta())
+    out = asyncio.run(go())
+
+    assert out == "Got it."
+    assert "On it, deploying now." not in out

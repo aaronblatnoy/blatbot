@@ -1046,6 +1046,18 @@ class GateSession:
                     if t is not None:
                         self.m.store.task_event(t["id"], "outbound", f"(phone) {reply}", chat_id=self.record_id)
                     return reply
+                # Item A5: checking for the fold BEFORE calling decide() here would save
+                # a model round on a certain dedupe hit, but it cannot be done safely:
+                # the running_for_thread check just above already covers every case
+                # where create_request_once's own dedupe (same chat_id AND sender,
+                # approved/running, within the window) would also fire -- that check
+                # is thread-wide (any sender), this one is sender-scoped, so whenever
+                # it would hit, running_for_thread already folded this fragment through
+                # the branch above and returned. The only way create_request_once's
+                # dedupe still fires below is a race in the time decide() itself takes
+                # (another fragment's request lands mid-call) -- a window too narrow to
+                # pre-check meaningfully, so the model round still happens; only the
+                # reply said on that rare hit is fixed, just below.
                 out, task = await self.decide(body=body, message=body, prior=history[:-1], mode="voice",
                                               memory=memory, found=found)
                 if task is not None and out.request is not None:
@@ -1078,7 +1090,12 @@ class GateSession:
                     # fragment as having just created or widened anything.
                     logger.info("[gate %s] voice fragment deduped onto existing request #%s; "
                                 "not running it a second time", self.chat_id, req.id)
-                    return reply or "Got it."
+                    # Item A5: nothing new was created, so the fixed line is said --
+                    # never the model's own acknowledgement (already stored above as
+                    # `reply`, which is a separate, pre-existing inconsistency this
+                    # does not attempt to fix: reordering that storage risks losing the
+                    # model's genuinely-new reply on the common, non-dedupe path).
+                    return "Got it."
                 self.m.remember_knowledge_notes(req.id, getattr(out.request, "knowledge_notes", None))
                 self.m.record_request_on_task(req, task, self)
                 if not approver:
