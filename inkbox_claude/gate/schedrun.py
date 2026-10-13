@@ -48,6 +48,8 @@ def parse_closing(text: str) -> Dict[str, Any]:
             headers.append((i, "NOTE"))
         elif s.startswith("STATUS:"):
             headers.append((i, "STATUS"))
+        elif s.startswith("CHANGED:"):
+            headers.append((i, "CHANGED"))
 
     status_idx = None
     status = None
@@ -81,6 +83,16 @@ def parse_closing(text: str) -> Dict[str, Any]:
     result_line = _block(result_idx, "RESULT:", result_end)
     note = _block(note_idx, "NOTE:", status_idx)
 
+    changed_idx = None
+    for i, kind in headers:
+        if kind == "CHANGED":
+            changed_idx = i
+    changed = None
+    if changed_idx is not None:
+        val = lines[changed_idx].strip()[len("CHANGED:"):].strip().lower()
+        if val in ("yes", "no"):
+            changed = val == "yes"
+
     remove_idxs = set()
     if result_idx is not None:
         remove_idxs.update(range(result_idx, result_end if result_end is not None else len(lines)))
@@ -88,6 +100,8 @@ def parse_closing(text: str) -> Dict[str, Any]:
         remove_idxs.update(range(note_idx, status_idx if status_idx is not None else len(lines)))
     if status_idx is not None:
         remove_idxs.add(status_idx)
+    if changed_idx is not None:
+        remove_idxs.add(changed_idx)
     final_status = "\n".join(ln for i, ln in enumerate(lines) if i not in remove_idxs).strip()
 
     return {
@@ -96,4 +110,5 @@ def parse_closing(text: str) -> Dict[str, Any]:
         "status": status,
         "stop": status == "STOP",
         "final_status": final_status,
+        "changed": changed,
     }

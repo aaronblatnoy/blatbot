@@ -198,6 +198,78 @@ async def test_complete_run_different_result_sends_short_notice_with_next_time(e
 
 
 @pytest.mark.asyncio
+async def test_finished_uses_reported_changed_true_even_if_text_is_unchanged(env):
+    # The model said CHANGED: yes even though result_line/note text is identical to
+    # the previous run's -- its judgment is the source of truth, not the text diff.
+    store, manager, service, task_id = env
+    schedule = await _propose(service, task_id)
+    activated = await service.decide(schedule.id, True)
+    await service._fire(activated, activated.next_run)
+    await asyncio.sleep(0)
+    req1 = manager.executed[-1]
+    await service.finished(req1, {"ok": True, "result_line": "same text", "note": "same note",
+                                  "finished_at": time.time(), "denied": [], "held": False, "changed": True})
+    store.set_state(req1.id, "done")
+    before = len(manager.notices)
+    updated = store.get_schedule(schedule.id)
+    await service._fire(updated, updated.next_run)
+    await asyncio.sleep(0)
+    req2 = manager.executed[-1]
+    await service.finished(req2, {"ok": True, "result_line": "same text", "note": "same note",
+                                  "finished_at": time.time(), "denied": [], "held": False, "changed": True})
+    store.set_state(req2.id, "done")
+    assert len(manager.notices) == before + 1
+
+
+@pytest.mark.asyncio
+async def test_finished_uses_reported_changed_false_even_if_text_differs(env):
+    # The model said CHANGED: no even though the text differs from the previous run's --
+    # again, its own judgment wins over the text-diff heuristic.
+    store, manager, service, task_id = env
+    schedule = await _propose(service, task_id)
+    activated = await service.decide(schedule.id, True)
+    await service._fire(activated, activated.next_run)
+    await asyncio.sleep(0)
+    req1 = manager.executed[-1]
+    await service.finished(req1, {"ok": True, "result_line": "first text", "finished_at": time.time(),
+                                  "denied": [], "held": False, "changed": True})
+    store.set_state(req1.id, "done")
+    before = len(manager.notices)
+    updated = store.get_schedule(schedule.id)
+    await service._fire(updated, updated.next_run)
+    await asyncio.sleep(0)
+    req2 = manager.executed[-1]
+    await service.finished(req2, {"ok": True, "result_line": "totally different text",
+                                  "finished_at": time.time(), "denied": [], "held": False, "changed": False})
+    store.set_state(req2.id, "done")
+    assert len(manager.notices) == before   # no notice sent despite differing text
+
+
+@pytest.mark.asyncio
+async def test_finished_falls_back_to_text_heuristic_when_changed_absent(env):
+    # No "changed" key at all in status (the old contract, or a run whose closing text
+    # never matched CHANGED:): falls back to comparing result_line/note text.
+    store, manager, service, task_id = env
+    schedule = await _propose(service, task_id)
+    activated = await service.decide(schedule.id, True)
+    await service._fire(activated, activated.next_run)
+    await asyncio.sleep(0)
+    req1 = manager.executed[-1]
+    await service.finished(req1, {"ok": True, "result_line": "same text", "finished_at": time.time(),
+                                  "denied": [], "held": False})
+    store.set_state(req1.id, "done")
+    before = len(manager.notices)
+    updated = store.get_schedule(schedule.id)
+    await service._fire(updated, updated.next_run)
+    await asyncio.sleep(0)
+    req2 = manager.executed[-1]
+    await service.finished(req2, {"ok": True, "result_line": "same text", "finished_at": time.time(),
+                                  "denied": [], "held": False})
+    store.set_state(req2.id, "done")
+    assert len(manager.notices) == before   # text identical, no "changed" key -> no notice
+
+
+@pytest.mark.asyncio
 async def test_report_every_time_always_notifies(env):
     store, manager, service, task_id = env
     schedule = await _propose(service, task_id, report_every_time=True)

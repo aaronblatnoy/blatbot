@@ -106,9 +106,12 @@ SCHEDULE_EXECUTOR_SYSTEM = (
     "RESULT: <one plain sentence for Aaron, no markdown, no lists, no bold>\n"
     "NOTE: <what the next run of this schedule needs to know, or omit this line entirely>\n"
     "STATUS: OK\n"
+    "CHANGED: yes or CHANGED: no\n"
     "Use STATUS: FAILED instead of STATUS: OK when the run could not finish what it was asked. Use "
     "STATUS: STOP instead when this schedule should not run again (its job is done for good, or it asked to "
-    "end itself); STOP still needs a RESULT line saying why."
+    "end itself); STOP still needs a RESULT line saying why. CHANGED is yes when something Aaron asked this "
+    "schedule to watch has changed since the previous run's NOTE, or when this is the first run ever; "
+    "CHANGED is no otherwise. CHANGED is always the last line."
 )
 
 def _norm_handle(v: str) -> str:
@@ -381,6 +384,7 @@ class Executor:
             "stop": bool(parsed["stop"]),
             "result_line": parsed["result_line"],
             "note": parsed["note"],
+            "changed": parsed.get("changed"),
             "engine": f"claude:{model or self.model}",
             "summary": raw if raw else "(no status text)",
             "final_status": final_status,

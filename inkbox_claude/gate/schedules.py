@@ -603,7 +603,17 @@ class ScheduleService:
         run_row = self._run_row_for_request(schedule.id, req.id)
         recent = self.store.schedule_runs(schedule.id, limit=2)
         prev = next((r for r in recent if r.get("id") != (run_row or {}).get("id")), None)
-        changed = prev is None or (prev.get("result_line"), prev.get("note")) != (result_line, note)
+        # The model's own CHANGED: yes/no (schedrun.parse_closing) is the source of truth
+        # when it said one; the old text-comparison heuristic is only a fallback for a run
+        # whose closing text never matched the contract (no CHANGED line at all). A first
+        # run always notifies, regardless of what either says.
+        reported_changed = status.get("changed")
+        if prev is None:
+            changed = True
+        elif reported_changed is not None:
+            changed = bool(reported_changed)
+        else:
+            changed = (prev.get("result_line"), prev.get("note")) != (result_line, note)
         run_id = run_row["id"] if run_row else self.store.create_schedule_run(schedule.id, req.id, finished_at)
         self.store.finish_schedule_run(run_id, finished_at=finished_at, complete=complete, outcome=outcome,
                                        result_line=result_line, final_status=final_status, denied=denied,

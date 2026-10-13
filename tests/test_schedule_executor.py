@@ -284,3 +284,19 @@ def test_parse_closing_keeps_a_very_long_closing_block_whole():
     parsed = schedrun.parse_closing(text)
     assert parsed["result_line"] == huge
     assert len(parsed["result_line"]) == 5000
+
+
+def test_parse_closing_changed_yes():
+    parsed = schedrun.parse_closing("RESULT: total moved.\nSTATUS: OK\nCHANGED: yes")
+    assert parsed["changed"] is True
+    assert "CHANGED" not in parsed["final_status"]
+
+
+def test_parse_closing_changed_no():
+    parsed = schedrun.parse_closing("RESULT: nothing new.\nSTATUS: OK\nCHANGED: no")
+    assert parsed["changed"] is False
+
+
+def test_parse_closing_changed_absent_is_none():
+    parsed = schedrun.parse_closing("RESULT: fine.\nSTATUS: OK")
+    assert parsed["changed"] is None
