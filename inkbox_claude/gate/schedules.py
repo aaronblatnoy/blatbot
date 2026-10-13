@@ -301,6 +301,40 @@ class ScheduleService:
                 logger.info("[schedules] %s edit proposal expired; left paused", schedule.id)
                 await self._notice(updated, f"{updated.title} is paused: that change expired unanswered.")
 
+    async def held(self, req: Request, status: Dict[str, Any]) -> None:
+        """A scheduled run's call is parked for the owner's yes. Record the run's
+        own (still-blank) row as incomplete right away, so it does not sit blank
+        while he decides -- without touching consecutive_failures or next_run,
+        both already settled at fire time, and without sending a notice: the
+        confirmation text ask_confirmation sends is the only message this
+        moment gets."""
+        if not req.schedule_id:
+            return
+        schedule = self.store.get_schedule(req.schedule_id)
+        if schedule is None:
+            return
+        confirm = status.get("confirm") or {}
+        tool = str(confirm.get("tool") or "")
+        what = tool.split("__")[-1].replace("_", " ") or "do this"
+        self._record_held_outcome(schedule.id, req.id, outcome="incomplete",
+                                  result_line=f"waiting for your yes to {what}",
+                                  final_status=str(status.get("final_status") or ""))
+
+    async def held_resolved(self, req: Request, status: Dict[str, Any]) -> None:
+        """The owner said yes and the held call ran. Record the run as complete
+        -- the call that was waiting is the whole of what this run needed to
+        do -- without routing through finished(): a held run was already
+        excluded from the three-strikes count and already got its one notice
+        at hold time, so completing it sends nothing more."""
+        if not req.schedule_id:
+            return
+        schedule = self.store.get_schedule(req.schedule_id)
+        if schedule is None:
+            return
+        result_line = str(status.get("summary") or status.get("error") or "performed.")
+        self._record_held_outcome(schedule.id, req.id, outcome="complete", result_line=result_line,
+                                  final_status=str(status.get("final_status") or result_line))
+
     async def held_ended(self, req: Request, reason: str) -> None:
         if not req.schedule_id:
             return
@@ -313,11 +347,27 @@ class ScheduleService:
             outcome = "The held call expired unanswered."
         else:
             raise ValueError(f"unknown held call outcome: {reason}")
+        self._record_held_outcome(schedule.id, req.id, outcome="incomplete", result_line=outcome,
+                                  final_status=outcome)
         changes: Dict[str, Any] = {"last_outcome": outcome}
         if schedule.cadence_kind == "once":
             changes.update(state="ended", next_run=None)
         updated = self.store.update_schedule(schedule.id, **changes)
         await self._notice(updated, f"{updated.title}: {outcome}")
+
+    def _record_held_outcome(self, schedule_id: int, request_id: Optional[int], *, outcome: str,
+                             result_line: str, final_status: str) -> None:
+        """Write or update a held call's schedule_runs row. Used both the moment a
+        call is parked (outcome="incomplete") and the moment it is resolved
+        (complete, or still incomplete after a decline/expiry) -- never finished(),
+        so a held run never counts toward the three-strikes pause and its
+        resolution never fires a second notice."""
+        now = time.time()
+        run_row = self._run_row_for_request(schedule_id, request_id)
+        run_id = run_row["id"] if run_row else self.store.create_schedule_run(schedule_id, request_id, now)
+        self.store.finish_schedule_run(run_id, finished_at=now, complete=(outcome == "complete"),
+                                       outcome=outcome, result_line=result_line, final_status=final_status,
+                                       denied=[], note="", changed=False, cost_usd=None)
 
     # -- editing and acting ------------------------------------------------
     async def edit(self, schedule_id: int, *, owner: bool, changes: Dict[str, Any]) -> Dict[str, Any]:

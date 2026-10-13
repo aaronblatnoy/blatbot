@@ -1665,6 +1665,8 @@ class GateSessionManager:
         c = status["confirm"]
         self.store.set_state(req.id, "pending", status=status, raw_output=status.get("raw"))
         self.store.set_thread(req.chat_id, "awaiting_aaron")
+        if req.schedule_id:
+            await self.schedules.held(req, status)
         short = c["tool"].split("__")[-1]
         shown = {k: v for k, v in c["args"].items() if k != "user_google_email"}
         about = "\n".join(f"  {ln}" for ln in c.get("about") or []) or "  (no further detail found)"
@@ -1711,6 +1713,12 @@ class GateSessionManager:
         result = _clean_result(status.get("summary") or status.get("error") or "")
         self.task_note(req, "done" if ok else "failed", f"{req.summary} -> {result}",
                        state="open" if req.schedule_id else ("done" if ok else "failed"))
+        if req.schedule_id:
+            # A held call's resolution is the whole of what this run needed to do; it was
+            # already excluded from the three-strikes count and already got its one notice
+            # when it was parked, so this goes through held_resolved, never finished().
+            await self.schedules.held_resolved(req, status)
+            return
         if await self.schedules.finished(req, status):
             return
         session = self.get(req.chat_id)

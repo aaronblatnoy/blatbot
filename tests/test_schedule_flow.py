@@ -538,6 +538,104 @@ async def test_a_proposed_schedule_never_fires_and_refuses_run_now(tmp_path):
         await m.schedules.action(schedule.id, "pause", owner=False)
 
 
+class FakeCaller:
+    """Stands in for the tool caller perform_confirmed uses to run the one
+    stored held call."""
+
+    def __init__(self, result):
+        self.result = result
+        self.calls = []
+
+    async def perform(self, tool, args):
+        self.calls.append((tool, args))
+        return dict(self.result)
+
+
+@pytest.mark.asyncio
+async def test_held_scheduled_call_records_incomplete_without_counting_a_strike(tmp_path):
+    m, sent = make_manager(tmp_path)
+    await _propose_via_manager(m, said="every 4 hours check the team page", scopes=["web"])
+    schedule = m.store.schedules(states=["proposed"])[0]
+    activated = await m.schedules.decide(schedule.id, True)
+    before = len(sent)
+
+    m.executor.results.append({
+        "ok": True, "confirm": {"tool": "mcp__fake__send_message", "args": {}, "about": [], "kind": "send"},
+        "result_line": "", "final_status": "", "note": "", "denied": [], "tool_calls": [], "held": True,
+        "started_at": time.time(), "finished_at": time.time(), "cost_usd": None,
+    })
+    await m.schedules.tick(now=activated.next_run)
+    await asyncio.sleep(0)
+
+    run = m.store.last_schedule_run(schedule.id)
+    assert run["outcome"] == "incomplete"
+    assert run["result_line"] == "waiting for your yes to send message"
+    assert not run["complete"]
+
+    after_hold = m.store.get_schedule(schedule.id)
+    assert after_hold.consecutive_failures == 0
+    assert after_hold.state == "active"
+    # the confirmation text is the only message the hold sends
+    assert len(sent) == before + 1
+
+
+@pytest.mark.asyncio
+async def test_approved_held_scheduled_call_completes_with_no_second_notice(tmp_path):
+    m, sent = make_manager(tmp_path)
+    await _propose_via_manager(m, said="every 4 hours check the team page", scopes=["web"])
+    schedule = m.store.schedules(states=["proposed"])[0]
+    activated = await m.schedules.decide(schedule.id, True)
+
+    m.executor.results.append({
+        "ok": True, "confirm": {"tool": "mcp__fake__send_message", "args": {}, "about": [], "kind": "send"},
+        "result_line": "", "final_status": "", "note": "", "denied": [], "tool_calls": [], "held": True,
+        "started_at": time.time(), "finished_at": time.time(), "cost_usd": None,
+    })
+    await m.schedules.tick(now=activated.next_run)
+    await asyncio.sleep(0)
+    sent_count_after_hold = len(sent)
+    req = m.store.pending()[0]
+    assert req.schedule_id == schedule.id
+
+    m.caller = FakeCaller({"ok": True, "summary": "sent it.", "raw": "", "tool_calls": []})
+    await m.decide_request(req.id, "yes")
+    await asyncio.sleep(0)
+    await asyncio.sleep(0)
+
+    run = m.store.last_schedule_run(schedule.id)
+    assert run["outcome"] == "complete"
+    assert run["complete"] is True
+    # no notice on the schedule's channel beyond the one sent while holding
+    assert len(sent) == sent_count_after_hold
+
+
+@pytest.mark.asyncio
+async def test_declined_held_scheduled_call_stays_incomplete(tmp_path):
+    m, sent = make_manager(tmp_path)
+    await _propose_via_manager(m, said="every 4 hours check the team page", scopes=["web"])
+    schedule = m.store.schedules(states=["proposed"])[0]
+    activated = await m.schedules.decide(schedule.id, True)
+
+    m.executor.results.append({
+        "ok": True, "confirm": {"tool": "mcp__fake__send_message", "args": {}, "about": [], "kind": "send"},
+        "result_line": "", "final_status": "", "note": "", "denied": [], "tool_calls": [], "held": True,
+        "started_at": time.time(), "finished_at": time.time(), "cost_usd": None,
+    })
+    await m.schedules.tick(now=activated.next_run)
+    await asyncio.sleep(0)
+    req = m.store.pending()[0]
+
+    result = await m.decide_request(req.id, "no")
+    assert result["ok"] is True
+
+    run = m.store.last_schedule_run(schedule.id)
+    assert run["outcome"] == "incomplete"
+    assert run["result_line"] == "The held call was declined."
+    assert not run["complete"]
+    after = m.store.get_schedule(schedule.id)
+    assert after.consecutive_failures == 0
+
+
 @pytest.mark.asyncio
 async def test_telegram_schedule_notices_go_to_telegram(tmp_path, monkeypatch):
     monkeypatch.setenv("GATE_APPROVER_TELEGRAM_ID", "1")
