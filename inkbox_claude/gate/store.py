@@ -2475,9 +2475,15 @@ class Store:
         Called from __init__ while self._lock is already held (same convention as
         _migrate_people_model): no re-entrant lock acquisition here."""
         from datetime import datetime
+        # A migrated 'continue'-kind row with no cadence supplied is deliberately left
+        # with cadence_kind still empty (paused, last_outcome 'needs a cadence') -- the
+        # WHERE below would otherwise match it again on every restart and keep rewriting
+        # state/last_outcome, undoing anything that happened to it since. Excluding that
+        # one last_outcome is what makes this run exactly once per row.
         rows = self._db.execute(
             "SELECT id, kind, cron, run_at, report_mode, state, notes FROM schedules "
-            "WHERE cadence_kind='' OR cadence_kind IS NULL"
+            "WHERE (cadence_kind='' OR cadence_kind IS NULL) "
+            "AND (last_outcome IS NULL OR last_outcome != 'needs a cadence')"
         ).fetchall()
         for r in rows:
             kind = str(r["kind"] or "")

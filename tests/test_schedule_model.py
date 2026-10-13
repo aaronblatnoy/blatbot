@@ -454,6 +454,41 @@ def test_migration_continue_with_no_cadence_pauses_with_reason(tmp_path):
     assert sched.last_outcome == "needs a cadence"
 
 
+def test_migration_runs_once_on_a_fresh_never_migrated_row(tmp_path):
+    path = tmp_path / "gate.db"
+    [sid] = _seed_legacy_db(path, [{"kind": "continue", "state": "active"}])
+    store = Store(str(path))
+    sched = store.get_schedule(sid)
+    assert sched.cadence_kind == ""
+    assert sched.state == "paused"
+    assert sched.last_outcome == "needs a cadence"
+
+
+def test_migration_is_a_no_op_on_an_already_migrated_row(tmp_path):
+    # A 'continue' row with no cadence supplied is deliberately left with
+    # cadence_kind still empty after migration (paused, "needs a cadence" -- the
+    # literal value the migration itself checks for before touching a row again).
+    # Opening the store a second time, or calling the migration directly again,
+    # must change nothing: no duplicate write, same state and last_outcome.
+    path = tmp_path / "gate.db"
+    [sid] = _seed_legacy_db(path, [{"kind": "continue", "state": "active"}])
+    store = Store(str(path))
+    sched = store.get_schedule(sid)
+    assert sched.state == "paused" and sched.last_outcome == "needs a cadence"
+
+    with store._lock:
+        store._migrate_schedule_cadence_model()
+    sched2 = store.get_schedule(sid)
+    assert sched2.state == "paused"
+    assert sched2.last_outcome == "needs a cadence"
+    assert sched2.cadence_kind == ""
+
+    store3 = Store(str(path))
+    sched3 = store3.get_schedule(sid)
+    assert sched3.state == "paused"
+    assert sched3.last_outcome == "needs a cadence"
+
+
 def test_migration_maps_old_states_to_ended(tmp_path):
     path = tmp_path / "gate.db"
     old_states = ("done", "failed", "rejected")
