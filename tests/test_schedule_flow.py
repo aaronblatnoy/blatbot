@@ -538,6 +538,8 @@ async def test_a_proposed_schedule_never_fires_and_refuses_run_now(tmp_path):
         await m.schedules.action(schedule.id, "pause", owner=False)
 
 
+
+
 class FakeCaller:
     """Stands in for the tool caller perform_confirmed uses to run the one
     stored held call."""
@@ -807,3 +809,36 @@ async def test_an_exception_during_a_scheduled_run_is_recorded_not_swallowed(tmp
     # the schedule is not left stuck: the next firing is not skipped as "still running"
     still_running = m.store.request_running_for_schedule(schedule.id)
     assert still_running is None
+
+
+@pytest.mark.asyncio
+async def test_a_cadence_set_by_edit_does_not_fire_on_every_tick(tmp_path):
+    m, _sent = make_manager(tmp_path)
+    await _propose_via_manager(m, said="every 4 hours check the team page", scopes=["web"])
+    schedule = m.store.schedules(states=["proposed"])[0]
+    await m.schedules.decide(schedule.id, True)
+    # an edit stores a cadence with no anchor, the way a console save or a chat change does
+    await m.schedules.edit(schedule.id, owner=True, changes={"cadence_kind": "every", "cadence": {"minutes": 120}})
+    edited = m.store.get_schedule(schedule.id)
+    now = time.time()
+    assert edited.next_run is not None and edited.next_run > now + 60
+
+    await m.schedules.tick(now=edited.next_run + 1)
+    after_fire = m.store.get_schedule(schedule.id)
+    assert after_fire.next_run > edited.next_run + 60  # not due again on the next tick
+    fired = [r for r in m.store.schedule_runs(schedule.id) if r.get("outcome") != "skipped"]
+    await m.schedules.tick(now=edited.next_run + 31)
+    assert len([r for r in m.store.schedule_runs(schedule.id) if r.get("outcome") != "skipped"]) == len(fired)
+
+
+@pytest.mark.asyncio
+async def test_listing_survives_a_schedule_with_no_timing(tmp_path):
+    from inkbox_claude.gate import schedcmd
+    m, _sent = make_manager(tmp_path)
+    await _propose_via_manager(m, said="every 4 hours check the team page", scopes=["web"])
+    schedule = m.store.schedules(states=["proposed"])[0]
+    m.store.update_schedule(schedule.id, state="paused", cadence_kind="", cadence={})
+    line = schedcmd._schedule_line(m.store, m.store.get_schedule(schedule.id))
+    assert "no timing set yet" in line and "paused" in line
+
+

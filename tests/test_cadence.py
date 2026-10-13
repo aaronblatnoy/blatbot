@@ -51,12 +51,6 @@ def test_every_anchored_does_not_drift_by_run_duration():
     assert cadence.next_run("every", cad, "America/New_York", after) == anchor + 4 * 3600
 
 
-def test_every_without_anchor_falls_back_to_after():
-    cad = {"minutes": 240}
-    after = _ts("2026-10-12T14:30:00")
-    assert cadence.next_run("every", cad, "America/New_York", after) == after
-
-
 def test_daily_description_and_next_run():
     cad = {"time": "08:00"}
     assert cadence.describe("daily", cad, "America/New_York") == "daily at 8:00 AM"
@@ -112,3 +106,11 @@ def test_validate_rejects_bad_cadence_kind():
 def test_validate_rejects_missing_fields():
     with pytest.raises(cadence.CadenceError):
         cadence.validate("weekly", {"time": "09:00"})
+
+
+def test_every_without_an_anchor_is_one_interval_later_never_now():
+    now = 1_800_000_000.0
+    nxt = cadence.next_run("every", {"minutes": 240}, "America/New_York", now)
+    assert nxt == now + 240 * 60
+    # the value a tick would compute right after firing must be in the future
+    assert cadence.next_run("every", {"minutes": 5}, "America/New_York", now) > now
