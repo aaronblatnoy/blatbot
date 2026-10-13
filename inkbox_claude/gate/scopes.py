@@ -102,6 +102,10 @@ LABELS: Dict[str, str] = {
 SYNONYMS: Dict[str, List[str]] = {
     name: list(spec.get("synonyms") or []) for name, spec in (_REGISTRY.get("scopes") or {}).items()  # type: ignore[union-attr]
 }
+ASK: Dict[str, str] = {
+    name: str(spec["ask"]) for name, spec in (_REGISTRY.get("scopes") or {}).items()  # type: ignore[union-attr]
+    if spec.get("ask")
+}
 WHERE_THINGS_LIVE: List[str] = list(_REGISTRY.get("where_things_live") or [])  # type: ignore[arg-type]
 
 # The Jev scope tree, derived from the registry's systems.

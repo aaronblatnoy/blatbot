@@ -226,6 +226,13 @@ def _person_model(store: Store, row: Dict[str, Any]) -> Dict[str, Any]:
         # one person, their "commander" role membership cannot be changed here,
         # and their delete/merge-away controls must not be offered.
         "commander": is_commander,
+         # New roles-summary fields: plain-language can_text and a badge list for
+        # the person panel, built from the same ask phrases as the Roles page --
+        # never the role's stored scope names.
+        "can_text": _person_can_text(role_scopes),
+        "role_badges": [
+            {"name": rn, "locked": rn in LOCKED_ROLES} for rn in role_names(row.get("role"))
+        ],
     }
 
 
@@ -1537,3 +1544,355 @@ def home(gateway: Any, store: Store) -> Dict[str, Any]:
         "people": people_summary,
         "recent_contacts": recent_contacts,
     }
+
+# ---------------------------------------------------------------------------
+# Roles summary: plain-English "who can do what" view of the roles/scopes
+# registry, for the Roles page. Never emits a raw scope name to the owner --
+# only ask phrases, labels and system labels built from them.
+# ---------------------------------------------------------------------------
+
+from ..gate.scopes import ASK as _SCOPE_ASK
+from ..gate.scopes import SCOPE_TREE_SYSTEMS as _SYS_LABELS
+
+NOTES_SYSTEM = "vault"
+
+
+def _ask_for(scope_name: str) -> str:
+    """The owner-facing phrase for one scope: the registry's `ask` field, or a
+    generated one for a discovered vault:<folder> note-folder scope."""
+    if scope_name in _SCOPE_ASK:
+        return _SCOPE_ASK[scope_name]
+    if scope_name.startswith("vault:"):
+        folder = scope_name.split(":", 1)[1].replace("/", " / ")
+        return f"read your notes on {folder}"
+    return SCOPES.get(scope_name, {}).get("description") or scope_name
+
+
+_SYSTEM_SHORT_LABEL = {
+    "second_brain": "Second brain",
+    "tamid_workspace": "TAMID workspace",
+    "tamid_calendar": "TAMID calendar",
+    "aaron_stern": "Your Stern account",
+    "blatbot_inkbox": "Blatbot's inbox and contacts",
+    "club_websites": "Club websites",
+    "public_web": "Public web",
+    "server": "The server",
+    "tamid_social": "TAMID social media",
+    "tamid_analytics": "TAMID website analytics",
+    "nyu_brightspace": "NYU Brightspace",
+    "coolify": "Coolify",
+    "pension_filings": "Pension filings",
+}
+
+
+def _system_label(system_name: str) -> str:
+    """A short plain label for a system, never the long registry description
+    (SCOPE_TREE_SYSTEMS values are full sentences meant for the Jev prompt, not
+    a UI label)."""
+    if system_name in _SYSTEM_SHORT_LABEL:
+        return _SYSTEM_SHORT_LABEL[system_name]
+    return system_name.replace("_", " ").strip().capitalize()
+
+
+def _join_phrases(phrases: List[str]) -> str:
+    phrases = [p for p in phrases if p]
+    if not phrases:
+        return ""
+    if len(phrases) == 1:
+        return phrases[0]
+    if len(phrases) == 2:
+        return f"{phrases[0]} and {phrases[1]}"
+    return ", ".join(phrases[:-1]) + f", and {phrases[-1]}"
+
+
+def _system_scope_sets() -> Dict[str, Dict[str, set]]:
+    """system -> {"read": {...}, "change": {...}, "send": {...}} of scope names,
+    derived from each scope's registry `read` flag and `_scope_kind` (which also
+    distinguishes "send" scopes -- those that let Blatbot speak as itself --
+    from plain write scopes), grouped by SCOPE_SYSTEM (the system each scope was
+    declared under in scopes.yaml). The vault system is excluded here: notes are
+    modeled separately (see `_notes_view`), not as a tri-level system."""
+    out: Dict[str, Dict[str, set]] = {}
+    for name, spec in SCOPES.items():
+        system = SCOPE_SYSTEM.get(name)
+        if not system or system == NOTES_SYSTEM or system == "second_brain":
+            continue
+        kind = _scope_kind(name, spec)
+        bucket = out.setdefault(system, {"read": set(), "change": set(), "send": set()})
+        if kind == "send":
+            bucket["send"].add(name)
+        elif kind == "read":
+            bucket["read"].add(name)
+        else:
+            bucket["change"].add(name)
+    return out
+
+
+def _system_level_labels(sets: Dict[str, set]) -> List[Dict[str, str]]:
+    levels = [{"value": "none", "label": "Nothing"}, {"value": "read", "label": "Read"}]
+    if sets["change"]:
+        levels.append({"value": "change", "label": "Read and change"})
+    return levels
+
+
+def _role_system_view(held: set, system: str, sets: Dict[str, set]) -> Dict[str, Any]:
+    read_set, change_set, send_set = sets["read"], sets["change"], sets["send"]
+    non_send = read_set | change_set
+    held_non_send = held & non_send
+    if not held_non_send:
+        level = "none"
+    elif held_non_send == read_set and read_set:
+        level = "read"
+    elif held_non_send == non_send and non_send:
+        level = "change"
+    else:
+        level = "custom"
+    level_label = {"none": "Nothing", "read": "Read", "change": "Read and change", "custom": "Custom"}[level]
+    phrases = [_ask_for(s) for s in sorted(held_non_send)] if level == "custom" else []
+    send = bool(held & send_set)
+    send_label = _ask_for(next(iter(send_set))) if send_set else None
+    return {
+        "system": system,
+        "system_label": _system_label(system),
+        "level": level,
+        "level_label": level_label,
+        "send": send,
+        "send_label": send_label,
+        "phrases": phrases,
+    }
+
+
+def _vault_scope_names() -> List[str]:
+    """Every scope that is part of the notes model: the whole-vault scope
+    (vault_read, declared under the second_brain system) plus every discovered
+    per-folder scope (declared under the "vault" system at refresh time)."""
+    folders = sorted(name for name, system in SCOPE_SYSTEM.items() if system == NOTES_SYSTEM)
+    return ["vault_read"] + folders
+
+
+def _notes_view(held: set) -> Dict[str, Any]:
+    folder_scopes = [s for s in _vault_scope_names() if s != "vault_read"]
+    held_whole = "vault_read" in held
+    folders = [{"scope": s, "label": _ask_for(s), "on": s in held} for s in folder_scopes]
+    held_any_folder = any(f["on"] for f in folders)
+    if held_whole:
+        level, text = "all", "All notes."
+    elif held_any_folder:
+        level = "some"
+        names = [f["label"] for f in folders if f["on"]]
+        text = "Some folders: " + _join_phrases(names) + "."
+    else:
+        level, text = "none", "No notes."
+    return {"level": level, "folders": folders, "text": text}
+
+
+def _person_can_text(scope_names: List[str]) -> str:
+    phrases = [_ask_for(s) for s in sorted(set(scope_names))]
+    if not phrases:
+        return "Asks you for everything."
+    return "Can, without asking you: " + _join_phrases(phrases) + "."
+
+
+def _role_can_text(role_name: str, phrases: List[str]) -> str:
+    if role_name in LOCKED_ROLES:
+        return "Full control (you)."
+    if not phrases:
+        return "Members cannot do anything without asking you."
+    return "Members can, without asking you: " + _join_phrases(phrases) + "."
+
+
+def _roles_summary_sources(store: Store) -> List[Dict[str, Any]]:
+    return [
+        {"label": "Roles and scopes", "detail": "inkbox_claude/gate/scopes.yaml, the live gate registry"},
+        {"label": "Role membership", "detail": "the console database's roles and trusted-people tables"},
+        {"label": "Notes folders", "detail": "discovered from the vault's own folder structure at run time"},
+    ]
+
+
+def roles_summary(store: Store) -> Dict[str, Any]:
+    """The owner-facing "who can do what" view: every role described in plain
+    English, with no raw scope name anywhere in the payload."""
+    sets_by_system = _system_scope_sets()
+    people_rows = store.trusted()
+    out_roles: List[Dict[str, Any]] = []
+    for row in store.roles():
+        name = row["name"]
+        held = set(row.get("scopes") or [])
+        systems_view = [_role_system_view(held, system, sets) for system, sets in sorted(sets_by_system.items())]
+        phrases: List[str] = []
+        for sv in systems_view:
+            if sv["level"] == "custom":
+                phrases.extend(sv["phrases"])
+            elif sv["level"] in ("read", "change"):
+                sets = sets_by_system[sv["system"]]
+                scope_pool = sets["read"] if sv["level"] == "read" else (sets["read"] | sets["change"])
+                phrases.extend(_ask_for(s) for s in sorted(held & scope_pool))
+            if sv["send"]:
+                phrases.append(sv["send_label"])
+        notes = _notes_view(held)
+        if notes["level"] == "all":
+            phrases.append("read all of your notes")
+        elif notes["level"] == "some":
+            phrases.extend(_ask_for(s) for s in _vault_scope_names() if s in held and s != "vault_read")
+        members = _role_members(store, name)
+        member_models = [{"person_id": m.get("key") or "", "name": m.get("person") or ""} for m in members]
+        out_roles.append({
+            "name": name,
+            "locked": name in LOCKED_ROLES,
+            "description_text": _LOCKED_ROLE_DESCRIPTION.get(name, row.get("note") or ""),
+            "member_count": len(member_models),
+            "members": member_models,
+            "can_text": _role_can_text(name, phrases),
+            "systems": systems_view,
+            "notes": notes,
+            "actions": [],
+        })
+
+    systems_payload = []
+    for system, sets in sorted(sets_by_system.items()):
+        systems_payload.append({
+            "system": system,
+            "system_label": _system_label(system),
+            "levels": _system_level_labels(sets),
+            "has_send": bool(sets["send"]),
+            "send_label": _ask_for(next(iter(sets["send"]))) if sets["send"] else None,
+        })
+    note_folders = [{"scope": s, "label": _ask_for(s)} for s in _vault_scope_names() if s != "vault_read"]
+
+    return {
+        "roles": out_roles,
+        "systems": systems_payload,
+        "note_folders": note_folders,
+        "sources": _roles_summary_sources(store),
+    }
+
+
+_UNKNOWN_ROLE = "there is no role by that name"
+_UNKNOWN_SYSTEM = "that is not a system in the registry"
+_UNKNOWN_LEVEL = "that is not a level this system offers"
+_LOCKED_ROLE_MSG = "that role is built in and cannot be changed here"
+
+
+def _role_row(store: Store, name: str) -> Dict[str, Any]:
+    row = next((r for r in store.roles() if r["name"] == name), None)
+    if row is None:
+        raise ValidationError(_UNKNOWN_ROLE)
+    return row
+
+
+def _role_by_name(store: Store, name: str) -> Dict[str, Any]:
+    for item in roles_summary(store)["roles"]:
+        if item["name"] == name:
+            return item
+    raise ValidationError(_UNKNOWN_ROLE)
+
+
+def _affects_text(role_row: Dict[str, Any], store: Store) -> str:
+    members = _role_members(store, role_row["name"])
+    n = len(members)
+    names = [m.get("person") or "" for m in members]
+    if n == 0:
+        return "This changes what 0 people can do."
+    return f"This changes what {n} people can do: " + _join_phrases(names) + "."
+
+
+def roles_set_level(store: Store, payload: Dict[str, Any]) -> Dict[str, Any]:
+    name = _required_text(payload.get("role"), "role").lower()
+    system = _required_text(payload.get("system"), "system")
+    level = _required_text(payload.get("level"), "level")
+    if name in LOCKED_ROLES:
+        raise ValidationError(_LOCKED_ROLE_MSG)
+    row = _role_row(store, name)
+    sets_by_system = _system_scope_sets()
+    if system not in sets_by_system:
+        raise ValidationError(_UNKNOWN_SYSTEM)
+    if level not in ("none", "read", "change"):
+        raise ValidationError(_UNKNOWN_LEVEL)
+    sets = sets_by_system[system]
+    if level == "change" and not sets["change"]:
+        raise ValidationError(_UNKNOWN_LEVEL)
+    held = set(row.get("scopes") or [])
+    non_send = sets["read"] | sets["change"]
+    held = held - non_send
+    if level == "read":
+        held |= sets["read"]
+    elif level == "change":
+        held |= sets["read"] | sets["change"]
+    store.set_role(name, sorted(held), row.get("note") or "")
+    events.publish("permissions.changed", {"kind": "role", "name": name, "system": system, "level": level})
+    result = _role_by_name(store, name)
+    result["affects_text"] = _affects_text(_role_row(store, name), store)
+    return result
+
+
+def roles_set_send(store: Store, payload: Dict[str, Any]) -> Dict[str, Any]:
+    name = _required_text(payload.get("role"), "role").lower()
+    system = _required_text(payload.get("system"), "system")
+    on = bool(payload.get("on"))
+    if name in LOCKED_ROLES:
+        raise ValidationError(_LOCKED_ROLE_MSG)
+    row = _role_row(store, name)
+    sets_by_system = _system_scope_sets()
+    if system not in sets_by_system:
+        raise ValidationError(_UNKNOWN_SYSTEM)
+    send_set = sets_by_system[system]["send"]
+    if not send_set:
+        raise ValidationError("that system has nothing to send with")
+    held = set(row.get("scopes") or [])
+    if on:
+        held |= send_set
+    else:
+        held -= send_set
+    store.set_role(name, sorted(held), row.get("note") or "")
+    events.publish("permissions.changed", {"kind": "role", "name": name, "system": system, "send": on})
+    result = _role_by_name(store, name)
+    result["affects_text"] = _affects_text(_role_row(store, name), store)
+    return result
+
+
+def roles_set_notes(store: Store, payload: Dict[str, Any]) -> Dict[str, Any]:
+    name = _required_text(payload.get("role"), "role").lower()
+    level = _required_text(payload.get("level"), "level")
+    folders = payload.get("folders") or []
+    if name in LOCKED_ROLES:
+        raise ValidationError(_LOCKED_ROLE_MSG)
+    row = _role_row(store, name)
+    if level not in ("none", "some", "all"):
+        raise ValidationError(_UNKNOWN_LEVEL)
+    vault_names = set(_vault_scope_names())
+    held = set(row.get("scopes") or []) - vault_names
+    if level == "all":
+        held.add("vault_read")
+    elif level == "some":
+        wanted = {f for f in folders if isinstance(f, str) and f in vault_names and f != "vault_read"}
+        held |= wanted
+    store.set_role(name, sorted(held), row.get("note") or "")
+    events.publish("permissions.changed", {"kind": "role", "name": name, "notes": level})
+    result = _role_by_name(store, name)
+    result["affects_text"] = _affects_text(_role_row(store, name), store)
+    return result
+
+
+def roles_who_can(store: Store, q: str) -> Dict[str, Any]:
+    words = [w.lower() for w in (q or "").split() if w.strip()]
+    if not words:
+        return {"matches": []}
+    roles_holding = _roles_holding_scope(store)
+    matches: List[Dict[str, Any]] = []
+    for name, spec in SCOPES.items():
+        phrase = _ask_for(name)
+        system = SCOPE_SYSTEM.get(name, "")
+        haystack = " ".join([phrase, spec.get("description") or "", _system_label(system)]).lower()
+        if not all(w in haystack for w in words):
+            continue
+        role_names_holding = roles_holding.get(name, [])
+        if not role_names_holding:
+            continue
+        role_entries = []
+        for rn in role_names_holding:
+            members = _role_members(store, rn)
+            member_models = [{"person_id": m.get("key") or "", "name": m.get("person") or ""} for m in members]
+            display = "You" if rn in LOCKED_ROLES else rn
+            role_entries.append({"name": display, "members": member_models})
+        matches.append({"phrase": phrase, "roles": role_entries})
+    return {"matches": matches}

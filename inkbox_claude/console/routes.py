@@ -216,6 +216,27 @@ async def post_roles_scopes_remove(request: web.Request) -> web.StreamResponse:
     return _json(api.remove_role_scope(_manager(request).store, await _payload(request)))
 
 
+async def get_roles_summary(request: web.Request) -> web.StreamResponse:
+    return _json(api.roles_summary(_manager(request).store))
+
+
+async def post_roles_set_level(request: web.Request) -> web.StreamResponse:
+    return _json(api.roles_set_level(_manager(request).store, await _payload(request)))
+
+
+async def post_roles_set_send(request: web.Request) -> web.StreamResponse:
+    return _json(api.roles_set_send(_manager(request).store, await _payload(request)))
+
+
+async def post_roles_set_notes(request: web.Request) -> web.StreamResponse:
+    return _json(api.roles_set_notes(_manager(request).store, await _payload(request)))
+
+
+async def get_roles_who_can(request: web.Request) -> web.StreamResponse:
+    q = request.query.get("q", "")
+    return _json(api.roles_who_can(_manager(request).store, q))
+
+
 async def get_scopes(request: web.Request) -> web.StreamResponse:
     store = _manager(request).store
     return _json(api.scopes(store))
@@ -334,6 +355,11 @@ def register(app: web.Application, gateway: Any) -> None:
     app.router.add_post("/console/api/roles/members/remove", _endpoint(post_roles_members_remove, mutation=True))
     app.router.add_post("/console/api/roles/scopes/add", _endpoint(post_roles_scopes_add, mutation=True))
     app.router.add_post("/console/api/roles/scopes/remove", _endpoint(post_roles_scopes_remove, mutation=True))
+    app.router.add_get("/console/api/roles/summary", _endpoint(get_roles_summary))
+    app.router.add_post("/console/api/roles/set_level", _endpoint(post_roles_set_level, mutation=True))
+    app.router.add_post("/console/api/roles/set_send", _endpoint(post_roles_set_send, mutation=True))
+    app.router.add_post("/console/api/roles/set_notes", _endpoint(post_roles_set_notes, mutation=True))
+    app.router.add_get("/console/api/roles/who_can", _endpoint(get_roles_who_can))
     app.router.add_get("/console/api/scopes", _endpoint(get_scopes))
     app.router.add_get("/console/api/scopes/breakdown", _endpoint(get_scopes_breakdown))
     app.router.add_get("/console/api/requests", _endpoint(get_requests))
@@ -359,7 +385,7 @@ def register(app: web.Application, gateway: Any) -> None:
         "/console/api/people/remove", "/console/api/people/contact/add", "/console/api/people/contact/remove",
         "/console/api/people/contact/move", "/console/api/people/contact/update", "/console/api/people/link",
         "/console/api/roles", "/console/api/roles/delete", "/console/api/roles/rename", "/console/api/roles/members/add",
-        "/console/api/roles/members/remove", "/console/api/roles/scopes/add", "/console/api/roles/scopes/remove",
+        "/console/api/roles/members/remove", "/console/api/roles/scopes/add", "/console/api/roles/scopes/remove", "/console/api/roles/set_level", "/console/api/roles/set_send", "/console/api/roles/set_notes",
         "/console/api/scopes", "/console/api/scopes/breakdown", "/console/api/requests",
         "/console/api/requests/decide", "/console/api/tasks", "/console/api/health",
         "/console/api/settings",
