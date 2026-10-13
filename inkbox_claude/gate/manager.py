@@ -1404,7 +1404,7 @@ class GateSession:
         if fresh.state == "done":
             return wording.success_message(_clean_result(fresh_status.get("summary") or ""))
         if fresh.state == "failed":
-            return wording.failure_message(fresh.summary, fresh_status)
+            return wording.failure_message(wording.plain_title(self.m.store, fresh), fresh_status)
         step = wording.latest_step_from_tool_calls(fresh_status.get("tool_calls"))
         return wording.progress_status_line(fresh.created_at, step, fresh.summary)
 

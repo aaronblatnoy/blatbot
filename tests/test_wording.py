@@ -344,3 +344,21 @@ def test_usage_limit_wins_over_an_incidental_quota_mention_in_a_denied_tool():
              "denied": [{"tool": "mcp__tamid-drive__modify_sheet_values", "reason": "scope"}]}
     msg = wording.failure_message("update the sheet", status)
     assert msg.startswith("I've hit a usage limit")
+
+
+def test_progress_reply_failed_branch_uses_plain_title_not_raw_summary(tmp_path):
+    """Item A11: _progress_reply's failed branch names the request by
+    wording.plain_title, same as every other place a request is named -- never the
+    raw summary, which for a call request is a hand-off transcript, not a title."""
+    m, sent = make_manager(tmp_path)
+    s = m.get("aaron")
+    t = m.store.create_task("deploy the app")
+    handoff_summary = "live phone call with an unidentified caller: deploy the app, context: none"
+    req = m.store.create_request(chat_id="aaron", sender="+15550100001", sender_name="Caller", mode="voice",
+                                 subject="", original_message="deploy the app", summary=handoff_summary,
+                                 scopes=["web"], prompt="deploy the app", state="failed", task_id=t["id"])
+    m.store.set_state(req.id, "failed", status={"ok": False, "error": "connection refused",
+                                                "tool_calls": ["mcp__coolify__deploy"], "raw": "connection refused"})
+    reply = s._progress_reply(req)
+    assert handoff_summary not in reply
+    assert "live phone call with an unidentified caller" not in reply
