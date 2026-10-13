@@ -390,7 +390,7 @@ class Executor:
         parsed = schedrun.parse_closing(closing_full)
         if parsed["status"] is not None:
             ok = parsed["status"] in ("OK", "STOP")
-            is_error = is_error or parsed["status"] == "FAILED"
+            is_error = is_error or parsed["status"] in ("FAILED", "BLOCKED")
         else:
             # No RESULT/NOTE/STATUS contract matched (the ordinary, non-schedule system
             # prompt just asks for a last line of STATUS: OK or STATUS: FAILED): fall
@@ -412,6 +412,8 @@ class Executor:
             "result_line": parsed["result_line"],
             "note": parsed["note"],
             "changed": parsed.get("changed"),
+            "blocked": bool(parsed.get("blocked")),
+            "needs": parsed.get("needs") or "",
             "engine": f"claude:{model or self.model}",
             "summary": raw if raw else "(no status text)",
             "final_status": final_status,

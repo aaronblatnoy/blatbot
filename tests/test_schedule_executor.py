@@ -331,3 +331,12 @@ def test_norm_handle_telegram_prefix_stripped():
     protected = ["telegram:998877"]
     assert gate_executor._is_owner_handle("998877", protected)
     assert gate_executor._is_owner_handle("Telegram:998877", protected)
+
+def test_parse_closing_blocked_and_needs_reach_the_status_fields():
+    from inkbox_claude.gate import schedrun
+    parsed = schedrun.parse_closing(
+        "Looked everywhere.\nRESULT: The team chat is not in any thread I can read.\n"
+        "NEEDS: a way to read Telegram groups\nSTATUS: BLOCKED")
+    assert parsed["blocked"] is True
+    assert parsed["needs"] == "a way to read Telegram groups"
+    assert parsed["status"] == "BLOCKED"
