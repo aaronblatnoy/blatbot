@@ -578,3 +578,38 @@ def test_opening_old_shape_database_twice_changes_nothing(tmp_path):
     assert first.report_every_time == second.report_every_time is True
     assert first.until == second.until is None
     assert first.last_note == second.last_note == ""
+
+
+# ---------------------------------------------------------------------------
+# Guard tests: in-flight staleness windows (spec item 8)
+# ---------------------------------------------------------------------------
+
+def test_guard_running_for_thread_ignores_a_scheduled_request_on_the_owner_s_thread(tmp_path):
+    store = make_store(tmp_path)
+    sched = make_schedule(store, cadence_kind="every", cadence={"minutes": 240})
+    req = store.create_request(chat_id="chat-1", sender="Aaron", sender_name="Aaron", mode="schedule",
+                               subject="", original_message=sched.prompt, summary=sched.title,
+                               scopes=["web"], prompt=sched.prompt, state="approved",
+                               task_id=sched.task_id, schedule_id=sched.id)
+    store.set_state(req.id, "running")
+    # A scheduled run in flight on the owner's own chat_id must never make his thread
+    # look busy: a message he sends while it fires is a fresh turn, not held for it.
+    assert store.running_for_thread("chat-1") is None
+
+
+def test_guard_a_stale_in_flight_scheduled_request_does_not_block_the_next_firing(tmp_path):
+    store = make_store(tmp_path)
+    sched = make_schedule(store, cadence_kind="every", cadence={"minutes": 240})
+    req = store.create_request(chat_id="chat-1", sender="Aaron", sender_name="Aaron", mode="schedule",
+                               subject="", original_message=sched.prompt, summary=sched.title,
+                               scopes=["web"], prompt=sched.prompt, state="approved",
+                               task_id=sched.task_id, schedule_id=sched.id)
+    store.set_state(req.id, "running")
+    # Back-date the row past RUN_STALE_S so it reads as a run that died without
+    # reporting (a crash between _fire creating it and execute() finishing it).
+    with store._lock:
+        store._db.execute("UPDATE requests SET updated_at=? WHERE id=?",
+                          (time.time() - store.RUN_STALE_S - 60, req.id))
+        store._db.commit()
+    assert store.request_running_for_schedule(sched.id) is None
+    assert store.get_request(req.id).state == "failed"

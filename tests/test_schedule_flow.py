@@ -253,6 +253,108 @@ async def test_one_time_schedule_ends_after_its_single_run(tmp_path):
 
 
 @pytest.mark.asyncio
+async def test_guard_pause_during_a_run_is_not_undone_when_it_ends(tmp_path):
+    m, sent = make_manager(tmp_path)
+    await _propose_via_manager(m, said="every 4 hours check the team page", scopes=["web"])
+    schedule = m.store.schedules(states=["proposed"])[0]
+    activated = await m.schedules.decide(schedule.id, True)
+
+    m.executor.results.append({"ok": True, "result_line": "found something", "final_status": "found something",
+                               "note": "", "denied": [], "tool_calls": ["mcp__fake__tool"], "held": False,
+                               "finished_at": time.time(), "cost_usd": None})
+    await m.schedules._fire(activated, activated.next_run)
+    # Pause lands before the detached run task below has had a chance to run at all.
+    await m.schedules.action(schedule.id, "pause", owner=True)
+    await asyncio.sleep(0)
+
+    assert m.store.get_schedule(schedule.id).state == "paused"
+
+
+@pytest.mark.asyncio
+async def test_guard_edit_needing_approval_during_a_run_is_not_reactivated_by_its_end(tmp_path):
+    m, sent = make_manager(tmp_path)
+    await _propose_via_manager(m, said="every 4 hours check the team page", scopes=["web"])
+    schedule = m.store.schedules(states=["proposed"])[0]
+    activated = await m.schedules.decide(schedule.id, True)
+
+    m.executor.results.append({"ok": True, "result_line": "found something", "final_status": "found something",
+                               "note": "", "denied": [], "tool_calls": ["mcp__fake__tool"], "held": False,
+                               "finished_at": time.time(), "cost_usd": None})
+    await m.schedules._fire(activated, activated.next_run)
+    await m.schedules.edit(schedule.id, owner=True, changes={"prompt": "check the team page and the roster"})
+    await asyncio.sleep(0)
+
+    assert m.store.get_schedule(schedule.id).state == "proposed"
+
+
+@pytest.mark.asyncio
+async def test_guard_a_stale_revision_run_completing_does_not_clobber_the_new_one(tmp_path):
+    m, sent = make_manager(tmp_path)
+    await _propose_via_manager(m, said="every 4 hours check the team page", scopes=["web"])
+    schedule = m.store.schedules(states=["proposed"])[0]
+    activated = await m.schedules.decide(schedule.id, True)
+    old_revision = activated.revision
+
+    m.executor.results.append({"ok": True, "result_line": "old revision result", "final_status": "old",
+                               "note": "", "denied": [], "tool_calls": ["mcp__fake__tool"], "held": False,
+                               "finished_at": time.time(), "cost_usd": None})
+    await m.schedules._fire(activated, activated.next_run)
+
+    # The owner edits the prompt (needs approval, bumps revision) and re-approves it
+    # before the old run's request finishes.
+    await m.schedules.edit(schedule.id, owner=True, changes={"prompt": "check the team page and the roster"})
+    reapproved = m.store.schedules(states=["proposed"])[0]
+    assert reapproved.revision == old_revision + 1
+    newly_active = await m.schedules.decide(reapproved.id, True)
+    assert newly_active.state == "active"
+
+    before_outcome = newly_active.last_outcome
+    await asyncio.sleep(0)   # the stale run's detached task finishes now
+
+    after = m.store.get_schedule(schedule.id)
+    assert after.state == "active"                 # the new approval's state survives
+    assert after.revision == old_revision + 1       # untouched by the stale run
+    assert after.last_outcome != "old revision result"
+
+
+@pytest.mark.asyncio
+async def test_guard_stop_during_a_run_sends_no_next_run_line_and_nothing_refires(tmp_path):
+    m, sent = make_manager(tmp_path)
+    await _propose_via_manager(m, said="every 4 hours check the team page", scopes=["web"])
+    schedule = m.store.schedules(states=["proposed"])[0]
+    activated = await m.schedules.decide(schedule.id, True)
+
+    m.executor.results.append({"ok": True, "result_line": "last thing it saw", "final_status": "last thing it saw",
+                               "note": "", "denied": [], "tool_calls": ["mcp__fake__tool"], "held": False,
+                               "finished_at": time.time(), "cost_usd": None})
+    await m.schedules._fire(activated, activated.next_run)
+    await m.schedules.action(schedule.id, "stop", owner=True)
+    await asyncio.sleep(0)
+
+    stopped = m.store.get_schedule(schedule.id)
+    assert stopped.state == "ended"
+    assert stopped.next_run is None
+    notice = sent[-1][1]
+    assert "last thing it saw" in notice
+    assert "Next check" not in notice
+
+    before = len(m.store.due_schedules(time.time() + 365 * 24 * 3600))
+    assert before == 0   # nothing left to fire, ever
+
+
+@pytest.mark.asyncio
+async def test_guard_restart_recovery_leaves_an_ordinary_approved_request_alone(tmp_path):
+    m, sent = make_manager(tmp_path)
+    task = m.store.create_task("an ordinary task")
+    req = m.store.create_request(chat_id="some-thread", sender="someone", sender_name="Someone",
+                                 mode="imessage", subject="", original_message="do a thing",
+                                 summary="do a thing", scopes=["web"], prompt="do a thing",
+                                 state="approved", task_id=task["id"])
+    await m.recover_interrupted()
+    assert m.store.get_request(req.id).state == "approved"
+
+
+@pytest.mark.asyncio
 async def test_proposal_expires_unanswered_after_24h(tmp_path):
     m, sent = make_manager(tmp_path)
     await _propose_via_manager(m, said="every 4 hours check the team page", scopes=["web"])
