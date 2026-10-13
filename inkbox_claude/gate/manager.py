@@ -14,7 +14,9 @@ import logging
 import os
 import re
 import time
+from datetime import datetime
 from typing import Any, Awaitable, Callable, Dict, List, Optional, Tuple
+from zoneinfo import ZoneInfo
 
 from .executor import Executor
 from . import settings as _settings
@@ -79,6 +81,32 @@ def _strip_quoted(text: str) -> str:
             continue
         out.append(ln)
     return "\n".join(out).strip()
+
+
+class UntilParseError(ValueError):
+    """The router's `until` was not a date or datetime this code can parse."""
+
+
+def _parse_until(until_text: Optional[str], timezone_name: Optional[str]) -> Optional[float]:
+    """The router hands back `until` as an ISO date ("2026-12-31") or datetime
+    string, in the schedule's own time zone -- never an epoch. A bare date means
+    the end of that day. Raises UntilParseError on anything else, so the caller
+    can answer in words instead of letting a schedule store a sentinel-string
+    "epoch" or crashing later when schedprop tries to format it as a time."""
+    text = (until_text or "").strip()
+    if not text:
+        return None
+    tz = ZoneInfo(timezone_name or "America/New_York")
+    try:
+        dt = datetime.fromisoformat(text)
+    except ValueError as exc:
+        raise UntilParseError(f"I didn't understand the end date {until_text!r}.") from exc
+    if dt.tzinfo is None:
+        if "T" not in text and len(text) <= 10:
+            # A bare date: the schedule runs through the end of that day.
+            dt = dt.replace(hour=23, minute=59, second=59, microsecond=0)
+        dt = dt.replace(tzinfo=tz)
+    return dt.timestamp()
 
 
 OWNER_THREAD = "owner"   # the one thread for the person the assistant works for
@@ -1021,12 +1049,18 @@ class GateSession:
                 return await self.send_to_sender(
                     f"I can't propose that schedule: unknown scope(s) {', '.join(exc.names)}.", role="answer")
             try:
+                until_epoch = _parse_until(out.schedule.until, out.schedule.timezone)
+            except UntilParseError as exc:
+                out.request = None
+                out.schedule = None
+                return await self.send_to_sender(str(exc), role="answer")
+            try:
                 await self.m.schedules.propose(
                     owner=True, chat_id=self.record_id, task_id=int(task["id"]),
                     title=out.schedule.title, prompt=out.schedule.prompt,
                     cadence_kind=out.schedule.cadence_kind, cadence=out.schedule.cadence,
                     timezone=out.schedule.timezone, report_every_time=out.schedule.report_every_time,
-                    until=out.schedule.until, scopes=scopes, start_now=out.schedule.start_now,
+                    until=until_epoch, scopes=scopes, start_now=out.schedule.start_now,
                     origin_mode=self.mode,
                     origin_chat_id=json.dumps({"chat_id": self.chat_id, "meta": self.reply_meta or {}}),
                 )

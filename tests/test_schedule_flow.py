@@ -55,12 +55,12 @@ def make_manager(tmp_path):
 async def _propose_via_manager(m, *, title="Team total watch",
                                prompt="check the team page", said="every 4 hours check the team page",
                                cadence_kind="every", cadence=None, scopes=None,
-                               report_every_time=None, start_now=False,
+                               report_every_time=None, start_now=False, until=None, timezone=None,
                                session_mode="imessage", session_chat_id=None, session_meta=None):
     task = m.store.create_task(title)
     proposal = ScheduleProposal(title=title, prompt=prompt, cadence_kind=cadence_kind,
-                                cadence=cadence or {"minutes": 240}, timezone=None,
-                                report_every_time=report_every_time, until=None,
+                                cadence=cadence or {"minutes": 240}, timezone=timezone,
+                                report_every_time=report_every_time, until=until,
                                 scopes=scopes or [], start_now=start_now)
     out = RouterOutput(reply="", request=None, schedule=proposal)
 
@@ -718,3 +718,42 @@ async def test_console_created_schedule_goes_to_owner_default_thread(tmp_path):
     assert target == f"imessage:{APPROVER_CONV}"
     rows = m.store.history(gm.OWNER_THREAD, limit=5)
     assert any(r.get("text") for r in rows)
+
+
+@pytest.mark.asyncio
+async def test_until_bare_date_from_chat_becomes_end_of_that_day(tmp_path):
+    m, sent = make_manager(tmp_path)
+    await _propose_via_manager(m, said="every 4 hours check the team page until 2026-12-31",
+                               scopes=["web"], until="2026-12-31", timezone="America/New_York")
+    schedule = m.store.schedules(states=["proposed"])[0]
+    assert schedule.until is not None
+    from datetime import datetime
+    from zoneinfo import ZoneInfo
+    dt = datetime.fromtimestamp(schedule.until, ZoneInfo("America/New_York"))
+    assert (dt.year, dt.month, dt.day) == (2026, 12, 31)
+    assert (dt.hour, dt.minute, dt.second) == (23, 59, 59)
+    # schedprop's proposal text must be able to format it without raising
+    from inkbox_claude.gate import schedprop
+    assert "2026" in schedprop.format_proposal(schedule) or "December" in schedprop.format_proposal(schedule)
+
+
+@pytest.mark.asyncio
+async def test_until_full_datetime_from_chat_is_parsed(tmp_path):
+    m, sent = make_manager(tmp_path)
+    await _propose_via_manager(m, said="every 4 hours check the team page until 2026-12-31 3pm",
+                               scopes=["web"], until="2026-12-31T15:00:00", timezone="America/New_York")
+    schedule = m.store.schedules(states=["proposed"])[0]
+    assert schedule.until is not None
+    from datetime import datetime
+    from zoneinfo import ZoneInfo
+    dt = datetime.fromtimestamp(schedule.until, ZoneInfo("America/New_York"))
+    assert (dt.year, dt.month, dt.day, dt.hour, dt.minute) == (2026, 12, 31, 15, 0)
+
+
+@pytest.mark.asyncio
+async def test_unparseable_until_gets_a_plain_reply_and_no_schedule(tmp_path):
+    m, sent = make_manager(tmp_path)
+    await _propose_via_manager(m, said="every 4 hours check the team page until whenever",
+                               scopes=["web"], until="whenever", timezone="America/New_York")
+    assert m.store.schedules(states=["proposed"]) == []
+    assert "didn't understand" in sent[-1][1]
