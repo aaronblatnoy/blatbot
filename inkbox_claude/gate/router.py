@@ -135,7 +135,7 @@ class ScheduleProposal(BaseModel):
         return value
 
 
-SCHEDULE_COMMAND_ACTIONS = {"list", "last", "change", "pause", "resume", "run_now", "stop", "add_capability", "approve", "reject", "status", "stuck", "today"}
+SCHEDULE_COMMAND_ACTIONS = {"list", "last", "change", "pause", "resume", "run_now", "stop", "add_capability", "approve", "reject", "status", "stuck", "today", "repair"}
 
 
 class ScheduleCommand(BaseModel):
@@ -312,6 +312,7 @@ class Router:
             "explicitly telling it it may now do something, e.g. \"let it edit contacts\"), \"approve\" "
             "(a proposal he is saying yes to IN MORE WORDS THAN A BARE YES, e.g. \"yes, go ahead and "
             "start it\"), or \"reject\" (same for a no in more words, e.g. \"no thanks, drop it\").\n"
+            "  - action: \"status\" (\"what are you working on\"/\"anything running\"), \"stuck\" (\"what's stuck\"/\"what needs me\"), \"today\" (\"what did you do today\"), or \"repair\" (\"repair it\"/\"repair the X one\"/\"fix the X one\") are also valid actions; the first three take no target or changes and the common phrasings for them are matched before you ever see the message, so you rarely need to fill them yourself; repair takes target naming the schedule the same way change does, and changes.cadence_kind/changes.cadence only when he also stated a timing in the same message.\n"
             "  - target: his own words for which schedule he means, exactly as he said them (\"the team "
             "one\", a full or partial title) -- never an id, never invented; null when he said \"it\"/"
             "\"that\" or did not name one at all. Matching the words to a schedule is done by code, not you.\n"

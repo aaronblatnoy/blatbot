@@ -20,6 +20,7 @@ from zoneinfo import ZoneInfo
 
 from . import cadence as cadence_module
 from . import schedprop
+from . import overview as overview_mod
 from .store import Schedule
 
 # A small fixed list, not a model: Aaron's own close variants of yes/no on a
@@ -507,10 +508,12 @@ async def _handle_add_capability(manager: Any, schedule: Schedule, changes: Dict
 
 # ---------------------------------------------------------------------------
 # status / stuck / today (item 2): plain answers to "what are you doing",
-# built entirely by code from the store -- no model, no ids, no scope names,
-# no markdown. A small fixed phrase list is matched whole-message before the
-# router ever runs (manager.py's decide()); the router can also still route
-# here via schedule_command for a differently-worded question.
+# built from the SAME row builders console/api.py's /console/api/overview
+# uses (gate/overview.py) -- no model, no ids, no scope names, no markdown,
+# and never a second, independently-guessed diagnosis of the same schedule.
+# A small fixed phrase list is matched whole-message before the router ever
+# runs (manager.py's decide()); the router can also still route here via
+# schedule_command for a differently-worded question.
 # ---------------------------------------------------------------------------
 
 _FIXED_PHRASES = {
@@ -524,131 +527,118 @@ _FIXED_PHRASES = {
     "whats waiting on me": "stuck",
     "what did you do today": "today",
     "what happened today": "today",
+    "repair it": "repair",
 }
 
 
 def match_fixed_phrase(text: str) -> Optional[str]:
-    """One of "status"/"stuck"/"today" when `text` is (whole-message, case-
-    insensitive, question mark optional) one of Aaron's own common exact
-    phrasings for these questions -- matched here, before the router ever
-    sees the message, so the answer never depends on the model."""
+    """One of "status"/"stuck"/"today"/"repair" when `text` is (whole-message,
+    case-insensitive, question mark optional) one of Aaron's own common exact
+    phrasings for these -- matched here, before the router ever sees the
+    message, so the answer never depends on the model. Named forms ("repair
+    the pledge one", "let the donor one do that") are not here: they carry a
+    schedule name, so they go to the router, which resolve() then matches the
+    same way it already matches any other targeted schedule command."""
     norm = _norm(text).rstrip("?")
     return _FIXED_PHRASES.get(norm)
 
 
-def _running_brief(store: Any) -> List[Dict[str, str]]:
-    out: List[Dict[str, str]] = []
-    for req in store.recent_requests(state="running", limit=50):
-        schedule = store.get_schedule(req.schedule_id) if req.schedule_id else None
-        title = schedule.title if schedule is not None else (req.summary or "a request")
-        status = req.status or {}
-        calls = status.get("tool_calls") or []
-        step = ""
-        if calls:
-            last = calls[-1]
-            step = str(last.get("tool") or last.get("name") or "") if isinstance(last, dict) else str(last)
-            step = step.rsplit("__", 1)[-1].replace("_", " ")
-        when = _clock_text(req.created_at, schedule.timezone if schedule is not None else "America/New_York")
-        out.append({"title": title, "started_text": when, "step": step or "working"})
-    return out
+def _title_word(title: str) -> str:
+    """The one plain word used to tell two stuck things apart in a reply
+    ("the <word> one"): the title's own first word, lower-cased. Good enough
+    for the common case of distinct titles; a genuine collision (two titles
+    starting with the same word) is not disambiguated further here."""
+    first = (title or "").split()
+    return first[0].lower() if first else "one"
 
 
-def _next_scheduled(store: Any) -> Optional[Dict[str, Any]]:
-    upcoming = [s for s in store.schedules(states=["active"]) if s.next_run is not None]
-    if not upcoming:
-        return None
-    nxt = min(upcoming, key=lambda s: s.next_run)
-    return {"title": nxt.title, "time_text": _clock_text(nxt.next_run, nxt.timezone)}
-
-
-def _stuck_brief(manager: Any) -> List[Dict[str, str]]:
-    """One entry per stuck schedule, each with exactly one fix phrase the chat
-    path already accepts: "let it <label>" for a missing capability (matched
-    by schedprop.capabilities_from_permission), "stop it" for anything else
-    (schedule_command action "stop", handled directly below)."""
-    store = manager.store
-    out: List[Dict[str, str]] = []
-    for schedule in store.schedules(states=["paused"]):
-        missing = schedprop.missing_capabilities(schedule.prompt, schedule.scopes)
-        if missing:
-            out.append({"sentence": f"{schedule.title} is not allowed to {schedprop.labels(missing)}.",
-                       "fix": f"let it {schedprop.short_labels(missing)}"})
-        else:
-            reason = _normalize_reason_safe(schedule.last_outcome) if schedule.last_outcome else "it stopped running"
-            out.append({"sentence": f"{schedule.title}: {reason}.", "fix": "stop it"})
-    for schedule in store.schedules(states=["active"]):
-        last = store.last_schedule_run(schedule.id)
-        if not last or last.get("outcome") in ("complete", "skipped"):
-            continue
-        missing = schedprop.missing_capabilities(schedule.prompt, schedule.scopes)
-        if missing:
-            out.append({"sentence": f"{schedule.title} is not allowed to {schedprop.labels(missing)}.",
-                       "fix": f"let it {schedprop.short_labels(missing)}"})
-        else:
-            reason = _normalize_reason_safe(last.get("result_line") or "") or "it could not finish"
-            out.append({"sentence": f"{schedule.title}: {reason}.", "fix": "stop it"})
-    return out
-
-
-def _normalize_reason_safe(text: str) -> str:
-    from . import schedules as sched_mod
-    return sched_mod._normalize_reason(text)
-
-
-def _done_today_brief(store: Any, now: Optional[float] = None) -> List[str]:
-    now = time.time() if now is None else now
-    tz = ZoneInfo("America/New_York")
-    today = datetime.fromtimestamp(now, tz).date()
-    rows: List[Any] = []
-    for schedule in store.schedules():
-        for run in store.schedule_runs(schedule.id):
-            finished = run.get("finished_at")
-            if finished is None:
-                continue
-            if datetime.fromtimestamp(finished, tz).date() != today:
-                continue
-            rows.append((finished, f"{schedule.title}: {run.get('result_line') or _last_result_phrase(run)}."))
-    rows.sort(key=lambda t: -t[0])
-    return [sentence for _, sentence in rows]
+def _named_say(say: str, word: str) -> str:
+    """`say` reworded to name which stuck thing it answers, for when more than
+    one thing is stuck in the same reply ("repair it" -> "repair the pledge
+    one"; "let it edit contacts" -> "let the donor one edit contacts"; "let it
+    do that" -> "let the donor one do that"; "try again" -> "try the tracker
+    one again")."""
+    if say == "repair it":
+        return f"repair the {word} one"
+    if say.startswith("let it "):
+        return f"let the {word} one " + say[len("let it "):]
+    if say == "try again":
+        return f"try the {word} one again"
+    return say
 
 
 def status_reply(manager: Any) -> str:
     store = manager.store
-    running = _running_brief(store)
-    nxt = _next_scheduled(store)
+    running = overview_mod.running_rows(store)
+    nxt = overview_mod.next_scheduled_row(store)
     if running:
-        parts = [f"{r['title']}: started {r['started_text']}, now {r['step']}." for r in running]
+        parts = [f"{row['sentence']} (started {row['started_text']})" for row in running]
         reply = f"{_count_word(len(parts))} thing{'s' if len(parts) != 1 else ''} running. " + " ".join(parts)
     else:
         reply = "Nothing is running."
     if nxt:
-        reply += f" Next: {nxt['title']} at {nxt['time_text']}."
+        reply += f" Next: {nxt['title']}, {nxt['next_run_text']}."
     return reply
 
 
-def _stuck_say(it: Dict[str, str]) -> str:
-    if it["fix"] == "stop it":
-        return f'{it["sentence"]} Say "stop it".'
-    return f'{it["sentence"]} Say "{it["fix"]}" or "stop it".'
+def _stuck_sayable(manager: Any) -> List[Dict[str, Any]]:
+    """Stuck rows that have a chat fix at all (say is not None) -- a
+    proposal or a plain approval already has its own yes/no mechanism, so
+    those are left to "list"/the open-proposal flow, not this reply."""
+    rows = overview_mod.stuck_rows(manager.store, manager.schedules)
+    return [r for r in rows if r.get("say")]
 
 
 def stuck_reply(manager: Any) -> str:
-    items = _stuck_brief(manager)
+    items = _stuck_sayable(manager)
     if not items:
         return "Nothing is stuck."
     if len(items) == 1:
-        return f"One thing is stuck. {_stuck_say(items[0])}"
-    parts = [_stuck_say(it) for it in items]
+        it = items[0]
+        say = it["say"]
+        tail = f'Say "{say}".' if say == "stop it" else f'Say "{say}" or "stop it".'
+        return f"One thing is stuck. {it['sentence']} {tail}"
+    parts = []
+    for it in items:
+        word = _title_word(it["title"])
+        say = _named_say(it["say"], word)
+        tail = f'Say "{say}".' if it["say"] == "stop it" else f'Say "{say}" or "stop the {word} one".'
+        parts.append(f"{it['sentence']} {tail}")
     return f"{_count_word(len(items))} things are stuck. " + " ".join(parts)
 
 
 def today_reply(manager: Any) -> str:
-    items = _done_today_brief(manager.store)
+    items = overview_mod.done_today_rows(manager.store)
     if not items:
-        return "Nothing finished today yet."
-    if len(items) == 1:
-        return items[0]
-    return f"{_count_word(len(items))} things finished today. " + " ".join(items)
+        return "Nothing finished today."
+    return " ".join(it["sentence"] for it in items)
+
+
+async def _handle_repair(manager: Any, schedule: Schedule, changes: Dict[str, Any]) -> str:
+    """"repair it"/"repair the <title> one"/"fix the <title> one": apply
+    ScheduleService.repair_plan() for this schedule. A timing already in
+    `changes` (the router filling it in from the same message, "repair it,
+    every 4 hours") or recovered by the plan itself is applied at once, same
+    as repair_apply always does; with neither, this asks how often it should
+    run instead of guessing, and tags that question to the schedule (via a
+    schedule notice, not the generic reply) so a bare timing answered back on
+    this thread ("every 4 hours") resolves to it the same way a reply to any
+    other schedule notice does."""
+    plan = manager.schedules.repair_plan(schedule.id)
+    if not plan["needed"]:
+        return f"{schedule.title} does not need repair."
+    timing = None
+    if "cadence_kind" in changes and "cadence" in changes:
+        timing = {"cadence_kind": changes["cadence_kind"], "cadence": changes["cadence"]}
+    if plan["timing"] is None and timing is None:
+        await manager.send_schedule_notice(
+            schedule, f"How often should {schedule.title} run? For example, every 4 hours.")
+        return ""
+    try:
+        result = await manager.schedules.repair_apply(schedule.id, owner=True, timing=timing)
+    except ValueError as exc:
+        return _friendly_action_error(schedule, exc)
+    return result["message"]
 
 
 async def handle(manager: Any, session: Any, command: Any) -> str:
@@ -688,6 +678,8 @@ async def handle(manager: Any, session: Any, command: Any) -> str:
     if action == "add_capability":
         said_text = _message_text(store, reply_to)
         return await _handle_add_capability(manager, schedule, changes, said_text)
+    if action == "repair":
+        return await _handle_repair(manager, schedule, changes)
     if action == "approve":
         await manager.schedules.decide(schedule.id, True)
         return ""
