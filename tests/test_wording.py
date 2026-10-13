@@ -125,3 +125,46 @@ def test_success_message_adds_done_prefix_to_a_fragment():
 def test_success_message_handles_empty_result():
     assert wording.success_message("") == "Done."
     assert wording.success_message("   ") == "Done."
+
+
+# -- one channel after a call ends -------------------------------------------
+# These reuse the gate test harness (tests/test_gate.py) rather than duplicate it.
+
+import asyncio
+
+from inkbox_claude.gate.manager import OWNER_THREAD
+from inkbox_claude.gate.router import RouterOutput, RouterRequest
+from tests.test_gate import make_manager, voice_meta, AARON_PHONE
+
+
+def _phone_manager(tmp_path, *, trust, active):
+    m, sent = make_manager(tmp_path)
+    m.approver_phone = AARON_PHONE
+    m.voice_trust_approver = trust
+    m.call_active = lambda chat_id: active
+    return m, sent
+
+
+def test_failed_voice_request_after_hangup_sends_once_and_stores_once(tmp_path):
+    m, sent = _phone_manager(tmp_path, trust=True, active=False)
+    m.executor.result = {"ok": False, "error": "connection refused", "tool_calls": ["mcp__coolify__deploy"], "raw": "connection refused"}
+    # The initial ack ("On it.") and the eventual spoken-result phrasing are two
+    # different router.route calls (action=True to decide, action=False to phrase a
+    # result); giving them different canned text keeps this test from confusing one
+    # for the other.
+    m.router.next = RouterOutput(reply="On it.", request=RouterRequest(
+        prompt="Deploy the app", scopes=["web"], summary="deploy the app"))
+    m.router.next_note = RouterOutput(reply="Could not reach Coolify.", request=None)
+
+    async def go():
+        await m.get("p1").handle_inbound("deploy the app for me", "voice", voice_meta())
+        await asyncio.sleep(0.05)
+    asyncio.run(go())
+
+    result_sends = [row for row in sent if "Could not reach Coolify" in row[1]]
+    assert len(result_sends) == 1, f"expected exactly one send of the result, got {result_sends}"
+    assert result_sends[0][2] in ("imessage", "sms")
+    rows = m.store.history("p1", limit=50) + m.store.history(OWNER_THREAD, limit=50)
+    stored = [row for row in rows if row["kind"] == "outbound" and "Could not reach Coolify" in row["text"]]
+    assert len(stored) == 1, f"expected exactly one stored outbound row for the result, got {stored}"
+    assert "connection refused" not in result_sends[0][1]

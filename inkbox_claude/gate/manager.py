@@ -959,7 +959,6 @@ class GateSession:
                 self.mode, self.reply_meta = prev
         reply = " ".join((reply or "").split())
         if reply and not reply.startswith(("Done via", "Failed via")):
-            self.m.store.add_message(self.record_id, "outbound", reply, "voice")
             return reply
         # Fallback: the tool bodies only, never the agent's header.
         body = _result_bodies(text.split("Result:", 1)[-1] if "Result:" in text else text)
@@ -968,14 +967,23 @@ class GateSession:
     async def _run_for_call(self, req: Request, aaron_call: bool, caller: str) -> str:
         text = await self.m.execute(req, notify=False)
         text = await self.phrase_result_for_call(req, text)
-        if not self.m.call_active(self.chat_id):
-            # They hung up first: deliver by text, without touching the thread's channel.
-            if aaron_call:
-                await self.m.send_to_approver(text)
-            else:
-                await self.m.send(f"sms:{caller}", text, "sms", {"to": caller, "sender": caller},
-                                  chat_id=self.record_id)
-            self.m.store.add_message(self.record_id, "outbound", text, "sms")
+        if self.m.call_active(self.chat_id):
+            # Still on the call: this is spoken, not sent, so it is recorded here as the
+            # one row for this result -- the only place that happens.
+            self.m.store.add_message(self.record_id, "outbound", text, "voice")
+            return text
+        # They hung up first: deliver on exactly one channel -- the owner's own primary
+        # (send_to_approver, iMessage) when it was Aaron, or back to the number that
+        # called otherwise -- and let that one send record the one outbound row. Two
+        # earlier bugs both traced here: this function used to store a "voice" row for
+        # a result that was never spoken (above), then send() recorded a second row for
+        # whichever channel it actually went out on, then a third explicit add_message
+        # duplicated (or mislabeled) that same row again.
+        if aaron_call:
+            await self.m.send_to_approver(text)
+        else:
+            await self.m.send(f"sms:{caller}", text, "sms", {"to": caller, "sender": caller},
+                              chat_id=self.record_id)
         return text
 
     async def run_consult_detailed(self, *args: Any, **kwargs: Any) -> Any:
@@ -1141,16 +1149,22 @@ class GateSession:
             logger.warning("[gate %s] refused a second %s for inbound #%s: %r", self.chat_id, role, self.inbound_id, text)
             return False
         if self.mode == "voice" and not self.m.call_active(self.chat_id):
-            # The call ended before this was ready: deliver by text instead.
+            # The call ended before this was ready: deliver by text instead, on exactly
+            # one channel -- the owner's own primary (send_to_approver) when it was
+            # Aaron, or back to the number that called otherwise -- and record exactly
+            # one row for it. send_to_approver already records its own row (imessage);
+            # recording a second one below under mode "voice" (never spoken) was the
+            # voice+imessage double-row bug.
             if self.is_aaron_on_phone():
                 await self.m.send_to_approver(text)
             else:
                 num = self._sender()
                 await self.m.send(f"sms:{num}", text, "sms", {"to": num, "sender": num}, record=False)
+                self.m.store.add_message(self.record_id, "outbound", text, "sms", reply_to=self.inbound_id, role=role)
         else:
             self.typing_stop()
             await self.m.send(self.chat_id, text, self.mode, self.reply_meta, record=False)
-        self.m.store.add_message(self.record_id, "outbound", text, self.mode, reply_to=self.inbound_id, role=role)
+            self.m.store.add_message(self.record_id, "outbound", text, self.mode, reply_to=self.inbound_id, role=role)
         t = self.task()
         if t is not None:
             self.m.store.task_event(t["id"], "outbound", text, chat_id=self.record_id)
