@@ -122,6 +122,65 @@ async def test_non_yes_no_text_not_captured_even_with_open_proposal(env):
     assert await schedcmd.answer_proposal(manager, session, "make it every 2 hours instead") is None
 
 
+def _make_stale(store, chat_id):
+    """Backdate every outbound message on this thread so the window rule
+    (latest-or-15-minutes) fails for all of them, then add a fresh unrelated
+    outbound message after -- the shape item 5's bug needed: a proposal is
+    open, but it is no longer the kind of 'bare yes answers it' situation."""
+    with store._lock:
+        store._db.execute("UPDATE messages SET created_at=created_at-3600 WHERE chat_id=?", (chat_id,))
+        store._db.commit()
+    store.add_message(chat_id, "outbound", "by the way, here's something else", "imessage", role="ack")
+
+
+@pytest.mark.asyncio
+async def test_bare_answer_outside_the_window_asks_instead_of_dropping_silently(env):
+    # A proposal is open, but its own notice is neither the latest outbound
+    # message nor within 15 minutes: the owner must never be left with no
+    # reply at all (item 5) -- he is asked to confirm explicitly instead.
+    store, manager, task_id = env
+    schedule = await _propose(manager, task_id)
+    _make_stale(store, "owner")
+    session = FakeSession()
+    reply = await schedcmd.answer_proposal(manager, session, "yes")
+    assert reply == f'Do you mean start "{schedule.title}"? Say "yes, start it".'
+    assert store.get_schedule(schedule.id).state == "proposed"  # not decided either way
+
+
+@pytest.mark.asyncio
+async def test_bare_no_outside_the_window_asks_to_drop(env):
+    store, manager, task_id = env
+    schedule = await _propose(manager, task_id)
+    _make_stale(store, "owner")
+    session = FakeSession()
+    reply = await schedcmd.answer_proposal(manager, session, "no")
+    assert reply == f'Do you mean drop "{schedule.title}"? Say "no, drop it".'
+    assert store.get_schedule(schedule.id).state == "proposed"
+
+
+@pytest.mark.asyncio
+async def test_yes_start_it_resolves_to_the_open_proposal_with_no_target(env):
+    # The recovery phrase answer_proposal offers back must actually work: a
+    # schedule_command(approve) with no target resolves to the open proposal
+    # on this thread before the 12-hour recent-notice rule.
+    store, manager, task_id = env
+    schedule = await _propose(manager, task_id)
+    _make_stale(store, "owner")
+    session = FakeSession()
+    await schedcmd.handle(manager, session, _command("approve", target=None))
+    assert store.get_schedule(schedule.id).state == "active"
+
+
+@pytest.mark.asyncio
+async def test_no_drop_it_resolves_to_the_open_proposal_with_no_target(env):
+    store, manager, task_id = env
+    schedule = await _propose(manager, task_id)
+    _make_stale(store, "owner")
+    session = FakeSession()
+    await schedcmd.handle(manager, session, _command("reject", target=None))
+    assert store.get_schedule(schedule.id).state == "ended"
+
+
 @pytest.mark.asyncio
 async def test_two_open_proposals_ask_which(env):
     store, manager, task_id = env
@@ -727,7 +786,11 @@ async def test_bare_yes_not_captured_once_window_passes_and_other_message_follow
     # ...and let something else go out on the same thread after it.
     store.add_message("owner", "outbound", "unrelated reply", "imessage", role="answer")
     session = FakeSession()
-    assert await schedcmd.answer_proposal(manager, session, "yes") is None
+    # The bare "yes" is not captured as answering this proposal directly --
+    # but a proposal IS open on this thread, so he is never left with no
+    # reply at all (item 5): he is asked to confirm explicitly instead.
+    reply = await schedcmd.answer_proposal(manager, session, "yes")
+    assert reply == f'Do you mean start "{schedule.title}"? Say "yes, start it".'
     assert store.get_schedule(schedule.id).state == "proposed"
 
 

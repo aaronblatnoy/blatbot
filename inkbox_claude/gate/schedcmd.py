@@ -84,18 +84,34 @@ async def answer_proposal(manager: Any, session: Any, text: str) -> Optional[str
     """If `text` is a bare yes/no and exactly one schedule proposal is open on
     this thread, answer it through ScheduleService.decide and return the reply
     to send (empty string when decide() already sent its own notice and there
-    is nothing more to say). Returns None when nothing here applies -- text is
-    not a plain yes/no, or no proposal is open -- so the caller falls through
-    to the router. Call this only AFTER checking that no pending request on
-    Aaron's plate already claims this reply; that precedence is the caller's
-    job, not this function's."""
+    is nothing more to say). Returns None when nothing here applies at all --
+    text is not a plain yes/no, or no proposal is open on this thread -- so
+    the caller falls through to the router.
+
+    A proposal IS open on this thread but fails the latest-outbound-or-15-
+    minutes window (item 5): never falls through silently in that case --
+    too much may have happened since for a bare yes/no to mean it, but he is
+    still owed an answer, not nothing. Instead this asks him to say so
+    explicitly ("yes, start it" / "no, drop it"), which schedcmd.resolve()
+    then finds as the open proposal on the thread even with no target named.
+
+    Call this only AFTER checking that no pending request on Aaron's plate
+    already claims this reply; that precedence is the caller's job, not this
+    function's."""
     yes, no = is_yes(text), is_no(text)
     if not yes and not no:
         return None
     chat_id = getattr(session, "record_id", None) or getattr(session, "chat_id", "")
-    proposals = _open_proposals(manager.store, chat_id)
-    proposals = [p for p in proposals if _captures_bare_answer(manager.store, chat_id, p)]
+    all_open = _open_proposals(manager.store, chat_id)
+    if not all_open:
+        return None
+    proposals = [p for p in all_open if _captures_bare_answer(manager.store, chat_id, p)]
     if not proposals:
+        if len(all_open) == 1:
+            p = all_open[0]
+            if yes:
+                return f'Do you mean start "{p.title}"? Say "yes, start it".'
+            return f'Do you mean drop "{p.title}"? Say "no, drop it".'
         return None
     if len(proposals) > 1:
         titles = " or ".join(f'"{s.title}"' for s in proposals)
@@ -206,6 +222,15 @@ def resolve(store: Any, text_target: Optional[str], chat_id: str,
         # Nothing was left after dropping filler words ("that one"): treat the
         # target as if he had named none, and fall through to the empty-target
         # rules below instead of reporting no match.
+    # With no target named, an open proposal on this thread wins before the
+    # 12-hour recent-notice rule: "yes, start it"/"no, drop it" (and any other
+    # untargeted approve/reject) should resolve to the thing he is actually
+    # being asked about, not to whatever else was last mentioned.
+    open_props = _open_proposals(store, chat_id)
+    if len(open_props) == 1:
+        return open_props[0]
+    if len(open_props) > 1:
+        return open_props
     recent = _recent_notice_schedule(store, chat_id)
     if recent is not None:
         return recent
