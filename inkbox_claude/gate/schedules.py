@@ -466,7 +466,9 @@ class ScheduleService:
                              f"(valid actions: {', '.join(valid)})")
         now = time.time()
         if action == "pause":
-            return self.store.update_schedule(schedule_id, state="paused")
+            # Owner-initiated, three-strikes, or migration: any route to 'paused' clears
+            # next_run so a paused schedule never shows a time it will not actually fire.
+            return self.store.update_schedule(schedule_id, state="paused", next_run=None)
         if action == "run_now":
             if self.store.request_running_for_schedule(schedule_id) is not None:
                 raise ValueError(f"{schedule.title} already has a run in flight; wait for it to finish")

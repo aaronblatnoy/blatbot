@@ -322,6 +322,20 @@ async def test_action_valid_pauses_an_active_schedule(tmp_path, monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_schedule_list_nulls_next_run_fields_when_not_active(tmp_path):
+    # _make_schedule intentionally leaves a stale next_run column set on a paused row
+    # (as a pause that predates this fix, or a migration, might) -- the console API
+    # must still never show a time a paused schedule will not actually fire at.
+    manager = make_manager(tmp_path)
+    schedule = _make_schedule(manager.store, state="paused")
+    body = api.schedule_list(manager.store, manager.schedules)
+    row = next(r for r in body["schedules"] if r["id"] == schedule.id)
+    assert row["next_run"] is None
+    assert row["next_run_text"] is None
+    assert row["next_run_in_seconds"] is None
+
+
+@pytest.mark.asyncio
 async def test_action_invalid_for_state_returns_409(tmp_path, monkeypatch):
     monkeypatch.setenv("CONSOLE_ALLOWED_ORIGINS", ALLOWED_ORIGIN)
     manager = make_manager(tmp_path)

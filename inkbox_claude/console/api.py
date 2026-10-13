@@ -753,7 +753,10 @@ def _schedule_view(store: Store, service: Any, schedule: Any) -> Dict[str, Any]:
     running = store.request_running_for_schedule(schedule.id) is not None
     missing = schedprop.missing_capabilities(schedule.prompt, schedule.scopes)
     last = _last_non_skipped_run(store, schedule.id)
-    next_run = schedule.next_run
+    # A schedule that is not active has no next run, whatever is still sitting in the
+    # next_run column (paused/ended clear it on their own route in, but this is belt
+    # and suspenders: the console never shows a time that will not actually fire).
+    next_run = schedule.next_run if schedule.state == "active" else None
     return {
         "id": schedule.id, "title": schedule.title, "prompt": schedule.prompt,
         "state": schedule.state, "state_label": _state_label(schedule, running),

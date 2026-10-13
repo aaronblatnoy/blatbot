@@ -530,6 +530,20 @@ async def test_action_refuses_invalid_for_state(env):
 
 
 @pytest.mark.asyncio
+async def test_pause_clears_next_run_and_resume_recomputes_it(env):
+    store, manager, service, task_id = env
+    schedule = await _propose(service, task_id)
+    activated = await service.decide(schedule.id, True)
+    assert activated.next_run is not None
+
+    paused = await service.action(schedule.id, "pause", owner=True)
+    assert paused.next_run is None
+
+    resumed = await service.action(schedule.id, "resume", owner=True)
+    assert resumed.next_run is not None
+
+
+@pytest.mark.asyncio
 async def test_edit_cadence_applies_immediately(env):
     store, manager, service, task_id = env
     schedule = await _propose(service, task_id)
