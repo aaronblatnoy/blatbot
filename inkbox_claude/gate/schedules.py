@@ -48,40 +48,6 @@ def names_tool(prompt: str, tool: str) -> str:
     return short if re.search(r"\b" + re.escape(short) + r"\b", prompt) else ""
 
 
-def cadence(schedule: Schedule) -> str:
-    """Back-compat shim for the console package (P6/P7), which still imports a
-    bare  from this module. The real wording logic lives in
-    cadence.py now; this just reads the schedule's own cadence_kind/cadence."""
-    if schedule.cadence_kind not in cadence_module.KINDS:
-        return "not set"  # a legacy/paused row with no cadence model yet
-    try:
-        return cadence_module.describe(schedule.cadence_kind, schedule.cadence, schedule.timezone)
-    except cadence_module.CadenceError:
-        return "not set"
-
-
-def next_three(schedule: Schedule, now: Optional[float] = None) -> List[float]:
-    """Back-compat shim for the console package: the next (up to) three fire
-    times for a schedule, from its own next_run forward."""
-    now = time.time() if now is None else now
-    out: List[float] = []
-    if schedule.cadence_kind not in cadence_module.KINDS:
-        return out  # a legacy/paused row with no cadence model yet: nothing to show
-    cursor = schedule.next_run
-    if cursor is None or cursor < now:
-        cursor = now
-    for _ in range(3):
-        try:
-            nxt = cadence_module.next_run(schedule.cadence_kind, schedule.cadence, schedule.timezone, cursor)
-        except cadence_module.CadenceError:
-            break
-        if nxt is None:
-            break
-        out.append(nxt)
-        cursor = nxt
-    return out
-
-
 def run_outcome(status: Dict[str, Any]) -> str:
     """complete / incomplete / failed, from the executor's status contract. A run
     that was denied a tool or had a call held is incomplete even when the model's
