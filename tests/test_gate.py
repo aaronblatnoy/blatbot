@@ -1304,7 +1304,7 @@ def test_ungrounded_result_reply_is_rewritten_or_replaced(tmp_path):
         return {"grounded": g, "p": 0.9 if g else 0.1, "reason": "ok"}
     p.judge_grounded = judge_grounded
     m.executor.result = {"ok": True, "summary": "Web search results: 1. Leadership - Stern Real Estate Group\n   co-presidents: Cand Idate and Sam Rivera",
-                         "tool_calls": [], "raw": "x"}
+                         "tool_calls": ["WebSearch"], "raw": "x"}
     m.router.next = RouterOutput(reply="On it.", task="new", task_title="Find the SREG president")
     drafts = [RouterOutput(reply="The president is Jamie Rivera, elected last spring.", task="T1"),
               RouterOutput(reply="The search lists Cand Idate and Sam Rivera as co-presidents; not yet confirmed on the site.", task="T1")]
@@ -1331,7 +1331,7 @@ def test_still_ungrounded_reply_falls_back_to_the_raw_result(tmp_path):
     async def judge_grounded(**kw):
         return {"grounded": False, "p": 0.1, "reason": "ok"}
     p.judge_grounded = judge_grounded
-    m.executor.result = {"ok": True, "summary": "Found 2 matches for President:\n- Cand Idate: Co-President", "tool_calls": [], "raw": "x"}
+    m.executor.result = {"ok": True, "summary": "Found 2 matches for President:\n- Cand Idate: Co-President", "tool_calls": ["WebSearch"], "raw": "x"}
     m.router.next = RouterOutput(reply="On it.", task="new", task_title="x")
     m.router.next_note = RouterOutput(reply="The president is Jamie Rivera.", task="T1")
     async def go():
@@ -1352,7 +1352,7 @@ def test_long_unverified_result_sends_the_rewrite_not_a_dump(tmp_path):
     p.judge_grounded = judge_grounded
     big = "Done via Jev agent in 4.7s (1 tool call(s)).\n- get_events:\n" + "\n".join(
         "- \"Event %d\" (Starts: 2026-10-01T%02d:00:00-04:00)" % (i, 9 + i % 10) for i in range(80)) + "\nSTATUS: OK"
-    m.executor.result = {"ok": True, "summary": big, "tool_calls": [], "raw": big}
+    m.executor.result = {"ok": True, "summary": big, "tool_calls": ["mcp__google-workspace__get_events"], "raw": big}
     m.router.next = RouterOutput(reply="On it.", task="new", task_title="x")
     m.router.next_note = RouterOutput(reply="Open slots Thursday: 11:00, 12:30, 3:00.", task="T1")
     async def go():
@@ -1906,14 +1906,14 @@ def test_decide_graph_runs_the_jev_first_flow(tmp_path, monkeypatch):
 
 def test_voice_result_is_phrased_for_speech_not_raw(tmp_path):
     m, sent = phone_manager(tmp_path, trust=True)
-    m.executor.result = {"ok": True, "summary": "Done via Jev agent in 9.1s (3 tool call(s)).\n- get_events:\nSuccessfully retrieved 2 events", "tool_calls": [], "raw": "x"}
+    m.executor.result = {"ok": True, "summary": "Done via Jev agent in 9.1s (3 tool call(s)).\n- get_events:\nSuccessfully retrieved 2 events", "tool_calls": ["mcp__google-workspace__get_events"], "raw": "x"}
     m.router.next = RouterOutput(reply=None, task="new", task_title="Tomorrow's chats",
                                  request=RouterRequest(prompt="List tomorrow", scopes=["stern_calendar"], summary="Tomorrow's chats"))
     m.router.next_note = RouterOutput(reply="Two chats tomorrow: Owen at five and Philip at six.", request=None)
     out = asyncio.run(m.get("p1").voice_consult("what chats do I have tomorrow", voice_meta()))
     assert out == "Two chats tomorrow: Owen at five and Philip at six."
     assert "Done via Jev agent" not in out
-    spoken = [r for r in m.store.history("p1", limit=20) if r["kind"] == "outbound" and r["mode"] == "voice"]
+    spoken = [r for r in m.store.history(OWNER_THREAD, limit=20) if r["kind"] == "outbound" and r["mode"] == "voice"]
     assert spoken and spoken[-1]["text"] == out
 
 
@@ -1993,7 +1993,7 @@ def test_still_ungrounded_reply_to_a_stranger_never_leaks_the_raw_result(tmp_pat
     final = outbound[-1]
     for leaked in ("send tool", "scope", "aaron approved", "permitted", "deliver the reply myself"):
         assert leaked not in final.lower()
-    assert "let aaron" in final.lower() or "told aaron" in final.lower()
+    assert "something broke on my side" in final.lower()
 
 
 def test_vault_scope_reads_notes_and_stays_inside_the_vault(tmp_path, monkeypatch):

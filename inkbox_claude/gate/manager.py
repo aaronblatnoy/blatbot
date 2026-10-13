@@ -910,9 +910,10 @@ class GateSession:
         Aaron's trusted number runs the request now and hears the result;
         anyone else's request goes to Aaron for a yes and they are told so."""
         req = None
+        call_meta = dict(meta or {})
         async with self._lock:
             prev = (self.mode, self.reply_meta)
-            self.mode, self.reply_meta = "voice", dict(meta or {})
+            self.mode, self.reply_meta = "voice", dict(call_meta)
             self.m.store.set_thread(self.chat_id, "routing")  # state only: keep their text/email route
             body = (query or "").strip()
             self.inbound_id = self.m.store.add_message(self.record_id, "inbound", body, "voice")
@@ -985,17 +986,25 @@ class GateSession:
                 self.mode, self.reply_meta = prev
         # Trusted caller: run it now, outside the lock, and hand back the result to speak.
         try:
-            return await asyncio.wait_for(asyncio.shield(self._run_for_call(req, aaron_call, caller)), timeout=75)
+            return await asyncio.wait_for(
+                asyncio.shield(self._run_for_call(req, aaron_call, caller, call_meta)), timeout=75)
         except asyncio.TimeoutError:
             return "That is still running. I will text you the result as soon as it finishes."
 
-    async def phrase_result_for_call(self, req: Request, text: str) -> str:
-        """Turn a finished request's raw status into what the voice model says: the same
-        reply writer and grounding check a texted result gets, told it is for a call."""
-        note = f"Task #{req.id} {'done' if text.startswith('Done') else 'FAILED'}: {req.summary}\nResult:\n{text}"
+    async def phrase_result_for_call(self, req: Request, text: str, call_meta: Dict[str, Any], ok: bool) -> str:
+        """Turn a finished request's result into what the voice model says. A failure is
+        already the whole message wording.py built for it (`execute()` returns it as-is
+        with notify=False); it is spoken exactly as written, never handed to a model that
+        can rewrite it into something the grounding check then rejects. Only a real
+        success result -- the run's own narration -- goes through the reply writer and
+        grounding check. `ok` comes from the request's own status, never from sniffing
+        the text for a leading "Done"."""
+        if not ok:
+            return text
+        note = f"Task #{req.id} done: {wording.plain_title(self.m.store, req)}\nResult:\n{text}"
         async with self._lock:
             prev = (self.mode, self.reply_meta)
-            self.mode = "voice"
+            self.mode, self.reply_meta = "voice", dict(call_meta or {})
             try:
                 approver = self.is_approver()
                 history = self.m.store.history(self.record_id, limit=20)
@@ -1008,7 +1017,7 @@ class GateSession:
                              "the answer or outcome first, names and times as words, no lists, no links, no symbols, "
                              "no internal details. If the result is only partial, say plainly what was and was not "
                              "found. Do not create a request.)"),
-                    action_task=req.summary)
+                    action_task=wording.plain_title(self.m.store, req))
                 out.request = None
                 reply = await self.ground_reply(out.reply, note, history, memory, "", approver)
             except Exception:
@@ -1023,13 +1032,29 @@ class GateSession:
         body = _result_bodies(text.split("Result:", 1)[-1] if "Result:" in text else text)
         return " ".join(body.split())[:700] or text
 
-    async def _run_for_call(self, req: Request, aaron_call: bool, caller: str) -> str:
+    async def _run_for_call(self, req: Request, aaron_call: bool, caller: str,
+                            call_meta: Dict[str, Any]) -> str:
         text = await self.m.execute(req, notify=False)
-        text = await self.phrase_result_for_call(req, text)
-        if self.m.call_active(self.chat_id):
-            # Still on the call: this is spoken, not sent, so it is recorded here as the
-            # one row for this result -- the only place that happens.
-            self.m.store.add_message(self.record_id, "outbound", text, "voice")
+        fresh = self.m.store.get_request(req.id)
+        ok = bool((fresh.status or {}).get("ok")) if fresh is not None else True
+        text = await self.phrase_result_for_call(req, text, call_meta, ok)
+        # Every row this call writes -- the ones above during voice_consult and these
+        # closing ones -- belong on the same thread record: the call's own identity
+        # (mode "voice", this call's meta) decides record_id the same way it did then,
+        # so the split-record bug (inbound on the owner thread, outbound on chat_id)
+        # cannot happen here even though mode/reply_meta were restored to the prior
+        # channel's values the moment the lock was released in voice_consult.
+        async with self._lock:
+            prev = (self.mode, self.reply_meta)
+            self.mode, self.reply_meta = "voice", dict(call_meta or {})
+            rid = self.record_id
+            still_on_call = self.m.call_active(self.chat_id)
+            if still_on_call:
+                # Still on the call: this is spoken, not sent, so it is recorded here as
+                # the one row for this result -- the only place that happens.
+                self.m.store.add_message(rid, "outbound", text, "voice")
+            self.mode, self.reply_meta = prev
+        if still_on_call:
             return text
         # They hung up first: deliver on exactly one channel -- the owner's own primary
         # (send_to_approver, iMessage) when it was Aaron, or back to the number that
@@ -1042,7 +1067,7 @@ class GateSession:
             await self.m.send_to_approver(text)
         else:
             await self.m.send(f"sms:{caller}", text, "sms", {"to": caller, "sender": caller},
-                              chat_id=self.record_id)
+                              chat_id=rid)
         return text
 
     async def run_consult_detailed(self, *args: Any, **kwargs: Any) -> Any:
@@ -1314,6 +1339,21 @@ class GateSession:
             if inbound_id:
                 self.inbound_id = inbound_id
             return await self._route_and_act(body)
+
+    async def notify_failure(self, message: str, note: str, inbound_id: Optional[int] = None) -> bool:
+        """A failed request's message to the person is always the wording.py text, exactly
+        as written -- never phrased or rewritten by a model (the raw status in `note`
+        still lands on the ledger/log, just never in front of a person). Same per-inbound
+        at-most-one-answer guarantee as notify_after_request."""
+        async with self._lock:
+            if inbound_id:
+                self.inbound_id = inbound_id
+            self.m.store.add_message(self.record_id, "system", note)
+            if self.inbound_id and "answer" in self.m.store.responses_to(self.inbound_id):
+                logger.warning("[gate %s] inbound #%s already answered; failure result not delivered again",
+                               self.chat_id, self.inbound_id)
+                return True
+            return await self.send_to_sender(message, role="answer")
 
     async def notify_after_request(self, note: str, inbound_id: Optional[int] = None) -> bool:
         """Phrase a request's result for the sender. The result is THE answer to the
@@ -2195,6 +2235,7 @@ class GateSessionManager:
         if status.get("confirm") or not status.get("ok") or status.get("tool_calls"):
             return status
         logger.warning("[gate] #%s reported success with no tool call; insisting it runs", req.id)
+        print("DEBUG insist: status=", status)
         insist = (context + "\n\n--- THIS RUN ---\nThe last attempt returned without using a tool and "
                   "said the work was already done. It was not. Whatever the record above says was "
                   "answered before, answer it again now by looking, and report what you find this "
@@ -2443,12 +2484,13 @@ class GateSessionManager:
                 return ""
         outcome = "done" if ok else "FAILED"
         result = _clean_result(status.get("summary") or status.get("error") or "")
+        title = wording.plain_title(self.store, req)
         # The message a person actually reads for this result: the cleaned result on
         # success, or a plain failure message (never the raw SDK/provider error, never
         # "That failed.") on failure. `result`/`note` below stay as they were -- the
         # grounding fallback downstream (ground_reply) still works from the run's own
         # findings -- only the text actually sent or returned here uses `message`.
-        message = wording.success_message(result) if ok else wording.failure_message(req.summary, status)
+        message = wording.success_message(result) if ok else wording.failure_message(title, status)
         self.task_note(req, "done" if ok else "failed", f"{req.summary} -> {result}",
                        state="open" if req.schedule_id else ("done" if ok else "failed"))
         if await self.schedules.finished(req, status):
@@ -2465,31 +2507,46 @@ class GateSessionManager:
         # Messages live on the person's record, which for the owner spans every surface.
         meanwhile = self.store.inbound_since(self.get(req.chat_id).record_id, req.created_at)
         if from_aaron:
-            if not ok and meanwhile:
-                # The run failed and Aaron said more while it ran (a hint, a correction):
-                # decide that latest message now, as one fresh turn. Exactly one reply.
-                logger.info("[gate] #%s failed with %d message(s) received meanwhile; re-deciding the latest",
-                            req.id, len(meanwhile))
-                self.store.add_message(req.chat_id, "system", note)
-                try:
-                    await session.handle_followup(meanwhile[-1]["text"], inbound_id=meanwhile[-1]["id"])
-                except Exception:
-                    logger.exception("[gate] follow-up after #%s failed", req.id)
-                finally:
-                    session.typing_stop()
+            if not ok:
+                # A failed request's message is always wording.py's own text, on every
+                # branch: notify_failure sends `message` exactly as written and never
+                # hands it to the router/model (which is how the raw status error used
+                # to leak through, and how a correctly-worded failure line got rewritten
+                # into something the grounding check then threw away). The raw status
+                # still lands on the ledger/log via `note`.
+                replied = await session.notify_failure(message, note, inbound_id=req.inbound_id)
+                if not replied:
+                    await self.send_to_approver(f"Failed: {title}\n{message}")
+                if meanwhile:
+                    # Aaron said more while it ran (a hint, a correction): the failure
+                    # above is the answer to the request itself; this is a separate,
+                    # later turn for whatever he said after that.
+                    logger.info("[gate] #%s failed with %d message(s) received meanwhile; handling the latest",
+                                req.id, len(meanwhile))
+                    try:
+                        await session.handle_followup(meanwhile[-1]["text"], inbound_id=meanwhile[-1]["id"])
+                    except Exception:
+                        logger.exception("[gate] follow-up after #%s failed", req.id)
+                session.typing_stop()
                 return ""
             # Aaron asked for it himself: let the router phrase the answer.
             try:
                 replied = await session.notify_after_request(note, inbound_id=req.inbound_id)
                 if not replied:
-                    await self.send_to_approver(f"{'Done' if ok else 'Failed'}: {req.summary}\n{message}")
+                    await self.send_to_approver(f"Done: {title}\n{message}")
             finally:
                 session.typing_stop()
             return ""
         # Someone else's request: short status to Aaron, and the router may
-        # tell the sender the outcome (never Claude's raw text).
+        # tell the sender the outcome -- except on failure, which is always
+        # wording.py's own text, never the router's rewrite of it.
+        if not ok:
+            await self.send_to_approver(f"[Blatbot #{req.id} FAILED] {title}\n{message}")
+            await session.notify_failure(message, note, inbound_id=req.inbound_id)
+            session.typing_stop()
+            return ""
         try:
-            await self.send_to_approver(f"[Blatbot #{req.id} {outcome}] {req.summary}\n{message}")
+            await self.send_to_approver(f"[Blatbot #{req.id} {outcome}] {title}\n{message}")
             await session.notify_after_request(note, inbound_id=req.inbound_id)
         finally:
             session.typing_stop()

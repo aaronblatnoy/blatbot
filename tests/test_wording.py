@@ -148,24 +148,23 @@ def _phone_manager(tmp_path, *, trust, active):
 def test_failed_voice_request_after_hangup_sends_once_and_stores_once(tmp_path):
     m, sent = _phone_manager(tmp_path, trust=True, active=False)
     m.executor.result = {"ok": False, "error": "connection refused", "tool_calls": ["mcp__coolify__deploy"], "raw": "connection refused"}
-    # The initial ack ("On it.") and the eventual spoken-result phrasing are two
-    # different router.route calls (action=True to decide, action=False to phrase a
-    # result); giving them different canned text keeps this test from confusing one
-    # for the other.
+    # The initial ack ("On it.") is the only router.route call this turn makes: a
+    # failed request's message is always wording.py's own text ("it could not reach
+    # Coolify", built from the status and the known tool->system name), never a model's
+    # rephrasing of it -- so no next_note canned reply is needed or used here.
     m.router.next = RouterOutput(reply="On it.", request=RouterRequest(
         prompt="Deploy the app", scopes=["web"], summary="deploy the app"))
-    m.router.next_note = RouterOutput(reply="Could not reach Coolify.", request=None)
 
     async def go():
         await m.get("p1").handle_inbound("deploy the app for me", "voice", voice_meta())
         await asyncio.sleep(0.05)
     asyncio.run(go())
 
-    result_sends = [row for row in sent if "Could not reach Coolify" in row[1]]
+    result_sends = [row for row in sent if "it could not reach Coolify" in row[1]]
     assert len(result_sends) == 1, f"expected exactly one send of the result, got {result_sends}"
     assert result_sends[0][2] in ("imessage", "sms")
     rows = m.store.history("p1", limit=50) + m.store.history(OWNER_THREAD, limit=50)
-    stored = [row for row in rows if row["kind"] == "outbound" and "Could not reach Coolify" in row["text"]]
+    stored = [row for row in rows if row["kind"] == "outbound" and "it could not reach Coolify" in row["text"]]
     assert len(stored) == 1, f"expected exactly one stored outbound row for the result, got {stored}"
     assert "connection refused" not in result_sends[0][1]
 
@@ -311,3 +310,37 @@ def test_a_read_scope_with_a_changing_tool_is_not_read_only():
     assert wording.truly_read_only("contacts") is False
     assert wording.truly_read_only("stern_calendar") is False
     assert wording.truly_read_only("email_send") is False
+
+
+# -- usage-limit classification (item 7): a session/usage/rate limit, quota,
+# overload, or exhausted credit balance is its own case, with its own wording,
+# and never offers "try again" as an immediate fix. --------------------------
+
+SESSION_LIMIT_ERROR = (
+    "Claude Code returned an error result: You've hit your session limit "
+    "· resets 3:10pm (America/New_York) (exit code: 1)"
+)
+
+
+def test_usage_limit_with_reset_time_names_the_time_and_does_not_offer_try_again():
+    status = {"ok": False, "error": SESSION_LIMIT_ERROR, "tool_calls": []}
+    msg = wording.failure_message("check the schedule", status)
+    assert msg == ("I've hit a usage limit and can't run anything until 3:10pm (America/New_York). "
+                   "I'll need you to try again after that.")
+    assert "say \"try again\"" not in msg.lower()
+    assert "exit code" not in msg and "Claude Code" not in msg
+
+
+def test_usage_limit_without_a_reset_time_still_classifies(tmp_path=None):
+    status = {"ok": False, "error": "rate limit exceeded, please slow down", "tool_calls": []}
+    msg = wording.failure_message("look something up", status)
+    assert msg == "I've hit a usage limit and can't run anything right now. I'll need you to try again after that."
+
+
+def test_usage_limit_wins_over_an_incidental_quota_mention_in_a_denied_tool():
+    # A usage-limit error has nothing to do with a denied scope, even when the
+    # raw text happens to also mention a tool that was refused earlier in the run.
+    status = {"ok": False, "error": "overloaded_error: the model is overloaded",
+             "denied": [{"tool": "mcp__tamid-drive__modify_sheet_values", "reason": "scope"}]}
+    msg = wording.failure_message("update the sheet", status)
+    assert msg.startswith("I've hit a usage limit")

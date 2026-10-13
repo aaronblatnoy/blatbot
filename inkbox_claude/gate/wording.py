@@ -51,6 +51,23 @@ _LOGIN_WORDS = (
     "not logged in", "no longer logged in", "session expired", "token expired",
     "invalid credentials", "forbidden", "login failed", "re-login",
 )
+_USAGE_LIMIT_WORDS = (
+    "session limit", "usage limit", "rate limit", "quota", "overloaded", "credit balance",
+)
+_RESET_TIME_RE = re.compile(
+    r"resets?\s+(\d{1,2}(?::\d{2})?\s*(?:am|pm)?(?:\s*\([^)]*\))?)", re.I)
+
+
+def _is_usage_limit(text: str) -> bool:
+    low = text.lower()
+    return any(w in low for w in _USAGE_LIMIT_WORDS) or "resets " in low
+
+
+def _reset_time(text: str) -> Optional[str]:
+    """The reset time exactly as the error gave it, e.g. "3:10pm (America/New_York)",
+    or None when the error names no reset time at all."""
+    m = _RESET_TIME_RE.search(text or "")
+    return m.group(1).strip().rstrip(".") if m else None
 
 
 def _tool_scope(tool: str) -> Optional[str]:
@@ -108,10 +125,14 @@ def _is_network_or_login(text: str) -> bool:
 
 
 def _classify(status: Dict[str, Any]) -> str:
-    """One category for a failed run: 'buffer', 'timeout', 'refusal', 'network',
-    or 'other'. Order matters: a specific error signature (buffer, timeout) wins
-    over a refusal or network guess even if denied/held also happen to be set."""
+    """One category for a failed run: 'usage_limit', 'buffer', 'timeout', 'refusal',
+    'network', or 'other'. Order matters: usage_limit is checked first (an exhausted
+    session has nothing to do with a buffer or a denied tool, even if the error text
+    happens to also mention one), then a specific error signature (buffer, timeout)
+    wins over a refusal or network guess even if denied/held also happen to be set."""
     text = f"{status.get('error') or ''} {status.get('final_status') or ''}"
+    if _is_usage_limit(text):
+        return "usage_limit"
     if _is_buffer_error(text):
         return "buffer"
     if _is_timeout(text):
@@ -158,6 +179,17 @@ def has_partial_findings(status: Dict[str, Any]) -> bool:
 def failure_message(summary: str, status: Dict[str, Any]) -> str:
     """The whole message a person receives for a failed request: never
     'That failed.', never an exception or SDK string, never markdown."""
+    if _classify(status) == "usage_limit":
+        # Its own case, entirely: no "I couldn't finish <summary>" framing, no
+        # partial-findings offer, and never "try again" as an immediate fix (the
+        # session that would run it is the thing that is out).
+        text = f"{status.get('error') or ''} {status.get('final_status') or ''}"
+        reset = _reset_time(text)
+        if reset:
+            clause = f"I've hit a usage limit and can't run anything until {reset}."
+        else:
+            clause = "I've hit a usage limit and can't run anything right now."
+        return f"{clause} I'll need you to try again after that."
     msg = f"I couldn't finish {summary}: {failure_in_words(status)}. {next_step(status)}"
     if has_partial_findings(status):
         msg += ' I have part of it; say "send what you have".'
