@@ -452,3 +452,21 @@ def test_overlapping_labels_longest_match_wins():
 
 def test_permission_no_words_at_all_grants_nothing():
     assert schedprop.capabilities_from_permission("") == []
+
+
+@pytest.mark.parametrize("said", [
+    "it can't send iMessages", "it can’t send iMessages", "it cannot send email from its own account",
+    "it may not send text messages", "it shouldn't look up and edit contacts", "never let it send iMessages",
+])
+def test_a_refusal_is_never_read_as_a_grant(said):
+    assert schedprop.capabilities_from_permission(said, []) == []
+
+
+@pytest.mark.parametrize("said", ["don't let it do that", "no, never do that", "no don't fix that", "do not fix that"])
+def test_a_negated_vague_phrase_grants_nothing_even_after_a_refused_run(said):
+    assert schedprop.capabilities_from_permission(said, ["contacts"]) == []
+
+
+def test_a_plain_vague_approval_still_grants_what_was_refused():
+    assert schedprop.capabilities_from_permission("let it do that", ["contacts"]) == ["contacts"]
+    assert schedprop.capabilities_from_permission("fix that", ["contacts"]) == ["contacts"]

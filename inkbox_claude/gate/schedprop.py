@@ -168,7 +168,12 @@ def friendly_error(exc: Exception) -> str:
 _PERMISSION_PHRASES = [
     "let it", "allow it to", "it can", "it may", "give it", "it should be able to",
 ]
-_NEGATION_WORDS = ["don't", "do not", "not", "never", "without", "except", "but not"]
+_NEGATION_WORDS = ["don't", "do not", "not", "never", "without", "except", "but not", "can't", "cannot",
+                   "won't", "shouldn't", "mustn't", "no longer", "stop", "isn't allowed", "may not"]
+# A permission phrase must stand as its own words: "it can" inside "it can't" or
+# "it cannot" is a refusal, not a grant.
+_PERMISSION_RE = re.compile(
+    r"\b(?:let it|allow it to|it can|it may|give it|it should be able to)\b(?!'t|not| not)")
 _VAGUE_PHRASES = ["do that", "fix that", "fix it"]
 # Comma is deliberately NOT a split point: several scope labels are
 # themselves comma-separated lists ("read TAMID's Drive, Sheets, Docs and
@@ -182,11 +187,11 @@ def _permitted_scopes_from_words(said_text: str) -> List[str]:
     """Scopes named by a synonym inside a clause that a permission phrase
     opens, never inside a clause (or the part of one) that a negation word
     closes off first."""
-    text = (said_text or "").lower()
+    text = (said_text or "").lower().replace("\u2019", "'")
     clauses = [c.strip() for c in _CLAUSE_SPLIT_RE.split(text) if c.strip()]
     found: List[str] = []
     for clause in clauses:
-        if not any(phrase in clause for phrase in _PERMISSION_PHRASES):
+        if not _PERMISSION_RE.search(clause):
             continue
         cut = len(clause)
         for neg in _NEGATION_WORDS:
@@ -213,8 +218,10 @@ def capabilities_from_permission(said_text: str, denied_scopes: Optional[List[st
     found = _permitted_scopes_from_words(said_text)
     if found:
         return found
-    text = (said_text or "").lower()
-    if denied_scopes and any(phrase in text for phrase in _VAGUE_PHRASES):
+    text = (said_text or "").lower().replace("\u2019", "'")
+    refused = re.search(r"\bno\b", text) or any(
+        re.search(r"\b" + re.escape(neg) + r"\b", text) for neg in _NEGATION_WORDS)
+    if denied_scopes and not refused and any(phrase in text for phrase in _VAGUE_PHRASES):
         denied = set(denied_scopes)
         return [name for name in SCOPES if name in denied]
     return []
