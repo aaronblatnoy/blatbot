@@ -612,8 +612,38 @@ def running_rows(store: Store) -> List[Dict[str, Any]]:
     return _running_items(store)
 
 
+def _collapse_same_failure(rows: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """Several requests that failed today for the very same reason are one line,
+    not one line each: seven asks killed by one usage limit read as one fact."""
+    out: List[Dict[str, Any]] = []
+    groups: Dict[str, Dict[str, Any]] = {}
+    for row in rows:
+        sentence = str(row.get("sentence") or "")
+        title, sep, reason = sentence.partition(": ")
+        if row.get("outcome") != "failed" or row.get("kind") != "request" or not sep:
+            out.append(row)
+            continue
+        if reason in groups:
+            groups[reason]["_count"] += 1
+            continue
+        merged = dict(row)
+        merged["_count"] = 1
+        merged["_title"] = title
+        groups[reason] = merged
+        out.append(merged)
+    for row in out:
+        count = row.pop("_count", None)
+        title = row.pop("_title", None)
+        if count and count > 1:
+            reason = str(row["sentence"]).partition(": ")[2]
+            row["title"] = f"{count} requests"
+            row["sentence"] = f"{count} requests failed: {reason}"
+            row["actions"] = []
+    return out
+
+
 def done_today_rows(store: Store, now: Optional[float] = None) -> List[Dict[str, Any]]:
-    return _done_today_items(store, time.time() if now is None else now)
+    return _collapse_same_failure(_done_today_items(store, time.time() if now is None else now))
 
 
 def next_scheduled_row(store: Store, now: Optional[float] = None) -> Optional[Dict[str, Any]]:
@@ -628,7 +658,7 @@ def overview(gateway: Any, store: Store) -> Dict[str, Any]:
     now = time.time()
     stuck = stuck_rows(store, gateway.sessions.schedules)
     running = _running_items(store)
-    done_today = _done_today_items(store, now)
+    done_today = _collapse_same_failure(_done_today_items(store, now))
     coming_up = _coming_up_items(store, now)
     return {
         "stuck": stuck, "running": running, "done_today": done_today, "coming_up": coming_up,

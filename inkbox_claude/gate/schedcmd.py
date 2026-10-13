@@ -699,9 +699,14 @@ def stuck_reply(manager: Any) -> str:
 
 def today_reply(manager: Any) -> str:
     items = overview_mod.done_today_rows(manager.store)
-    if not items:
+    finished = [it["sentence"] for it in items if it.get("outcome") != "failed"]
+    failed = [it["sentence"] for it in items if it.get("outcome") == "failed"]
+    if not finished and not failed:
         return "Nothing finished today."
-    return " ".join(it["sentence"] for it in items)
+    lines = finished if finished else ["Nothing finished today."]
+    if failed:
+        lines = lines + ["Did not finish:"] + failed
+    return "\n".join(lines)
 
 
 async def _handle_repair(manager: Any, schedule: Schedule, changes: Dict[str, Any]) -> str:

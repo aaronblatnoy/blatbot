@@ -442,3 +442,28 @@ async def test_fixed_phrase_never_reaches_the_router_on_either_path(tmp_path, le
     assert len(sent) == 1
     reply_text = sent[-1][1]
     assert "running" in reply_text.lower()
+
+
+def test_today_reply_separates_finished_from_failed_and_collapses_identical_failures():
+    from inkbox_claude.gate import schedcmd as _sc, overview as _ov
+
+    class _M:
+        store = object()
+
+    rows = [
+        {"kind": "request", "id": 1, "outcome": "finished", "sentence": "Found the three invoices.", "actions": []},
+        {"kind": "request", "id": 2, "outcome": "failed", "sentence": "the request from the 2:10 PM call: it had hit a usage limit until 3:10pm.", "actions": []},
+        {"kind": "request", "id": 3, "outcome": "failed", "sentence": "the request from the 2:11 PM call: it had hit a usage limit until 3:10pm.", "actions": []},
+    ]
+    collapsed = _ov._collapse_same_failure([dict(r) for r in rows])
+    assert [r["sentence"] for r in collapsed] == [
+        "Found the three invoices.", "2 requests failed: it had hit a usage limit until 3:10pm."]
+    orig = _ov.done_today_rows
+    _ov.done_today_rows = lambda store, now=None: collapsed
+    try:
+        assert _sc.today_reply(_M()) == (
+            "Found the three invoices.\nDid not finish:\n2 requests failed: it had hit a usage limit until 3:10pm.")
+        _ov.done_today_rows = lambda store, now=None: []
+        assert _sc.today_reply(_M()) == "Nothing finished today."
+    finally:
+        _ov.done_today_rows = orig

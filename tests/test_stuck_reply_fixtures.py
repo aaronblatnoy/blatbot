@@ -263,10 +263,10 @@ def test_cluster_disappears_from_stuck_after_its_reset_time_passes(env, monkeypa
     assert not any(r["kind"] == "request_cluster" for r in rows_after)
 
     done = overview_mod.done_today_rows(store, now=reset_epoch + 60)
-    done_ids = {d["id"] for d in done}
-    for req in store.recent_requests(limit=100):
-        if req.chat_id == "call-thread-2":
-            assert req.id in done_ids
+    # the four identical failures surface under Done today as one line, not four
+    collapsed = [d for d in done if d["sentence"].startswith("4 requests failed: it had hit a usage limit")]
+    assert len(collapsed) == 1
+    assert collapsed[0]["actions"] == []
 
 
 def test_cluster_with_no_reset_time_expires_after_two_hours(env, monkeypatch):
