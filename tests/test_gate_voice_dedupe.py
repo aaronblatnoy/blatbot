@@ -109,7 +109,9 @@ def test_text_message_while_request_approved_not_running_creates_none(tmp_path):
     assert m.store.get_request(2) is None
     total = m.store._db.execute("SELECT COUNT(*) AS c FROM requests").fetchone()["c"]
     assert total == 1
-    assert any(x[1] == "Still working on it." for x in sent)
+    # the reply is the code-built status line for a progress question, never a model's promise
+    assert sent and all(x[1] != "Still working on it." for x in sent)
+    assert any("original ask" in x[1] or "Started" in x[1] for x in sent)
     events = m.store.task_with_events(task["id"])["events"]
     assert any("any update?" in (e.get("body") or e.get("text") or "") for e in events)
 
