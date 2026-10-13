@@ -1104,6 +1104,10 @@ class HoldingExecutor(FakeExecutor):
 
 
 def test_message_during_a_running_request_does_not_start_a_second_one(tmp_path):
+    # A message during a still-running request is answered by code, not a model
+    # call (see wording.is_progress_question / NOT_PROMISING_FOLLOWUP): a plain
+    # statement ("it's in ...") is not a progress question, so it gets the fixed
+    # non-promising line and the router is never consulted a second time.
     m, sent = make_manager(tmp_path)
     m.executor = HoldingExecutor()
     m.router.next = RouterOutput(reply="On it.", task="new", task_title="Acceptance rate",
@@ -1112,11 +1116,10 @@ def test_message_during_a_running_request_does_not_start_a_second_one(tmp_path):
         s = m.get("aaron")
         await s.handle_inbound("what's my acceptance rate as a reviewer?", "imessage", approver_meta())
         await m.executor.started.wait()
-        m.router.next = RouterOutput(reply="Noted, using that sheet.", task="new", task_title="x",
-                                     request=RouterRequest(prompt="again", scopes=["tamid_drive_read"], summary="again"))
+        calls_before = len(m.router.calls)
         await s.handle_inbound("it's in the Fall 2026 responses sheet", "imessage", approver_meta())
         assert m.store.get_request(2) is None                      # no second request while #1 runs
-        assert m.router.calls[-1]["action"] is True                # router told a request is running
+        assert len(m.router.calls) == calls_before                 # no model call for this reply
         m.router.next = RouterOutput(reply="Done: 47%.", task="T1")  # the result phrasing
         m.executor.release.set()
         await asyncio.sleep(0.1)
@@ -1124,7 +1127,7 @@ def test_message_during_a_running_request_does_not_start_a_second_one(tmp_path):
     assert m.store.get_request(1).state == "done"
     assert len(m.executor.ran) == 1
     outbound = [t for _, t, *_ in sent]
-    assert outbound == ["On it.", "Noted, using that sheet.", "Done: 47%."]
+    assert outbound == ["On it.", "Noted. I will pick that up when this finishes.", "Done: 47%."]
 
 
 def test_failed_run_re_decides_the_message_that_arrived_meanwhile(tmp_path):

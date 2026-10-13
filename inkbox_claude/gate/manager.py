@@ -1017,16 +1017,17 @@ class GateSession:
             t = self._peek_task(RouterOutput(task=f"T{self.m.store.task_id_for_request(running.id)}"))
             if t:
                 self._ensure_inbound_on_task(t, body)
-            out = await self.m.router.route(
-                history=prior, message=message, mode=self.mode, sender=self._sender(),
-                contact_notes=self._contact_notes(), is_approver=approver,
-                task_memory=memory, found_tasks=found, action=True,
-                action_task=(t or {}).get("title") or running.summary,
-            )
-            out.request = None
-            if out.reply:
-                await self.send_to_sender(out.reply, role="ack")
-            return bool(out.reply)
+            # Code only, no model call: a progress question gets a status line built from
+            # the request row; anything else keeps today's behaviour of becoming a
+            # follow-up for when the run ends, but with a fixed line, never a model's
+            # promise about what it is doing.
+            if wording.is_progress_question(body):
+                reply = self._progress_reply(running)
+            else:
+                reply = wording.NOT_PROMISING_FOLLOWUP
+            if reply:
+                await self.send_to_sender(reply, role="ack")
+            return bool(reply)
         if system_note:
             out: RouterOutput = await self.m.router.route(
                 history=prior, message=message, mode=self.mode, sender=self._sender(),
@@ -1139,6 +1140,22 @@ class GateSession:
         return True
 
     inbound_id: Optional[int] = None   # the inbound message this turn is responding to
+
+    def _progress_reply(self, running: Request) -> str:
+        """The status line for a message that asked about the still-running request
+        named by `running`. Re-reads the request fresh: it may have finished or failed
+        in the moment between running_for_thread's check and this turn being handled,
+        and that gets the same wording a finished request's result ever gets, not a
+        claim that it is still going."""
+        fresh = self.m.store.get_request(running.id) or running
+        fresh_status = fresh.status or {}
+        if fresh.state == "done":
+            return wording.success_message(_clean_result(fresh_status.get("summary") or ""))
+        if fresh.state == "failed":
+            return wording.failure_message(fresh.summary, fresh_status)
+        step = wording.latest_step_from_tool_calls(fresh_status.get("tool_calls"))
+        return wording.progress_status_line(fresh.created_at, step, fresh.summary)
+
 
     async def send_to_sender(self, text: str, role: str = "answer") -> bool:
         """Deliver to the sender. Enforced: per inbound message at most one 'ack' and

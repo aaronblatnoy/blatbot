@@ -134,7 +134,7 @@ import asyncio
 
 from inkbox_claude.gate.manager import OWNER_THREAD
 from inkbox_claude.gate.router import RouterOutput, RouterRequest
-from tests.test_gate import make_manager, voice_meta, AARON_PHONE
+from tests.test_gate import make_manager, voice_meta, approver_meta, AARON_PHONE
 
 
 def _phone_manager(tmp_path, *, trust, active):
@@ -168,3 +168,83 @@ def test_failed_voice_request_after_hangup_sends_once_and_stores_once(tmp_path):
     stored = [row for row in rows if row["kind"] == "outbound" and "Could not reach Coolify" in row["text"]]
     assert len(stored) == 1, f"expected exactly one stored outbound row for the result, got {stored}"
     assert "connection refused" not in result_sends[0][1]
+
+
+# -- messages while a request is still running --------------------------------
+
+def test_fixed_progress_phrases_are_recognized():
+    for text in ("are you working on it?", "Are you working on this", "status",
+                 "how's it going?", "did you start?", "any update?"):
+        assert wording.is_progress_question(text)
+
+
+def test_question_mark_with_no_new_task_verb_is_a_progress_question():
+    assert wording.is_progress_question("is that done yet?")
+    assert wording.is_progress_question("almost there?")
+
+
+def test_question_mark_naming_a_new_task_is_not_a_progress_question():
+    assert not wording.is_progress_question("can you also email Bob?")
+    assert not wording.is_progress_question("could you book Tuesday at 6 instead?")
+
+
+def test_plain_statement_is_not_a_progress_question():
+    assert not wording.is_progress_question("it's in the Fall 2026 responses sheet")
+    assert not wording.is_progress_question("")
+
+
+def test_progress_status_line_uses_latest_step_when_available():
+    started = 1_700_000_000.0
+    line = wording.progress_status_line(started, "now working on get events", "pull my schedule")
+    assert line.startswith("Yes. Started ")
+    assert line.endswith("now working on get events.")
+
+
+def test_progress_status_line_falls_back_to_summary():
+    started = 1_700_000_000.0
+    line = wording.progress_status_line(started, None, "pull my schedule")
+    assert line.endswith("still working on pull my schedule.")
+
+
+def test_latest_step_from_tool_calls():
+    assert wording.latest_step_from_tool_calls(["mcp__tamid-drive__read_sheet_values"]) == \
+        "now working on read sheet values"
+    assert wording.latest_step_from_tool_calls([]) is None
+    assert wording.latest_step_from_tool_calls(None) is None
+
+
+def test_progress_reply_during_a_run(tmp_path):
+    m, sent = make_manager(tmp_path)
+    m.executor = _HoldingExecutor()
+    m.router.next = RouterOutput(reply="On it.", task="new", task_title="x",
+                                 request=RouterRequest(prompt="pull it", scopes=["web"], summary="pull the report"))
+
+    async def go():
+        s = m.get("aaron")
+        await s.handle_inbound("pull the report", "imessage", approver_meta())
+        await m.executor.started.wait()
+        await s.handle_inbound("are you working on it?", "imessage", approver_meta())
+        m.executor.release.set()
+        await asyncio.sleep(0.05)
+    asyncio.run(go())
+    outbound = [t for _, t, *_ in sent]
+    assert outbound[0] == "On it."
+    assert outbound[1].startswith("Yes. Started ") and "pull the report" in outbound[1]
+
+
+class _HoldingExecutor:
+    """A minimal stand-in: blocks on run() until released, like test_gate's
+    HoldingExecutor, without importing test_gate's FakeExecutor base (keeps this
+    file's harness fixtures self-contained aside from make_manager/voice_meta)."""
+
+    def __init__(self):
+        self.release = asyncio.Event()
+        self.started = asyncio.Event()
+        self.ran = []
+        self.result = {"ok": True, "summary": "Found it.", "tool_calls": ["mcp__host__rows_where"], "raw": "x"}
+
+    async def run(self, req, context="", prior_work="", model=None, **kw):
+        self.started.set()
+        self.ran.append(req.id)
+        await self.release.wait()
+        return self.result

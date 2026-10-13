@@ -169,3 +169,61 @@ def success_message(result: str) -> str:
     if text[0].isupper():
         return text
     return f"Done. {text}"
+
+
+
+# ---------------------------------------------------------------------------
+# A message arriving while a request is still running: "is it working?" gets a
+# status line built here, in code, never a model call; anything else keeps the
+# existing follow-up behaviour but with a fixed line instead of a promise.
+# ---------------------------------------------------------------------------
+
+_FIXED_PROGRESS_PHRASES = {
+    "are you working on this", "are you working on it", "status", "how's it going",
+    "hows it going", "did you start", "any update", "any updates",
+}
+# A verb that names a new ask: a question-mark message built around one of these is
+# a new request, not a progress check, even without a fixed phrase match.
+_NEW_TASK_VERBS = (
+    "book", "schedule", "send", "email", "text", "call", "cancel", "find", "look up",
+    "set up", "create", "add", "remove", "delete", "move", "update", "change", "buy",
+    "order", "pay", "write", "draft", "check on",
+)
+
+
+def is_progress_question(body: str) -> bool:
+    """Whether an inbound message, arriving while a request runs, is asking about
+    progress rather than giving a new instruction. Code-only, on purpose: no model
+    call decides this."""
+    raw = (body or "").strip()
+    if not raw:
+        return False
+    bare = raw.rstrip("?!. ").lower()
+    if bare in _FIXED_PROGRESS_PHRASES:
+        return True
+    if raw.endswith("?") and not any(v in bare for v in _NEW_TASK_VERBS):
+        return True
+    return False
+
+
+NOT_PROMISING_FOLLOWUP = "Noted. I will pick that up when this finishes."
+
+
+def progress_status_line(started_at: float, latest_step: Optional[str], summary: str) -> str:
+    """'Yes. Started <time>, <latest step>.' -- the latest step from the run's own
+    recorded tool calls when any are available, else 'still working on <summary>'."""
+    from datetime import datetime
+    from zoneinfo import ZoneInfo
+    started = datetime.fromtimestamp(started_at, ZoneInfo("America/New_York")).strftime("%-I:%M %p")
+    step = latest_step or f"still working on {summary}"
+    return f"Yes. Started {started}, {step}."
+
+
+def latest_step_from_tool_calls(tool_calls: Optional[List[str]]) -> Optional[str]:
+    """A plain phrase for the last tool call a running request made, if the run has
+    recorded any yet (today, nothing streams tool calls into a running request's row,
+    so this is normally None; the caller falls back to 'still working on <summary>')."""
+    if not tool_calls:
+        return None
+    short = str(tool_calls[-1]).split("__")[-1].replace("_", " ").strip()
+    return f"now working on {short}" if short else None
