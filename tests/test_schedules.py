@@ -198,6 +198,85 @@ async def test_complete_run_different_result_sends_short_notice_with_next_time(e
 
 
 @pytest.mark.asyncio
+async def test_failed_notice_falls_back_to_error_in_plain_words_when_no_result_line(env):
+    store, manager, service, task_id = env
+    schedule = await _propose(service, task_id)
+    activated = await service.decide(schedule.id, True)
+    await service._fire(activated, activated.next_run)
+    await asyncio.sleep(0)
+    req = manager.executed[-1]
+    await service.finished(req, {"ok": False, "error": "connection refused", "result_line": "",
+                                 "final_status": "", "finished_at": time.time(),
+                                 "denied": [], "held": False})
+    text = manager.notices[-1][1]
+    assert "connection refused" in text
+    assert "it failed" not in text
+
+
+@pytest.mark.asyncio
+async def test_failed_notice_renders_a_timeout_as_ran_out_of_time(env):
+    store, manager, service, task_id = env
+    schedule = await _propose(service, task_id)
+    activated = await service.decide(schedule.id, True)
+    await service._fire(activated, activated.next_run)
+    await asyncio.sleep(0)
+    req = manager.executed[-1]
+    await service.finished(req, {"ok": False, "error": "timed out after 600s", "result_line": "",
+                                 "final_status": "", "finished_at": time.time(),
+                                 "denied": [], "held": False})
+    text = manager.notices[-1][1]
+    assert "it ran out of time" in text
+    assert "timed out after 600s" not in text
+
+
+@pytest.mark.asyncio
+async def test_failed_notice_falls_back_to_first_sentence_of_final_status_when_no_error(env):
+    store, manager, service, task_id = env
+    schedule = await _propose(service, task_id)
+    activated = await service.decide(schedule.id, True)
+    await service._fire(activated, activated.next_run)
+    await asyncio.sleep(0)
+    req = manager.executed[-1]
+    await service.finished(req, {"ok": False, "error": "", "result_line": "",
+                                 "final_status": "The page would not load. It kept spinning for a while.",
+                                 "finished_at": time.time(), "denied": [], "held": False})
+    text = manager.notices[-1][1]
+    assert "The page would not load." in text
+    assert "kept spinning" not in text   # only the first sentence, not the rest
+
+
+@pytest.mark.asyncio
+async def test_failed_notice_never_degenerates_to_bare_it_failed(env):
+    store, manager, service, task_id = env
+    schedule = await _propose(service, task_id)
+    activated = await service.decide(schedule.id, True)
+    await service._fire(activated, activated.next_run)
+    await asyncio.sleep(0)
+    req = manager.executed[-1]
+    await service.finished(req, {"ok": False, "error": "", "result_line": "", "final_status": "",
+                                 "finished_at": time.time(), "denied": [], "held": False})
+    text = manager.notices[-1][1]
+    assert "it failed" not in text
+    assert "could not finish: it could not finish" in text
+
+
+@pytest.mark.asyncio
+async def test_complete_notice_with_no_result_line_uses_first_sentence_of_final_status(env):
+    store, manager, service, task_id = env
+    schedule = await _propose(service, task_id, report_every_time=True)
+    activated = await service.decide(schedule.id, True)
+    await service._fire(activated, activated.next_run)
+    await asyncio.sleep(0)
+    req = manager.executed[-1]
+    await service.finished(req, {"ok": True, "result_line": "",
+                                 "final_status": "Checked the page. Nothing else to add.",
+                                 "finished_at": time.time(), "denied": [], "held": False})
+    text = manager.notices[-1][1]
+    assert "Checked the page." in text
+    assert "Nothing else to add" not in text
+
+
+@pytest.mark.asyncio
 async def test_finished_still_notices_a_paused_mid_flight_run_with_no_next_run_line(env):
     # The owner paused the schedule while a run was in flight. The run's result is still
     # told to him (no silent drop), but with no "Next check" line and the schedule stays

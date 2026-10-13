@@ -96,6 +96,18 @@ def run_outcome(status: Dict[str, Any]) -> str:
     return "failed"
 
 
+def _first_sentence(text: str) -> str:
+    """The first sentence of a longer status block, whole and never cut mid-word; a
+    text with no sentence punctuation at all is just its first line."""
+    text = (text or "").strip()
+    if not text:
+        return ""
+    m = re.search(r"(.+?[.!?])(\s|$)", text, re.S)
+    if m:
+        return m.group(1).strip()
+    return text.splitlines()[0].strip()
+
+
 def _shown(ts: Optional[float], timezone_name: str) -> str:
     """"2:30 PM", with the day added when it is not today, in the schedule's zone."""
     if ts is None:
@@ -632,7 +644,8 @@ class ScheduleService:
             # result still happened and is still worth telling him -- just with no "next
             # run" line (there may not be one any more) and no change to what he set.
             run_dict = {"outcome": outcome, "result_line": result_line, "final_status": final_status,
-                       "denied": denied, "note": note, "changed": changed, "cost_usd": status.get("cost_usd")}
+                       "denied": denied, "note": note, "changed": changed, "cost_usd": status.get("cost_usd"),
+                       "error": status.get("error")}
             send = (not complete) or schedule.report_every_time or changed
             if send:
                 await self._notice(schedule, self.notice_text(schedule, run_dict, None))
@@ -640,7 +653,8 @@ class ScheduleService:
         if note:
             self.store.update_schedule(schedule.id, last_note=note)
         run_dict = {"outcome": outcome, "result_line": result_line, "final_status": final_status,
-                   "denied": denied, "note": note, "changed": changed, "cost_usd": status.get("cost_usd")}
+                   "denied": denied, "note": note, "changed": changed, "cost_usd": status.get("cost_usd"),
+                       "error": status.get("error")}
         stop = bool(status.get("stop"))
         failures = 0 if complete else schedule.consecutive_failures + 1
         if stop:
@@ -670,6 +684,31 @@ class ScheduleService:
         return True
 
     # -- notice text -------------------------------------------------------
+    @staticmethod
+    def _shown_text(run: Dict[str, Any]) -> str:
+        """The one sentence a complete-but-RESULT-less run shows: the first sentence of
+        final_status (never the whole narration, never blank)."""
+        return _first_sentence(str(run.get("final_status") or "")) or "it finished with nothing to report"
+
+    @staticmethod
+    def _failure_reason(run: Dict[str, Any]) -> str:
+        """result_line -> the run's own error in plain words -> the first sentence of
+        final_status. Never degenerates to the bare word "failed": one of these three
+        always has something to say, even if it is only "it could not finish"."""
+        result_line = str(run.get("result_line") or "").strip()
+        if result_line:
+            return result_line
+        err = str(run.get("error") or "").strip()
+        if err:
+            low = err.lower()
+            if "timed out" in low or "timeout" in low:
+                return "it ran out of time"
+            return err
+        final_status = _first_sentence(str(run.get("final_status") or ""))
+        if final_status:
+            return final_status
+        return "it could not finish"
+
     def notice_text(self, schedule: Schedule, run: Dict[str, Any], next_run: Optional[float]) -> str:
         if run.get("paused"):
             return (f'{schedule.title} is paused after three runs that could not finish. '
@@ -677,7 +716,7 @@ class ScheduleService:
         outcome = run.get("outcome")
         result_line = run.get("result_line") or ""
         if outcome == "complete":
-            text = f"{schedule.title}: {result_line}"
+            text = f"{schedule.title}: {result_line or self._shown_text(run)}"
             if schedule.cadence_kind != "once" and next_run is not None:
                 text += f" Next check {_shown(next_run, schedule.timezone)}."
             return text
@@ -694,7 +733,7 @@ class ScheduleService:
         if outcome == "failed":
             remaining = max(0, 3 - schedule.consecutive_failures)
             when = _shown(next_run, schedule.timezone) if next_run is not None else "soon"
-            reason = result_line or "it failed"
+            reason = self._failure_reason(run)
             return (f"{schedule.title} could not finish: {reason}. I will try again at {when}. "
                     f"After {remaining} more misses I will pause it and tell you.")
         return f"{schedule.title}: {result_line}"
