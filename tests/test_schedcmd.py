@@ -722,3 +722,96 @@ async def test_stop_on_a_proposed_schedule_rejects_it(env):
     reply = await schedcmd.handle(manager, session, _command("stop", target="Team total watch"))
     assert reply == ""
     assert store.get_schedule(schedule.id).state == "ended"
+
+
+# ---------------------------------------------------------------------------
+# No raw error text anywhere a schedcmd path replies (item L)
+# ---------------------------------------------------------------------------
+
+_FORBIDDEN_SUBSTRINGS = ["cadence", "scope", "valid actions", "proposed", "#", "*", "_", "`", "["]
+
+
+def _assert_clean(reply: str) -> None:
+    low = reply.lower()
+    for bad in _FORBIDDEN_SUBSTRINGS:
+        assert bad not in low, f"{bad!r} leaked in: {reply!r}"
+    import re as _re
+    assert not _re.search(r"\bs\d", low), f"an S<digit> handle leaked in: {reply!r}"
+
+
+@pytest.mark.asyncio
+async def test_pause_on_an_already_paused_schedule_is_clean(env):
+    store, manager, task_id = env
+    schedule = await _active(manager, task_id)
+    await manager.schedules.action(schedule.id, "pause", owner=True)
+    session = FakeSession()
+    reply = await schedcmd.handle(manager, session, _command("pause", target="Team total watch"))
+    assert reply == "Team total watch is already paused."
+    _assert_clean(reply)
+
+
+@pytest.mark.asyncio
+async def test_resume_on_an_already_active_schedule_is_clean(env):
+    store, manager, task_id = env
+    schedule = await _active(manager, task_id)
+    session = FakeSession()
+    reply = await schedcmd.handle(manager, session, _command("resume", target="Team total watch"))
+    assert reply == "Team total watch is already running."
+    _assert_clean(reply)
+
+
+@pytest.mark.asyncio
+async def test_pause_on_a_proposed_schedule_is_clean(env):
+    store, manager, task_id = env
+    await _propose(manager, task_id)
+    session = FakeSession()
+    reply = await schedcmd.handle(manager, session, _command("pause", target="Team total watch"))
+    assert reply == "Team total watch has not started yet; say yes or no first."
+    _assert_clean(reply)
+
+
+@pytest.mark.asyncio
+async def test_action_on_an_ended_schedule_is_clean(env):
+    store, manager, task_id = env
+    schedule = await _active(manager, task_id)
+    await manager.schedules.action(schedule.id, "stop", owner=True)
+    session = FakeSession()
+    reply = await schedcmd.handle(manager, session, _command("pause", target="Team total watch"))
+    assert reply == 'Team total watch has ended. Say "start it again" to bring it back.'
+    _assert_clean(reply)
+
+
+@pytest.mark.asyncio
+async def test_cadence_too_short_on_change_is_clean(env):
+    store, manager, task_id = env
+    await _active(manager, task_id)
+    session = FakeSession()
+    reply = await schedcmd.handle(manager, session, _command(
+        "change", target="Team total watch", cadence_kind="every", cadence={"minutes": 1}))
+    assert reply == "It has to run at least every 5 minutes."
+    _assert_clean(reply)
+
+
+def test_friendly_action_error_maps_missing_capability():
+    reply = schedcmd._friendly_action_error(
+        None, ValueError("missing capability: look up and edit contacts"))
+    assert reply == "It isn't allowed to look up and edit contacts yet."
+    _assert_clean(reply)
+
+
+def test_friendly_action_error_maps_cadence_too_short():
+    reply = schedcmd._friendly_action_error(
+        None, schedcmd.cadence_module.CadenceError("an every cadence must be at least 5 minutes"))
+    assert reply == "It has to run at least every 5 minutes."
+    _assert_clean(reply)
+
+
+@pytest.mark.asyncio
+async def test_list_and_last_sentences_are_clean(env):
+    store, manager, task_id = env
+    await _active(manager, task_id)
+    session = FakeSession()
+    reply = await schedcmd.handle(manager, session, _command("list"))
+    _assert_clean(reply)
+    reply = await schedcmd.handle(manager, session, _command("last", target="Team total watch"))
+    _assert_clean(reply)
