@@ -2316,6 +2316,24 @@ class Store:
                 ).fetchone()
         return Request.from_row(r) if r else None
 
+    def last_finished_for_thread(self, chat_id: str, *, window_seconds: float = 600,
+                                 exclude_scheduled: bool = True) -> Optional[Request]:
+        """The most recent request on this thread that finished -- done or failed --
+        within the last `window_seconds`, if any. Used to answer a progress question
+        ("did you start?", "any update?") that arrives after the run it is asking
+        about has already ended: that answer comes from this row, never by deciding
+        the question as a brand new ask. Scheduled runs are excluded by default --
+        their own progress reporting is a separate mechanism (schedules.py)."""
+        with self._lock:
+            clause = "chat_id=? AND state IN ('done','failed') AND updated_at>?"
+            args: List[Any] = [chat_id, time.time() - window_seconds]
+            if exclude_scheduled:
+                clause += " AND schedule_id IS NULL"
+            r = self._db.execute(
+                f"SELECT * FROM requests WHERE {clause} ORDER BY updated_at DESC LIMIT 1", args
+            ).fetchone()
+        return Request.from_row(r) if r else None
+
     def last_failed_for_thread_or_person(self, chat_id: str, sender: str, *,
                                          exclude_scheduled: bool = False) -> Optional[Request]:
         """last_failed_for_thread(chat_id), or -- when nothing matches there -- the most

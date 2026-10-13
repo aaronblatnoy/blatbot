@@ -1111,6 +1111,23 @@ class GateSession:
             if reply:
                 await self.send_to_sender(reply, role="ack")
             return bool(reply)
+        if not system_note and wording.is_fixed_progress_phrase(body):
+            # Nothing is running, but something on this thread finished or failed
+            # recently enough that a fixed, unambiguous check-in phrase ("status",
+            # "any update?") almost certainly means IT, not a brand new ask: answer
+            # from that row and stop here. Only the fixed phrases, never the looser
+            # "ends in a question mark" guess -- that guess is safe only while a
+            # request is still running and nothing else could be meant; once it is
+            # over, a question-shaped message is just as likely a genuinely new ask.
+            finished = self.m.store.last_finished_for_thread(self.chat_id)
+            if finished is not None:
+                t = self._peek_task(RouterOutput(task=f"T{self.m.store.task_id_for_request(finished.id)}"))
+                if t:
+                    self._ensure_inbound_on_task(t, body)
+                reply = self._finished_progress_reply(finished)
+                if reply:
+                    await self.send_to_sender(reply, role="ack")
+                return bool(reply)
         if system_note:
             out: RouterOutput = await self.m.router.route(
                 history=prior, message=message, mode=self.mode, sender=self._sender(),
@@ -1234,6 +1251,15 @@ class GateSession:
         return True
 
     inbound_id: Optional[int] = None   # the inbound message this turn is responding to
+
+    def _finished_progress_reply(self, req: Request) -> str:
+        """The answer to a progress question ("did you start?", "any update?") that
+        arrives after the request it asks about has already finished or failed --
+        read straight from the row, never by deciding the message as a new ask."""
+        status = req.status or {}
+        if req.state == "done":
+            return wording.success_message(_clean_result(status.get("summary") or ""))
+        return f"That one failed: {wording.failure_in_words(status)}."
 
     def _progress_reply(self, running: Request) -> str:
         """The status line for a message that asked about the still-running request

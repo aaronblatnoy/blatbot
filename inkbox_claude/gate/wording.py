@@ -228,6 +228,21 @@ _NEW_TASK_VERBS = (
 )
 
 
+def is_fixed_progress_phrase(body: str) -> bool:
+    """Whether `body` is one of the fixed, unambiguous progress phrases ("status",
+    "any update?", ...) -- never the looser "ends in a question mark" guess
+    is_progress_question also makes. Used once nothing is running any more: after
+    a request has already finished, a short question-shaped message is just as
+    likely to be a genuinely new ask ("when is it?", "actually 7?") as a check-in,
+    so only an explicit, fixed phrase is read as "about the thing that just
+    finished" -- the loose guess stays scoped to the one place it is safe: while
+    a request is actually running and nothing else could be meant."""
+    raw = (body or "").strip()
+    if not raw:
+        return False
+    return raw.rstrip("?!. ").lower() in _FIXED_PROGRESS_PHRASES
+
+
 def is_progress_question(body: str) -> bool:
     """Whether an inbound message, arriving while a request runs, is asking about
     progress rather than giving a new instruction. Code-only, on purpose: no model

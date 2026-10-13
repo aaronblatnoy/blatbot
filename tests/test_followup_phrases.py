@@ -714,3 +714,81 @@ async def test_try_again_never_finds_an_unrelated_persons_failed_request(manager
                                  meta={"sender": "aaron@example.com", "conversation_id": APPROVER_CONV})
     assert m.executor.ran == []
     assert any("Got it." in s[1] for s in sent)
+
+
+# ---------------------------------------------------------------------------
+# Item 9: a progress question after the run has already finished or failed is
+# answered from the request row, not re-decided as a new ask.
+# ---------------------------------------------------------------------------
+
+def _finish_request(m, *, chat_id, sender, sender_name, mode, state, age_seconds=60.0, status=None):
+    t = m.store.create_task("do the thing")
+    req = m.store.create_request(chat_id=chat_id, sender=sender, sender_name=sender_name, mode=mode,
+                                 subject="", original_message="do the thing", summary="do the thing",
+                                 scopes=["web"], prompt="do the thing", state="approved", task_id=t["id"])
+    m.store.set_state(req.id, state, status=status or ({"ok": True, "summary": "all set"} if state == "done"
+                                                        else {"ok": False, "error": "timed out after 300s"}))
+    if age_seconds:
+        m.store._db.execute("UPDATE requests SET updated_at=? WHERE id=?",
+                            (time.time() - age_seconds, req.id))
+        m.store._db.commit()
+    return m.store.get_request(req.id)
+
+
+@pytest.mark.asyncio
+async def test_progress_question_after_failure_is_answered_from_the_row(manager, tmp_path):
+    m, sent = manager
+    m.router.next = RouterOutput(reply="Should not be used.", request=RouterRequest(
+        prompt="something new", scopes=["web"], summary="something new"))
+    req = _finish_request(m, chat_id=APPROVER_CONV, sender="+15550100001", sender_name="Aaron",
+                          mode="imessage", state="failed", age_seconds=30)
+    session = m.get(APPROVER_CONV)
+    await session.handle_inbound("any update?", mode="imessage", meta=approver_meta())
+    assert any("That one failed: it took too long." in s[1] for s in sent)
+    # No new request was created from this question.
+    rows = m.store._db.execute("SELECT id FROM requests WHERE chat_id=?", (APPROVER_CONV,)).fetchall()
+    assert [r["id"] for r in rows] == [req.id]
+
+
+@pytest.mark.asyncio
+async def test_progress_question_after_success_is_answered_from_the_row(manager, tmp_path):
+    m, sent = manager
+    m.router.next = RouterOutput(reply="Should not be used.", request=None)
+    _finish_request(m, chat_id=APPROVER_CONV, sender="+15550100001", sender_name="Aaron",
+                    mode="imessage", state="done", age_seconds=30)
+    session = m.get(APPROVER_CONV)
+    await session.handle_inbound("status", mode="imessage", meta=approver_meta())
+    assert any("all set" in s[1] for s in sent)
+    assert not any("Should not be used." in s[1] for s in sent)
+
+
+@pytest.mark.asyncio
+async def test_progress_question_outside_the_ten_minute_window_falls_through(manager, tmp_path):
+    m, sent = manager
+    m.router.next = RouterOutput(reply="A fresh answer.", request=None)
+    _finish_request(m, chat_id=APPROVER_CONV, sender="+15550100001", sender_name="Aaron",
+                    mode="imessage", state="failed", age_seconds=20 * 60)
+    session = m.get(APPROVER_CONV)
+    await session.handle_inbound("status", mode="imessage", meta=approver_meta())
+    assert any("A fresh answer." in s[1] for s in sent)
+
+
+@pytest.mark.asyncio
+async def test_a_genuinely_new_question_mark_ask_still_creates_a_request_after_a_finish(tmp_path):
+    """The loose "ends in a question mark" guess must not leak into the
+    post-finish path: only the fixed phrases do. "When is it?" right after an
+    unrelated request finished is still a new ask.
+
+    Legacy manager only: this file's FakePicker always answers "no action" for
+    the decide-graph manager, which is a separate concern from what this test
+    is about."""
+    m, sent = make_legacy_manager(tmp_path)
+    m.executor = RecordingExecutor()
+    m.router.next = RouterOutput(reply="On it.", task="new", task_title="look something up",
+                                 request=RouterRequest(prompt="look it up", scopes=["web"], summary="look it up"))
+    _finish_request(m, chat_id=APPROVER_CONV, sender="+15550100001", sender_name="Aaron",
+                    mode="imessage", state="done", age_seconds=30)
+    session = m.get(APPROVER_CONV)
+    await session.handle_inbound("when is it?", mode="imessage", meta=approver_meta())
+    await _drain()
+    assert m.executor.ran, "a genuinely new question-shaped ask must still create a request"
