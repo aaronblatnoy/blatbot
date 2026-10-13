@@ -135,7 +135,7 @@ class ScheduleProposal(BaseModel):
         return value
 
 
-SCHEDULE_COMMAND_ACTIONS = {"list", "last", "change", "pause", "resume", "run_now", "stop", "add_capability", "approve", "reject"}
+SCHEDULE_COMMAND_ACTIONS = {"list", "last", "change", "pause", "resume", "run_now", "stop", "add_capability", "approve", "reject", "status", "stuck", "today"}
 
 
 class ScheduleCommand(BaseModel):

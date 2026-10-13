@@ -504,6 +504,153 @@ async def _handle_add_capability(manager: Any, schedule: Schedule, changes: Dict
     return f"Done. It can now {schedprop.labels(added)}."
 
 
+
+# ---------------------------------------------------------------------------
+# status / stuck / today (item 2): plain answers to "what are you doing",
+# built entirely by code from the store -- no model, no ids, no scope names,
+# no markdown. A small fixed phrase list is matched whole-message before the
+# router ever runs (manager.py's decide()); the router can also still route
+# here via schedule_command for a differently-worded question.
+# ---------------------------------------------------------------------------
+
+_FIXED_PHRASES = {
+    "what are you working on": "status",
+    "what are you doing": "status",
+    "anything running": "status",
+    "what's stuck": "stuck",
+    "whats stuck": "stuck",
+    "what needs me": "stuck",
+    "what's waiting on me": "stuck",
+    "whats waiting on me": "stuck",
+    "what did you do today": "today",
+    "what happened today": "today",
+}
+
+
+def match_fixed_phrase(text: str) -> Optional[str]:
+    """One of "status"/"stuck"/"today" when `text` is (whole-message, case-
+    insensitive, question mark optional) one of Aaron's own common exact
+    phrasings for these questions -- matched here, before the router ever
+    sees the message, so the answer never depends on the model."""
+    norm = _norm(text).rstrip("?")
+    return _FIXED_PHRASES.get(norm)
+
+
+def _running_brief(store: Any) -> List[Dict[str, str]]:
+    out: List[Dict[str, str]] = []
+    for req in store.recent_requests(state="running", limit=50):
+        schedule = store.get_schedule(req.schedule_id) if req.schedule_id else None
+        title = schedule.title if schedule is not None else (req.summary or "a request")
+        status = req.status or {}
+        calls = status.get("tool_calls") or []
+        step = ""
+        if calls:
+            last = calls[-1]
+            step = str(last.get("tool") or last.get("name") or "") if isinstance(last, dict) else str(last)
+            step = step.rsplit("__", 1)[-1].replace("_", " ")
+        when = _clock_text(req.created_at, schedule.timezone if schedule is not None else "America/New_York")
+        out.append({"title": title, "started_text": when, "step": step or "working"})
+    return out
+
+
+def _next_scheduled(store: Any) -> Optional[Dict[str, Any]]:
+    upcoming = [s for s in store.schedules(states=["active"]) if s.next_run is not None]
+    if not upcoming:
+        return None
+    nxt = min(upcoming, key=lambda s: s.next_run)
+    return {"title": nxt.title, "time_text": _clock_text(nxt.next_run, nxt.timezone)}
+
+
+def _stuck_brief(manager: Any) -> List[Dict[str, str]]:
+    """One entry per stuck schedule, each with exactly one fix phrase the chat
+    path already accepts: "let it <label>" for a missing capability (matched
+    by schedprop.capabilities_from_permission), "stop it" for anything else
+    (schedule_command action "stop", handled directly below)."""
+    store = manager.store
+    out: List[Dict[str, str]] = []
+    for schedule in store.schedules(states=["paused"]):
+        missing = schedprop.missing_capabilities(schedule.prompt, schedule.scopes)
+        if missing:
+            out.append({"sentence": f"{schedule.title} is not allowed to {schedprop.labels(missing)}.",
+                       "fix": f"let it {schedprop.short_labels(missing)}"})
+        else:
+            reason = _normalize_reason_safe(schedule.last_outcome) if schedule.last_outcome else "it stopped running"
+            out.append({"sentence": f"{schedule.title}: {reason}.", "fix": "stop it"})
+    for schedule in store.schedules(states=["active"]):
+        last = store.last_schedule_run(schedule.id)
+        if not last or last.get("outcome") in ("complete", "skipped"):
+            continue
+        missing = schedprop.missing_capabilities(schedule.prompt, schedule.scopes)
+        if missing:
+            out.append({"sentence": f"{schedule.title} is not allowed to {schedprop.labels(missing)}.",
+                       "fix": f"let it {schedprop.short_labels(missing)}"})
+        else:
+            reason = _normalize_reason_safe(last.get("result_line") or "") or "it could not finish"
+            out.append({"sentence": f"{schedule.title}: {reason}.", "fix": "stop it"})
+    return out
+
+
+def _normalize_reason_safe(text: str) -> str:
+    from . import schedules as sched_mod
+    return sched_mod._normalize_reason(text)
+
+
+def _done_today_brief(store: Any, now: Optional[float] = None) -> List[str]:
+    now = time.time() if now is None else now
+    tz = ZoneInfo("America/New_York")
+    today = datetime.fromtimestamp(now, tz).date()
+    rows: List[Any] = []
+    for schedule in store.schedules():
+        for run in store.schedule_runs(schedule.id):
+            finished = run.get("finished_at")
+            if finished is None:
+                continue
+            if datetime.fromtimestamp(finished, tz).date() != today:
+                continue
+            rows.append((finished, f"{schedule.title}: {run.get('result_line') or _last_result_phrase(run)}."))
+    rows.sort(key=lambda t: -t[0])
+    return [sentence for _, sentence in rows]
+
+
+def status_reply(manager: Any) -> str:
+    store = manager.store
+    running = _running_brief(store)
+    nxt = _next_scheduled(store)
+    if running:
+        parts = [f"{r['title']}: started {r['started_text']}, now {r['step']}." for r in running]
+        reply = f"{_count_word(len(parts))} thing{'s' if len(parts) != 1 else ''} running. " + " ".join(parts)
+    else:
+        reply = "Nothing is running."
+    if nxt:
+        reply += f" Next: {nxt['title']} at {nxt['time_text']}."
+    return reply
+
+
+def _stuck_say(it: Dict[str, str]) -> str:
+    if it["fix"] == "stop it":
+        return f'{it["sentence"]} Say "stop it".'
+    return f'{it["sentence"]} Say "{it["fix"]}" or "stop it".'
+
+
+def stuck_reply(manager: Any) -> str:
+    items = _stuck_brief(manager)
+    if not items:
+        return "Nothing is stuck."
+    if len(items) == 1:
+        return f"One thing is stuck. {_stuck_say(items[0])}"
+    parts = [_stuck_say(it) for it in items]
+    return f"{_count_word(len(items))} things are stuck. " + " ".join(parts)
+
+
+def today_reply(manager: Any) -> str:
+    items = _done_today_brief(manager.store)
+    if not items:
+        return "Nothing finished today yet."
+    if len(items) == 1:
+        return items[0]
+    return f"{_count_word(len(items))} things finished today. " + " ".join(items)
+
+
 async def handle(manager: Any, session: Any, command: Any) -> str:
     """The plain reply to a schedule_command: list/last/change/pause/resume/
     run_now/stop/add_capability. Only the owner may manage schedules; anyone
@@ -515,6 +662,12 @@ async def handle(manager: Any, session: Any, command: Any) -> str:
     action = str(_field(command, "action") or "").strip().lower()
     if action == "list":
         return _list_sentence(store)
+    if action == "status":
+        return status_reply(manager)
+    if action == "stuck":
+        return stuck_reply(manager)
+    if action == "today":
+        return today_reply(manager)
     target_text = _field(command, "target")
     changes = dict(_field(command, "changes") or {})
     chat_id = getattr(session, "record_id", None) or getattr(session, "chat_id", "")

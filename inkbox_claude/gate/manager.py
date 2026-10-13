@@ -22,7 +22,7 @@ from .executor import Executor
 from . import settings as _settings
 from .jevagent import JevAgent, enabled as jev_agent_enabled
 from .taskpick import TaskPicker, enabled as jev_enabled
-from .router import Router, RouterOutput, RouterRequest
+from .router import Router, RouterOutput, RouterRequest, ScheduleCommand
 from .scopes import SCOPES, READ_SCOPES
 from .store import Person, Request, Store, TaskRequired, task_key
 from .schedules import ScheduleService
@@ -543,6 +543,15 @@ class GateSession:
         Legacy flow (picker off, or GATE_ROUTER_DEFINES_REQUEST=1): the router proposes
         the request and Jev checks task, action and scopes afterwards."""
         approver = self.is_approver()
+        if approver:
+            from . import schedcmd
+            fixed_action = schedcmd.match_fixed_phrase(message)
+            if fixed_action is not None:
+                # One of Aaron's own common exact phrasings for status/stuck/today
+                # (schedcmd._FIXED_PHRASES): answered without the router or any
+                # model call at all, on either flow below.
+                out = RouterOutput(schedule_command=ScheduleCommand(action=fixed_action))
+                return out, None
         picker = self.m.task_picker
         if self.m.router_defines_requests or picker is None:
             out = await self.m.router.route(history=prior, message=message, mode=mode, sender=self._sender(),
