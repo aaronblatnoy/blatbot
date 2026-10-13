@@ -170,6 +170,31 @@ def test_capabilities_for_refuses_an_unknown_suggested_scope():
         schedprop.capabilities_for("check it", [], ["not_a_real_scope"], "")
 
 
+def test_capabilities_for_drops_unknown_suggested_scope_when_others_remain():
+    # The router hallucinating one bad scope name should not sink a proposal
+    # that otherwise has a real capability from another source.
+    got = schedprop.capabilities_for("check it", ["web"], ["not_a_real_scope"], "")
+    assert got == ["web"]
+
+
+def test_friendly_error_unknown_scopes_never_says_scope():
+    text = schedprop.friendly_error(schedprop.UnknownScopes(["not_a_real_scope"]))
+    assert "scope" not in text.lower()
+    assert "not_a_real_scope" not in text
+
+
+def test_friendly_error_cadence_never_says_cadence():
+    from inkbox_claude.gate import cadence as cadence_mod
+    text = schedprop.friendly_error(cadence_mod.CadenceError("cadence_kind must be one of ['once']"))
+    assert "cadence" not in text.lower()
+
+
+def test_friendly_error_missing_capability_names_it_in_words():
+    text = schedprop.friendly_error(ValueError("missing capability: contacts"))
+    assert "scope" not in text.lower()
+    assert text == "It isn't allowed to contacts yet."
+
+
 def test_missing_capabilities_names_a_tool_named_prompt_scope_not_granted():
     prompt = "Then call inkbox_create_contact for the tracker."
     assert schedprop.missing_capabilities(prompt, []) == ["contacts"]
@@ -203,6 +228,15 @@ def test_format_proposal_matches_the_specs_example_shape(monkeypatch):
     assert "#" not in text
     assert "*" not in text
     assert "every\"" not in text and "'every'" not in text  # no raw cadence_kind word as a token
+
+
+def test_format_proposal_with_no_capabilities_never_reads_it_will_dot(monkeypatch):
+    monkeypatch.setattr(schedprop, "_cadence_text", lambda s: "every 4 hours")
+    monkeypatch.setattr(schedprop, "_first_run_text", lambda s: "2:30 PM today")
+    schedule = _schedule(scopes=[])
+    text = schedprop.format_proposal(schedule)
+    assert "It will ." not in text
+    assert "It will not be able to use any tools." in text
 
 
 def test_format_proposal_every_time_reporting(monkeypatch):

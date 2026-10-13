@@ -702,7 +702,14 @@ class ScheduleService:
                 for name in self._scopes_for_tool(str(tool)):
                     if name not in scope_names:
                         scope_names.append(name)
-            labels = self._labels(sorted(scope_names)) if scope_names else "do part of this"
+            if not scope_names:
+                # A denied tool that belongs to no known scope has no label to
+                # offer back ("let it do part of this" names nothing real);
+                # the vague-approval phrase add_capability already understands
+                # is the only sound recovery to suggest.
+                return (f'{schedule.title} could not finish: it is not allowed to do part of this. '
+                        f'{result_line} Reply "let it do that" to try again.')
+            labels = self._labels(sorted(scope_names))
             return (f"{schedule.title} could not finish: it is not allowed to {labels}. {result_line} "
                     f'Reply "let it {labels}" to fix that, or "stop it".')
         if outcome == "failed":

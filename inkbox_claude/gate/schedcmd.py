@@ -353,18 +353,10 @@ def _state_error_reply(schedule: Schedule, action: str) -> str:
 
 def _friendly_action_error(schedule: Schedule, exc: ValueError) -> str:
     """Map a service ValueError from schedules.action/edit to a plain owner
-    sentence. Timing errors (CadenceError) never say "cadence"; a missing
-    capability is named in words, not as "scope"."""
-    msg = str(exc)
-    if isinstance(exc, cadence_module.CadenceError):
-        if "at least 5 minutes" in msg:
-            return "It has to run at least every 5 minutes."
-        return "I didn't understand that timing."
-    if msg.startswith("missing capability:"):
-        return f"It isn't allowed to {msg.split(':', 1)[1].strip()} yet."
-    # "already has a run in flight", "needs to be told how often to run
-    # first", "That time has already passed." -- already plain sentences.
-    return msg
+    sentence. The mapping itself (schedprop.friendly_error) is shared with
+    manager.py's proposal-time errors, so an unknown scope or an unparseable
+    cadence is worded the same way no matter which path hit it."""
+    return schedprop.friendly_error(exc)
 
 
 async def _handle_simple_action(manager: Any, schedule: Schedule, action: str) -> str:

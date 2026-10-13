@@ -116,14 +116,47 @@ def capabilities_for(prompt: str, named_scopes: Optional[List[str]], suggested_s
     """The de-duplicated union, in registry order, of: scopes he named
     explicitly, scopes his own words name by synonym, scopes whose tools the
     prompt names literally, and the scopes the router suggests the work needs
-    (a suggestion only -- it becomes permission only with his yes). Raises
-    UnknownScopes if named_scopes or suggested_scopes names something not in
-    the registry, so the caller can refuse the proposal."""
-    unknown = sorted({n for n in (list(named_scopes or []) + list(suggested_scopes or [])) if n not in SCOPES})
-    if unknown:
-        raise UnknownScopes(unknown)
-    matched = set(named_scopes or []) | set(_said_scopes(said_text)) | set(_prompt_tool_scopes(prompt)) | set(suggested_scopes or [])
+    (a suggestion only -- it becomes permission only with his yes).
+
+    A scope he named himself (named_scopes) that is not in the registry
+    always refuses the proposal with UnknownScopes -- that is his own typed
+    or spoken word for something that does not exist. A scope the router
+    merely *suggests* that is not in the registry (the model hallucinating a
+    name) is dropped silently as long as some other, real capability is
+    still matched from any source; it is refused only when nothing real is
+    left to propose at all, so the caller can fall back to "tell me what it
+    should be allowed to do" rather than naming a made-up scope back to him."""
+    named_unknown = sorted({n for n in (named_scopes or []) if n not in SCOPES})
+    if named_unknown:
+        raise UnknownScopes(named_unknown)
+    valid_suggested = [n for n in (suggested_scopes or []) if n in SCOPES]
+    matched = set(named_scopes or []) | set(_said_scopes(said_text)) | set(_prompt_tool_scopes(prompt)) | set(valid_suggested)
+    if not matched:
+        suggested_unknown = sorted({n for n in (suggested_scopes or []) if n not in SCOPES})
+        if suggested_unknown:
+            raise UnknownScopes(suggested_unknown)
     return [name for name in SCOPES if name in matched]
+
+
+def friendly_error(exc: Exception) -> str:
+    """Plain owner-facing text for a scope/cadence service error -- never the
+    words "scope", "cadence" or "cadence_kind". Shared by the proposal path
+    (manager.py) and the schedule-management path (schedcmd.py) so an error
+    from either is worded the same way."""
+    if isinstance(exc, UnknownScopes):
+        return ('I can\'t tell what it should be allowed to do. Tell me in plain words, '
+                'like "read public web pages".')
+    from . import cadence as cadence_mod
+    msg = str(exc)
+    if isinstance(exc, cadence_mod.CadenceError):
+        if "at least 5 minutes" in msg:
+            return "It has to run at least every 5 minutes."
+        return "I didn't understand that timing."
+    if msg.startswith("missing capability:"):
+        return f"It isn't allowed to {msg.split(':', 1)[1].strip()} yet."
+    # "already has a run in flight", "needs to be told how often to run
+    # first", "That time has already passed." -- already plain sentences.
+    return msg
 
 
 # Phrases that open a permission grant ("let it edit contacts") and words that
@@ -248,7 +281,13 @@ def format_proposal(schedule: Any) -> str:
     sentence = f'Set up "{schedule.title}": {cadence_text}, starting {first_run}'
     if getattr(schedule, "until", None):
         sentence += f", until {_until_text(schedule)}"
-    sentence += ". It will " + labels(schedule.scopes) + "."
+    if schedule.scopes:
+        sentence += ". It will " + labels(schedule.scopes) + "."
+    else:
+        # Belt and suspenders: manager.py refuses to propose a schedule with
+        # no capabilities at all, but format_proposal must never read "It
+        # will ." if that guard is ever bypassed (an edit path, a test).
+        sentence += ". It will not be able to use any tools."
     hears = "every time it runs" if schedule.report_every_time else "only when something changed or it could not finish"
     sentence += f" You hear from it {hears}."
     sentence += " Reply yes to start, or tell me what to change."

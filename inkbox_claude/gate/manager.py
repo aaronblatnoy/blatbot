@@ -1046,8 +1046,18 @@ class GateSession:
             except schedprop.UnknownScopes as exc:
                 out.request = None
                 out.schedule = None
+                return await self.send_to_sender(schedprop.friendly_error(exc), role="answer")
+            if not scopes:
+                # Nothing named it, nothing in his words matched a synonym or
+                # label, the prompt names no tool literally, and the router
+                # suggested no scope the work needs: a proposal with no
+                # capabilities would read "It will ." and be refused every
+                # tool on its first run. Ask instead of proposing.
+                out.request = None
+                out.schedule = None
                 return await self.send_to_sender(
-                    f"I can't propose that schedule: unknown scope(s) {', '.join(exc.names)}.", role="answer")
+                    "Tell me what it should be allowed to do, for example read public web pages.",
+                    role="answer")
             try:
                 until_epoch = _parse_until(out.schedule.until, out.schedule.timezone)
             except UntilParseError as exc:
@@ -1067,7 +1077,7 @@ class GateSession:
             except ValueError as exc:
                 out.request = None
                 out.schedule = None
-                return await self.send_to_sender(f"I can't set that up: {exc}", role="answer")
+                return await self.send_to_sender(schedprop.friendly_error(exc), role="answer")
             return True
         if not system_note and getattr(out, "schedule_command", None) is not None:
             if not approver:

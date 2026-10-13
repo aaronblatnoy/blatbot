@@ -84,6 +84,19 @@ async def _afut(value):
 
 
 @pytest.mark.asyncio
+async def test_empty_capabilities_asks_instead_of_proposing(tmp_path):
+    # "check <a page>" with no scopes named and none suggested by the router
+    # must not create a proposal that reads "It will ." and gets refused
+    # every tool on its first run.
+    m, sent = make_manager(tmp_path)
+    await _propose_via_manager(m, said="check the status page", prompt="check the status page",
+                               scopes=[])
+    assert m.store.schedules(states=["proposed"]) == []
+    reply = sent[-1][1]
+    assert reply == "Tell me what it should be allowed to do, for example read public web pages."
+
+
+@pytest.mark.asyncio
 async def test_full_flow_propose_approve_fire_complete_notice(tmp_path):
     m, sent = make_manager(tmp_path)
     await _propose_via_manager(m, said="every 4 hours check the team page", scopes=["web"])
@@ -170,9 +183,13 @@ async def test_denied_contact_tool_gives_incomplete_notice_with_phrase(tmp_path)
     run = m.store.last_schedule_run(schedule.id)
     assert run["outcome"] == "incomplete" and not run["complete"]
     notice = sent[-1][1]
+    # mcp__tamid-drive__manage_doc_tab belongs to no known scope in the
+    # registry, so there is no real label to offer back; the notice falls
+    # back to the vague recovery phrase add_capability's "do that" already
+    # understands, not an invented "let it do part of this".
     assert "could not finish" in notice
-    assert "let it" in notice
-    assert '"stop it"' in notice
+    assert '"let it do that" to try again.' in notice
+    assert "do part of this" in notice
 
 
 @pytest.mark.asyncio
