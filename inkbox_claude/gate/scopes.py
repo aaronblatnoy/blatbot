@@ -108,6 +108,17 @@ ASK: Dict[str, str] = {
 }
 WHERE_THINGS_LIVE: List[str] = list(_REGISTRY.get("where_things_live") or [])  # type: ignore[arg-type]
 
+# Scopes a registry entry marks `explicit_only: true`: never added by a blanket
+# "permission for everything" grant or any other automatic widening, no matter
+# how read-only their tools are (see wording.truly_read_only / manager's
+# _blanket_grant_scopes). A scope lands here only when it reads something as
+# broad and personal as an owner's own message history -- granted the same way
+# any other scope is, just never for free.
+EXPLICIT_ONLY_SCOPES: set = {
+    name for name, spec in (_REGISTRY.get("scopes") or {}).items()  # type: ignore[union-attr]
+    if spec.get("explicit_only")
+}
+
 # The Jev scope tree, derived from the registry's systems.
 SCOPE_TREE_SYSTEMS: Dict[str, str] = {k: _expand(str(v.get("description") or k)) for k, v in (_REGISTRY.get("systems") or {}).items()}  # type: ignore[union-attr]
 SCOPE_TREE_ALWAYS: Dict[str, List[str]] = {k: list(v.get("always") or []) for k, v in (_REGISTRY.get("systems") or {}).items()}  # type: ignore[union-attr]
