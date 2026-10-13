@@ -248,3 +248,44 @@ def test_a_genuinely_new_ask_on_the_same_call_still_creates_a_request(tmp_path):
     out = asyncio.run(go())
     assert out == "Two events tomorrow."
     assert m.executor.ran == [1, 2]
+
+
+def test_still_stuck_line_also_texts_the_failure_exactly_once(tmp_path):
+    """Item C9: when the "Still stuck on that" line is spoken (the second fragment
+    of a repeated failed ask), the failure message is also delivered once to a text
+    channel -- not just spoken -- and it is never sent again, including if the fold
+    fires a third time or the request is later handled at hang-up."""
+    m, sent = phone_manager(tmp_path, trust=True, active=True)
+    m.executor.result = {"ok": False, "error": "connection refused",
+                         "tool_calls": ["mcp__coolify__deploy"], "raw": "connection refused"}
+    m.router.next = RouterOutput(reply="On it.", task="new", task_title="Deploy the app",
+                                 request=RouterRequest(prompt="Deploy the app", scopes=["web"],
+                                                       summary="deploy the app"))
+
+    async def first():
+        return await m.get("p1").voice_consult("deploy the app for me", _voice_meta())
+    out1 = asyncio.run(first())
+    assert "it could not reach Coolify" in out1
+    task_id = m.store.task_id_for_request(1)
+
+    m.router.next = RouterOutput(reply="On it.", task=f"T{task_id}",
+                                 request=RouterRequest(prompt="deploy it", scopes=["web"], summary="deploy it"))
+
+    async def second():
+        return await m.get("p1").voice_consult("go ahead and deploy it", _voice_meta())
+    asyncio.run(second())
+
+    async def third():
+        return await m.get("p1").voice_consult("did that work", _voice_meta())
+    out3 = asyncio.run(third())
+    assert out3 == "Still stuck on that. I'll text you."
+
+    texted = [row for row in sent if row[2] in ("sms", "imessage") and "it could not reach Coolify" in row[1]]
+    assert len(texted) == 1, f"expected exactly one text, got {texted}"
+
+    # A fourth fragment folds again -- the text is not repeated.
+    async def fourth():
+        return await m.get("p1").voice_consult("please try again", _voice_meta())
+    asyncio.run(fourth())
+    texted_again = [row for row in sent if row[2] in ("sms", "imessage") and "it could not reach Coolify" in row[1]]
+    assert len(texted_again) == 1, "the failure must never be texted a second time"

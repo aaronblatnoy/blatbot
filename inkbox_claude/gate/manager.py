@@ -913,7 +913,7 @@ class GateSession:
             "or more detailed."
         )
 
-    def _fold_into_failed_ask(self, task_id: int, call_id: Optional[str]) -> Optional[str]:
+    async def _fold_into_failed_ask(self, task_id: int, call_id: Optional[str]) -> Optional[str]:
         """Item 4: when a voice fragment's ask is the SAME ask (same task) as a
         request that already failed on this thread -- the realtime voice model
         can hand off several fragments of one spoken request a few seconds apart,
@@ -921,7 +921,17 @@ class GateSession:
         existing fold (above) to catch -- a further fragment never starts a
         second run of it. The failure is spoken once, then a short "still stuck"
         line at most once more, then nothing further for this ask. Returns None
-        when this is not that case (a genuinely new ask proceeds as normal)."""
+        when this is not that case (a genuinely new ask proceeds as normal).
+
+        Item C9: the "still stuck" line is spoken, not texted -- the caller never
+        actually gets the failure in writing unless he hangs up right after hearing
+        it (and send_to_sender's hang-up path only fires for the CURRENT fragment's
+        own inbound, not the earlier failed request). So the moment that line is
+        said, the failure message is also delivered once to a text channel -- the
+        same single-channel choice _run_for_call uses after hang-up (owner's own
+        primary when this is Aaron, otherwise back to the number that called) --
+        and the failed request is marked answered so that delivery never repeats,
+        whether this fold fires again or the request is later handled at hang-up."""
         failed = self.m.store.last_failed_for_thread(self.chat_id, exclude_scheduled=True)
         if failed is None:
             return None
@@ -937,6 +947,17 @@ class GateSession:
             text = wording.failure_message(wording.plain_title(self.m.store, failed), failed.status or {})
         elif count == 1:
             text = "Still stuck on that. I'll text you."
+            already = failed.inbound_id and "answer" in self.m.store.responses_to(failed.inbound_id)
+            if not already:
+                failure_text = wording.failure_message(wording.plain_title(self.m.store, failed), failed.status or {})
+                if self.is_aaron_on_phone():
+                    await self.m.send_to_approver(failure_text)
+                else:
+                    num = self._sender()
+                    await self.m.send(f"sms:{num}", failure_text, "sms", {"to": num, "sender": num}, record=False)
+                if failed.inbound_id:
+                    self.m.store.add_message(self.record_id, "outbound", failure_text, "sms",
+                                             reply_to=failed.inbound_id, role="answer")
         else:
             text = ""
         if text:
@@ -998,7 +1019,7 @@ class GateSession:
                 if task is not None and out.request is not None:
                     # Item 4: this ask's task may be the same one a request already
                     # failed under on this call -- never start a second run of it.
-                    folded = self._fold_into_failed_ask(task["id"], call_meta.get("call_id"))
+                    folded = await self._fold_into_failed_ask(task["id"], call_meta.get("call_id"))
                     if folded is not None:
                         if t is not None:
                             self._ensure_inbound_on_task(t, body)
