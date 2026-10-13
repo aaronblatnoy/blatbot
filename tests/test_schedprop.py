@@ -470,3 +470,44 @@ def test_a_negated_vague_phrase_grants_nothing_even_after_a_refused_run(said):
 def test_a_plain_vague_approval_still_grants_what_was_refused():
     assert schedprop.capabilities_from_permission("let it do that", ["contacts"]) == ["contacts"]
     assert schedprop.capabilities_from_permission("fix that", ["contacts"]) == ["contacts"]
+
+
+# ---------------------------------------------------------------------------
+# default_report_every_time (item 4): digest vs watch default
+# ---------------------------------------------------------------------------
+
+@pytest.mark.parametrize("text", [
+    "send me a summary of the team chat every morning",
+    "text me a daily briefing",
+    "give me a recap of the inbox",
+    "send a weekly roundup",
+    "tell me every day what changed",
+])
+def test_digest_wording_defaults_to_every_time(text):
+    assert schedprop.default_report_every_time(text, "daily") is True
+
+
+@pytest.mark.parametrize("text", [
+    "check the team page and tell me when the total changes",
+    "alert me if the price drops",
+    "let me know if anything changes on the site",
+])
+def test_watch_wording_defaults_to_only_on_change(text):
+    assert schedprop.default_report_every_time(text, "every") is False
+
+
+def test_no_digest_or_watch_wording_falls_back_to_cadence_kind():
+    assert schedprop.default_report_every_time("look at the page", "once") is True
+    assert schedprop.default_report_every_time("look at the page", "every") is False
+
+
+# ---------------------------------------------------------------------------
+# capability_match (item 2's blocked fix sentence)
+# ---------------------------------------------------------------------------
+
+def test_capability_match_finds_a_real_scope_by_label():
+    assert schedprop.capability_match("a way to look up and edit contacts") == "contacts"
+
+
+def test_capability_match_returns_none_for_an_unregistered_capability():
+    assert schedprop.capability_match("a way to read Telegram groups") is None

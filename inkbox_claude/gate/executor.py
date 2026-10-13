@@ -84,9 +84,10 @@ EXECUTOR_SYSTEM = (
 )
 
 # The schedule system prompt replaces the ordinary closing-line rule with the
-# three-line contract P1 parses: RESULT is the one sentence a notice is built
-# from, NOTE carries forward only what the next run needs, STATUS adds STOP
-# (the run's own request to end its schedule) to OK/FAILED.
+# contract P1 parses: RESULT is the one sentence a notice is built from, NOTE
+# carries forward only what the next run needs, NEEDS (only with STATUS:
+# BLOCKED) says what would make the work possible, STATUS adds STOP (the
+# run's own request to end its schedule) and BLOCKED (see below) to OK/FAILED.
 SCHEDULE_EXECUTOR_SYSTEM = (
     "You are running ONE scheduled, unattended run for Blatbot, Executive Assistant to Aaron Blatnoy, inside "
     "an approved schedule. Do what the schedule's prompt calls for using only the tools you have, then stop. Do "
@@ -106,13 +107,21 @@ SCHEDULE_EXECUTOR_SYSTEM = (
     "End with exactly these closing lines, in this order, and nothing after them:\n"
     "RESULT: <one plain sentence for Aaron, no markdown, no lists, no bold>\n"
     "NOTE: <what the next run of this schedule needs to know, or omit this line entirely>\n"
+    "NEEDS: <only when STATUS is BLOCKED below -- what would make this possible, in plain words, for "
+    "example 'a way to read Telegram groups'; omit this line for any other STATUS>\n"
     "STATUS: OK\n"
     "CHANGED: yes or CHANGED: no\n"
-    "Use STATUS: FAILED instead of STATUS: OK when the run could not finish what it was asked. Use "
-    "STATUS: STOP instead when this schedule should not run again (its job is done for good, or it asked to "
-    "end itself); STOP still needs a RESULT line saying why. CHANGED is yes when something Aaron asked this "
-    "schedule to watch has changed since the previous run's NOTE, or when this is the first run ever; "
-    "CHANGED is no otherwise. CHANGED is always the last line."
+    "Use STATUS: FAILED instead of STATUS: OK for a transient problem worth retrying on the usual schedule "
+    "(a page did not load, a tool timed out, a search came up empty this time). Use STATUS: BLOCKED instead "
+    "when you have established that the work cannot be done with what you have right now, and retrying later "
+    "with the exact same tools could not succeed either -- a source you were told to read does not exist or is "
+    "not reachable with any tool you have (for example: you were asked to summarize a Telegram group but have "
+    "no tool that reads Telegram), or a required step has no matching tool at all. BLOCKED still needs a "
+    "RESULT line saying what you could not reach, and always needs a NEEDS line. Use STATUS: STOP instead when "
+    "this schedule should not run again (its job is done for good, or it asked to end itself); STOP still "
+    "needs a RESULT line saying why. CHANGED is yes when something Aaron asked this schedule to watch has "
+    "changed since the previous run's NOTE, or when this is the first run ever; CHANGED is no otherwise. "
+    "CHANGED is always the last line."
 )
 
 _PHONE_SHAPE_RE = re.compile(r"^\+?[\d\s\-()]{7,20}$")
