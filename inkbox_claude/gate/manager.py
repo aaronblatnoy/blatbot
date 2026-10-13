@@ -1723,7 +1723,15 @@ class GateSessionManager:
             plain = f"[Blatbot #{req.id}] Nothing has been sent. This is what would go out:\n\n{_draft_text(shown)}"
         else:
             plain = await self._phrase_confirmation(req, short, shown, c.get("about") or [])
-        await self.send_to_approver(f"{plain}\nReply \"#{req.id} yes\" to do it or \"#{req.id} no\" to leave it alone.")
+        full_text = f"{plain}\nReply \"#{req.id} yes\" to do it or \"#{req.id} no\" to leave it alone."
+        schedule = self.store.get_schedule(req.schedule_id) if req.schedule_id else None
+        if schedule is not None:
+            # A held call that belongs to a scheduled run asks on that
+            # schedule's own channel, not always the owner's iMessage -- the
+            # "#<id> yes" reply mechanics themselves are unchanged.
+            await self.send_schedule_notice(schedule, full_text)
+        else:
+            await self.send_to_approver(full_text)
 
     async def _phrase_confirmation(self, req: Request, short: str, shown: Dict[str, Any], about: List[str]) -> str:
         """One or two plain sentences saying what the change would do, for the owner."""

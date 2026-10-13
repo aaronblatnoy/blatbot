@@ -489,6 +489,7 @@ class ScheduleService:
                                                schedule.timezone, now)
             self.store.update_schedule(schedule.id, next_run=next_run)
             logger.info("[schedules] %s skipped a firing: previous run still in flight", schedule.id)
+            await self._notify_held_skip_once(schedule, running, now)
             return
         req = self.store.create_request(
             chat_id=schedule.chat_id, sender="Aaron", sender_name="Aaron", mode="schedule", subject="",
@@ -507,6 +508,25 @@ class ScheduleService:
                               chat_id=schedule.chat_id, request_id=req.id, state="running")
         logger.info("[schedules] %s fired: request #%s", schedule.id, req.id)
         asyncio.create_task(self._run_fired(req))
+
+    async def _notify_held_skip_once(self, schedule: Schedule, running: Request, now: float) -> None:
+        """A run parked waiting for the owner's yes (a held send) blocks every
+        later firing silently otherwise -- tell him, but only the first time a
+        firing is skipped for this held call (item 6), not on every one of
+        what could be many ticks over the up-to-24-hours it may sit there."""
+        if running.state != "pending":
+            return
+        status = running.status or {}
+        if status.get("held_skip_notified"):
+            return
+        confirm = status.get("confirm") or {}
+        about = confirm.get("about") or []
+        what = ", ".join(str(a) for a in about) if about else \
+            str(confirm.get("tool", "")).split("__")[-1].replace("_", " ") or "do that"
+        when = _shown(running.updated_at, schedule.timezone)
+        await self._notice(schedule, f'{schedule.title} is waiting for your yes to {what} since {when}. '
+                                     'Say yes or no to that first.')
+        self.store.set_state(running.id, running.state, status={**status, "held_skip_notified": True})
 
     async def _run_fired(self, req: Request) -> None:
         """manager.execute() runs detached (nothing here awaits it), so an exception

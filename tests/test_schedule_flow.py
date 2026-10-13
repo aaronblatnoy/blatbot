@@ -803,6 +803,70 @@ async def test_declined_held_scheduled_call_stays_incomplete(tmp_path):
 
 
 @pytest.mark.asyncio
+async def test_held_call_blocks_firing_with_one_notice_only_the_first_time(tmp_path):
+    # Item 6: a held send parks the request as "pending", which blocks every
+    # later firing (store.request_running_for_schedule treats it as in
+    # flight) for up to 24 hours. He must be told the first time a firing is
+    # skipped for that reason -- and only the first time, not on every tick.
+    m, sent = make_manager(tmp_path)
+    await _propose_via_manager(m, said="every 4 hours check the team page", scopes=["web"])
+    schedule = m.store.schedules(states=["proposed"])[0]
+    activated = await m.schedules.decide(schedule.id, True)
+
+    m.executor.results.append({
+        "ok": True, "confirm": {"tool": "mcp__fake__send_message", "args": {}, "about": [], "kind": "send"},
+        "result_line": "", "final_status": "", "note": "", "denied": [], "tool_calls": [], "held": True,
+        "started_at": time.time(), "finished_at": time.time(), "cost_usd": None,
+    })
+    await m.schedules.tick(now=activated.next_run)
+    await asyncio.sleep(0)
+    after_hold = len(sent)
+
+    schedule = m.store.get_schedule(schedule.id)
+    await m.schedules.tick(now=schedule.next_run + 1)
+    await asyncio.sleep(0)
+    after_first_skip = len(sent)
+    assert after_first_skip == after_hold + 1
+    skip_notice = sent[-1][1]
+    assert schedule.title in skip_notice
+    assert "waiting for your yes" in skip_notice
+    assert "Say yes or no to that first." in skip_notice
+
+    schedule = m.store.get_schedule(schedule.id)
+    await m.schedules.tick(now=schedule.next_run + 1)
+    await asyncio.sleep(0)
+    # The second skipped tick sends nothing more -- only once per held call.
+    assert len(sent) == after_first_skip
+
+
+@pytest.mark.asyncio
+async def test_held_scheduled_confirmation_goes_to_the_schedules_own_channel(tmp_path):
+    # ask_confirmation must send the original "#<id> yes" confirmation
+    # question through send_schedule_notice (the schedule's own channel),
+    # not always the owner's iMessage, when the held call belongs to a
+    # scheduled run. send_fn here captures every channel equally, so this
+    # checks the stored message row is tagged with schedule_id, which only
+    # send_schedule_notice does.
+    m, sent = make_manager(tmp_path)
+    await _propose_via_manager(m, said="every 4 hours check the team page", scopes=["web"])
+    schedule = m.store.schedules(states=["proposed"])[0]
+    activated = await m.schedules.decide(schedule.id, True)
+
+    m.executor.results.append({
+        "ok": True, "confirm": {"tool": "mcp__fake__send_message", "args": {}, "about": [], "kind": "send"},
+        "result_line": "", "final_status": "", "note": "", "denied": [], "tool_calls": [], "held": True,
+        "started_at": time.time(), "finished_at": time.time(), "cost_usd": None,
+    })
+    await m.schedules.tick(now=activated.next_run)
+    await asyncio.sleep(0)
+
+    with m.store._lock:
+        row = m.store._db.execute(
+            "SELECT schedule_id FROM messages WHERE kind='outbound' ORDER BY id DESC LIMIT 1").fetchone()
+    assert row["schedule_id"] == schedule.id
+
+
+@pytest.mark.asyncio
 async def test_telegram_schedule_notices_go_to_telegram(tmp_path, monkeypatch):
     monkeypatch.setenv("GATE_APPROVER_TELEGRAM_ID", "1")
     m, sent = make_manager(tmp_path)
