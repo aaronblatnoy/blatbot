@@ -250,6 +250,21 @@ def _repair_prompt_paragraphs(prompt: str) -> "tuple[List[Dict[str, str]], str]"
     return changes, "\n\n".join(kept)
 
 
+def _insert_before_reply_yes(text: str, extra: str) -> str:
+    """Item C10: `extra` (one sentence, no leading/trailing space) inserted right
+    before the proposal's closing "Reply yes ..." sentence, or appended at the end
+    when that sentence is not found (never silently dropped). A blank `extra`
+    leaves `text` untouched."""
+    if not extra:
+        return text
+    extra = extra.strip()
+    marker = "Reply yes"
+    idx = text.rfind(marker)
+    if idx == -1:
+        return f"{text} {extra}".strip()
+    return f"{text[:idx]}{extra} {text[idx:]}"
+
+
 def _repair_join(parts: List[str]) -> str:
     if not parts:
         return ""
@@ -545,7 +560,8 @@ class ScheduleService:
                                        denied=[], note="", changed=False, cost_usd=None)
 
     # -- editing and acting ------------------------------------------------
-    async def edit(self, schedule_id: int, *, owner: bool, changes: Dict[str, Any]) -> Dict[str, Any]:
+    async def edit(self, schedule_id: int, *, owner: bool, changes: Dict[str, Any],
+                   extra_proposal_note: str = "") -> Dict[str, Any]:
         if not owner:
             raise PermissionError("only Aaron can create or change schedules")
         old = self.store.get_schedule(schedule_id)
@@ -596,7 +612,8 @@ class ScheduleService:
             updated = self.store.update_schedule(
                 schedule_id, prompt=prompt, scopes=scopes, state="proposed",
                 revision=old.revision + 1, notes=[json.dumps({"_edit_revert": revert})])
-            await self._notice(updated, self._proposal_text(updated))
+            await self._notice(updated, _insert_before_reply_yes(
+                self._proposal_text(updated), extra_proposal_note))
             message = f"Updated proposal sent for {updated.title}."
         logger.info("[schedules] %s edited (needs_approval=%s)", schedule_id, needs_approval)
         return {"schedule": updated, "applied": immediate, "needs_approval": needs_approval,
@@ -720,7 +737,9 @@ class ScheduleService:
             schedule = self.store.get_schedule(schedule_id)
             changes["scopes"] = sorted(set(schedule.scopes) | set(add_scopes))
             changes["prompt"] = plan["new_prompt"]
-        result = await self.edit(schedule_id, owner=owner, changes=changes)
+        extra_note = ("I will also drop the part of its instructions that mentions a "
+                     "tool that no longer exists." if plan["prompt_changes"] else "")
+        result = await self.edit(schedule_id, owner=owner, changes=changes, extra_proposal_note=extra_note)
         if not result["needs_approval"] and result["schedule"].state == "paused":
             # Only the timing changed: no prompt/scope change means edit() never
             # moves the schedule out of 'paused' on its own (edit() only flips

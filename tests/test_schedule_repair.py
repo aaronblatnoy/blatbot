@@ -103,6 +103,10 @@ async def test_apply_full_plan_proposes_then_activates(env):
     assert "contacts" in proposed.scopes
     assert "schedule_continue" not in proposed.prompt
     assert len(manager.notices) == 1
+    proposal_text = manager.notices[0][1]
+    assert ("I will also drop the part of its instructions that mentions a tool "
+           "that no longer exists.") in proposal_text
+    assert proposal_text.index("I will also drop") < proposal_text.rindex("Reply yes")
 
     before = time.time()
     activated = await service.decide(proposed.id, True)
@@ -141,3 +145,31 @@ async def test_apply_refused_for_non_owner(env):
     schedule = _make_stuck(store, task_id)
     with pytest.raises(PermissionError):
         await service.repair_apply(schedule.id, owner=False)
+
+
+@pytest.mark.asyncio
+async def test_apply_without_a_dead_tool_paragraph_gets_no_extra_sentence(env):
+    """The extra "I will also drop..." sentence (item C10) only appears when the
+    repair plan actually removes a paragraph -- a capability-only repair proposal
+    (timing already set, no dead-tool paragraph) is unchanged."""
+    store, manager, service, task_id = env
+    prompt = ("Check the team fundraising page every 4 hours and tell me the total.\n\n"
+             "If the total changed, call inkbox_update_contact with the new total.")
+    schedule = store.create_schedule(
+        chat_id="owner", task_id=task_id, title="Donor watch", prompt=prompt,
+        kind="", scopes=["web"], timezone="America/New_York", report_mode="changed",
+        cadence_kind="every", cadence={"minutes": 240}, origin_mode="imessage", origin_chat_id="owner",
+    )
+    schedule = store.update_schedule(schedule.id, state="paused", last_outcome="missing capability")
+    plan = service.repair_plan(schedule.id)
+    assert plan["prompt_changes"] == []
+    assert plan["add_capabilities"]
+
+    result = await service.repair_apply(schedule.id, owner=True)
+    assert result["needs_approval"] is True
+    assert len(manager.notices) == 1
+    proposal_text = manager.notices[0][1]
+    assert "I will also drop" not in proposal_text
+    assert len(manager.notices) == 1
+    proposal_text = manager.notices[0][1]
+    assert "I will also drop" not in proposal_text
