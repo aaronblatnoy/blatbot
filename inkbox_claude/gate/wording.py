@@ -144,9 +144,29 @@ def _classify(status: Dict[str, Any]) -> str:
     return "other"
 
 
+def failure_category(status: Dict[str, Any]) -> str:
+    """Public name for _classify: one category for a failed run -- 'usage_limit',
+    'buffer', 'timeout', 'refusal', 'network', or 'other'. Shared by every place
+    that needs to tell a usage-limit failure apart from the rest (overview.py's
+    Stuck collapsing, in particular), so there is exactly one classifier."""
+    return _classify(status)
+
+
+def usage_limit_reset_text(status: Dict[str, Any]) -> Optional[str]:
+    """The reset time exactly as a usage-limit error gave it (e.g. "3:10pm
+    (America/New_York)"), or None when the error named no reset time."""
+    text = f"{status.get('error') or ''} {status.get('final_status') or ''}"
+    return _reset_time(text)
+
+
 def failure_in_words(status: Dict[str, Any]) -> str:
     """One plain clause for why a run failed. Never the raw error string."""
     category = _classify(status)
+    if category == "usage_limit":
+        reset = usage_limit_reset_text(status)
+        if reset:
+            return f"it had hit a usage limit until {reset}"
+        return "it had hit a usage limit"
     if category == "buffer":
         return "it ran out of room handling something too large"
     if category == "timeout":
@@ -434,27 +454,69 @@ def _call_time_text(created_at: Any, timezone_name: str = "America/New_York") ->
     return f"{at.strftime('%b')} {at.day}, {clock}"
 
 
+_MAX_TITLE_LEN = 80
+
+
+def is_call_request(req: Any) -> bool:
+    """Whether `req` came from a phone call: its mode is voice, or its
+    original message is a call hand-off (see _is_handoff_shaped). Either
+    one is enough -- a call request is never named by its summary, whatever
+    that summary says, because the summary of a call is often a speech
+    transcript."""
+    mode = str(getattr(req, "mode", "") or "")
+    original = (getattr(req, "original_message", "") or "").strip()
+    return mode == "voice" or _is_handoff_shaped(original) or _is_handoff_shaped(
+        (getattr(req, "summary", "") or "").strip())
+
+
+def _call_title(req: Any) -> str:
+    when = _call_time_text(getattr(req, "created_at", None))
+    return f"the request from the {when} call" if when else "the request from a call"
+
+
+def _non_call_title(summary: str, created_at: Any) -> str:
+    """A plain title for a non-call request's summary: the summary itself
+    when it is short and a single sentence; otherwise its first sentence
+    alone, if that sentence is 80 characters or fewer; otherwise a request
+    is named by when it was asked rather than cut mid-sentence."""
+    text = summary.strip()
+    sentences = [s for s in _SENTENCE_PIECE_RE.split(text) if s.strip()]
+    one_sentence = len(sentences) <= 1
+    if len(text) <= _MAX_TITLE_LEN and one_sentence:
+        return text
+    first = (sentences[0].strip() if sentences else text)
+    if first and len(first) <= _MAX_TITLE_LEN:
+        return first
+    when = _call_time_text(created_at)
+    return f"a request from {when}" if when else "a request"
+
+
+_SENTENCE_PIECE_RE = re.compile(r"(?<=[.!?])\s+")
+
+
 def plain_title(store: Any, req: Any) -> str:
     """The request named to the owner, anywhere a request is named (overview
-    rows, failure/success messages, the progress reply): its own summary when
-    that already reads as plain text, else the caller's own words pulled from
-    a voice hand-off transcript. Never the hand-off preamble, never a
-    "blatbot:" line, never a phone number, never cut by length.
+    rows, failure/success messages, the progress reply): a call request is
+    always named by when it was asked (see is_call_request), whatever its
+    summary says, because a speech transcript is never a title. A non-call
+    request is named by its own summary when that already reads as plain
+    text (see _non_call_title); a long or multi-sentence summary is named
+    by its first sentence alone, or by when it was asked when even that
+    sentence runs long -- never cut mid-sentence.
 
     `store` is accepted for parity with the rest of the console's
     contact-aware wording (and in case a future hand-off shape ever needs a
     contact lookup); plain_title itself never needs one; it only ever reads
-    the caller's own spoken words, which carry no identifier for themselves."""
+    the caller's own spoken words or the request's own summary."""
+    if is_call_request(req):
+        return _call_title(req)
     summary = (getattr(req, "summary", "") or "").strip()
     original = (getattr(req, "original_message", "") or "").strip()
-    if summary and not _is_handoff_shaped(summary) and not _is_cut_of(summary, original):
-        return summary
-    # A raw speech transcript is not a title: it rambles and repeats. A row whose
-    # only name is its hand-off transcript is named by when it was asked instead;
-    # the caller's own words stay available through caller_lines() for anyone who
-    # wants the detail.
-    when = _call_time_text(getattr(req, "created_at", None))
-    return f"the request from the {when} call" if when else "the request from a call"
+    if summary and not _is_cut_of(summary, original):
+        return _non_call_title(summary, getattr(req, "created_at", None))
+    # No usable summary at all: fall back to the call-shaped naming so a
+    # request with nothing better named still gets a plain, whole title.
+    return _call_title(req)
 
 
 _CHANGING_TOOL_RE = re.compile(r"(^|_)(create|update|delete|manage|remove|write)(_|$)")

@@ -430,6 +430,10 @@ def test_handoff_prompt_summary_is_replaced_by_the_caller_own_words(tmp_path):
 
 
 def test_sentences_are_whole_never_cut(tmp_path):
+    """A summary too long to name a request by (over 80 characters, here with
+    no sentence boundary at all) is never sliced -- it is named by when it
+    was asked instead (wording.plain_title's "a request from <time>" rule),
+    not by a hard character cut of the long text."""
     store = make_store(tmp_path)
     long_summary = "Approve this: " + ("x" * 400)
     request = _make_request(store, summary=long_summary, original_message=long_summary, state="pending")
@@ -437,7 +441,9 @@ def test_sentences_are_whole_never_cut(tmp_path):
     result = api.overview(FakeGateway(FakeManager(store)), store)
 
     row = next(r for r in result["stuck"] if r["id"] == request.id)
-    assert long_summary in row["sentence"]
+    assert long_summary not in row["sentence"]
+    assert "x" * 20 not in row["sentence"]  # no partial slice of the long run of x's either
+    assert "a request from" in row["sentence"]
 
 
 # ---------------------------------------------------------------------------
