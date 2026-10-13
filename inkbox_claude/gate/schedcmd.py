@@ -297,9 +297,19 @@ async def _handle_simple_action(manager: Any, schedule: Schedule, action: str) -
 async def _handle_change(manager: Any, schedule: Schedule, changes: Dict[str, Any]) -> str:
     was_proposed = schedule.state == "proposed"
     edit_changes: Dict[str, Any] = {}
-    for key in ("cadence_kind", "cadence", "report_every_time", "until", "title"):
+    for key in ("cadence_kind", "cadence", "report_every_time", "title"):
         if key in changes:
             edit_changes[key] = changes[key]
+    if "until" in changes:
+        # The router hands until back as an ISO date/datetime string in the
+        # schedule's own time zone; the store column is a numeric epoch. Reuse
+        # manager's own parser (the same one schedule creation uses) rather
+        # than duplicate it, so the two paths cannot drift.
+        from . import manager as manager_module
+        try:
+            edit_changes["until"] = manager_module._parse_until(changes["until"], schedule.timezone)
+        except manager_module.UntilParseError as exc:
+            return str(exc)
     if changes.get("prompt_addition"):
         edit_changes["prompt"] = (schedule.prompt + " " + str(changes["prompt_addition"]).strip()).strip()
     added_scopes: List[str] = []

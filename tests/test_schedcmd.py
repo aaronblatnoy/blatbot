@@ -562,3 +562,31 @@ async def test_no_reply_leaks_scope_names_ids_or_markdown(env):
         for ch in "*_`[]":
             assert ch not in reply
         assert not __import__("re").search(r"\bS\d+\b", reply)
+
+
+@pytest.mark.asyncio
+async def test_change_until_parses_bare_date_to_end_of_day_epoch(env):
+    store, manager, task_id = env
+    schedule = await _active(manager, task_id)
+    session = FakeSession()
+    reply = await schedcmd.handle(manager, session, _command(
+        "change", target="Team total watch", until="2026-12-31"))
+    assert "Changed." in reply
+    updated = store.get_schedule(schedule.id)
+    assert isinstance(updated.until, float)
+    from datetime import datetime
+    from zoneinfo import ZoneInfo
+    dt = datetime.fromtimestamp(updated.until, ZoneInfo(updated.timezone))
+    assert (dt.month, dt.day, dt.hour, dt.minute) == (12, 31, 23, 59)
+
+
+@pytest.mark.asyncio
+async def test_change_until_unparseable_gets_plain_reply_and_no_store_change(env):
+    store, manager, task_id = env
+    schedule = await _active(manager, task_id)
+    session = FakeSession()
+    reply = await schedcmd.handle(manager, session, _command(
+        "change", target="Team total watch", until="not a date"))
+    assert "didn't understand" in reply
+    updated = store.get_schedule(schedule.id)
+    assert updated.until == schedule.until
