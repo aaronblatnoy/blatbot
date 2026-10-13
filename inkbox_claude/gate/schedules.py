@@ -75,8 +75,31 @@ def run_outcome(status: Dict[str, Any]) -> str:
     if denied or held:
         return "incomplete"
     if status.get("ok"):
+        tool_results = status.get("tool_results")
+        if tool_results and not any(r.get("ok") for r in tool_results):
+            return "incomplete"
+        if _looks_like_could_not(str(status.get("result_line") or "")):
+            return "incomplete"
         return "complete"
     return "failed"
+
+
+_COULD_NOT_PHRASES = (
+    "i could not", "i couldn't", "could not", "couldn't",
+    "i was unable to", "unable to", "i can't", "i cannot",
+)
+
+
+def _looks_like_could_not(result_line: str) -> bool:
+    """True when a STATUS: OK run's own RESULT line opens by admitting it could not
+    do the job (item C11): a status of ok with a result like this is not a genuine
+    "nothing new" -- the model is reporting a failure under a false OK. Checked
+    against the start of the text only, so a result that merely mentions "could not"
+    partway through (describing something else) does not trip this."""
+    text = (result_line or "").strip().lower()
+    if not text:
+        return False
+    return any(text.startswith(p) for p in _COULD_NOT_PHRASES)
 
 
 # Rewriting the run's own first-person "I" so it never sits next to the

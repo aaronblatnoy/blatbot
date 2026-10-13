@@ -731,6 +731,41 @@ async def test_failed_notice_title_ending_in_punctuation_does_not_double_up(env)
     assert text.startswith("Nightly check could not finish:")
 
 
+def test_run_outcome_ok_with_could_not_result_is_incomplete():
+    for phrase in ("I could not reach the calendar.", "I couldn't find the chat.",
+                   "Could not find the file.", "couldn't open the inbox.",
+                   "I was unable to log in.", "unable to reach the server.",
+                   "I can't access that.", "I cannot complete this."):
+        status = {"ok": True, "result_line": phrase, "finished_at": time.time()}
+        assert sched_mod.run_outcome(status) == "incomplete", phrase
+
+
+def test_run_outcome_ok_with_genuine_nothing_new_stays_complete():
+    for phrase in ("No change since last time.", "Nothing new to report.",
+                   "Total unchanged at 12.", "All caught up, no updates."):
+        status = {"ok": True, "result_line": phrase, "finished_at": time.time()}
+        assert sched_mod.run_outcome(status) == "complete", phrase
+
+
+def test_run_outcome_ok_with_all_tool_calls_failing_is_incomplete():
+    status = {"ok": True, "result_line": "total changed", "finished_at": time.time(),
+              "tool_results": [{"tool": "mcp__x__y", "ok": False},
+                                {"tool": "mcp__x__z", "ok": False}]}
+    assert sched_mod.run_outcome(status) == "incomplete"
+
+
+def test_run_outcome_ok_with_at_least_one_successful_tool_call_stays_complete():
+    status = {"ok": True, "result_line": "total changed", "finished_at": time.time(),
+              "tool_results": [{"tool": "mcp__x__y", "ok": False},
+                                {"tool": "mcp__x__z", "ok": True}]}
+    assert sched_mod.run_outcome(status) == "complete"
+
+
+def test_run_outcome_ok_with_no_tool_results_key_is_unaffected():
+    status = {"ok": True, "result_line": "total changed", "finished_at": time.time()}
+    assert sched_mod.run_outcome(status) == "complete"
+
+
 def test_blocked_reason_fallback_is_it_did_not_give_a_reason():
     from inkbox_claude.gate.schedules import ScheduleService
     assert ScheduleService._blocked_reason({}) == "it did not give a reason"
