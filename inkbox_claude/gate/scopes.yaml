@@ -128,6 +128,12 @@ systems:
     always:
     - host_read
     leaves: {}
+  telegram_account:
+    description: 'Aaron''s own Telegram account (his personal account, not Blatbot''s bot): his groups, channels
+      and DMs. Read-only here: finding a chat, listing chats, reading messages.'
+    always:
+    - telegram_read
+    leaves: {}
   tamid_social:
     description: 'TAMID''s Instagram or LinkedIn accounts: what was posted, how posts performed, followers, drafting
       or publishing a post.'
@@ -553,6 +559,24 @@ scopes:
     read: true
     tools:
     - mcp__host__host_status
+  telegram_read:
+    description: 'read Aaron''s own Telegram account (his personal account, not Blatbot''s bot): find a chat,
+      list chats, read messages in a chat. Read-only: no send, edit, delete or mark-read.'
+    label: read your Telegram chats
+    ask: 'read your Telegram chats'
+    synonyms:
+    - read my telegram
+    - my telegram chats
+    - telegram group
+    - telegram chat
+    - telegram groups
+    - read telegram
+    read: true
+    explicit_only: true
+    tools:
+    - mcp__host__telegram_find_chats
+    - mcp__host__telegram_list_chats
+    - mcp__host__telegram_read_chat
   browser_read:
     description: 'read a public web page in a headless browser (navigate, snapshot, find, screenshot), for things
       that are only online and not in Aaron''s own systems. Read-only: no clicking, typing or form filling.'
