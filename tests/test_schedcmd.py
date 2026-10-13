@@ -378,7 +378,7 @@ async def test_invalid_action_for_the_current_state_returns_a_plain_sentence(env
     await manager.schedules.action(schedule.id, "pause", owner=True)
     session = FakeSession()
     reply = await schedcmd.handle(manager, session, _command("pause", target="Team total watch"))
-    assert "not valid" in reply
+    assert reply == "Team total watch is already paused."
     assert "#" not in reply
     assert "S0" not in reply and "S1" not in reply
 
@@ -630,3 +630,95 @@ async def test_resolve_two_prefix_matches_still_ask_which(env):
     await _active(manager, task_id, title="Monthly report")
     found = schedcmd.resolve(store, "the mon one", "owner", None)
     assert isinstance(found, list) and len(found) == 2
+
+
+# ---------------------------------------------------------------------------
+# answer_proposal(): narrowed vocabulary and the recency/window rule (item G)
+# ---------------------------------------------------------------------------
+
+def test_yes_vocabulary_is_narrow():
+    for phrase in ("yes", "y", "yep", "yeah", "yup", "yes please", "yes do it"):
+        assert schedcmd.is_yes(phrase), phrase
+    for phrase in ("ok", "okay", "sure", "go ahead", "sounds good", "please do"):
+        assert not schedcmd.is_yes(phrase), phrase
+
+
+def test_no_vocabulary_is_narrow():
+    for phrase in ("no", "n", "nope", "nah", "no thanks", "cancel that"):
+        assert schedcmd.is_no(phrase), phrase
+    for phrase in ("cancel", "don't", "dont", "never mind", "nevermind", "skip it", "not now"):
+        assert not schedcmd.is_no(phrase), phrase
+
+
+@pytest.mark.asyncio
+async def test_bare_yes_not_captured_once_window_passes_and_other_message_followed(env):
+    store, manager, task_id = env
+    schedule = await _propose(manager, task_id)
+    # Back-date the proposal's own notice past the 15 minute window...
+    with store._lock:
+        store._db.execute("UPDATE messages SET created_at=? WHERE schedule_id=?",
+                          (time.time() - 3600, schedule.id))
+    # ...and let something else go out on the same thread after it.
+    store.add_message("owner", "outbound", "unrelated reply", "imessage", role="answer")
+    session = FakeSession()
+    assert await schedcmd.answer_proposal(manager, session, "yes") is None
+    assert store.get_schedule(schedule.id).state == "proposed"
+
+
+@pytest.mark.asyncio
+async def test_bare_yes_captured_when_proposal_is_still_the_latest_outbound(env):
+    store, manager, task_id = env
+    schedule = await _propose(manager, task_id)
+    # Old, but nothing has gone out on the thread since -- still captures.
+    with store._lock:
+        store._db.execute("UPDATE messages SET created_at=? WHERE schedule_id=?",
+                          (time.time() - 3600, schedule.id))
+    session = FakeSession()
+    reply = await schedcmd.answer_proposal(manager, session, "yes")
+    assert reply == ""
+    assert store.get_schedule(schedule.id).state == "active"
+
+
+@pytest.mark.asyncio
+async def test_bare_yes_captured_within_fifteen_minutes_even_if_not_latest(env):
+    store, manager, task_id = env
+    schedule = await _propose(manager, task_id)
+    store.add_message("owner", "outbound", "unrelated reply", "imessage", role="answer")
+    session = FakeSession()
+    reply = await schedcmd.answer_proposal(manager, session, "yes")
+    assert reply == ""
+    assert store.get_schedule(schedule.id).state == "active"
+
+
+# ---------------------------------------------------------------------------
+# handle(): approve / reject actions, and stop on a proposed schedule (item G)
+# ---------------------------------------------------------------------------
+
+@pytest.mark.asyncio
+async def test_approve_action_starts_the_proposal(env):
+    store, manager, task_id = env
+    schedule = await _propose(manager, task_id)
+    session = FakeSession()
+    reply = await schedcmd.handle(manager, session, _command("approve", target="Team total watch"))
+    assert reply == ""
+    assert store.get_schedule(schedule.id).state == "active"
+
+
+@pytest.mark.asyncio
+async def test_reject_action_ends_the_proposal(env):
+    store, manager, task_id = env
+    schedule = await _propose(manager, task_id)
+    session = FakeSession()
+    reply = await schedcmd.handle(manager, session, _command("reject", target="Team total watch"))
+    assert reply == ""
+    assert store.get_schedule(schedule.id).state == "ended"
+
+
+@pytest.mark.asyncio
+async def test_stop_on_a_proposed_schedule_rejects_it(env):
+    store, manager, task_id = env
+    schedule = await _propose(manager, task_id)
+    session = FakeSession()
+    reply = await schedcmd.handle(manager, session, _command("stop", target="Team total watch"))
+    assert reply == ""
+    assert store.get_schedule(schedule.id).state == "ended"

@@ -1853,6 +1853,22 @@ class GateSessionManager:
                 # proposal (handled further below) answers the bare yes/no instead.
             else:
                 req = pending[0]
+        elif len(pending) >= 2:
+            # Two or more ordinary requests are pending (on any thread): with only
+            # one pending a bare yes/no is unambiguous (handled above), but with
+            # several there is no single "the" pending request to resolve, so an
+            # open proposal on THIS thread must not be silently approved underneath
+            # that ambiguity -- ask instead (item G). Checked with schedcmd's own
+            # narrow yes/no vocabulary, since that is what would otherwise answer
+            # the proposal below.
+            from . import schedcmd
+            chat_id = getattr(session, "record_id", None) or getattr(session, "chat_id", "")
+            this_thread_proposals = schedcmd._open_proposals(self.store, chat_id)
+            if this_thread_proposals and (schedcmd.is_yes(t) or schedcmd.is_no(t)):
+                await session.send_to_sender(
+                    f'Yes to which: starting "{this_thread_proposals[0].title}", '
+                    f'or one of {len(pending)} pending things?', role="answer")
+                return True
         if req is not None:
             # Parsing stops here: what the words mean is decided in one place, so a text and a
             # click in the console cannot drift apart.
