@@ -38,6 +38,11 @@ HANDOFF_LINE = (
     "Blatbot\nExecutive Assistant to Aaron Blatnoy"
 )
 EXPIRE_SECONDS = 24 * 3600
+# Item 4: how long a call's failed ask is still "the same ask" for folding purposes
+# -- long enough to cover a real call, short enough that a much later, unrelated
+# call from the same person is never folded into an old failure by mistake.
+CALL_ASK_FOLD_WINDOW_S = 300
+
 
 _EMAIL = re.compile(r"[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}")
 _CANDIDATE_STOP = {"the", "and", "for", "with", "from", "that", "this", "what", "which", "who", "how", "many", "did",
@@ -125,6 +130,12 @@ class GateSession:
         self._typing: Optional[asyncio.Task] = None
         self.deferred_ack: Optional[str] = None   # the writer's "on it" line, sent only if the run is slow
         self.room: str = ""                       # set when this thread is a group chat: who is in it
+        # Item 4: how many times a voice fragment has already folded into THIS
+        # call's already-failed ask, keyed by (call_id, failed request id) so a
+        # different call from the same person never shares the count. In-memory
+        # only -- it resets with the session, which is the documented fallback
+        # ("the voice session object's lifetime") when no call_id is available.
+        self._call_ask_replies: Dict[Tuple[Optional[str], int], int] = {}
 
     @property
     def record_id(self) -> str:
@@ -902,6 +913,36 @@ class GateSession:
             "or more detailed."
         )
 
+    def _fold_into_failed_ask(self, task_id: int, call_id: Optional[str]) -> Optional[str]:
+        """Item 4: when a voice fragment's ask is the SAME ask (same task) as a
+        request that already failed on this thread -- the realtime voice model
+        can hand off several fragments of one spoken request a few seconds apart,
+        and a run that fails in a few seconds leaves nothing "running" for the
+        existing fold (above) to catch -- a further fragment never starts a
+        second run of it. The failure is spoken once, then a short "still stuck"
+        line at most once more, then nothing further for this ask. Returns None
+        when this is not that case (a genuinely new ask proceeds as normal)."""
+        failed = self.m.store.last_failed_for_thread(self.chat_id, exclude_scheduled=True)
+        if failed is None:
+            return None
+        failed_task_id = self.m.store.task_id_for_request(failed.id)
+        if failed_task_id != task_id:
+            return None
+        if (time.time() - failed.updated_at) > CALL_ASK_FOLD_WINDOW_S:
+            return None
+        key = (call_id, failed.id)
+        count = self._call_ask_replies.get(key, 0)
+        self._call_ask_replies[key] = count + 1
+        if count == 0:
+            text = wording.failure_message(wording.plain_title(self.m.store, failed), failed.status or {})
+        elif count == 1:
+            text = "Still stuck on that. I'll text you."
+        else:
+            text = ""
+        if text:
+            self.m.store.add_message(self.record_id, "outbound", text, "voice")
+        return text or "Got it."
+
     async def voice_consult(self, query: str, meta: Dict[str, Any]) -> str:
         """One consult from the realtime voice model during a live call.
 
@@ -954,6 +995,14 @@ class GateSession:
                     return reply
                 out, task = await self.decide(body=body, message=body, prior=history[:-1], mode="voice",
                                               memory=memory, found=found)
+                if task is not None and out.request is not None:
+                    # Item 4: this ask's task may be the same one a request already
+                    # failed under on this call -- never start a second run of it.
+                    folded = self._fold_into_failed_ask(task["id"], call_meta.get("call_id"))
+                    if folded is not None:
+                        if t is not None:
+                            self._ensure_inbound_on_task(t, body)
+                        return folded
                 reply = out.reply or ""
                 if reply:
                     self.m.store.add_message(self.record_id, "outbound", reply, "voice")
@@ -961,14 +1010,22 @@ class GateSession:
                         self.m.store.task_event(t["id"], "outbound", f"(phone) {reply}", chat_id=self.record_id)
                 if out.request is None:
                     return reply or "I don't have anything on that."
-                if self.m.store.pending_for_thread(self.chat_id) and not approver:
+                if self.m.store.pending_for_thread(self.chat_id, sender=self._sender()) and not approver:
                     return reply or "I already have a request waiting on Aaron for you."
                 assert task is not None
-                req = self.m.store.create_request(
+                req, created = self.m.store.create_request_once(
                     chat_id=self.chat_id, sender=self._sender(), sender_name=self._sender_name(), mode="voice",
                     subject="", original_message=body, summary=out.request.summary,
                     scopes=out.request.scopes, prompt=out.request.prompt,
                     state="approved" if approver else "pending", task_id=task["id"], inbound_id=self.inbound_id)
+                if not created:
+                    # Another fragment of this same ask, from this same caller, already
+                    # has a request approved or running on this thread within the dedupe
+                    # window: never execute a second run of it, and never treat this
+                    # fragment as having just created or widened anything.
+                    logger.info("[gate %s] voice fragment deduped onto existing request #%s; "
+                                "not running it a second time", self.chat_id, req.id)
+                    return reply or "Got it."
                 self.m.remember_knowledge_notes(req.id, getattr(out.request, "knowledge_notes", None))
                 self.m.record_request_on_task(req, task, self)
                 if not approver:
@@ -1049,13 +1106,17 @@ class GateSession:
             self.mode, self.reply_meta = "voice", dict(call_meta or {})
             rid = self.record_id
             still_on_call = self.m.call_active(self.chat_id)
-            if still_on_call:
+            if still_on_call and text:
                 # Still on the call: this is spoken, not sent, so it is recorded here as
-                # the one row for this result -- the only place that happens.
+                # the one row for this result -- the only place that happens. A blank
+                # text (a usage-limit failure already told once within the window --
+                # item 7) means nothing is spoken and nothing is recorded here either.
                 self.m.store.add_message(rid, "outbound", text, "voice")
             self.mode, self.reply_meta = prev
         if still_on_call:
             return text
+        if not text:
+            return ""
         # They hung up first: deliver on exactly one channel -- the owner's own primary
         # (send_to_approver, iMessage) when it was Aaron, or back to the number that
         # called otherwise -- and let that one send record the one outbound row. Two
@@ -1112,6 +1173,23 @@ class GateSession:
             if reply:
                 await self.send_to_sender(reply, role="ack")
             return bool(reply)
+        if not system_note and wording.is_fixed_progress_phrase(body):
+            # Nothing is running, but something on this thread finished or failed
+            # recently enough that a fixed, unambiguous check-in phrase ("status",
+            # "any update?") almost certainly means IT, not a brand new ask: answer
+            # from that row and stop here. Only the fixed phrases, never the looser
+            # "ends in a question mark" guess -- that guess is safe only while a
+            # request is still running and nothing else could be meant; once it is
+            # over, a question-shaped message is just as likely a genuinely new ask.
+            finished = self.m.store.last_finished_for_thread(self.chat_id)
+            if finished is not None:
+                t = self._peek_task(RouterOutput(task=f"T{self.m.store.task_id_for_request(finished.id)}"))
+                if t:
+                    self._ensure_inbound_on_task(t, body)
+                reply = self._finished_progress_reply(finished)
+                if reply:
+                    await self.send_to_sender(reply, role="ack")
+                return bool(reply)
         if system_note:
             out: RouterOutput = await self.m.router.route(
                 history=prior, message=message, mode=self.mode, sender=self._sender(),
@@ -1181,17 +1259,16 @@ class GateSession:
             from . import schedcmd
             reply = await schedcmd.handle(self.m, self, out.schedule_command)
             return await self.send_to_sender(reply, role="answer")
-        sent_reply = False
-        if out.reply:
-            # Alongside a request the reply is an acknowledgement; on its own, or when
-            # phrasing a result, it is THE answer to that inbound message.
-            sent_reply = await self.send_to_sender(out.reply, role="ack" if out.request is not None else "answer")
         if out.request is None:
-            return sent_reply
+            if out.reply:
+                return await self.send_to_sender(out.reply, role="answer")
+            return False
         # Validate scopes (pydantic already rejected unknown ones).
-        if self.m.store.pending_for_thread(self.chat_id) and not approver:
+        if self.m.store.pending_for_thread(self.chat_id, sender=self._sender()) and not approver:
             self.m.store.add_message(self.record_id, "system", "A request is already awaiting Aaron; new request not created.")
-            return sent_reply
+            if out.reply:
+                return await self.send_to_sender(out.reply, role="ack")
+            return False
         assert task is not None
         # Someone Aaron has trusted for exactly these scopes does not need him woken up.
         # Anyone else, and any scope outside what they were given, still waits for his yes.
@@ -1203,13 +1280,25 @@ class GateSession:
             if trusted:
                 logger.info("[gate %s] %s is trusted for %s; running without asking Aaron",
                             self.chat_id, t.get("person") or self._sender(), sorted(out.request.scopes))
-        req = self.m.store.create_request(
+        req, created = self.m.store.create_request_once(
             chat_id=self.chat_id, sender=self._sender(), sender_name=self._sender_name(), mode=self.mode,
             subject=str(self.reply_meta.get("subject") or ""), original_message=body,
             summary=out.request.summary, scopes=out.request.scopes, prompt=out.request.prompt,
             state="approved" if (approver or trusted) else "pending", task_id=task["id"],
             inbound_id=self.inbound_id,
         )
+        if not created:
+            # Another message from this same sender on this thread already has a
+            # request approved or running within the dedupe window: the ack for a
+            # second one is never sent (there is no second run to acknowledge), it
+            # is never executed again, and its scopes are never widened -- all three
+            # belong to whichever turn actually created the row this one found.
+            logger.info("[gate %s] request deduped onto #%s for sender %s; not acknowledging or running again",
+                        self.chat_id, req.id, self._sender())
+            return False
+        # Alongside a request the reply is an acknowledgement, sent only now that
+        # this turn is known to own a genuinely new request.
+        sent_reply = await self.send_to_sender(out.reply, role="ack") if out.reply else False
         self.m.remember_knowledge_notes(req.id, getattr(out.request, "knowledge_notes", None))
         self.m.record_request_on_task(req, task, self)
         if approver or trusted:
@@ -1224,6 +1313,15 @@ class GateSession:
         return True
 
     inbound_id: Optional[int] = None   # the inbound message this turn is responding to
+
+    def _finished_progress_reply(self, req: Request) -> str:
+        """The answer to a progress question ("did you start?", "any update?") that
+        arrives after the request it asks about has already finished or failed --
+        read straight from the row, never by deciding the message as a new ask."""
+        status = req.status or {}
+        if req.state == "done":
+            return wording.success_message(_clean_result(status.get("summary") or ""))
+        return f"That one failed: {wording.failure_in_words(status)}."
 
     def _progress_reply(self, running: Request) -> str:
         """The status line for a message that asked about the still-running request
@@ -2104,7 +2202,15 @@ class GateSessionManager:
         if not wording.is_try_again(text):
             return False
         chat_id = session.chat_id
-        req = self.store.last_failed_for_thread(chat_id)
+        # A schedule's own failed run shares the owner's chat_id; "try again" said
+        # about something else entirely must never re-create the schedule's prompt
+        # as a one-off (_handle_let_it_label already excludes it the same way).
+        # last_failed_for_thread_or_person also finds a failed request that landed
+        # on a DIFFERENT thread record for the same person -- a call from the
+        # owner's number that never verified as the approver writes its rows to
+        # its own chat_id, while his texts land on the owner thread; this is a
+        # lookup only, it grants no owner power.
+        req = self.store.last_failed_for_thread_or_person(chat_id, session._sender(), exclude_scheduled=True)
         if req is None:
             return False
         now = time.time()
@@ -2120,6 +2226,12 @@ class GateSessionManager:
             return False
         approved = self._retry_approval(session, req)
         new_req = self.retry_request(req, approved=approved)
+        if new_req is None:
+            # The request being retried is itself still approved/running (a race:
+            # it had not actually finished failing when this phrase arrived). Never
+            # dedupe a retry against a different request -- there is simply nothing
+            # to retry yet.
+            return True
         if approved:
             asyncio.create_task(self.execute(new_req))
         else:
@@ -2130,7 +2242,7 @@ class GateSessionManager:
     async def _handle_send_what_you_have(self, session: "GateSession", text: str) -> bool:
         if not wording.is_send_what_you_have(text):
             return False
-        req = self.store.last_failed_for_thread(session.chat_id)
+        req = self.store.last_failed_for_thread_or_person(session.chat_id, session._sender())
         if req is None or not wording.within_retry_window(req.updated_at, time.time()):
             return False   # nothing recent it could mean; the message goes on as usual
         text_out = wording.send_what_you_have_text(req.status or {})
@@ -2153,6 +2265,9 @@ class GateSessionManager:
             return True
         new_scopes = [sc for sc in mapped if sc not in req.scopes]
         grown = self.retry_request(req, approved=True)
+        if grown is None:
+            # Already running again (a race); nothing left to widen or start.
+            return True
         if new_scopes:
             self.store.set_scopes(grown.id, list(req.scopes) + new_scopes)
             grown = self.store.get_request(grown.id)
@@ -2164,13 +2279,17 @@ class GateSessionManager:
             return False
         chat_id = session.chat_id
         now = time.time()
-        failed = self.store.last_failed_for_thread(chat_id)
+        # Never a schedule's own failed run: the blanket grant would otherwise widen
+        # the SCHEDULE's standing scopes from an unrelated "permission for everything".
+        failed = self.store.last_failed_for_thread(chat_id, exclude_scheduled=True)
         if failed is not None and wording.within_retry_window(failed.updated_at, now, hours=0.5):
             await self._grant_blanket_and_retry(session, failed)
             return True
         running = self.store.running_for_thread(chat_id)
         if running is not None:
             self._blanket_pending.add(running.id)
+            await session.send_to_sender(
+                "Okay. If it gets refused something, I'll let it and continue.", role="answer")
             return True
         await session.send_to_sender(
             "I don't keep a blanket permission. Tell me what to do and I'll ask for anything it needs.",
@@ -2182,19 +2301,38 @@ class GateSessionManager:
         registry -- never a scope that sends, posts, writes, deletes, deploys or
         controls anything unless it was actually refused. "read-only" is the
         `read` field scopes.yaml gives each scope (exposed as scopes.READ_SCOPES);
-        where a scope carries no such field it is treated as not read-only."""
+        where a scope carries no such field it is treated as not read-only.
+
+        vault_read (the WHOLE vault of Aaron's own notes) is excluded from the
+        auto-add: it is never granted on its own just for being read-only, only
+        when the run was actually refused it -- the vault can hold anything he has
+        ever written down, so a blanket "permission for everything" must not open
+        all of it as a side effect of a run that never asked for it."""
         denied = set(wording.denied_scopes(status))
-        granted = [sc for sc in SCOPES if sc in denied or wording.truly_read_only(sc)]
+        granted = [sc for sc in SCOPES if sc in denied or
+                  (wording.truly_read_only(sc) and sc != "vault_read")]
         return [sc for sc in granted if sc not in (req.scopes or [])]
 
     async def _grant_blanket_and_retry(self, session: "GateSession", req: Request) -> None:
         new_scopes = self._blanket_grant_scopes(req, req.status or {})
         grown = self.retry_request(req, approved=True)
+        if grown is None:
+            # Already running again (a race); nothing left to widen or start.
+            return
         if new_scopes:
             self.store.set_scopes(grown.id, list(req.scopes) + new_scopes)
             grown = self.store.get_request(grown.id)
-            await session.send_to_sender(
-                f"Okay. For this task it can now {schedprop.short_labels(new_scopes)}. Continuing.", role="answer")
+            # Named here: only what the run had actually been refused, never every
+            # read-only scope the grant also quietly added alongside it.
+            denied_now = [sc for sc in wording.denied_scopes(req.status or {}) if sc in new_scopes]
+            if denied_now:
+                await session.send_to_sender(
+                    f"Okay. For this task it can now {schedprop.short_labels(denied_now)}. Continuing.",
+                    role="answer")
+            else:
+                # Only read-only scopes were auto-added (nothing was actually denied
+                # to name); still confirm, without claiming a capability was refused.
+                await session.send_to_sender("Okay. Continuing.", role="answer")
         asyncio.create_task(self.execute(grown))
 
     # -- executor --------------------------------------------------------------
@@ -2414,23 +2552,38 @@ class GateSessionManager:
                         req.id, len(attachment.included), len(attachment.overflow))
         return attachment.block
 
-    def retry_request(self, req: Request, *, approved: bool) -> Request:
+    def retry_request(self, req: Request, *, approved: bool) -> Optional[Request]:
         """Re-create a failed request exactly as it was asked: the same prompt,
-        scopes and task, through the store's own create_request -- never a shortcut
-        around approval. The caller recognizes "try again" on an inbound message
-        (wording.is_try_again, within wording.within_retry_window of the failure
-        notice) and decides `approved` the same way any new request's approval is
-        decided for that sender; when it is False, the caller still owes this
-        fresh pending request whatever a new pending request normally gets
-        (an approval text to the owner), the same as request creation always has."""
+        scopes and task, through the store's own create_request_once -- never a
+        shortcut around approval. The caller recognizes "try again" on an inbound
+        message (wording.is_try_again, within wording.within_retry_window of the
+        failure notice) and decides `approved` the same way any new request's
+        approval is decided for that sender; when it is False, the caller still owes
+        this fresh pending request whatever a new pending request normally gets
+        (an approval text to the owner), the same as request creation always has.
+
+        Bypasses the sender-scoped dedupe entirely (a retry recreates a request for
+        the exact sender `req` already belongs to, so that dedupe would otherwise
+        fold the retry into some other approved/running request of theirs that
+        happened to race it, or even into `req` itself before its own "failed" state
+        had committed). In its place: refuses -- returns None -- when `req` itself
+        is, right now, already approved or running. That is the one case a retry
+        must never hand back a second, concurrent run of the same work; the caller
+        treats None as "nothing to retry yet" and does not acknowledge, execute, or
+        widen scopes for anything."""
         task_id = self.store.task_id_for_request(req.id)
         if not task_id:
             raise TaskRequired(f"request #{req.id} has no task to retry under")
-        return self.store.create_request(
+        fresh = self.store.get_request(req.id) or req
+        if fresh.state in ("approved", "running"):
+            logger.info("[gate] retry of #%s refused: it is already %s", req.id, fresh.state)
+            return None
+        new_req, _created = self.store.create_request_once(
             chat_id=req.chat_id, sender=req.sender, sender_name=req.sender_name, mode=req.mode,
             subject=req.subject, original_message=req.original_message, summary=req.summary,
             scopes=list(req.scopes), prompt=req.prompt, state="approved" if approved else "pending",
-            task_id=task_id, inbound_id=req.inbound_id)
+            task_id=task_id, inbound_id=req.inbound_id, bypass_dedupe=True)
+        return new_req
 
     async def execute(self, req: Request, notify: bool = True) -> str:
         """Run an approved request. With notify=False the caller delivers the
@@ -2491,6 +2644,16 @@ class GateSessionManager:
         # grounding fallback downstream (ground_reply) still works from the run's own
         # findings -- only the text actually sent or returned here uses `message`.
         message = wording.success_message(result) if ok else wording.failure_message(title, status)
+        # Item 7's remainder: a usage-limit failure is told once, not once per ask.
+        # If this thread already heard one within the last 10 minutes, this one
+        # still fails the same way but says nothing further -- the raw status and
+        # the plain-worded message both still land on the ledger/log via `note`
+        # below, just never a second time in front of a person.
+        told_already = False
+        if not ok and wording.is_usage_limit_failure(status):
+            prior = self.store.recent_failed_statuses_for_thread(
+                req.chat_id, window_seconds=600, exclude_request_id=req.id)
+            told_already = any(wording.is_usage_limit_failure(st) for st in prior)
         self.task_note(req, "done" if ok else "failed", f"{req.summary} -> {result}",
                        state="open" if req.schedule_id else ("done" if ok else "failed"))
         if await self.schedules.finished(req, status):
@@ -2501,7 +2664,7 @@ class GateSessionManager:
             return ""
         if not notify:
             self.store.add_message(req.chat_id, "system", f"Task #{req.id} {outcome}: {req.summary}\nResult:\n{result}")
-            return message
+            return "" if told_already else message
         from_aaron = session.is_approver() or session.is_aaron_on_phone() or req.chat_id in self._approver_chat_ids()
         note = f"Task #{req.id} {outcome}: {req.summary}\nResult:\n{result}"
         # Messages live on the person's record, which for the owner spans every surface.
@@ -2514,9 +2677,12 @@ class GateSessionManager:
                 # to leak through, and how a correctly-worded failure line got rewritten
                 # into something the grounding check then threw away). The raw status
                 # still lands on the ledger/log via `note`.
-                replied = await session.notify_failure(message, note, inbound_id=req.inbound_id)
-                if not replied:
-                    await self.send_to_approver(f"Failed: {title}\n{message}")
+                if told_already:
+                    self.store.add_message(self.get(req.chat_id).record_id, "system", note)
+                else:
+                    replied = await session.notify_failure(message, note, inbound_id=req.inbound_id)
+                    if not replied:
+                        await self.send_to_approver(f"Failed: {title}\n{message}")
                 if meanwhile:
                     # Aaron said more while it ran (a hint, a correction): the failure
                     # above is the answer to the request itself; this is a separate,
@@ -2541,8 +2707,11 @@ class GateSessionManager:
         # tell the sender the outcome -- except on failure, which is always
         # wording.py's own text, never the router's rewrite of it.
         if not ok:
-            await self.send_to_approver(f"[Blatbot #{req.id} FAILED] {title}\n{message}")
-            await session.notify_failure(message, note, inbound_id=req.inbound_id)
+            if told_already:
+                self.store.add_message(self.get(req.chat_id).record_id, "system", note)
+            else:
+                await self.send_to_approver(f"[Blatbot #{req.id} FAILED] {title}\n{message}")
+                await session.notify_failure(message, note, inbound_id=req.inbound_id)
             session.typing_stop()
             return ""
         try:

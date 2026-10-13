@@ -124,6 +124,14 @@ def _is_network_or_login(text: str) -> bool:
     return any(w in low for w in _NETWORK_WORDS) or any(w in low for w in _LOGIN_WORDS)
 
 
+def is_usage_limit_failure(status: Dict[str, Any]) -> bool:
+    """Whether a failed run's status classifies as a usage/session/rate-limit,
+    quota, overload or exhausted-credit failure -- public so a caller deciding
+    whether to suppress a repeat notice (item 7's "told once, not once per
+    ask") does not need to reach into _classify."""
+    return _classify(status) == "usage_limit"
+
+
 def _classify(status: Dict[str, Any]) -> str:
     """One category for a failed run: 'usage_limit', 'buffer', 'timeout', 'refusal',
     'network', or 'other'. Order matters: usage_limit is checked first (an exhausted
@@ -246,6 +254,21 @@ _NEW_TASK_VERBS = (
     "set up", "create", "add", "remove", "delete", "move", "update", "change", "buy",
     "order", "pay", "write", "draft", "check on",
 )
+
+
+def is_fixed_progress_phrase(body: str) -> bool:
+    """Whether `body` is one of the fixed, unambiguous progress phrases ("status",
+    "any update?", ...) -- never the looser "ends in a question mark" guess
+    is_progress_question also makes. Used once nothing is running any more: after
+    a request has already finished, a short question-shaped message is just as
+    likely to be a genuinely new ask ("when is it?", "actually 7?") as a check-in,
+    so only an explicit, fixed phrase is read as "about the thing that just
+    finished" -- the loose guess stays scoped to the one place it is safe: while
+    a request is actually running and nothing else could be meant."""
+    raw = (body or "").strip()
+    if not raw:
+        return False
+    return raw.rstrip("?!. ").lower() in _FIXED_PROGRESS_PHRASES
 
 
 def is_progress_question(body: str) -> bool:
