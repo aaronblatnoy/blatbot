@@ -248,3 +248,55 @@ class _HoldingExecutor:
         self.ran.append(req.id)
         await self.release.wait()
         return self.result
+
+
+# -- "try again" / "send what you have" ----------------------------------------
+
+def test_try_again_recognized():
+    for text in ("try again", "Try it again.", "retry", "please try again?"):
+        assert wording.is_try_again(text)
+    assert not wording.is_try_again("try the other sheet instead")
+
+
+def test_send_what_you_have_recognized():
+    for text in ("send what you have", "Send me what you have.", "send it"):
+        assert wording.is_send_what_you_have(text)
+    assert not wording.is_send_what_you_have("send the invoice")
+
+
+def test_retry_window():
+    now = 1_700_100_000.0
+    assert wording.within_retry_window(now - 60, now)
+    assert wording.within_retry_window(now - 11 * 3600, now)
+    assert not wording.within_retry_window(now - 13 * 3600, now)
+    assert not wording.within_retry_window(None, now)
+
+
+def test_send_what_you_have_text_prefers_final_status():
+    status = {"final_status": "Checked 4 of 10 vendors.", "raw": "raw narration", "summary": "s"}
+    assert wording.send_what_you_have_text(status) == "Checked 4 of 10 vendors."
+
+
+def test_send_what_you_have_text_falls_back_when_nothing_was_found():
+    assert wording.send_what_you_have_text({}) == "There is nothing more to send; the run left no findings."
+
+
+def test_retry_request_recreates_with_same_prompt_and_scopes(tmp_path):
+    m, sent = make_manager(tmp_path)
+    m.router.next = RouterOutput(reply=None, request=RouterRequest(
+        prompt="P1 exact prompt", scopes=["web"], summary="look something up"))
+    asyncio.run(m.get("c1").handle_inbound("look it up", "email", {"sender": "cand@nyu.edu", "to": "cand@nyu.edu",
+                                                                   "subject": "x", "contact": {"id": "c1", "name": "Cand"}}))
+    rid = m.store.pending()[0].id
+    original = m.store.get_request(rid)
+    m.store.set_state(rid, "failed", status={"ok": False, "error": "connection refused"})
+    failed = m.store.get_request(rid)
+
+    retried = m.retry_request(failed, approved=False)
+    assert retried.id != failed.id
+    assert retried.prompt == original.prompt and retried.scopes == original.scopes
+    assert retried.summary == "look something up"
+    assert retried.state == "pending"          # needed approval before; needs it again
+
+    retried2 = m.retry_request(failed, approved=True)
+    assert retried2.state == "approved"

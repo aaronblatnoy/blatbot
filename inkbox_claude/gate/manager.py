@@ -2167,6 +2167,24 @@ class GateSessionManager:
                         req.id, len(attachment.included), len(attachment.overflow))
         return attachment.block
 
+    def retry_request(self, req: Request, *, approved: bool) -> Request:
+        """Re-create a failed request exactly as it was asked: the same prompt,
+        scopes and task, through the store's own create_request -- never a shortcut
+        around approval. The caller recognizes "try again" on an inbound message
+        (wording.is_try_again, within wording.within_retry_window of the failure
+        notice) and decides `approved` the same way any new request's approval is
+        decided for that sender; when it is False, the caller still owes this
+        fresh pending request whatever a new pending request normally gets
+        (an approval text to the owner), the same as request creation always has."""
+        task_id = self.store.task_id_for_request(req.id)
+        if not task_id:
+            raise TaskRequired(f"request #{req.id} has no task to retry under")
+        return self.store.create_request(
+            chat_id=req.chat_id, sender=req.sender, sender_name=req.sender_name, mode=req.mode,
+            subject=req.subject, original_message=req.original_message, summary=req.summary,
+            scopes=list(req.scopes), prompt=req.prompt, state="approved" if approved else "pending",
+            task_id=task_id, inbound_id=req.inbound_id)
+
     async def execute(self, req: Request, notify: bool = True) -> str:
         """Run an approved request. With notify=False the caller delivers the
         result itself (a live phone call reads it aloud) and gets it back."""

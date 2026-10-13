@@ -227,3 +227,44 @@ def latest_step_from_tool_calls(tool_calls: Optional[List[str]]) -> Optional[str
         return None
     short = str(tool_calls[-1]).split("__")[-1].replace("_", " ").strip()
     return f"now working on {short}" if short else None
+
+
+
+# ---------------------------------------------------------------------------
+# "try again" / "send what you have", said about a request that just failed.
+# Recognizing the words and building the reply text live here; re-creating the
+# request itself is `GateSessionManager.retry_request` in manager.py (it needs
+# the store), since this module stays a pure-text module with no store access.
+# ---------------------------------------------------------------------------
+
+_TRY_AGAIN_PHRASES = {"try again", "try it again", "retry", "please try again", "run it again"}
+_SEND_WHAT_YOU_HAVE_PHRASES = {
+    "send what you have", "send me what you have", "send it", "share what you have",
+    "give me what you have",
+}
+
+RETRY_WINDOW_HOURS = 12
+
+
+def is_try_again(body: str) -> bool:
+    return (body or "").strip().rstrip("?!. ").lower() in _TRY_AGAIN_PHRASES
+
+
+def is_send_what_you_have(body: str) -> bool:
+    return (body or "").strip().rstrip("?!. ").lower() in _SEND_WHAT_YOU_HAVE_PHRASES
+
+
+def within_retry_window(failed_at: Optional[float], now: float, hours: float = RETRY_WINDOW_HOURS) -> bool:
+    """Whether a failure notice sent at `failed_at` is still within the window a
+    "try again" or "send what you have" reply to it is honored."""
+    if not failed_at:
+        return False
+    return 0 <= (now - failed_at) <= hours * 3600
+
+
+def send_what_you_have_text(status: Dict[str, Any]) -> str:
+    """The failed run's final status text, in full -- never summarized, never
+    re-worded. The one place this module intentionally returns raw run text,
+    because the person explicitly asked to see it."""
+    text = str(status.get("final_status") or status.get("raw") or status.get("summary") or "").strip()
+    return text or "There is nothing more to send; the run left no findings."
