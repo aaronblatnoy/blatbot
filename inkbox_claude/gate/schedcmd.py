@@ -382,6 +382,17 @@ async def _handle_simple_action(manager: Any, schedule: Schedule, action: str) -
     real_action = action
     if action == "resume" and schedule.state == "ended":
         real_action = "start_again"  # a resumed ended schedule has to restart, not just unpause
+    if action == "run_now" and schedule.state == "paused":
+        # "run it now"/"try it now"/"try again" after a blocked run's fix: a
+        # paused schedule's valid_actions never includes run_now on its own, but
+        # this is exactly what answering a blocked run's question means -- resume
+        # it first (same cadence it already has), then fire it immediately. If it
+        # is blocked again, the existing three-strikes/blocked-outcome handling
+        # pauses it again with its own notice; this reply is only the first ack.
+        try:
+            schedule = await manager.schedules.action(schedule.id, "resume", owner=True)
+        except ValueError as exc:
+            return _friendly_action_error(schedule, exc)
     valid = manager.schedules.valid_actions(schedule)
     if real_action not in valid:
         return _state_error_reply(schedule, action)

@@ -685,6 +685,33 @@ async def test_blocked_schedule_location_reply_is_recorded_as_a_note_and_does_no
 
 
 @pytest.mark.asyncio
+async def test_blocked_schedule_run_it_now_after_the_note_resumes_and_runs(env):
+    """R1: the full loop -- blocked notice, his explanation (recorded as a
+    note, not auto-run), then "run it now" must not dead-end on "<title>
+    can't do that right now" just because a paused schedule's own
+    valid_actions never lists run_now. It resumes first, then fires."""
+    store, manager, task_id = env
+    schedule = await _active(manager, task_id)
+    run = store.create_schedule_run(schedule.id, None, time.time() - 10)
+    store.finish_schedule_run(run, finished_at=time.time() - 5, complete=False, outcome="blocked",
+                              result_line="it could not find a Telegram group", final_status="",
+                              denied=[], note="", changed=True, cost_usd=None)
+    store.update_schedule(schedule.id, state="paused", next_run=None,
+                          last_outcome="it could not find a Telegram group")
+    said_id = store.add_message("owner", "inbound", "it's the Telegram group called Team Chat", "imessage")
+    session = FakeSession(inbound_id=said_id)
+    note_reply = await schedcmd.handle(manager, session, _command("add_capability", target="Team total watch"))
+    assert note_reply == 'Got it. Say "run it now" to try with that.'
+
+    run_reply = await schedcmd.handle(manager, FakeSession(), _command("run_now", target="Team total watch"))
+    assert "can't do that" not in run_reply
+    updated = store.get_schedule(schedule.id)
+    assert updated.state == "active"
+    assert updated.next_run is not None and updated.next_run <= time.time() + 1
+    assert "Team total watch" in run_reply
+
+
+@pytest.mark.asyncio
 async def test_add_capability_with_nothing_mapped_asks_what_to_allow(env):
     store, manager, task_id = env
     schedule = await _active(manager, task_id)

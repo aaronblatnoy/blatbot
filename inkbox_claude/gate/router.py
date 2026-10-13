@@ -308,7 +308,7 @@ class Router:
             "  - action: \"list\" (what's scheduled), \"last\" (what a schedule did last time), \"change\" "
             "(a different cadence, report setting, title, prompt addition, or capability -- anything that "
             "needs his yes before it takes effect except a plain cadence/report/title change, which code "
-            "applies at once), \"pause\", \"resume\", \"run_now\", \"stop\", \"add_capability\" (he is "
+            "applies at once), \"pause\", \"resume\", \"run_now\" (also his words \"run it now\", \"try it now\", or \"try again\" said about a schedule, not a one-off request), \"stop\", \"add_capability\" (he is "
             "explicitly telling it it may now do something, e.g. \"let it edit contacts\"), \"approve\" "
             "(a proposal he is saying yes to IN MORE WORDS THAN A BARE YES, e.g. \"yes, go ahead and "
             "start it\"), or \"reject\" (same for a no in more words, e.g. \"no thanks, drop it\").\n"
