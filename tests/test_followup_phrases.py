@@ -881,3 +881,39 @@ async def test_blanket_permission_finds_a_failed_request_on_a_different_thread(m
                                  meta={"sender": "aaron@example.com", "conversation_id": APPROVER_CONV})
     await _drain()
     assert m.executor.ran, "blanket permission should have retried the call's failed request"
+
+
+
+# ---------------------------------------------------------------------------
+# Item C5: GateSessionManager.retry_approval_for_request decides from the
+# request's OWN sender identity, never the live console operator's.
+# ---------------------------------------------------------------------------
+
+def test_retry_approval_for_request_console_is_always_owner(manager, tmp_path):
+    m, sent = manager
+    t = m.store.create_task("do the thing")
+    req = m.store.create_request(chat_id="owner", sender="jordan@example.test", sender_name="Jordan",
+                                 mode="console", subject="", original_message="do the thing",
+                                 summary="do the thing", scopes=["web"], prompt="do the thing",
+                                 state="failed", task_id=t["id"])
+    assert m.retry_approval_for_request(req) is True
+
+
+def test_retry_approval_for_request_strangers_email_needs_approval_again(manager, tmp_path):
+    m, sent = manager
+    t = m.store.create_task("do the thing")
+    req = m.store.create_request(chat_id=STRANGER, sender=STRANGER, sender_name="Cand", mode="email",
+                                 subject="", original_message="do the thing", summary="do the thing",
+                                 scopes=["web"], prompt="do the thing", state="failed", task_id=t["id"])
+    assert m.retry_approval_for_request(req) is False
+
+
+def test_retry_approval_for_request_the_owners_verified_imessage_is_approved(manager, tmp_path):
+    m, sent = manager
+    t = m.store.create_task("do the thing")
+    req = m.store.create_request(chat_id=APPROVER_CONV, sender="aaron@example.com", sender_name="Aaron",
+                                 mode="imessage", subject="", original_message="do the thing",
+                                 summary="do the thing", scopes=["web"], prompt="do the thing",
+                                 state="failed", task_id=t["id"])
+    m.store.set_thread(APPROVER_CONV, "idle", "imessage", {"conversation_id": APPROVER_CONV})
+    assert m.retry_approval_for_request(req) is True

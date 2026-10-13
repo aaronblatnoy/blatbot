@@ -25,16 +25,29 @@ def make_store(tmp_path):
 
 
 class FakeManager:
-    def __init__(self, store):
+    def __init__(self, store, *, owner_requests=True):
         self.store = store
         self.schedules = sched_mod.ScheduleService(self)
         self.notices = []
+        self.approval_texts = []
+        # Whether a non-console request counts as the owner's own, for the
+        # retry-approval tests below; real GateSessionManager derives this from
+        # the request's own sender identity (manager.retry_approval_for_request).
+        self._owner_requests = owner_requests
 
     async def send_schedule_notice(self, schedule, text):
         self.notices.append((schedule.id, text))
 
     async def execute(self, req):
         self.store.set_state(req.id, "running")
+
+    async def send_approval_text(self, req):
+        self.approval_texts.append(req.id)
+
+    def retry_approval_for_request(self, req):
+        if req.mode == "console":
+            return True
+        return self._owner_requests
 
     def retry_request(self, req, *, approved):
         task_id = self.store.task_id_for_request(req.id)
@@ -737,3 +750,50 @@ async def test_retry_route_is_behind_the_same_origin_gate(tmp_path):
     async with TestClient(TestServer(app)) as client:
         resp = await client.post("/console/api/requests/retry", json={"id": request.id})
         assert resp.status == 403
+
+
+
+# ---------------------------------------------------------------------------
+# Item C5: the retry endpoint keeps the original request's own approval
+# standing, rather than always re-creating it approved.
+# ---------------------------------------------------------------------------
+
+@pytest.mark.asyncio
+async def test_retry_endpoint_keeps_a_strangers_request_pending(tmp_path):
+    """A request that was not the owner's own, and needed his approval the
+    first time, is recreated pending on retry -- not auto-approved -- and the
+    normal approval text goes out. A console-made request is always the
+    owner's own, so this uses a non-console mode (a real sender's channel)."""
+    store = make_store(tmp_path)
+    manager = FakeManager(store, owner_requests=False)
+    task_id = store.create_task("Wire the vendor invoice.")["id"]
+    request = store.create_request(
+        chat_id="jordan-thread", sender="jordan@example.test", sender_name="Jordan", mode="email",
+        subject="", original_message="wire it", summary="Wire the vendor invoice.", scopes=[],
+        prompt="Wire the vendor invoice.", state="failed", task_id=task_id)
+    store._db.execute("UPDATE requests SET status_json=? WHERE id=?",
+                      (_json.dumps({"error": "could not reach the page"}), request.id))
+    store._db.commit()
+    request = store.get_request(request.id)
+
+    result = await api.retry_request_endpoint(manager, {"id": request.id})
+    assert result["ok"] is True
+    assert result["needs_approval"] is True
+    new_req = store.get_request(result["id"])
+    assert new_req.state == "pending"
+    assert manager.approval_texts == [new_req.id]
+
+
+@pytest.mark.asyncio
+async def test_retry_endpoint_runs_the_owners_own_request_at_once(tmp_path):
+    store = make_store(tmp_path)
+    manager = FakeManager(store, owner_requests=True)
+    request = _make_request(store, summary="Wire the vendor invoice.", state="failed",
+                            status={"error": "could not reach the page"})
+
+    result = await api.retry_request_endpoint(manager, {"id": request.id})
+    assert result["ok"] is True
+    assert result["needs_approval"] is False
+    assert manager.approval_texts == []
+    new_req = store.get_request(result["id"])
+    assert new_req.state == "approved"

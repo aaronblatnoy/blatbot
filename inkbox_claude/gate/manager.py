@@ -2198,6 +2198,28 @@ class GateSessionManager:
         allowed = set(t.get("scopes") or [])
         return bool(allowed) and set(req.scopes or []) <= allowed
 
+    def retry_approval_for_request(self, req: Request) -> bool:
+        """The same question _retry_approval answers for a live chat sender, asked
+        instead from the request's OWN standing -- used by a retry that has no
+        asking sender at all (the console's "try again" button). A console-made
+        request is always the owner's own (nothing else can use the console). For
+        every other request this rebuilds the identity its original sender had --
+        never the console operator's -- so a stranger's request that needed the
+        owner's approval the first time still needs it on a retry."""
+        if req.mode == "console":
+            return True
+        probe = GateSession(req.chat_id, self)
+        probe.mode = req.mode
+        route = self.store.thread_route(req.chat_id)
+        meta = dict((route or {}).get("meta") or {})
+        meta["sender"] = req.sender
+        probe.reply_meta = meta
+        if probe.is_approver():
+            return True
+        t = probe.trust()
+        allowed = set(t.get("scopes") or [])
+        return bool(allowed) and set(req.scopes or []) <= allowed
+
     async def _handle_try_again(self, session: "GateSession", text: str) -> bool:
         if not wording.is_try_again(text):
             return False

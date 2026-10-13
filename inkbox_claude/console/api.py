@@ -677,9 +677,16 @@ async def decide_request(manager: Any, payload: Dict[str, Any]) -> Dict[str, Any
 async def retry_request_endpoint(manager: Any, payload: Dict[str, Any]) -> Dict[str, Any]:
     """POST /console/api/requests/retry: re-ask a failed request exactly as it
     was, through the manager's own retry_request (never a shortcut around
-    approval) -- the same path try again in chat already uses -- then runs
-    it right away, owner-console only, same gate as every other console
-    write."""
+    approval) -- the same path try again in chat already uses -- owner-console
+    only, same gate as every other console write.
+
+    The retry keeps the original request's own approval standing (item C5):
+    a request that was the owner's own runs again at once; a request that came
+    from someone else and had needed the owner's approval is recreated pending,
+    and the normal approval text goes out to the owner, exactly as a brand new
+    request from that sender would. Any held-send or destructive-call
+    confirmation still applies exactly as on a first run -- that happens inside
+    execute() itself and is untouched here."""
     try:
         request_id = int(payload.get("id"))
     except (TypeError, ValueError):
@@ -689,13 +696,22 @@ async def retry_request_endpoint(manager: Any, payload: Dict[str, Any]) -> Dict[
         raise ValidationError(f"no such request: {request_id}")
     if req.state != "failed":
         raise ValidationError(f"that request is {req.state}, not failed -- nothing to retry")
+    approved = manager.retry_approval_for_request(req)
     try:
-        new_req = manager.retry_request(req, approved=True)
+        new_req = manager.retry_request(req, approved=approved)
     except TaskRequired as exc:
         raise ValidationError(str(exc)) from exc
-    asyncio.create_task(manager.execute(new_req))
+    if new_req is None:
+        raise ValidationError("that request is already approved or running")
+    if approved:
+        asyncio.create_task(manager.execute(new_req))
+        message = "Retrying now."
+    else:
+        manager.store.set_thread(new_req.chat_id, "awaiting_aaron")
+        await manager.send_approval_text(new_req)
+        message = "That needs your approval again -- sent to you."
     events.publish("requests.changed", {"id": new_req.id, "action": "retry"})
-    return {"ok": True, "id": new_req.id}
+    return {"ok": True, "id": new_req.id, "needs_approval": not approved, "message": message}
 
 
 def tasks(store: Store) -> List[Dict[str, Any]]:
