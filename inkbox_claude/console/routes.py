@@ -237,6 +237,11 @@ async def get_roles_who_can(request: web.Request) -> web.StreamResponse:
     return _json(api.roles_who_can(_manager(request).store, q))
 
 
+async def get_roles_delete_preview(request: web.Request) -> web.StreamResponse:
+    role = request.query.get("role", "")
+    return _json(api.roles_delete_preview(_manager(request).store, role))
+
+
 async def get_scopes(request: web.Request) -> web.StreamResponse:
     store = _manager(request).store
     return _json(api.scopes(store))
@@ -360,6 +365,7 @@ def register(app: web.Application, gateway: Any) -> None:
     app.router.add_post("/console/api/roles/set_send", _endpoint(post_roles_set_send, mutation=True))
     app.router.add_post("/console/api/roles/set_notes", _endpoint(post_roles_set_notes, mutation=True))
     app.router.add_get("/console/api/roles/who_can", _endpoint(get_roles_who_can))
+    app.router.add_get("/console/api/roles/delete_preview", _endpoint(get_roles_delete_preview))
     app.router.add_get("/console/api/scopes", _endpoint(get_scopes))
     app.router.add_get("/console/api/scopes/breakdown", _endpoint(get_scopes_breakdown))
     app.router.add_get("/console/api/requests", _endpoint(get_requests))

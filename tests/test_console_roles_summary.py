@@ -218,3 +218,80 @@ def test_person_can_text_is_union_of_role_phrases(tmp_path):
     assert "role_badges" in row
     names = {r["name"] for r in row["role_badges"]}
     assert {"a", "b"} <= names
+
+
+# ---------------------------------------------------------------------------
+# Follow-up: actions list, delete preview, singular/plural, custom phrases
+# ---------------------------------------------------------------------------
+
+def test_role_actions_locked_role_has_no_rename_or_delete(tmp_path):
+    store = make_store(tmp_path)
+    store.set_role("ops", ["inbox_read"])
+    summary = api.roles_summary(store)
+    by_name = {r["name"]: r for r in summary["roles"]}
+
+    assert "rename" in by_name["ops"]["actions"]
+    assert "delete" in by_name["ops"]["actions"]
+
+    commander = by_name["commander"]
+    assert "delete" not in commander["actions"]
+    assert "rename" not in commander["actions"]
+
+
+def test_delete_preview_singular_and_plural_and_locked_and_unknown(tmp_path):
+    store = make_store(tmp_path)
+    store.set_role("solo", ["inbox_read"])
+    store.set_trust("mia@example.edu", person="Mia", role="solo")
+    preview = api.roles_delete_preview(store, "solo")
+    assert preview["member_count"] == 1
+    assert "1 person" in preview["text"]
+    assert "1 people" not in preview["text"]
+    assert "They keep their other roles." in preview["text"]
+
+    store.set_role("duo", ["inbox_read"])
+    store.set_trust("mia@example.edu", person="Mia", role="duo")
+    store.set_trust("theo@example.edu", person="Theo", role="duo")
+    preview2 = api.roles_delete_preview(store, "duo")
+    assert preview2["member_count"] == 2
+    assert "2 people" in preview2["text"]
+
+    with pytest.raises(api.ValidationError):
+        api.roles_delete_preview(store, "commander")
+    with pytest.raises(api.ValidationError):
+        api.roles_delete_preview(store, "no-such-role")
+
+
+def test_affects_text_uses_singular_person_for_one_member(tmp_path):
+    store = make_store(tmp_path)
+    store.set_role("solo2", [])
+    store.set_trust("mia@example.edu", person="Mia", role="solo2")
+    result = api.roles_set_level(store, {"role": "solo2", "system": "tamid_workspace", "level": "read"})
+    assert "1 person" in result["affects_text"]
+    assert "1 people" not in result["affects_text"]
+
+
+def test_sources_have_no_file_paths_or_table_names_and_include_counts(tmp_path):
+    store = make_store(tmp_path)
+    store.set_role("ops2", ["inbox_read"])
+    store.set_trust("mia@example.edu", person="Mia", role="ops2")
+    summary = api.roles_summary(store)
+    for source in summary["sources"]:
+        detail = source["detail"]
+        assert ".py" not in detail
+        assert ".yaml" not in detail
+        assert "table" not in detail.lower()
+        assert any(ch.isdigit() for ch in detail), detail
+
+
+def test_custom_level_phrases_are_nonempty_and_scope_name_free(tmp_path):
+    # blatbot_inkbox's read set is {inbox_read, contacts}; holding only inbox_read
+    # is a genuine subset of that system's read scopes, so it reads as "custom".
+    store = make_store(tmp_path)
+    store.set_role("partial", ["inbox_read"])
+    summary = api.roles_summary(store)
+    role = next(r for r in summary["roles"] if r["name"] == "partial")
+    sy = next(s for s in role["systems"] if s["system"] == "blatbot_inkbox")
+    assert sy["level"] == "custom"
+    assert sy["phrases"], "custom level must list what it currently holds"
+    for phrase in sy["phrases"]:
+        assert not _SCOPE_SHAPED.search(phrase), phrase

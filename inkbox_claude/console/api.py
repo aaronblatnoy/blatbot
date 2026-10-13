@@ -521,6 +521,31 @@ def remove_role_scope(store: Store, payload: Dict[str, Any]) -> Dict[str, Any]:
     return row
 
 
+def roles_delete_preview(store: Store, name: str) -> Dict[str, Any]:
+    """A plain-English line for the frontend to show before an actual delete:
+    who loses this role and what happens to the rest of what they can do.
+    Read-only; does not touch the role or its members."""
+    name = (name or "").strip().lower()
+    if not name:
+        raise ValidationError(_UNKNOWN_ROLE)
+    if name in LOCKED_ROLES:
+        raise ValidationError(_LOCKED_ROLE_MSG)
+    _role_row(store, name)  # 400s on an unknown role name
+    members = _role_members(store, name)
+    n = len(members)
+    names = [m.get("person") or "" for m in members]
+    if n == 0:
+        text = f"Deleting {name} removes it from nobody -- no one currently holds it."
+    else:
+        text = (
+            f"Deleting {name} removes it from {_people_count_text(n)}: " + _join_phrases(names)
+            + ". They keep their other roles."
+        )
+    return {"role": name, "member_count": n, "members": [
+        {"person_id": m.get("key") or "", "name": m.get("person") or ""} for m in members
+    ], "text": text}
+
+
 def delete_role(store: Store, payload: Dict[str, Any]) -> Dict[str, Any]:
     name = _required_text(payload.get("name"), "name").lower()
     _require_unlocked_role(name)
@@ -1701,12 +1726,45 @@ def _role_can_text(role_name: str, phrases: List[str]) -> str:
     return "Members can, without asking you: " + _join_phrases(phrases) + "."
 
 
+def _plural(n: int, singular: str, plural: str) -> str:
+    return singular if n == 1 else plural
+
+
+def _people_count_text(n: int) -> str:
+    return f"{n} " + _plural(n, "person", "people")
+
+
 def _roles_summary_sources(store: Store) -> List[Dict[str, Any]]:
+    role_count = len(store.roles())
+    member_total = len({m.get("key") for row in store.roles() for m in _role_members(store, row["name"])})
+    scope_count = len(SCOPES)
+    folder_count = len(_vault_scope_names()) - 1  # exclude the whole-vault scope itself
+    folder_count = max(folder_count, 0)
     return [
-        {"label": "Roles and scopes", "detail": "inkbox_claude/gate/scopes.yaml, the live gate registry"},
-        {"label": "Role membership", "detail": "the console database's roles and trusted-people tables"},
-        {"label": "Notes folders", "detail": "discovered from the vault's own folder structure at run time"},
+        {
+            "label": "Roles and their members",
+            "detail": f"this console's database: {role_count} " + _plural(role_count, "role", "roles")
+            + f", {_people_count_text(member_total)} with at least one role",
+        },
+        {
+            "label": "Abilities",
+            "detail": f"Blatbot's permission registry: {scope_count} " + _plural(scope_count, "ability", "abilities"),
+        },
+        {
+            "label": "Note folders",
+            "detail": f"your vault's folders: {folder_count} " + _plural(folder_count, "folder", "folders"),
+        },
     ]
+
+
+def _role_actions(name: str) -> List[str]:
+    """Which of rename/delete/create apply to this role row. Creating a new
+    role is always possible and is not blocked by any one role being locked,
+    so every row carries it; the locked (owner) role is the only one that
+    cannot be renamed or deleted."""
+    if name in LOCKED_ROLES:
+        return ["create"]
+    return ["create", "rename", "delete"]
 
 
 def roles_summary(store: Store) -> Dict[str, Any]:
@@ -1745,7 +1803,7 @@ def roles_summary(store: Store) -> Dict[str, Any]:
             "can_text": _role_can_text(name, phrases),
             "systems": systems_view,
             "notes": notes,
-            "actions": [],
+            "actions": _role_actions(name),
         })
 
     systems_payload = []
@@ -1793,7 +1851,7 @@ def _affects_text(role_row: Dict[str, Any], store: Store) -> str:
     names = [m.get("person") or "" for m in members]
     if n == 0:
         return "This changes what 0 people can do."
-    return f"This changes what {n} people can do: " + _join_phrases(names) + "."
+    return f"This changes what {_people_count_text(n)} can do: " + _join_phrases(names) + "."
 
 
 def roles_set_level(store: Store, payload: Dict[str, Any]) -> Dict[str, Any]:
