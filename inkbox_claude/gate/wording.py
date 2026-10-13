@@ -1,0 +1,171 @@
+"""Plain-language wording for a finished request's result message.
+
+A failed run's status dict (as the executor returns it: ``ok``, ``error``,
+``denied``, ``held``, ``final_status``, ``tool_calls``, ...) is never shown to
+a person as-is -- its ``error``/``raw`` text is an SDK or provider string, not
+something a person asked for. This module turns that status into one plain
+clause people can read, plus one next step, and assembles the whole result
+message a person receives. The raw text stays in the request row and the log;
+nothing here ever returns it.
+"""
+
+from __future__ import annotations
+
+from typing import Any, Dict, List, Optional
+
+from . import schedprop
+from . import scopes as _scopes
+
+_TOOL_SYSTEM_NAMES: Dict[str, str] = {
+    "tamid-admin": "the TAMID website admin",
+    "sjba-admin": "the SJBA website admin",
+    "tamid-drive": "TAMID's Google Workspace",
+    "stern-drive": "Aaron's Stern Google account",
+    "tamid-instagram": "TAMID's Instagram",
+    "tamid-linkedin": "TAMID's LinkedIn",
+    "analytics-admin": "TAMID's Google Analytics",
+    "brightspace": "Brightspace",
+    "coolify": "Coolify",
+    "coolify-vox": "the Vox Coolify instance",
+    "playwright": "the web",
+    "inkbox": "Blatbot's own inbox",
+    "host": "the server",
+    "advancedmd": "AdvancedMD",
+    "availity": "Availity",
+    "quickbooks": "QuickBooks",
+    "dol": "the pension filings database",
+    "runpod": "RunPod",
+    "google-workspace": "Google Workspace",
+}
+
+_NETWORK_WORDS = (
+    "connection", "network", "unreachable", "could not resolve", "name resolution",
+    "dns", "connection refused", "reset by peer", "ssl", "certificate", "handshake",
+    "bad gateway", "gateway timeout", "service unavailable", "502", "503", "504",
+    "econnrefused", "econnreset", "enotfound",
+)
+_LOGIN_WORDS = (
+    "unauthorized", "authentication failed", "auth failed", "401", "403",
+    "not logged in", "no longer logged in", "session expired", "token expired",
+    "invalid credentials", "forbidden", "login failed", "re-login",
+)
+
+
+def _tool_scope(tool: str) -> Optional[str]:
+    for name, spec in _scopes.SCOPES.items():
+        if tool in (spec.get("tools") or []):
+            return name
+    return None
+
+
+def _system_for_tool(tool: str) -> Optional[str]:
+    parts = str(tool).split("__")
+    server = parts[1] if len(parts) >= 3 else (parts[0] if parts else "")
+    return _TOOL_SYSTEM_NAMES.get(server)
+
+
+def _denied_tools(status: Dict[str, Any]) -> List[str]:
+    out: List[str] = []
+    for item in status.get("denied") or []:
+        tool = item.get("tool") if isinstance(item, dict) else item
+        if tool:
+            out.append(str(tool))
+    return out
+
+
+def _denied_label(status: Dict[str, Any]) -> str:
+    """The owner-facing verb phrase for whatever was refused, from the scope(s)
+    that own the denied tool(s). Falls back to a vague phrase when the tool
+    belongs to no known scope (nothing real to name)."""
+    scope_names: List[str] = []
+    for tool in _denied_tools(status):
+        sc = _tool_scope(tool)
+        if sc and sc not in scope_names:
+            scope_names.append(sc)
+    if scope_names:
+        return schedprop.labels(scope_names)
+    return "do part of this"
+
+
+def _is_buffer_error(text: str) -> bool:
+    low = text.lower()
+    return "buffer size" in low or "exceeded maximum buffer" in low
+
+
+def _is_timeout(text: str) -> bool:
+    low = text.lower()
+    return "timed out" in low or "timeout" in low
+
+
+def _is_network_or_login(text: str) -> bool:
+    low = text.lower()
+    return any(w in low for w in _NETWORK_WORDS) or any(w in low for w in _LOGIN_WORDS)
+
+
+def _classify(status: Dict[str, Any]) -> str:
+    """One category for a failed run: 'buffer', 'timeout', 'refusal', 'network',
+    or 'other'. Order matters: a specific error signature (buffer, timeout) wins
+    over a refusal or network guess even if denied/held also happen to be set."""
+    text = f"{status.get('error') or ''} {status.get('final_status') or ''}"
+    if _is_buffer_error(text):
+        return "buffer"
+    if _is_timeout(text):
+        return "timeout"
+    if _denied_tools(status) or status.get("held"):
+        return "refusal"
+    if _is_network_or_login(text):
+        return "network"
+    return "other"
+
+
+def failure_in_words(status: Dict[str, Any]) -> str:
+    """One plain clause for why a run failed. Never the raw error string."""
+    category = _classify(status)
+    if category == "buffer":
+        return "it ran out of room handling something too large"
+    if category == "timeout":
+        return "it took too long"
+    if category == "refusal":
+        return f"it is not allowed to {_denied_label(status)}"
+    if category == "network":
+        for tool in reversed(status.get("tool_calls") or []):
+            system = _system_for_tool(tool)
+            if system:
+                return f"it could not reach {system}"
+        return "a service it needs did not respond"
+    return "something broke on my side"
+
+
+def next_step(status: Dict[str, Any]) -> str:
+    """One next step the person can say to move the request forward."""
+    if _classify(status) == "refusal":
+        return f'Say "let it {_denied_label(status)}" and I will finish.'
+    return 'Say "try again" and I will.'
+
+
+def has_partial_findings(status: Dict[str, Any]) -> bool:
+    """Whether the failed run left behind real narration worth offering, beyond
+    the bare error itself."""
+    final = str(status.get("final_status") or "").strip()
+    return bool(final) and final != "(no status text)"
+
+
+def failure_message(summary: str, status: Dict[str, Any]) -> str:
+    """The whole message a person receives for a failed request: never
+    'That failed.', never an exception or SDK string, never markdown."""
+    msg = f"I couldn't finish {summary}: {failure_in_words(status)}. {next_step(status)}"
+    if has_partial_findings(status):
+        msg += ' I have part of it; say "send what you have".'
+    return msg
+
+
+def success_message(result: str) -> str:
+    """The whole message for a finished request that succeeded: the result as
+    is, without a leading 'Done.' when the result already reads as a sentence
+    (starts capitalized, as the executor's own closing text normally does)."""
+    text = (result or "").strip()
+    if not text:
+        return "Done."
+    if text[0].isupper():
+        return text
+    return f"Done. {text}"
