@@ -51,6 +51,25 @@ def labels(scopes: Iterable[str]) -> str:
     return ", ".join(ls[:-1]) + ", and " + ls[-1]
 
 
+def short_label(scope: str) -> str:
+    """label(), cut at a parenthetical detail -- the short, re-sayable form a
+    recovery phrase offers him ("act in Brightspace", never "act in Brightspace
+    (submit, post, mark complete)"). A label with no parenthesis is unchanged."""
+    return label(scope).split("(", 1)[0].strip()
+
+
+def short_labels(scopes: Iterable[str]) -> str:
+    """Like labels(), but each scope's short, re-sayable form."""
+    ls = [short_label(s) for s in scopes]
+    if not ls:
+        return ""
+    if len(ls) == 1:
+        return ls[0]
+    if len(ls) == 2:
+        return f"{ls[0]} and {ls[1]}"
+    return ", ".join(ls[:-1]) + ", and " + ls[-1]
+
+
 # ---------------------------------------------------------------------------
 # Capabilities
 # ---------------------------------------------------------------------------
@@ -79,6 +98,11 @@ def _said_scopes(said_text: str) -> List[str]:
     # in scopes.yaml). Where a label and a synonym overlap, the longest match
     # wins via the same sort below.
     candidates += [(len(label(name).lower()), name, label(name).lower()) for name in SCOPES]
+    # And the short, parenthesis-free form of that same label: the recovery phrase
+    # offers him the short form ("act in Brightspace"), so his reply must be
+    # accepted whichever form he actually says back.
+    candidates += [(len(short_label(name).lower()), name, short_label(name).lower())
+                   for name in SCOPES if short_label(name) != label(name)]
     candidates.sort(key=lambda t: -t[0])
     found: List[str] = []
     for _, name, syn in candidates:
@@ -225,6 +249,15 @@ def capabilities_from_permission(said_text: str, denied_scopes: Optional[List[st
         denied = set(denied_scopes)
         return [name for name in SCOPES if name in denied]
     return []
+
+
+def looks_like_permission_grant(text: str) -> bool:
+    """Whether `text` reads as an attempt to grant permission at all (a "let it
+    ..." phrase, or one of the vague-approval phrases) -- used to decide whether
+    a message after a one-off request's denied-tool failure is a "let it <label>"
+    reply at all, before capabilities_from_permission is asked what it grants."""
+    low = (text or "").lower().replace("’", "'")
+    return bool(_PERMISSION_RE.search(low)) or any(p in low for p in _VAGUE_PHRASES)
 
 
 def capability_match(text: str) -> Optional[str]:

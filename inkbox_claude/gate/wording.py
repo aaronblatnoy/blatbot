@@ -11,6 +11,8 @@ nothing here ever returns it.
 
 from __future__ import annotations
 
+import re
+
 from typing import Any, Dict, List, Optional
 
 from . import schedprop
@@ -83,7 +85,10 @@ def _denied_label(status: Dict[str, Any]) -> str:
         if sc and sc not in scope_names:
             scope_names.append(sc)
     if scope_names:
-        return schedprop.labels(scope_names)
+        # The short, re-sayable form: "act in Brightspace", never the parenthetical
+        # detail ("...submit, post, mark complete)") -- a person asked to say this
+        # phrase back ("let it <label>") must be able to say it whole.
+        return schedprop.short_labels(scope_names)
     return "do part of this"
 
 
@@ -239,7 +244,7 @@ def latest_step_from_tool_calls(tool_calls: Optional[List[str]]) -> Optional[str
 
 _TRY_AGAIN_PHRASES = {"try again", "try it again", "retry", "please try again", "run it again"}
 _SEND_WHAT_YOU_HAVE_PHRASES = {
-    "send what you have", "send me what you have", "send it", "share what you have",
+    "send what you have", "send me what you have", "share what you have",
     "give me what you have",
 }
 
@@ -252,6 +257,37 @@ def is_try_again(body: str) -> bool:
 
 def is_send_what_you_have(body: str) -> bool:
     return (body or "").strip().rstrip("?!. ").lower() in _SEND_WHAT_YOU_HAVE_PHRASES
+
+
+# A small fixed list, whole-message match: the owner granting blanket permission
+# for whatever the currently failed/running request needs, never a standing grant
+# (see GateSessionManager._handle_blanket_permission in manager.py).
+_EVERYTHING_PHRASES = {
+    "you have my permission for everything",
+    "you have my personal permission for everything",
+    "you have permission for everything",
+    "do whatever you need",
+    "you're allowed to do all of it",
+    "you are allowed to do all of it",
+    "full permission",
+    "go ahead with everything",
+}
+
+
+def is_blanket_permission(body: str) -> bool:
+    return (body or "").strip().rstrip("?!. ").lower().replace("’", "'") in _EVERYTHING_PHRASES
+
+
+def denied_scopes(status: Dict[str, Any]) -> List[str]:
+    """Scope names behind each tool a failed run's status denied, de-duplicated --
+    what "let it <label>" (item 3) and a blanket grant (item 4) narrow to when
+    nothing more specific is named."""
+    out: List[str] = []
+    for tool in _denied_tools(status):
+        sc = _tool_scope(tool)
+        if sc and sc not in out:
+            out.append(sc)
+    return out
 
 
 def within_retry_window(failed_at: Optional[float], now: float, hours: float = RETRY_WINDOW_HOURS) -> bool:
@@ -387,3 +423,17 @@ def plain_title(store: Any, req: Any) -> str:
     # wants the detail.
     when = _call_time_text(getattr(req, "created_at", None))
     return f"the request from the {when} call" if when else "the request from a call"
+
+
+_CHANGING_TOOL_RE = re.compile(r"(^|_)(create|update|delete|manage|remove|write)(_|$)")
+
+
+def truly_read_only(scope: str) -> bool:
+    """A scope the registry marks `read` whose tools also cannot change anything.
+    Some `read` scopes carry a create/update/manage tool (contacts, the calendars);
+    a blanket "permission for everything" never adds those on its own."""
+    from .scopes import READ_SCOPES, SCOPES
+    if scope not in READ_SCOPES:
+        return False
+    tools = [t.rsplit("__", 1)[-1] for t in (SCOPES.get(scope) or {}).get("tools") or []]
+    return not any(_CHANGING_TOOL_RE.search(t) for t in tools)
