@@ -27,6 +27,7 @@ from .scopes import SCOPES
 from .store import Person, Request, Store, TaskRequired, task_key
 from .schedules import ScheduleService
 from . import schedprop
+from . import wording
 
 logger = logging.getLogger(__name__)
 
@@ -1004,7 +1005,6 @@ class GateSession:
                 self.mode, self.reply_meta = prev
         reply = " ".join((reply or "").split())
         if reply and not reply.startswith(("Done via", "Failed via")):
-            self.m.store.add_message(self.record_id, "outbound", reply, "voice")
             return reply
         # Fallback: the tool bodies only, never the agent's header.
         body = _result_bodies(text.split("Result:", 1)[-1] if "Result:" in text else text)
@@ -1013,14 +1013,23 @@ class GateSession:
     async def _run_for_call(self, req: Request, aaron_call: bool, caller: str) -> str:
         text = await self.m.execute(req, notify=False)
         text = await self.phrase_result_for_call(req, text)
-        if not self.m.call_active(self.chat_id):
-            # They hung up first: deliver by text, without touching the thread's channel.
-            if aaron_call:
-                await self.m.send_to_approver(text)
-            else:
-                await self.m.send(f"sms:{caller}", text, "sms", {"to": caller, "sender": caller},
-                                  chat_id=self.record_id)
-            self.m.store.add_message(self.record_id, "outbound", text, "sms")
+        if self.m.call_active(self.chat_id):
+            # Still on the call: this is spoken, not sent, so it is recorded here as the
+            # one row for this result -- the only place that happens.
+            self.m.store.add_message(self.record_id, "outbound", text, "voice")
+            return text
+        # They hung up first: deliver on exactly one channel -- the owner's own primary
+        # (send_to_approver, iMessage) when it was Aaron, or back to the number that
+        # called otherwise -- and let that one send record the one outbound row. Two
+        # earlier bugs both traced here: this function used to store a "voice" row for
+        # a result that was never spoken (above), then send() recorded a second row for
+        # whichever channel it actually went out on, then a third explicit add_message
+        # duplicated (or mislabeled) that same row again.
+        if aaron_call:
+            await self.m.send_to_approver(text)
+        else:
+            await self.m.send(f"sms:{caller}", text, "sms", {"to": caller, "sender": caller},
+                              chat_id=self.record_id)
         return text
 
     async def run_consult_detailed(self, *args: Any, **kwargs: Any) -> Any:
@@ -1054,16 +1063,17 @@ class GateSession:
             t = self._peek_task(RouterOutput(task=f"T{self.m.store.task_id_for_request(running.id)}"))
             if t:
                 self._ensure_inbound_on_task(t, body)
-            out = await self.m.router.route(
-                history=prior, message=message, mode=self.mode, sender=self._sender(),
-                contact_notes=self._contact_notes(), is_approver=approver,
-                task_memory=memory, found_tasks=found, action=True,
-                action_task=(t or {}).get("title") or running.summary,
-            )
-            out.request = None
-            if out.reply:
-                await self.send_to_sender(out.reply, role="ack")
-            return bool(out.reply)
+            # Code only, no model call: a progress question gets a status line built from
+            # the request row; anything else keeps today's behaviour of becoming a
+            # follow-up for when the run ends, but with a fixed line, never a model's
+            # promise about what it is doing.
+            if wording.is_progress_question(body):
+                reply = self._progress_reply(running)
+            else:
+                reply = wording.NOT_PROMISING_FOLLOWUP
+            if reply:
+                await self.send_to_sender(reply, role="ack")
+            return bool(reply)
         if system_note:
             out: RouterOutput = await self.m.router.route(
                 history=prior, message=message, mode=self.mode, sender=self._sender(),
@@ -1177,6 +1187,22 @@ class GateSession:
 
     inbound_id: Optional[int] = None   # the inbound message this turn is responding to
 
+    def _progress_reply(self, running: Request) -> str:
+        """The status line for a message that asked about the still-running request
+        named by `running`. Re-reads the request fresh: it may have finished or failed
+        in the moment between running_for_thread's check and this turn being handled,
+        and that gets the same wording a finished request's result ever gets, not a
+        claim that it is still going."""
+        fresh = self.m.store.get_request(running.id) or running
+        fresh_status = fresh.status or {}
+        if fresh.state == "done":
+            return wording.success_message(_clean_result(fresh_status.get("summary") or ""))
+        if fresh.state == "failed":
+            return wording.failure_message(fresh.summary, fresh_status)
+        step = wording.latest_step_from_tool_calls(fresh_status.get("tool_calls"))
+        return wording.progress_status_line(fresh.created_at, step, fresh.summary)
+
+
     async def send_to_sender(self, text: str, role: str = "answer") -> bool:
         """Deliver to the sender. Enforced: per inbound message at most one 'ack' and
         one 'answer' go out. A second of either is refused here, whatever produced it.
@@ -1186,16 +1212,22 @@ class GateSession:
             logger.warning("[gate %s] refused a second %s for inbound #%s: %r", self.chat_id, role, self.inbound_id, text)
             return False
         if self.mode == "voice" and not self.m.call_active(self.chat_id):
-            # The call ended before this was ready: deliver by text instead.
+            # The call ended before this was ready: deliver by text instead, on exactly
+            # one channel -- the owner's own primary (send_to_approver) when it was
+            # Aaron, or back to the number that called otherwise -- and record exactly
+            # one row for it. send_to_approver already records its own row (imessage);
+            # recording a second one below under mode "voice" (never spoken) was the
+            # voice+imessage double-row bug.
             if self.is_aaron_on_phone():
                 await self.m.send_to_approver(text)
             else:
                 num = self._sender()
                 await self.m.send(f"sms:{num}", text, "sms", {"to": num, "sender": num}, record=False)
+                self.m.store.add_message(self.record_id, "outbound", text, "sms", reply_to=self.inbound_id, role=role)
         else:
             self.typing_stop()
             await self.m.send(self.chat_id, text, self.mode, self.reply_meta, record=False)
-        self.m.store.add_message(self.record_id, "outbound", text, self.mode, reply_to=self.inbound_id, role=role)
+            self.m.store.add_message(self.record_id, "outbound", text, self.mode, reply_to=self.inbound_id, role=role)
         t = self.task()
         if t is not None:
             self.m.store.task_event(t["id"], "outbound", text, chat_id=self.record_id)
@@ -2187,6 +2219,24 @@ class GateSessionManager:
                         req.id, len(attachment.included), len(attachment.overflow))
         return attachment.block
 
+    def retry_request(self, req: Request, *, approved: bool) -> Request:
+        """Re-create a failed request exactly as it was asked: the same prompt,
+        scopes and task, through the store's own create_request -- never a shortcut
+        around approval. The caller recognizes "try again" on an inbound message
+        (wording.is_try_again, within wording.within_retry_window of the failure
+        notice) and decides `approved` the same way any new request's approval is
+        decided for that sender; when it is False, the caller still owes this
+        fresh pending request whatever a new pending request normally gets
+        (an approval text to the owner), the same as request creation always has."""
+        task_id = self.store.task_id_for_request(req.id)
+        if not task_id:
+            raise TaskRequired(f"request #{req.id} has no task to retry under")
+        return self.store.create_request(
+            chat_id=req.chat_id, sender=req.sender, sender_name=req.sender_name, mode=req.mode,
+            subject=req.subject, original_message=req.original_message, summary=req.summary,
+            scopes=list(req.scopes), prompt=req.prompt, state="approved" if approved else "pending",
+            task_id=task_id, inbound_id=req.inbound_id)
+
     async def execute(self, req: Request, notify: bool = True) -> str:
         """Run an approved request. With notify=False the caller delivers the
         result itself (a live phone call reads it aloud) and gets it back."""
@@ -2229,6 +2279,12 @@ class GateSessionManager:
         self.store.set_thread(req.chat_id, "idle")
         outcome = "done" if ok else "FAILED"
         result = _clean_result(status.get("summary") or status.get("error") or "")
+        # The message a person actually reads for this result: the cleaned result on
+        # success, or a plain failure message (never the raw SDK/provider error, never
+        # "That failed.") on failure. `result`/`note` below stay as they were -- the
+        # grounding fallback downstream (ground_reply) still works from the run's own
+        # findings -- only the text actually sent or returned here uses `message`.
+        message = wording.success_message(result) if ok else wording.failure_message(req.summary, status)
         self.task_note(req, "done" if ok else "failed", f"{req.summary} -> {result}",
                        state="open" if req.schedule_id else ("done" if ok else "failed"))
         if await self.schedules.finished(req, status):
@@ -2239,7 +2295,7 @@ class GateSessionManager:
             return ""
         if not notify:
             self.store.add_message(req.chat_id, "system", f"Task #{req.id} {outcome}: {req.summary}\nResult:\n{result}")
-            return f"{'Done' if ok else 'That failed'}. {result}"
+            return message
         from_aaron = session.is_approver() or session.is_aaron_on_phone() or req.chat_id in self._approver_chat_ids()
         note = f"Task #{req.id} {outcome}: {req.summary}\nResult:\n{result}"
         # Messages live on the person's record, which for the owner spans every surface.
@@ -2262,14 +2318,14 @@ class GateSessionManager:
             try:
                 replied = await session.notify_after_request(note, inbound_id=req.inbound_id)
                 if not replied:
-                    await self.send_to_approver(f"{'Done' if ok else 'Failed'}: {req.summary}\n{result}")
+                    await self.send_to_approver(f"{'Done' if ok else 'Failed'}: {req.summary}\n{message}")
             finally:
                 session.typing_stop()
             return ""
         # Someone else's request: short status to Aaron, and the router may
         # tell the sender the outcome (never Claude's raw text).
         try:
-            await self.send_to_approver(f"[Blatbot #{req.id} {outcome}] {req.summary}\n{result}")
+            await self.send_to_approver(f"[Blatbot #{req.id} {outcome}] {req.summary}\n{message}")
             await session.notify_after_request(note, inbound_id=req.inbound_id)
         finally:
             session.typing_stop()
