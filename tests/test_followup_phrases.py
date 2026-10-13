@@ -301,7 +301,7 @@ async def test_blanket_permission_grants_denied_plus_read_only(manager, tmp_path
             # only when the run was actually refused it, never just for being
             # read-only -- it is not refused here, so it stays out.
             assert read_scope not in granted
-        elif _wording.truly_read_only(read_scope):
+        elif _wording.truly_read_only(read_scope) and read_scope not in gm.EXPLICIT_ONLY_SCOPES:
             assert read_scope in granted
         elif read_scope != scope_name:
             # a "read" scope that can also create or change things is never added on its own
@@ -917,3 +917,12 @@ def test_retry_approval_for_request_the_owners_verified_imessage_is_approved(man
                                  state="failed", task_id=t["id"])
     m.store.set_thread(APPROVER_CONV, "idle", "imessage", {"conversation_id": APPROVER_CONV})
     assert m.retry_approval_for_request(req) is True
+
+
+def test_blanket_grant_never_adds_an_explicit_only_scope_on_its_own():
+    from inkbox_claude.gate import scopes as _sc, wording as _w
+    assert "telegram_read" in _sc.EXPLICIT_ONLY_SCOPES and _w.truly_read_only("telegram_read")
+    import inspect
+    from inkbox_claude.gate import manager as _gm
+    src = inspect.getsource(_gm.GateSessionManager._blanket_grant_scopes)
+    assert "EXPLICIT_ONLY_SCOPES" in src

@@ -23,7 +23,7 @@ from . import settings as _settings
 from .jevagent import JevAgent, enabled as jev_agent_enabled
 from .taskpick import TaskPicker, enabled as jev_enabled
 from .router import Router, RouterOutput, RouterRequest, ScheduleCommand
-from .scopes import SCOPES, READ_SCOPES
+from .scopes import SCOPES, READ_SCOPES, EXPLICIT_ONLY_SCOPES
 from .store import Person, Request, Store, TaskRequired, task_key
 from .schedules import ScheduleService
 from . import schedprop
@@ -2338,7 +2338,8 @@ class GateSessionManager:
         all of it as a side effect of a run that never asked for it."""
         denied = set(wording.denied_scopes(status))
         granted = [sc for sc in SCOPES if sc in denied or
-                  (wording.truly_read_only(sc) and sc != "vault_read")]
+                  (wording.truly_read_only(sc) and sc != "vault_read"
+                   and sc not in EXPLICIT_ONLY_SCOPES)]
         return [sc for sc in granted if sc not in (req.scopes or [])]
 
     async def _grant_blanket_and_retry(self, session: "GateSession", req: Request) -> None:

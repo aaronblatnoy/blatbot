@@ -510,4 +510,6 @@ def test_capability_match_finds_a_real_scope_by_label():
 
 
 def test_capability_match_returns_none_for_an_unregistered_capability():
-    assert schedprop.capability_match("a way to read Telegram groups") is None
+    assert schedprop.capability_match("a way to read fax transmissions") is None
+    # a need that IS a registered capability is recognised from the run's own words
+    assert schedprop.capability_match("a way to read Telegram groups") == "telegram_read"

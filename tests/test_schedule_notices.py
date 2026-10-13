@@ -146,8 +146,8 @@ async def test_blocked_run_pauses_clears_next_run_and_gives_the_exact_notice(tmp
     notice = sent[-1][1]
     assert notice == (
         'Team chat digest could not run: it could not find a team chat in any reachable iMessage, SMS, or '
-        'Telegram source, so no summary could be produced today. Tell me where to find it or what to change, '
-        'or say "stop it". I won\'t retry on my own.'
+        'Telegram source, so no summary could be produced today. Say "let it read your Telegram chats" and '
+        'I will run it now, or "stop it". I won\'t retry on my own.'
     )
 
     # A later tick must not refire it on its own -- it stays paused with no
