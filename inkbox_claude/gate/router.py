@@ -135,7 +135,7 @@ class ScheduleProposal(BaseModel):
         return value
 
 
-SCHEDULE_COMMAND_ACTIONS = {"list", "last", "change", "pause", "resume", "run_now", "stop", "add_capability"}
+SCHEDULE_COMMAND_ACTIONS = {"list", "last", "change", "pause", "resume", "run_now", "stop", "add_capability", "approve", "reject"}
 
 
 class ScheduleCommand(BaseModel):
@@ -217,7 +217,7 @@ class Router:
             "Available task scopes (choose the minimal set):\n"
             f"{scope_lines}\n\n"
             "Respond with ONLY a JSON object, no prose, of the form:\n"
-            '{"reasoning": string or null, "reply": string or null, "request": null or {"prompt": string, "scopes": [string], "summary": string, "counterpart": string or null}, "schedule": null or {"title": string, "prompt": string, "cadence_kind": "once"|"every"|"daily"|"weekdays"|"weekly"|"cron", "cadence": object, "timezone": IANA timezone or null, "report_every_time": true|false|null, "until": ISO date or null, "scopes": [string], "start_now": true|false}, "schedule_command": null or {"action": "list"|"last"|"change"|"pause"|"resume"|"run_now"|"stop"|"add_capability", "target": string or null, "changes": object}}\n'
+            '{"reasoning": string or null, "reply": string or null, "request": null or {"prompt": string, "scopes": [string], "summary": string, "counterpart": string or null}, "schedule": null or {"title": string, "prompt": string, "cadence_kind": "once"|"every"|"daily"|"weekdays"|"weekly"|"cron", "cadence": object, "timezone": IANA timezone or null, "report_every_time": true|false|null, "until": ISO date or null, "scopes": [string], "start_now": true|false}, "schedule_command": null or {"action": "list"|"last"|"change"|"pause"|"resume"|"run_now"|"stop"|"add_capability"|"approve"|"reject", "target": string or null, "changes": object}}\n'
             "- reply: what to send back to the sender now, or null to send nothing.\n"
             "- request.counterpart: the email (preferred), phone, or full name of the person the task is\n"
             "  about, when it concerns someone other than the sender; null otherwise.\n"
@@ -303,8 +303,10 @@ class Router:
             "  - action: \"list\" (what's scheduled), \"last\" (what a schedule did last time), \"change\" "
             "(a different cadence, report setting, title, prompt addition, or capability -- anything that "
             "needs his yes before it takes effect except a plain cadence/report/title change, which code "
-            "applies at once), \"pause\", \"resume\", \"run_now\", \"stop\", or \"add_capability\" (he is "
-            "explicitly telling it it may now do something, e.g. \"let it edit contacts\").\n"
+            "applies at once), \"pause\", \"resume\", \"run_now\", \"stop\", \"add_capability\" (he is "
+            "explicitly telling it it may now do something, e.g. \"let it edit contacts\"), \"approve\" "
+            "(a proposal he is saying yes to IN MORE WORDS THAN A BARE YES, e.g. \"yes, go ahead and "
+            "start it\"), or \"reject\" (same for a no in more words, e.g. \"no thanks, drop it\").\n"
             "  - target: his own words for which schedule he means, exactly as he said them (\"the team "
             "one\", a full or partial title) -- never an id, never invented; null when he said \"it\"/"
             "\"that\" or did not name one at all. Matching the words to a schedule is done by code, not you.\n"
@@ -313,9 +315,11 @@ class Router:
             "title for those; prompt_addition for words to add to what the schedule does; scopes (scope "
             "names from the list above) for a capability change or addition. Set only the keys that changed.\n"
             "  - A bare \"yes\"/\"no\" while a schedule proposal is open is handled before you ever see it; "
-            "do not fill schedule_command for that. Anything else he says about that open proposal (a "
-            "different cadence, an added capability) is schedule_command action \"change\" with target "
-            "naming that proposal's title.\n"
+            "do not fill schedule_command for that. A longer yes/no about that open proposal (\"yes, go "
+            "ahead and start it\") is schedule_command action \"approve\" or \"reject\" with target "
+            "naming that proposal's title. Anything else he says about that open proposal (a different "
+            "cadence, an added capability) is schedule_command action \"change\" with target naming that "
+            "proposal's title.\n"
             "- You have no memory of what tools can or cannot do. NEVER tell anyone a capability is missing, "
             "broken, or unavailable, and never rely on past failure notes in the history; tools get fixed. "
             "If information is needed (who emailed, what is on a calendar, a phone number, a file), "

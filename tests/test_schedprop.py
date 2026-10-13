@@ -353,3 +353,45 @@ def test_manager_never_calls_the_jev_picker_for_a_schedule(tmp_path):
     meta = {"sender": "+15550100001", "conversation_id": "conv-aaron"}
     asyncio.run(session.handle_inbound("set it up", "imessage", meta))
     assert len(m.schedules.calls) == 1
+
+
+
+# ---------------------------------------------------------------------------
+# capabilities_from_permission(): deterministic grant from his own permission
+# words, never from the router's suggestion (item D)
+# ---------------------------------------------------------------------------
+
+def test_permission_grants_only_the_named_scope():
+    got = schedprop.capabilities_from_permission("let it edit contacts")
+    assert got == ["contacts"]
+
+
+def test_permission_excludes_a_negated_clause_after_but():
+    got = schedprop.capabilities_from_permission("let it edit contacts but don't send email")
+    assert got == ["contacts"]
+    assert "email_send" not in got
+
+
+def test_permission_excludes_a_clause_with_no_permission_phrase():
+    # "update the contact note" alone, without "let it"/"allow it to"/etc, is
+    # not a permission grant -- unlike capabilities_for's proposal-time
+    # matching, add_capability only ever widens on an explicit grant.
+    assert schedprop.capabilities_from_permission("update the contact note") == []
+
+
+def test_permission_vague_phrase_narrows_to_denied_scopes():
+    got = schedprop.capabilities_from_permission("let it do that", denied_scopes=["contacts"])
+    assert got == ["contacts"]
+
+
+def test_permission_fix_that_narrows_to_denied_scopes_without_let_it():
+    got = schedprop.capabilities_from_permission("fix that", denied_scopes=["contacts", "web"])
+    assert got == [name for name in SCOPES if name in {"contacts", "web"}]
+
+
+def test_permission_vague_phrase_with_no_prior_denial_grants_nothing():
+    assert schedprop.capabilities_from_permission("let it do that", denied_scopes=None) == []
+
+
+def test_permission_no_words_at_all_grants_nothing():
+    assert schedprop.capabilities_from_permission("") == []

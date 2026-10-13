@@ -25,16 +25,8 @@ from .store import Schedule
 # A small fixed list, not a model: Aaron's own close variants of yes/no on a
 # schedule proposal. Checked whole-message, case-insensitive, whitespace
 # collapsed -- "yes" inside a longer sentence is not a bare answer.
-YES_PHRASES = {
-    "yes", "y", "yeah", "yep", "yup", "ok", "okay", "sure", "do it",
-    "go ahead", "ok do it", "okay do it", "yes please", "go for it",
-    "sounds good", "please do", "yes do it",
-}
-NO_PHRASES = {
-    "no", "n", "nope", "nah", "cancel", "cancel that", "no thanks",
-    "don't", "dont", "never mind", "nevermind", "skip it", "not now",
-    "no don't", "no dont",
-}
+YES_PHRASES = {"yes", "y", "yep", "yeah", "yup", "yes please", "yes do it"}
+NO_PHRASES = {"no", "n", "nope", "nah", "no thanks", "cancel that"}
 
 
 def _norm(text: str) -> str:
@@ -61,6 +53,52 @@ def _open_proposals(store: Any, chat_id: str) -> List[Schedule]:
     return [s for s in store.schedules(states=["proposed"]) if s.chat_id == chat_id]
 
 
+_BARE_ANSWER_WINDOW_S = 15 * 60
+
+
+def _captures_bare_answer(store: Any, chat_id: str, schedule: Schedule) -> bool:
+    """A bare yes/no on this thread answers `schedule`'s proposal only when its
+    own notice is still the most recent outbound message on the thread, or it
+    went out within the last 15 minutes. Otherwise too much may have happened
+    since, so a bare yes/no is not captured at all (item G) -- the message
+    goes on to the router as today."""
+    with store._lock:
+        prop_row = store._db.execute(
+            "SELECT created_at FROM messages WHERE chat_id=? AND schedule_id=? AND kind='outbound' "
+            "ORDER BY created_at DESC LIMIT 1", (chat_id, schedule.id)).fetchone()
+        if prop_row is None:
+            return False
+        sent_at = float(prop_row["created_at"])
+        latest_row = store._db.execute(
+            "SELECT created_at FROM messages WHERE chat_id=? AND kind='outbound' "
+            "ORDER BY created_at DESC LIMIT 1", (chat_id,)).fetchone()
+    is_latest = latest_row is None or float(latest_row["created_at"]) <= sent_at + 1e-6
+    return is_latest or (time.time() - sent_at) <= _BARE_ANSWER_WINDOW_S
+
+
+_BARE_ANSWER_WINDOW_S = 15 * 60
+
+
+def _captures_bare_answer(store: Any, chat_id: str, schedule: Schedule) -> bool:
+    """A bare yes/no on this thread answers 's proposal only when its
+    own notice is still the most recent outbound message on the thread, or it
+    went out within the last 15 minutes. Otherwise too much may have happened
+    since, so a bare yes/no is not captured at all (item G) -- the message
+    goes on to the router as today."""
+    with store._lock:
+        prop_row = store._db.execute(
+            "SELECT created_at FROM messages WHERE chat_id=? AND schedule_id=? AND kind='outbound' "
+            "ORDER BY created_at DESC LIMIT 1", (chat_id, schedule.id)).fetchone()
+        if prop_row is None:
+            return False
+        sent_at = float(prop_row["created_at"])
+        latest_row = store._db.execute(
+            "SELECT created_at FROM messages WHERE chat_id=? AND kind='outbound' "
+            "ORDER BY created_at DESC LIMIT 1", (chat_id,)).fetchone()
+    is_latest = latest_row is None or float(latest_row["created_at"]) <= sent_at + 1e-6
+    return is_latest or (time.time() - sent_at) <= _BARE_ANSWER_WINDOW_S
+
+
 # ---------------------------------------------------------------------------
 # Answering a bare yes/no before the router ever sees the message
 # ---------------------------------------------------------------------------
@@ -79,6 +117,7 @@ async def answer_proposal(manager: Any, session: Any, text: str) -> Optional[str
         return None
     chat_id = getattr(session, "record_id", None) or getattr(session, "chat_id", "")
     proposals = _open_proposals(manager.store, chat_id)
+    proposals = [p for p in proposals if _captures_bare_answer(manager.store, chat_id, p)]
     if not proposals:
         return None
     if len(proposals) > 1:
@@ -94,6 +133,25 @@ async def answer_proposal(manager: Any, session: Any, text: str) -> Optional[str
 
 _HANDLE_RE = re.compile(r"^s(\d+)$", re.I)
 _RECENT_NOTICE_WINDOW_S = 12 * 3600
+
+# Words that carry no identifying content when he refers to a schedule ("the
+# team one", "that thing") -- dropped before matching against titles.
+_FILLER_WORDS = {
+    "the", "a", "an", "one", "that", "this", "it", "thing", "schedule",
+    "job", "check", "monitor", "my", "please",
+}
+
+
+def _word_matches_title_word(word: str, title_word: str) -> bool:
+    if word == title_word:
+        return True
+    return len(title_word) >= 4 and title_word.startswith(word)
+
+
+def _schedule_matches_words(schedule: Schedule, words: List[str]) -> bool:
+    title_words = [w for w in re.split(r"\s+", schedule.title.lower()) if w]
+    return bool(words) and all(
+        any(_word_matches_title_word(w, tw) for tw in title_words) for w in words)
 
 
 def _recent_notice_schedule(store: Any, chat_id: str) -> Optional[Schedule]:
@@ -160,13 +218,17 @@ def resolve(store: Any, text_target: Optional[str], chat_id: str,
         if len(exact) > 1:
             return exact
         words = [w for w in re.split(r"\s+", target.lower()) if w]
-        partial = [s for s in all_schedules
-                   if words and all(w in s.title.lower() for w in words)]
-        if len(partial) == 1:
-            return partial[0]
-        if len(partial) > 1:
-            return partial
-        return None
+        words = [w for w in words if w not in _FILLER_WORDS]
+        if words:
+            partial = [s for s in all_schedules if _schedule_matches_words(s, words)]
+            if len(partial) == 1:
+                return partial[0]
+            if len(partial) > 1:
+                return partial
+            return None
+        # Nothing was left after dropping filler words ("that one"): treat the
+        # target as if he had named none, and fall through to the empty-target
+        # rules below instead of reporting no match.
     recent = _recent_notice_schedule(store, chat_id)
     if recent is not None:
         return recent
@@ -274,14 +336,53 @@ def _last_sentence(store: Any, schedule: Schedule) -> str:
 # handle(): the router's schedule_command -> a plain reply
 # ---------------------------------------------------------------------------
 
+def _state_error_reply(schedule: Schedule, action: str) -> str:
+    """A plain sentence for an action the schedule's current state refuses --
+    never the raw "<action> is not valid for a schedule that is <state>
+    (valid actions: ...)" message (item L)."""
+    if schedule.state == "proposed":
+        return f"{schedule.title} has not started yet; say yes or no first."
+    if schedule.state == "paused" and action == "pause":
+        return f"{schedule.title} is already paused."
+    if schedule.state == "active" and action == "resume":
+        return f"{schedule.title} is already running."
+    if schedule.state == "ended":
+        return f'{schedule.title} has ended. Say "start it again" to bring it back.'
+    return f"{schedule.title} can't do that right now."
+
+
+def _friendly_action_error(schedule: Schedule, exc: ValueError) -> str:
+    """Map a service ValueError from schedules.action/edit to a plain owner
+    sentence. Timing errors (CadenceError) never say "cadence"; a missing
+    capability is named in words, not as "scope"."""
+    msg = str(exc)
+    if isinstance(exc, cadence_module.CadenceError):
+        if "at least 5 minutes" in msg:
+            return "It has to run at least every 5 minutes."
+        return "I didn't understand that timing."
+    if msg.startswith("missing capability:"):
+        return f"It isn't allowed to {msg.split(':', 1)[1].strip()} yet."
+    # "already has a run in flight", "needs to be told how often to run
+    # first", "That time has already passed." -- already plain sentences.
+    return msg
+
+
 async def _handle_simple_action(manager: Any, schedule: Schedule, action: str) -> str:
+    if action == "stop" and schedule.state == "proposed":
+        # A proposal has never run; "stop it" on one means the same as "no" --
+        # reject it rather than report it as already stopped (item G).
+        await manager.schedules.decide(schedule.id, False)
+        return ""
     real_action = action
     if action == "resume" and schedule.state == "ended":
         real_action = "start_again"  # a resumed ended schedule has to restart, not just unpause
+    valid = manager.schedules.valid_actions(schedule)
+    if real_action not in valid:
+        return _state_error_reply(schedule, action)
     try:
         updated = await manager.schedules.action(schedule.id, real_action, owner=True)
     except ValueError as exc:
-        return str(exc)
+        return _friendly_action_error(schedule, exc)
     if action == "pause":
         return f"Paused {updated.title}."
     if action == "resume":
@@ -297,9 +398,19 @@ async def _handle_simple_action(manager: Any, schedule: Schedule, action: str) -
 async def _handle_change(manager: Any, schedule: Schedule, changes: Dict[str, Any]) -> str:
     was_proposed = schedule.state == "proposed"
     edit_changes: Dict[str, Any] = {}
-    for key in ("cadence_kind", "cadence", "report_every_time", "until", "title"):
+    for key in ("cadence_kind", "cadence", "report_every_time", "title"):
         if key in changes:
             edit_changes[key] = changes[key]
+    if "until" in changes:
+        # The router hands until back as an ISO date/datetime string in the
+        # schedule's own time zone; the store column is a numeric epoch. Reuse
+        # manager's own parser (the same one schedule creation uses) rather
+        # than duplicate it, so the two paths cannot drift.
+        from . import manager as manager_module
+        try:
+            edit_changes["until"] = manager_module._parse_until(changes["until"], schedule.timezone)
+        except manager_module.UntilParseError as exc:
+            return str(exc)
     if changes.get("prompt_addition"):
         edit_changes["prompt"] = (schedule.prompt + " " + str(changes["prompt_addition"]).strip()).strip()
     added_scopes: List[str] = []
@@ -312,7 +423,7 @@ async def _handle_change(manager: Any, schedule: Schedule, changes: Dict[str, An
     try:
         result = await manager.schedules.edit(schedule.id, owner=True, changes=edit_changes)
     except ValueError as exc:
-        return str(exc)
+        return _friendly_action_error(schedule, exc)
     updated = result["schedule"]
     if result["needs_approval"]:
         display_changes = dict(edit_changes)
@@ -330,23 +441,22 @@ async def _handle_change(manager: Any, schedule: Schedule, changes: Dict[str, An
 
 async def _handle_add_capability(manager: Any, schedule: Schedule, changes: Dict[str, Any],
                                  said_text: str) -> str:
+    # The router's own changes["scopes"] suggestion is NEVER granted here --
+    # that would make whatever the model lists permission at once (item D).
+    # Only his own permission words, optionally narrowed to what the last run
+    # was actually denied, can widen an already-active schedule's scopes.
     store = manager.store
-    suggested = list(changes.get("scopes") or [])
-    try:
-        mapped = schedprop.capabilities_for(prompt="", named_scopes=[], suggested_scopes=suggested,
-                                            said_text=said_text or "")
-    except schedprop.UnknownScopes:
-        mapped = []
+    last = store.last_schedule_run(schedule.id)
+    denied_names: List[str] = []
+    if last:
+        for item in last.get("denied") or []:
+            tool = item.get("tool") if isinstance(item, dict) else item
+            for name in manager.schedules._scopes_for_tool(str(tool)):
+                if name not in denied_names:
+                    denied_names.append(name)
+    mapped = schedprop.capabilities_from_permission(said_text or "", denied_names)
     added = [s for s in mapped if s not in schedule.scopes]
     if not added:
-        last = store.last_schedule_run(schedule.id)
-        denied_names: List[str] = []
-        if last:
-            for item in last.get("denied") or []:
-                tool = item.get("tool") if isinstance(item, dict) else item
-                for name in manager.schedules._scopes_for_tool(str(tool)):
-                    if name not in denied_names:
-                        denied_names.append(name)
         if denied_names:
             return f"What should it be allowed to do: {schedprop.labels(sorted(denied_names))}?"
         return "What should it be allowed to do?"
@@ -392,6 +502,12 @@ async def handle(manager: Any, session: Any, command: Any) -> str:
     if action == "add_capability":
         said_text = _message_text(store, reply_to)
         return await _handle_add_capability(manager, schedule, changes, said_text)
+    if action == "approve":
+        await manager.schedules.decide(schedule.id, True)
+        return ""
+    if action == "reject":
+        await manager.schedules.decide(schedule.id, False)
+        return ""
     if action in {"pause", "resume", "run_now", "stop"}:
         return await _handle_simple_action(manager, schedule, action)
     return "I don't understand that schedule command."

@@ -378,7 +378,7 @@ async def test_invalid_action_for_the_current_state_returns_a_plain_sentence(env
     await manager.schedules.action(schedule.id, "pause", owner=True)
     session = FakeSession()
     reply = await schedcmd.handle(manager, session, _command("pause", target="Team total watch"))
-    assert "not valid" in reply
+    assert reply == "Team total watch is already paused."
     assert "#" not in reply
     assert "S0" not in reply and "S1" not in reply
 
@@ -464,12 +464,41 @@ async def test_change_while_proposal_open_revises_and_resends_it(env):
 async def test_add_capability_applies_and_replies_with_labels(env):
     store, manager, task_id = env
     schedule = await _active(manager, task_id)
-    session = FakeSession()
+    said_id = store.add_message("owner", "inbound", "let it edit contacts", "imessage")
+    session = FakeSession(inbound_id=said_id)
     reply = await schedcmd.handle(manager, session, _command(
         "add_capability", target="Team total watch", scopes=["contacts"]))
     assert reply.startswith("Done. It can now ")
     updated = store.get_schedule(schedule.id)
     assert "contacts" in updated.scopes
+
+
+@pytest.mark.asyncio
+async def test_add_capability_ignores_the_routers_suggested_scope(env):
+    # Item D: changes["scopes"] is the router's own guess at what the prompt
+    # needs -- it must never become permission on its own, only his words do.
+    store, manager, task_id = env
+    schedule = await _active(manager, task_id)
+    said_id = store.add_message("owner", "inbound", "sounds fine, go ahead", "imessage")
+    session = FakeSession(inbound_id=said_id)
+    reply = await schedcmd.handle(manager, session, _command(
+        "add_capability", target="Team total watch", scopes=["contacts"]))
+    assert reply == "What should it be allowed to do?"
+    assert "contacts" not in store.get_schedule(schedule.id).scopes
+
+
+@pytest.mark.asyncio
+async def test_add_capability_but_not_clause_grants_only_the_permitted_scope(env):
+    store, manager, task_id = env
+    schedule = await _active(manager, task_id)
+    said_id = store.add_message(
+        "owner", "inbound", "let it edit contacts but don't send email", "imessage")
+    session = FakeSession(inbound_id=said_id)
+    reply = await schedcmd.handle(manager, session, _command(
+        "add_capability", target="Team total watch", scopes=["contacts", "email_send"]))
+    assert "contacts" in store.get_schedule(schedule.id).scopes
+    assert "email_send" not in store.get_schedule(schedule.id).scopes
+    assert reply.startswith("Done. It can now ")
 
 
 @pytest.mark.asyncio
@@ -479,9 +508,10 @@ async def test_add_capability_reruns_after_an_incomplete_run(env):
     run = store.create_schedule_run(schedule.id, None, time.time() - 10)
     store.finish_schedule_run(run, finished_at=time.time() - 5, complete=False, outcome="incomplete",
                               result_line="could not update the tracker note", final_status="",
-                              denied=[{"tool": "x__y", "reason": "scope"}], note="", changed=True,
-                              cost_usd=None)
-    session = FakeSession()
+                              denied=[{"tool": "mcp__inkbox__inkbox_update_contact", "reason": "scope"}], note="",
+                              changed=True, cost_usd=None)
+    said_id = store.add_message("owner", "inbound", "let it edit contacts", "imessage")
+    session = FakeSession(inbound_id=said_id)
     reply = await schedcmd.handle(manager, session, _command(
         "add_capability", target="Team total watch", scopes=["contacts"]))
     assert "Running the check again now" in reply
@@ -489,6 +519,22 @@ async def test_add_capability_reruns_after_an_incomplete_run(env):
     # not execute synchronously inside the chat reply.
     updated = store.get_schedule(schedule.id)
     assert updated.next_run is not None and updated.next_run <= time.time() + 1
+
+
+@pytest.mark.asyncio
+async def test_add_capability_vague_yes_after_denial_grants_exactly_what_was_denied(env):
+    store, manager, task_id = env
+    schedule = await _active(manager, task_id)
+    run = store.create_schedule_run(schedule.id, None, time.time() - 10)
+    store.finish_schedule_run(run, finished_at=time.time() - 5, complete=False, outcome="incomplete",
+                              result_line="could not update the tracker note", final_status="",
+                              denied=[{"tool": "mcp__inkbox__inkbox_update_contact", "reason": "scope"}], note="",
+                              changed=True, cost_usd=None)
+    said_id = store.add_message("owner", "inbound", "let it do that", "imessage")
+    session = FakeSession(inbound_id=said_id)
+    reply = await schedcmd.handle(manager, session, _command("add_capability", target="Team total watch"))
+    assert "contacts" in store.get_schedule(schedule.id).scopes
+    assert reply.startswith("Done. It can now ")
 
 
 @pytest.mark.asyncio
@@ -562,3 +608,256 @@ async def test_no_reply_leaks_scope_names_ids_or_markdown(env):
         for ch in "*_`[]":
             assert ch not in reply
         assert not __import__("re").search(r"\bS\d+\b", reply)
+
+
+@pytest.mark.asyncio
+async def test_change_until_parses_bare_date_to_end_of_day_epoch(env):
+    store, manager, task_id = env
+    schedule = await _active(manager, task_id)
+    session = FakeSession()
+    reply = await schedcmd.handle(manager, session, _command(
+        "change", target="Team total watch", until="2026-12-31"))
+    assert "Changed." in reply
+    updated = store.get_schedule(schedule.id)
+    assert isinstance(updated.until, float)
+    from datetime import datetime
+    from zoneinfo import ZoneInfo
+    dt = datetime.fromtimestamp(updated.until, ZoneInfo(updated.timezone))
+    assert (dt.month, dt.day, dt.hour, dt.minute) == (12, 31, 23, 59)
+
+
+@pytest.mark.asyncio
+async def test_change_until_unparseable_gets_plain_reply_and_no_store_change(env):
+    store, manager, task_id = env
+    schedule = await _active(manager, task_id)
+    session = FakeSession()
+    reply = await schedcmd.handle(manager, session, _command(
+        "change", target="Team total watch", until="not a date"))
+    assert "didn't understand" in reply
+    updated = store.get_schedule(schedule.id)
+    assert updated.until == schedule.until
+
+
+# ---------------------------------------------------------------------------
+# resolve(): filler words dropped, prefix match on title words (item C)
+# ---------------------------------------------------------------------------
+
+@pytest.mark.asyncio
+async def test_resolve_drops_filler_words_and_prefix_matches(env):
+    store, manager, task_id = env
+    await _active(manager, task_id, title="Team total watch")
+    found = schedcmd.resolve(store, "the team one", "owner", None)
+    assert found is not None and found.title == "Team total watch"
+
+
+@pytest.mark.asyncio
+async def test_resolve_filler_only_target_treated_as_empty(env):
+    store, manager, task_id = env
+    schedule = await _active(manager, task_id, title="Team total watch")
+    # "that one" is all filler words -- with exactly one non-ended schedule on
+    # the thread, the empty-target path should resolve it.
+    found = schedcmd.resolve(store, "that one", "owner", None)
+    assert found is not None and found.id == schedule.id
+
+
+@pytest.mark.asyncio
+async def test_resolve_prefix_match_requires_four_letter_title_word(env):
+    store, manager, task_id = env
+    await _active(manager, task_id, title="Fix bug")
+    # "b" is a prefix of "bug" (3 letters) -- too short to count as a match.
+    found = schedcmd.resolve(store, "the b", "owner", None)
+    assert found is None
+
+
+@pytest.mark.asyncio
+async def test_resolve_two_prefix_matches_still_ask_which(env):
+    store, manager, task_id = env
+    await _active(manager, task_id, title="Monday brief")
+    await _active(manager, task_id, title="Monthly report")
+    found = schedcmd.resolve(store, "the mon one", "owner", None)
+    assert isinstance(found, list) and len(found) == 2
+
+
+# ---------------------------------------------------------------------------
+# answer_proposal(): narrowed vocabulary and the recency/window rule (item G)
+# ---------------------------------------------------------------------------
+
+def test_yes_vocabulary_is_narrow():
+    for phrase in ("yes", "y", "yep", "yeah", "yup", "yes please", "yes do it"):
+        assert schedcmd.is_yes(phrase), phrase
+    for phrase in ("ok", "okay", "sure", "go ahead", "sounds good", "please do"):
+        assert not schedcmd.is_yes(phrase), phrase
+
+
+def test_no_vocabulary_is_narrow():
+    for phrase in ("no", "n", "nope", "nah", "no thanks", "cancel that"):
+        assert schedcmd.is_no(phrase), phrase
+    for phrase in ("cancel", "don't", "dont", "never mind", "nevermind", "skip it", "not now"):
+        assert not schedcmd.is_no(phrase), phrase
+
+
+@pytest.mark.asyncio
+async def test_bare_yes_not_captured_once_window_passes_and_other_message_followed(env):
+    store, manager, task_id = env
+    schedule = await _propose(manager, task_id)
+    # Back-date the proposal's own notice past the 15 minute window...
+    with store._lock:
+        store._db.execute("UPDATE messages SET created_at=? WHERE schedule_id=?",
+                          (time.time() - 3600, schedule.id))
+    # ...and let something else go out on the same thread after it.
+    store.add_message("owner", "outbound", "unrelated reply", "imessage", role="answer")
+    session = FakeSession()
+    assert await schedcmd.answer_proposal(manager, session, "yes") is None
+    assert store.get_schedule(schedule.id).state == "proposed"
+
+
+@pytest.mark.asyncio
+async def test_bare_yes_captured_when_proposal_is_still_the_latest_outbound(env):
+    store, manager, task_id = env
+    schedule = await _propose(manager, task_id)
+    # Old, but nothing has gone out on the thread since -- still captures.
+    with store._lock:
+        store._db.execute("UPDATE messages SET created_at=? WHERE schedule_id=?",
+                          (time.time() - 3600, schedule.id))
+    session = FakeSession()
+    reply = await schedcmd.answer_proposal(manager, session, "yes")
+    assert reply == ""
+    assert store.get_schedule(schedule.id).state == "active"
+
+
+@pytest.mark.asyncio
+async def test_bare_yes_captured_within_fifteen_minutes_even_if_not_latest(env):
+    store, manager, task_id = env
+    schedule = await _propose(manager, task_id)
+    store.add_message("owner", "outbound", "unrelated reply", "imessage", role="answer")
+    session = FakeSession()
+    reply = await schedcmd.answer_proposal(manager, session, "yes")
+    assert reply == ""
+    assert store.get_schedule(schedule.id).state == "active"
+
+
+# ---------------------------------------------------------------------------
+# handle(): approve / reject actions, and stop on a proposed schedule (item G)
+# ---------------------------------------------------------------------------
+
+@pytest.mark.asyncio
+async def test_approve_action_starts_the_proposal(env):
+    store, manager, task_id = env
+    schedule = await _propose(manager, task_id)
+    session = FakeSession()
+    reply = await schedcmd.handle(manager, session, _command("approve", target="Team total watch"))
+    assert reply == ""
+    assert store.get_schedule(schedule.id).state == "active"
+
+
+@pytest.mark.asyncio
+async def test_reject_action_ends_the_proposal(env):
+    store, manager, task_id = env
+    schedule = await _propose(manager, task_id)
+    session = FakeSession()
+    reply = await schedcmd.handle(manager, session, _command("reject", target="Team total watch"))
+    assert reply == ""
+    assert store.get_schedule(schedule.id).state == "ended"
+
+
+@pytest.mark.asyncio
+async def test_stop_on_a_proposed_schedule_rejects_it(env):
+    store, manager, task_id = env
+    schedule = await _propose(manager, task_id)
+    session = FakeSession()
+    reply = await schedcmd.handle(manager, session, _command("stop", target="Team total watch"))
+    assert reply == ""
+    assert store.get_schedule(schedule.id).state == "ended"
+
+
+# ---------------------------------------------------------------------------
+# No raw error text anywhere a schedcmd path replies (item L)
+# ---------------------------------------------------------------------------
+
+_FORBIDDEN_SUBSTRINGS = ["cadence", "scope", "valid actions", "proposed", "#", "*", "_", "`", "["]
+
+
+def _assert_clean(reply: str) -> None:
+    low = reply.lower()
+    for bad in _FORBIDDEN_SUBSTRINGS:
+        assert bad not in low, f"{bad!r} leaked in: {reply!r}"
+    import re as _re
+    assert not _re.search(r"\bs\d", low), f"an S<digit> handle leaked in: {reply!r}"
+
+
+@pytest.mark.asyncio
+async def test_pause_on_an_already_paused_schedule_is_clean(env):
+    store, manager, task_id = env
+    schedule = await _active(manager, task_id)
+    await manager.schedules.action(schedule.id, "pause", owner=True)
+    session = FakeSession()
+    reply = await schedcmd.handle(manager, session, _command("pause", target="Team total watch"))
+    assert reply == "Team total watch is already paused."
+    _assert_clean(reply)
+
+
+@pytest.mark.asyncio
+async def test_resume_on_an_already_active_schedule_is_clean(env):
+    store, manager, task_id = env
+    schedule = await _active(manager, task_id)
+    session = FakeSession()
+    reply = await schedcmd.handle(manager, session, _command("resume", target="Team total watch"))
+    assert reply == "Team total watch is already running."
+    _assert_clean(reply)
+
+
+@pytest.mark.asyncio
+async def test_pause_on_a_proposed_schedule_is_clean(env):
+    store, manager, task_id = env
+    await _propose(manager, task_id)
+    session = FakeSession()
+    reply = await schedcmd.handle(manager, session, _command("pause", target="Team total watch"))
+    assert reply == "Team total watch has not started yet; say yes or no first."
+    _assert_clean(reply)
+
+
+@pytest.mark.asyncio
+async def test_action_on_an_ended_schedule_is_clean(env):
+    store, manager, task_id = env
+    schedule = await _active(manager, task_id)
+    await manager.schedules.action(schedule.id, "stop", owner=True)
+    session = FakeSession()
+    reply = await schedcmd.handle(manager, session, _command("pause", target="Team total watch"))
+    assert reply == 'Team total watch has ended. Say "start it again" to bring it back.'
+    _assert_clean(reply)
+
+
+@pytest.mark.asyncio
+async def test_cadence_too_short_on_change_is_clean(env):
+    store, manager, task_id = env
+    await _active(manager, task_id)
+    session = FakeSession()
+    reply = await schedcmd.handle(manager, session, _command(
+        "change", target="Team total watch", cadence_kind="every", cadence={"minutes": 1}))
+    assert reply == "It has to run at least every 5 minutes."
+    _assert_clean(reply)
+
+
+def test_friendly_action_error_maps_missing_capability():
+    reply = schedcmd._friendly_action_error(
+        None, ValueError("missing capability: look up and edit contacts"))
+    assert reply == "It isn't allowed to look up and edit contacts yet."
+    _assert_clean(reply)
+
+
+def test_friendly_action_error_maps_cadence_too_short():
+    reply = schedcmd._friendly_action_error(
+        None, schedcmd.cadence_module.CadenceError("an every cadence must be at least 5 minutes"))
+    assert reply == "It has to run at least every 5 minutes."
+    _assert_clean(reply)
+
+
+@pytest.mark.asyncio
+async def test_list_and_last_sentences_are_clean(env):
+    store, manager, task_id = env
+    await _active(manager, task_id)
+    session = FakeSession()
+    reply = await schedcmd.handle(manager, session, _command("list"))
+    _assert_clean(reply)
+    reply = await schedcmd.handle(manager, session, _command("last", target="Team total watch"))
+    _assert_clean(reply)
