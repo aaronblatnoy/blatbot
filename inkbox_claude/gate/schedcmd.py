@@ -211,7 +211,10 @@ def _last_result_phrase(last: Dict[str, Any]) -> str:
 
 
 def _schedule_line(store: Any, schedule: Schedule) -> str:
-    cadence_text = cadence_module.describe(schedule.cadence_kind, schedule.cadence, schedule.timezone)
+    try:
+        cadence_text = cadence_module.describe(schedule.cadence_kind, schedule.cadence, schedule.timezone)
+    except ValueError:
+        cadence_text = "no timing set yet"  # a row migrated from the old self-scheduling kind
     bits = [f"{schedule.title}, {cadence_text}"]
     last = store.last_schedule_run(schedule.id)
     if last is not None and last.get("finished_at") is not None:

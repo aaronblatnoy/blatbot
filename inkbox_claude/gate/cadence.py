@@ -86,7 +86,7 @@ def next_run(cadence_kind: str, cadence: Dict[str, Any], timezone_name: str,
     """First firing strictly after `after` (epoch seconds), or None when the cadence
     has none left (a past `once`). `every` is anchored on `cadence.get('anchor')`
     when present -- the schedule's first run -- so repeated calls do not drift by
-    however long each run took; without an anchor it falls back to `after`."""
+    however long each run took; without an anchor it is one interval after `after`."""
     validate(cadence_kind, cadence)
     tz = _zone(timezone_name)
     cadence = cadence or {}
@@ -105,9 +105,10 @@ def next_run(cadence_kind: str, cadence: Dict[str, Any], timezone_name: str,
         step = minutes * 60
         anchor = cadence.get("anchor")
         if anchor is None:
-            # No anchor yet: this computation IS the schedule's first run, and the
-            # caller (decide()) stores its result back as the anchor.
-            return after if after is not None else 0.0
+            # No anchor (a cadence set by an edit, or not yet started): one full
+            # interval from now. Never `after` itself, which would make the schedule
+            # due again on every tick.
+            return (after if after is not None else 0.0) + step
         base = float(anchor)
         if after is None:
             return base

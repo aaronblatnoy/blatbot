@@ -302,7 +302,7 @@ async def test_until_ends_schedule_without_running(env):
     schedule = await _propose(service, task_id, until=now - 1)
     activated = await service.decide(schedule.id, True)
     before = len(manager.executed)
-    await service.tick(now=time.time() + 5)
+    await service.tick(now=activated.next_run + 5)
     after = store.get_schedule(schedule.id)
     assert after.state == "ended"
     assert len(manager.executed) == before
