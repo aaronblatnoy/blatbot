@@ -253,6 +253,51 @@ async def test_one_time_schedule_ends_after_its_single_run(tmp_path):
 
 
 @pytest.mark.asyncio
+async def test_only_is_approver_can_create_a_schedule_even_with_the_owner_s_own_email(tmp_path):
+    # A sender whose email happens to match the owner's own address on file is still
+    # not Aaron unless is_approver() says so (his iMessage conversation id, Telegram
+    # id, or trusted phone) -- a bare email/contact-record match is never enough.
+    m, sent = make_manager(tmp_path)
+    from inkbox_claude.gate.scopes import OWNER_ACCOUNT
+    await _propose_via_manager(
+        m, said="every 4 hours check the team page", scopes=["web"],
+        session_chat_id="not-aaron-thread",
+        session_meta={"sender": OWNER_ACCOUNT, "to": OWNER_ACCOUNT,
+                     "conversation_id": "not-aaron-conversation",
+                     "contact": {"name": "Aaron Blatnoy"}},
+    )
+    assert m.store.schedules(states=["proposed"]) == []
+    assert sent[-1][1] == "Only Aaron can create or change a schedule."
+
+
+@pytest.mark.asyncio
+async def test_scheduled_run_tools_are_the_schedules_scopes_at_fire_time_not_proposal_time(tmp_path):
+    # Scopes granted after the owner approved a wider capability later (an
+    # add_capability reply, say) must reach the very next fire: the executor is
+    # handed req.scopes at fire time, never a snapshot frozen when first proposed.
+    m, sent = make_manager(tmp_path)
+    await _propose_via_manager(m, said="every 4 hours check the team page", scopes=["web"])
+    schedule = m.store.schedules(states=["proposed"])[0]
+    activated = await m.schedules.decide(schedule.id, True)
+    assert activated.scopes == ["web"]
+
+    # The owner grants a second scope well after approval, before the next firing.
+    await m.schedules.edit(schedule.id, owner=True, changes={"report_every_time": True})
+    m.store.update_schedule(schedule.id, scopes=["web", "contacts"])
+    widened = m.store.get_schedule(schedule.id)
+
+    m.executor.results.append({"ok": True, "result_line": "updated the contact note",
+                               "final_status": "updated the contact note", "note": "", "denied": [],
+                               "tool_calls": ["mcp__fake__tool"], "held": False,
+                               "finished_at": time.time(), "cost_usd": None})
+    await m.schedules.tick(now=widened.next_run)
+    await asyncio.sleep(0)
+
+    call = m.executor.calls[-1]
+    assert sorted(call["req"].scopes) == sorted(["web", "contacts"])
+
+
+@pytest.mark.asyncio
 async def test_guard_pause_during_a_run_is_not_undone_when_it_ends(tmp_path):
     m, sent = make_manager(tmp_path)
     await _propose_via_manager(m, said="every 4 hours check the team page", scopes=["web"])
