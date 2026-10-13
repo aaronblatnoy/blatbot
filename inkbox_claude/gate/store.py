@@ -2182,17 +2182,41 @@ class Store:
         return [int(r["task_id"]) for r in rows]
 
     # -- requests --------------------------------------------------------
+    # A second create_request for the same thread, this close behind an approved or
+    # running one, is the same ask arriving twice (a race between the guard's read and
+    # this insert, or several fragments of one voice utterance) rather than a fresh
+    # one -- see running_for_thread's docstring for why schedule requests are excluded
+    # both ways: a scheduled run never counts as "busy" here, and never blocks one either.
+    DEDUPE_WINDOW_S = 120
+
     def create_request(self, *, chat_id: str, sender: str, sender_name: str, mode: str, subject: str,
                        original_message: str, summary: str, scopes: List[str], prompt: str,
                        state: str, task_id: int, inbound_id: Optional[int] = None,
                        schedule_id: Optional[int] = None, schedule_kind: str = "") -> Request:
-        """Create a request. ``task_id`` is mandatory: a request is always part of a task."""
+        """Create a request. ``task_id`` is mandatory: a request is always part of a task.
+
+        Refuses (returning the already-existing request instead of inserting a second
+        one) when this is a non-schedule request and a non-schedule request on the same
+        thread is already approved or running and was created within the last
+        DEDUPE_WINDOW_S seconds. The check and the insert happen under the same lock,
+        on both the sqlite and the Postgres code paths (both go through self._db under
+        self._lock here), so a second caller that raced the first in past the read
+        still lands inside this one critical section and sees the row the first one
+        just committed."""
         if not task_id:
             raise TaskRequired("a request must belong to a task")
         now = time.time()
         with self._lock:
             if not self._db.execute("SELECT 1 FROM tasks WHERE id=?", (task_id,)).fetchone():
                 raise TaskRequired(f"task T{task_id} does not exist")
+            if schedule_id is None:
+                dupe = self._db.execute(
+                    "SELECT * FROM requests WHERE chat_id=? AND state IN ('approved','running') "
+                    "AND schedule_id IS NULL AND created_at>? ORDER BY id DESC LIMIT 1",
+                    (chat_id, now - self.DEDUPE_WINDOW_S),
+                ).fetchone()
+                if dupe:
+                    return Request.from_row(dupe)
             cur = self._db.execute(
                 "INSERT INTO requests(chat_id,sender,sender_name,mode,subject,original_message,summary,"
                 "scopes_json,prompt,prompt_sha256,state,created_at,updated_at,task_id,inbound_id,schedule_id,schedule_kind) "
