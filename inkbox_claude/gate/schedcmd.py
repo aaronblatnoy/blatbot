@@ -554,27 +554,56 @@ def match_fixed_phrase(text: str) -> Optional[str]:
     return _FIXED_PHRASES.get(norm)
 
 
-def _title_word(title: str) -> str:
-    """The one plain word used to tell two stuck things apart in a reply
-    ("the <word> one"): the title's own first word, lower-cased. Good enough
-    for the common case of distinct titles; a genuine collision (two titles
-    starting with the same word) is not disambiguated further here."""
-    first = (title or "").split()
-    return first[0].lower() if first else "one"
+_NAMING_FILLER_WORDS = {
+    "the", "a", "an", "one", "that", "this", "it", "thing", "schedule",
+    "job", "check", "monitor", "my", "please", "and", "for", "from", "with",
+    "your", "you", "request",
+}
+
+
+def _title_words(title: str) -> List[str]:
+    return [w for w in re.split(r"[^a-z0-9]+", (title or "").lower()) if w]
+
+
+def _distinguishing_word(title: str, other_titles: List[str]) -> Optional[str]:
+    """A word of 4 or more letters in `title` that appears in no other title
+    in `other_titles` and is not a filler word -- the one word code can use
+    to tell this stuck thing apart from the rest of the reply without
+    quoting its whole title. None when no such word exists."""
+    other_words: set = set()
+    for other in other_titles:
+        other_words.update(_title_words(other))
+    for word in _title_words(title):
+        if len(word) >= 4 and word not in _NAMING_FILLER_WORDS and word not in other_words:
+            return word
+    return None
 
 
 def _named_say(say: str, word: str) -> str:
-    """`say` reworded to name which stuck thing it answers, for when more than
-    one thing is stuck in the same reply ("repair it" -> "repair the pledge
-    one"; "let it edit contacts" -> "let the donor one edit contacts"; "let it
-    do that" -> "let the donor one do that"; "try again" -> "try the tracker
-    one again")."""
+    """`say` reworded to name which stuck thing it answers by its
+    distinguishing word ("repair it" -> "repair the pledge one"; "let it
+    edit contacts" -> "let the donor one edit contacts"; "let it do that" ->
+    "let the donor one do that"; "try again" -> "try the tracker one
+    again")."""
     if say == "repair it":
         return f"repair the {word} one"
     if say.startswith("let it "):
         return f"let the {word} one " + say[len("let it "):]
     if say == "try again":
         return f"try the {word} one again"
+    return say
+
+
+def _named_say_by_title(say: str, title: str) -> str:
+    """`say` reworded to name a stuck thing by its full title in quotes, used
+    when no single word distinguishes it from the rest of the reply (item 4:
+    never "the the", never an empty quoted phrase)."""
+    if say == "repair it":
+        return f'repair "{title}"'
+    if say.startswith("let it "):
+        return f'let "{title}" ' + say[len("let it "):]
+    if say == "try again":
+        return f'try "{title}" again'
     return say
 
 
@@ -619,16 +648,26 @@ def _stuck_tail(item: Dict[str, Any]) -> str:
     return f'Say "{say}".'
 
 
-def _stuck_tail_named(item: Dict[str, Any], word: str) -> str:
+def _stuck_tail_named(item: Dict[str, Any], other_titles: List[str]) -> str:
+    """Item 4's naming rule: a distinguishing word of 4+ letters not shared
+    with any other title shown in this reply, or -- when none exists -- the
+    full title in quotes. Never "the the", never an empty quoted phrase, and
+    never "stop the <word> one" for a request (see _stuck_tail)."""
     say = item.get("say")
     stoppable = item.get("kind") != "request" and item.get("kind") != "request_cluster"
     if not say:
         return ""
-    named_say = _named_say(say, word)
+    word = _distinguishing_word(item["title"], other_titles)
+    if word:
+        named_say = _named_say(say, word)
+        stop_phrase = f'stop the {word} one'
+    else:
+        named_say = _named_say_by_title(say, item["title"])
+        stop_phrase = f'stop "{item["title"]}"'
     if say == "stop it":
         return f'Say "{named_say}".'
     if stoppable:
-        return f'Say "{named_say}" or "stop the {word} one".'
+        return f'Say "{named_say}" or "{stop_phrase}".'
     return f'Say "{named_say}".'
 
 
@@ -645,10 +684,11 @@ def stuck_reply(manager: Any) -> str:
         sentence = f"{it['sentence']} {tail}".strip() if tail else it["sentence"]
         return f"One thing is stuck. {sentence}"
     shown = items[:_STUCK_REPLY_SHOWN]
+    all_titles = [it["title"] for it in shown]
     lines = []
-    for it in shown:
-        word = _title_word(it["title"])
-        tail = _stuck_tail_named(it, word)
+    for i, it in enumerate(shown):
+        other_titles = all_titles[:i] + all_titles[i + 1:]
+        tail = _stuck_tail_named(it, other_titles)
         line = f"{it['sentence']} {tail}".strip() if tail else it["sentence"]
         lines.append(line)
     reply = f"{_count_word(len(items))} things are stuck. " + "\n".join(lines)

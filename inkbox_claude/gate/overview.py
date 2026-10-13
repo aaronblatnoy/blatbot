@@ -29,6 +29,15 @@ _EMAIL_RE = re.compile(r"[\w.+-]+@[\w-]+\.[\w.-]+")
 _PHONE_RE = re.compile(r"(?:\+?1[-.\s]?)?\(?\d{3}\)?[-.\s]?\d{3}[-.\s]?\d{4}")
 _SENTENCE_SPLIT_RE = re.compile(r"(?<=[.!?])\s+")
 
+def _lead_lower(text: str) -> str:
+    """A sentence taken from a schedule's repair plan reads as the tail of
+    "<title>: <sentence>" -- its own first letter is lower-cased to match
+    (never "<title>: It needs ...")."""
+    if not text:
+        return text
+    return text[0].lower() + text[1:]
+
+
 def _schedule_time_text(ts: Optional[float], timezone_name: str) -> Optional[str]:
     """"Mon Oct 12, 2:33 AM EDT" in the schedule's own time zone. None in, None out."""
     if ts is None:
@@ -222,23 +231,37 @@ def _usage_limit_groups(store: Store) -> List[Dict[str, Any]]:
     its latest member's failure -- past that, the group is no longer Stuck at
     all (it only still shows under Done today, as plain individual rows)."""
     recent = store.recent_requests(limit=500)
-    groups: Dict[Any, List[Request]] = {}
+    by_chat: Dict[str, List[Request]] = {}
     for request in recent:
         if request.schedule_id or request.state != "failed":
             continue
         if wording.failure_category(request.status or {}) != "usage_limit":
             continue
-        bucket = int(request.created_at // 3600)
-        groups.setdefault((request.chat_id, bucket), []).append(request)
+        by_chat.setdefault(request.chat_id, []).append(request)
     out = []
-    for reqs in groups.values():
-        reqs = sorted(reqs, key=lambda r: r.created_at)
-        latest = reqs[-1]
-        reset_text = wording.usage_limit_reset_text(latest.status or {})
-        latest_failed_at = max(r.updated_at for r in reqs)
-        expiry = _usage_limit_expiry(reset_text, latest_failed_at)
-        out.append({"reqs": reqs, "reset_text": reset_text, "expiry": expiry})
+    for chat_requests in by_chat.values():
+        for reqs in _within_the_hour_groups(chat_requests):
+            latest = reqs[-1]
+            reset_text = wording.usage_limit_reset_text(latest.status or {})
+            latest_failed_at = max(r.updated_at for r in reqs)
+            expiry = _usage_limit_expiry(reset_text, latest_failed_at)
+            out.append({"reqs": reqs, "reset_text": reset_text, "expiry": expiry})
     return out
+
+
+def _within_the_hour_groups(requests: List[Request]) -> List[List[Request]]:
+    """Split one thread's usage-limit failures into groups that each span no
+    more than an hour from the group's first member -- a sliding window
+    rather than a clock-aligned bucket, so four failures a minute apart never
+    split into two groups just for straddling the top of an hour."""
+    ordered = sorted(requests, key=lambda r: r.created_at)
+    groups: List[List[Request]] = []
+    for request in ordered:
+        if groups and request.created_at - groups[-1][0].created_at <= 3600:
+            groups[-1].append(request)
+        else:
+            groups.append([request])
+    return groups
 
 
 def _usage_limit_expiry(reset_text: Optional[str], latest_failed_at: float) -> float:
@@ -272,7 +295,10 @@ def _parse_reset_epoch(reset_text: str, ref_ts: float) -> Optional[float]:
         tz = ZoneInfo(DEFAULT_TIMEZONE)
     ref = datetime.fromtimestamp(ref_ts, tz)
     candidate = ref.replace(hour=hour, minute=minute, second=0, microsecond=0)
-    if (ref - candidate).total_seconds() > 3600:
+    if candidate < ref:
+        # A reset time an error names is always still ahead of when the error
+        # was reported -- if today's clock time has already passed, it means
+        # the reset is tomorrow, not that it already happened.
         candidate = candidate + timedelta(days=1)
     return candidate.timestamp()
 
@@ -386,7 +412,7 @@ def _stuck_schedules(store: Store, service: Any) -> List[Dict[str, Any]]:
     for schedule in store.schedules(states=["paused"]):
         plan = service.repair_plan(schedule.id)
         if plan["needed"]:
-            why = plan["sentence"]
+            why = _lead_lower(plan["sentence"])
             actions = [repair_action(schedule),
                        {"action": "stop", "label": "Stop",
                         "target": {"endpoint": "schedules/action", "id": schedule.id, "action": "stop"}}]
