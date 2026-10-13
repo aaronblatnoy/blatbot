@@ -2082,10 +2082,10 @@ class GateSessionManager:
         if not wording.is_send_what_you_have(text):
             return False
         req = self.store.last_failed_for_thread(session.chat_id)
-        if req is None:
-            await session.send_to_sender("I don't have anything from that run.", role="answer")
-        else:
-            await session.send_to_sender(wording.send_what_you_have_text(req.status or {}), role="answer")
+        if req is None or not wording.within_retry_window(req.updated_at, time.time()):
+            return False   # nothing recent it could mean; the message goes on as usual
+        text_out = wording.send_what_you_have_text(req.status or {})
+        await session.send_to_sender(text_out or "I don't have anything from that run.", role="answer")
         return True
 
     async def _handle_let_it_label(self, session: "GateSession", text: str) -> bool:
@@ -2135,7 +2135,7 @@ class GateSessionManager:
         `read` field scopes.yaml gives each scope (exposed as scopes.READ_SCOPES);
         where a scope carries no such field it is treated as not read-only."""
         denied = set(wording.denied_scopes(status))
-        granted = [sc for sc in SCOPES if sc in denied or sc in READ_SCOPES]
+        granted = [sc for sc in SCOPES if sc in denied or wording.truly_read_only(sc)]
         return [sc for sc in granted if sc not in (req.scopes or [])]
 
     async def _grant_blanket_and_retry(self, session: "GateSession", req: Request) -> None:

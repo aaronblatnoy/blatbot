@@ -259,7 +259,7 @@ def test_try_again_recognized():
 
 
 def test_send_what_you_have_recognized():
-    for text in ("send what you have", "Send me what you have.", "send it"):
+    for text in ("send what you have", "Send me what you have."):
         assert wording.is_send_what_you_have(text)
     assert not wording.is_send_what_you_have("send the invoice")
 
@@ -300,3 +300,14 @@ def test_retry_request_recreates_with_same_prompt_and_scopes(tmp_path):
 
     retried2 = m.retry_request(failed, approved=True)
     assert retried2.state == "approved"
+
+
+def test_send_it_is_not_taken_as_send_what_you_have():
+    assert wording.is_send_what_you_have("send it") is False
+
+
+def test_a_read_scope_with_a_changing_tool_is_not_read_only():
+    assert wording.truly_read_only("web") is True
+    assert wording.truly_read_only("contacts") is False
+    assert wording.truly_read_only("stern_calendar") is False
+    assert wording.truly_read_only("email_send") is False

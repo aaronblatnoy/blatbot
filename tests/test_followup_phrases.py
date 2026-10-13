@@ -212,7 +212,8 @@ async def test_send_what_you_have_with_nothing(manager, tmp_path):
     m, sent = manager
     session = m.get(APPROVER_CONV)
     await session.handle_inbound("send what you have", mode="imessage", meta=approver_meta())
-    assert any("I don't have anything from that run." in s[1] for s in sent)
+    # with no recent failed run there is nothing it could mean: it is not captured
+    assert not any("I don't have anything from that run." in s[1] for s in sent)
 
 
 # ---------------------------------------------------------------------------
@@ -293,8 +294,13 @@ async def test_blanket_permission_grants_denied_plus_read_only(manager, tmp_path
     row = m.store._db.execute("SELECT scopes_json FROM requests WHERE id=?", (ran_id,)).fetchone()
     granted = set(_json.loads(row["scopes_json"]))
     assert scope_name in granted
+    from inkbox_claude.gate import wording as _wording
     for read_scope in gm.READ_SCOPES:
-        assert read_scope in granted
+        if _wording.truly_read_only(read_scope):
+            assert read_scope in granted
+        elif read_scope != scope_name:
+            # a "read" scope that can also create or change things is never added on its own
+            assert read_scope not in granted
     # Never a send/write/post/delete/deploy/control scope beyond what was refused.
     for name, spec in gm.SCOPES.items():
         if name in granted and name != scope_name:

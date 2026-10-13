@@ -11,6 +11,8 @@ nothing here ever returns it.
 
 from __future__ import annotations
 
+import re
+
 from typing import Any, Dict, List, Optional
 
 from . import schedprop
@@ -242,7 +244,7 @@ def latest_step_from_tool_calls(tool_calls: Optional[List[str]]) -> Optional[str
 
 _TRY_AGAIN_PHRASES = {"try again", "try it again", "retry", "please try again", "run it again"}
 _SEND_WHAT_YOU_HAVE_PHRASES = {
-    "send what you have", "send me what you have", "send it", "share what you have",
+    "send what you have", "send me what you have", "share what you have",
     "give me what you have",
 }
 
@@ -421,3 +423,17 @@ def plain_title(store: Any, req: Any) -> str:
     # wants the detail.
     when = _call_time_text(getattr(req, "created_at", None))
     return f"the request from the {when} call" if when else "the request from a call"
+
+
+_CHANGING_TOOL_RE = re.compile(r"(^|_)(create|update|delete|manage|remove|write)(_|$)")
+
+
+def truly_read_only(scope: str) -> bool:
+    """A scope the registry marks `read` whose tools also cannot change anything.
+    Some `read` scopes carry a create/update/manage tool (contacts, the calendars);
+    a blanket "permission for everything" never adds those on its own."""
+    from .scopes import READ_SCOPES, SCOPES
+    if scope not in READ_SCOPES:
+        return False
+    tools = [t.rsplit("__", 1)[-1] for t in (SCOPES.get(scope) or {}).get("tools") or []]
+    return not any(_CHANGING_TOOL_RE.search(t) for t in tools)
