@@ -73,10 +73,23 @@ def _said_scopes(said_text: str) -> List[str]:
     text = said_text or ""
     remaining = text.lower()
     candidates = [(len(syn), name, syn.lower()) for name, syns in SYNONYMS.items() for syn in syns]
+    # Every scope's own label is always a valid phrase for that scope too (the
+    # recovery phrase the bot itself dictates, "let it <label>", must work for
+    # every scope, including a discovered vault knowledge scope with no entry
+    # in scopes.yaml). Where a label and a synonym overlap, the longest match
+    # wins via the same sort below.
+    candidates += [(len(label(name).lower()), name, label(name).lower()) for name in SCOPES]
     candidates.sort(key=lambda t: -t[0])
     found: List[str] = []
     for _, name, syn in candidates:
-        m = re.search(r"\b" + re.escape(syn) + r"\b", remaining)
+        # A hand-written \b fails at either end of a phrase that ends or
+        # starts on punctuation (several labels do, e.g. "...(submit, post,
+        # mark complete)"): \b needs a word character on exactly one side,
+        # and two adjacent non-word characters are never a boundary. These
+        # lookarounds require a non-word character (or string edge) outside
+        # the phrase instead, which also still blocks a word being matched
+        # mid-token (no match of "cat" inside "category").
+        m = re.search(r"(?<![\w])" + re.escape(syn) + r"(?![\w])", remaining)
         if not m:
             continue
         if name not in found:
@@ -124,7 +137,12 @@ _PERMISSION_PHRASES = [
 ]
 _NEGATION_WORDS = ["don't", "do not", "not", "never", "without", "except", "but not"]
 _VAGUE_PHRASES = ["do that", "fix that", "fix it"]
-_CLAUSE_SPLIT_RE = re.compile(r"[.;,]| but | except | without ")
+# Comma is deliberately NOT a split point: several scope labels are
+# themselves comma-separated lists ("read TAMID's Drive, Sheets, Docs and
+# Forms"), and splitting on every comma would strand the "let it" phrase in
+# the first fragment and leave the rest unmatched. A negated tail is still
+# cut off below via _NEGATION_WORDS ("not"/"without"/etc), comma or no comma.
+_CLAUSE_SPLIT_RE = re.compile(r"[.;]| but | except | without ")
 
 
 def _permitted_scopes_from_words(said_text: str) -> List[str]:
@@ -139,7 +157,11 @@ def _permitted_scopes_from_words(said_text: str) -> List[str]:
             continue
         cut = len(clause)
         for neg in _NEGATION_WORDS:
-            idx = clause.find(neg)
+            # Word-boundary search: plain substring search would find "not"
+            # inside "notes" (as in the label "read your notes") and wrongly
+            # truncate the clause before the scope name ever appears.
+            m = re.search(r"\b" + re.escape(neg) + r"\b", clause)
+            idx = m.start() if m else -1
             if idx != -1:
                 cut = min(cut, idx)
         for name in _said_scopes(clause[:cut]):

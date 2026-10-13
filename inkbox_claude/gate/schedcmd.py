@@ -454,7 +454,13 @@ async def _handle_add_capability(manager: Any, schedule: Schedule, changes: Dict
             for name in manager.schedules._scopes_for_tool(str(tool)):
                 if name not in denied_names:
                     denied_names.append(name)
-    mapped = schedprop.capabilities_from_permission(said_text or "", denied_names)
+    # A bare reply that is exactly one of the labels the refusal just offered
+    # ("What should it be allowed to do: <labels>?") grants that scope on its
+    # own, with no permission phrase needed. The last run having been refused
+    # that scope is what makes the prior question (and this answer) about it.
+    bare = _norm(said_text or "")
+    label_match = [n for n in denied_names if _norm(schedprop.label(n)) == bare]
+    mapped = label_match or schedprop.capabilities_from_permission(said_text or "", denied_names)
     added = [s for s in mapped if s not in schedule.scopes]
     if not added:
         if denied_names:

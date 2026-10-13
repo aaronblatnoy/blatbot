@@ -393,5 +393,28 @@ def test_permission_vague_phrase_with_no_prior_denial_grants_nothing():
     assert schedprop.capabilities_from_permission("let it do that", denied_scopes=None) == []
 
 
+def test_every_scopes_own_label_grants_exactly_that_scope():
+    # The recovery phrase the bot itself dictates ("Reply 'let it <label>'")
+    # must work for every scope in the registry, including a discovered vault
+    # knowledge scope that has no entry in scopes.yaml at all.
+    from inkbox_claude.gate import scopes as scopes_mod
+    scopes_mod.refresh_vault_scopes(force=True)
+    assert any(scopes_mod.SCOPE_SYSTEM.get(n) == "vault" for n in scopes_mod.SCOPES), \
+        "expected at least one discovered vault scope to test against"
+    for name in scopes_mod.SCOPES:
+        lbl = schedprop.label(name)
+        got = schedprop.capabilities_from_permission(f"let it {lbl}")
+        assert got == [name], f"scope {name!r} label {lbl!r} -> {got!r}"
+
+
+def test_overlapping_labels_longest_match_wins():
+    # "look up and edit contacts" (contacts) and a shorter label that is a
+    # substring of it must not both match; only the longest wins.
+    from inkbox_claude.gate.scopes import SCOPES
+    assert "contacts" in SCOPES
+    got = schedprop.capabilities_from_permission("let it look up and edit contacts")
+    assert got == ["contacts"]
+
+
 def test_permission_no_words_at_all_grants_nothing():
     assert schedprop.capabilities_from_permission("") == []

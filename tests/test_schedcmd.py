@@ -538,6 +538,26 @@ async def test_add_capability_vague_yes_after_denial_grants_exactly_what_was_den
 
 
 @pytest.mark.asyncio
+async def test_add_capability_bare_label_reply_grants_the_refused_scope(env):
+    # The bot's own refusal asks "What should it be allowed to do: <label>?";
+    # replying with exactly that label (no "let it") grants it, because the
+    # schedule's last run was refused that scope -- the simplest sound way to
+    # know the question was about it.
+    store, manager, task_id = env
+    schedule = await _active(manager, task_id)
+    run = store.create_schedule_run(schedule.id, None, time.time() - 10)
+    store.finish_schedule_run(run, finished_at=time.time() - 5, complete=False, outcome="incomplete",
+                              result_line="could not update the tracker note", final_status="",
+                              denied=[{"tool": "mcp__inkbox__inkbox_update_contact", "reason": "scope"}], note="",
+                              changed=True, cost_usd=None)
+    said_id = store.add_message("owner", "inbound", "look up and edit contacts", "imessage")
+    session = FakeSession(inbound_id=said_id)
+    reply = await schedcmd.handle(manager, session, _command("add_capability", target="Team total watch"))
+    assert "contacts" in store.get_schedule(schedule.id).scopes
+    assert reply.startswith("Done. It can now ")
+
+
+@pytest.mark.asyncio
 async def test_add_capability_with_nothing_mapped_asks_what_to_allow(env):
     store, manager, task_id = env
     schedule = await _active(manager, task_id)
