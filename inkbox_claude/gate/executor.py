@@ -11,6 +11,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
+import re
 import time
 from typing import Any, Dict, List, Optional
 
@@ -114,13 +115,26 @@ SCHEDULE_EXECUTOR_SYSTEM = (
     "CHANGED is no otherwise. CHANGED is always the last line."
 )
 
+_PHONE_SHAPE_RE = re.compile(r"^\+?[\d\s\-()]{7,20}$")
+
+
 def _norm_handle(v: str) -> str:
-    """Same normalization the gate already uses to recognize the owner's own
-    phone/iMessage/Telegram handle (scopes._norm): digits-only for anything that is
-    not an email, last 10 digits for a phone, case-folded otherwise."""
+    """Normalize a handle for comparison against Aaron's own protected list.
+    Only a value that is actually phone-shaped (optional leading +, then
+    digits/spaces/dashes/parens, 7-15 digits total) is reduced to its last 10
+    digits -- that is the only case where two differently-formatted strings
+    (with or without a country code, with or without punctuation) can mean
+    the same phone number. Anything else -- a conversation id, a Telegram
+    id, a plain handle -- is compared whole, trimmed and case-folded, with a
+    leading "telegram:" prefix stripped, so it never collides with a phone
+    number that merely happens to share some of its digits."""
     v = (v or "").strip().lower()
+    if v.startswith("telegram:"):
+        v = v[len("telegram:"):]
     digits = "".join(ch for ch in v if ch.isdigit())
-    return digits[-10:] if digits and "@" not in v and len(digits) >= 7 else v
+    if _PHONE_SHAPE_RE.match(v) and 7 <= len(digits) <= 15:
+        return digits[-10:]
+    return v
 
 
 def _is_owner_handle(value: str, protected: List[str]) -> bool:

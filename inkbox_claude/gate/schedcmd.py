@@ -76,29 +76,6 @@ def _captures_bare_answer(store: Any, chat_id: str, schedule: Schedule) -> bool:
     return is_latest or (time.time() - sent_at) <= _BARE_ANSWER_WINDOW_S
 
 
-_BARE_ANSWER_WINDOW_S = 15 * 60
-
-
-def _captures_bare_answer(store: Any, chat_id: str, schedule: Schedule) -> bool:
-    """A bare yes/no on this thread answers 's proposal only when its
-    own notice is still the most recent outbound message on the thread, or it
-    went out within the last 15 minutes. Otherwise too much may have happened
-    since, so a bare yes/no is not captured at all (item G) -- the message
-    goes on to the router as today."""
-    with store._lock:
-        prop_row = store._db.execute(
-            "SELECT created_at FROM messages WHERE chat_id=? AND schedule_id=? AND kind='outbound' "
-            "ORDER BY created_at DESC LIMIT 1", (chat_id, schedule.id)).fetchone()
-        if prop_row is None:
-            return False
-        sent_at = float(prop_row["created_at"])
-        latest_row = store._db.execute(
-            "SELECT created_at FROM messages WHERE chat_id=? AND kind='outbound' "
-            "ORDER BY created_at DESC LIMIT 1", (chat_id,)).fetchone()
-    is_latest = latest_row is None or float(latest_row["created_at"]) <= sent_at + 1e-6
-    return is_latest or (time.time() - sent_at) <= _BARE_ANSWER_WINDOW_S
-
-
 # ---------------------------------------------------------------------------
 # Answering a bare yes/no before the router ever sees the message
 # ---------------------------------------------------------------------------

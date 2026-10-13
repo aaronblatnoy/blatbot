@@ -300,3 +300,34 @@ def test_parse_closing_changed_no():
 def test_parse_closing_changed_absent_is_none():
     parsed = schedrun.parse_closing("RESULT: fine.\nSTATUS: OK")
     assert parsed["changed"] is None
+
+
+# ---------------------------------------------------------------------------
+# _norm_handle / _is_owner_handle (item 8): only a phone-shaped value is
+# reduced to its last 10 digits; anything else is compared whole.
+# ---------------------------------------------------------------------------
+
+def test_norm_handle_conversation_id_matches_only_itself():
+    protected = ["conv-aaron"]
+    assert gate_executor._is_owner_handle("conv-aaron", protected)
+    assert not gate_executor._is_owner_handle("conv-other", protected)
+
+
+def test_norm_handle_phone_with_country_code_matches():
+    protected = ["+1 (555) 000-1234"]
+    assert gate_executor._is_owner_handle("5550001234", protected)
+    assert gate_executor._is_owner_handle("+15550001234", protected)
+
+
+def test_norm_handle_third_party_sharing_digits_does_not_match():
+    # A conversation id that happens to contain the same digits as a real
+    # phone number must not collide with it: it is not phone-shaped, so it
+    # is compared whole, never reduced to its last 10 digits.
+    protected = ["5550001234"]
+    assert not gate_executor._is_owner_handle("conv-5550001234", protected)
+
+
+def test_norm_handle_telegram_prefix_stripped():
+    protected = ["telegram:998877"]
+    assert gate_executor._is_owner_handle("998877", protected)
+    assert gate_executor._is_owner_handle("Telegram:998877", protected)
