@@ -154,6 +154,9 @@ class ScheduleService:
         cadence_module.validate(cadence_kind, cadence)
         timezone_name = timezone or DEFAULT_TIMEZONE
         ZoneInfo(timezone_name)
+        if cadence_kind == "once" and cadence_module.next_run(cadence_kind, cadence, timezone_name,
+                                                              time.time()) is None:
+            raise ValueError("That time has already passed.")
         missing = self._missing(prompt, scopes)
         if missing:
             raise ValueError(f"missing capability: {self._labels(missing)}")
@@ -396,6 +399,8 @@ class ScheduleService:
             kind = changes.get("cadence_kind", old.cadence_kind)
             cadence = changes.get("cadence", old.cadence)
             cadence_module.validate(kind, cadence)
+            if kind == "once" and cadence_module.next_run(kind, cadence, old.timezone, time.time()) is None:
+                raise ValueError("That time has already passed.")
             immediate["cadence_kind"] = kind
             immediate["cadence"] = cadence
         if "report_every_time" in changes:

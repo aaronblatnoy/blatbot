@@ -449,3 +449,23 @@ async def test_expiring_an_edit_of_a_never_approved_proposal_ends_it(env):
     ended = store.get_schedule(schedule.id)
     assert ended.state == "ended"
     assert "resume" not in service.valid_actions(ended)
+
+
+@pytest.mark.asyncio
+async def test_a_once_cadence_already_in_the_past_is_refused_on_propose(env):
+    store, manager, service, task_id = env
+    past = time.strftime("%Y-%m-%dT%H:%M:%S", time.localtime(time.time() - 3600))
+    with pytest.raises(ValueError, match="already passed"):
+        await _propose(service, task_id, cadence_kind="once", cadence={"at": past},
+                      timezone="America/New_York")
+
+
+@pytest.mark.asyncio
+async def test_a_once_cadence_edited_into_the_past_is_refused(env):
+    store, manager, service, task_id = env
+    schedule = await _propose(service, task_id)
+    activated = await service.decide(schedule.id, True)
+    assert activated.state == "active"
+    past = time.strftime("%Y-%m-%dT%H:%M:%S", time.localtime(time.time() - 3600))
+    with pytest.raises(ValueError, match="already passed"):
+        await service.edit(schedule.id, owner=True, changes={"cadence_kind": "once", "cadence": {"at": past}})
