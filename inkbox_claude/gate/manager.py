@@ -191,6 +191,27 @@ class GateSession:
         return (self.mode == "voice" and bool(self.m.approver_phone)
                 and _digits(self._sender()) == _digits(self.m.approver_phone))
 
+    def _is_owner_person(self) -> bool:
+        """Who this session is talking to, for WORDING ONLY -- never scopes, approval
+        power, or anything is_approver() gates. True for the verified approver, for
+        Aaron calling from his own number even when GATE_VOICE_TRUST_APPROVER is off
+        (caller ID can be spoofed, which is exactly why that case is not is_approver()),
+        and for a sender on any channel, including voice, whose contact resolves to the
+        commander's person entry. Both caller ID and a contact record can be forged, so
+        nothing here may ever stand in for is_approver() -- it only changes which of two
+        equally honest sentences gets said to someone who cannot be proven to be Aaron."""
+        if self.is_approver() or self.is_aaron_on_phone():
+            return True
+        try:
+            pid = self.m.store.commander_person_id()
+            if not pid:
+                return False
+            res = self.m.store.resolve_handles(self.handles())
+            return bool(pid) and not res.get("conflict") and res.get("person_id") == pid
+        except Exception:
+            logger.exception("[gate %s] could not resolve owner identity for fallback wording", self.chat_id)
+            return False
+
     def _sender(self) -> str:
         return str((self.reply_meta or {}).get("sender") or self.chat_id)
 
@@ -891,6 +912,31 @@ class GateSession:
                 memory = self.task_memory()
                 logger.info("[gate %s] ledger loaded (voice consult): %d chars", self.chat_id, len(memory))
                 found = await self.lookup_tasks(history[:-1], body, memory)
+                # One request per ask, including from the trusted caller: the realtime
+                # voice model hands this consult one transcript fragment at a time, so
+                # one spoken request can arrive as several calls a few seconds apart.
+                # running_for_thread already covers both 'approved' and 'running' (and
+                # already excludes schedule requests), so a fragment that lands while
+                # the first fragment's request is still open folds in as more context on
+                # that request -- the same "meanwhile" handling an ordinary follow-up
+                # message gets in _route_and_act -- instead of becoming a second request.
+                running = self.m.store.running_for_thread(self.chat_id)
+                if running is not None:
+                    logger.info("[gate %s] request #%s still open; folding this voice fragment into it "
+                                "instead of starting another", self.chat_id, running.id)
+                    if t is not None:
+                        self._ensure_inbound_on_task(t, body)
+                    out = await self.m.router.route(
+                        history=history[:-1], message=body, mode="voice", sender=self._sender(),
+                        contact_notes=self._contact_notes(), is_approver=approver,
+                        task_memory=memory, found_tasks=found, action=True,
+                        action_task=(t or {}).get("title") or running.summary,
+                    )
+                    reply = out.reply or "Got it."
+                    self.m.store.add_message(self.record_id, "outbound", reply, "voice")
+                    if t is not None:
+                        self.m.store.task_event(t["id"], "outbound", f"(phone) {reply}", chat_id=self.record_id)
+                    return reply
                 out, task = await self.decide(body=body, message=body, prior=history[:-1], mode="voice",
                                               memory=memory, found=found)
                 reply = out.reply or ""
@@ -1194,21 +1240,27 @@ class GateSession:
         # it is a confident answer the check already judged to be unbacked.
         logger.warning("[gate %s] rewrite still not grounded (p=%.2f); refusing to pass it off",
                        self.chat_id, p2)
-        if not approver:
-            # Someone other than Aaron never sees the run's own words: no mention of
-            # tools, scopes, approval or why it failed. Aaron gets the full result
-            # separately (the note this call was given, in full, on his own thread).
-            return ("I do not have an answer ready for that right now. I have let Aaron "
-                    "know, and he will follow up if there is more to share.")
-        # For Aaron: hand over what the run actually produced, and say plainly that
-        # it did not answer the question.
-        body = _result_bodies(results)
-        if body.strip() and len(body) <= 1500:
-            return body
-        # Too long to hand over raw, and dumping tool output is not an answer either.
-        return ("I could not put an answer together from what came back, and I am not going to "
-                "guess at one. The full result is on the task. Tell me to try again and I will "
-                "run it fresh.")
+        if approver:
+            # For the verified Aaron: hand over what the run actually produced, and say
+            # plainly that it did not answer the question.
+            body = _result_bodies(results)
+            if body.strip() and len(body) <= 1500:
+                return body
+            # Too long to hand over raw, and dumping tool output is not an answer either.
+            return ("I could not put an answer together from what came back, and I am not going to "
+                    "guess at one. The full result is on the task. Tell me to try again and I will "
+                    "run it fresh.")
+        if self._is_owner_person():
+            # Looks like Aaron (his number, or a contact record that resolves to him)
+            # but not verified -- is_approver() stays False and no scope or power widens.
+            # He still hears it in the first person, about himself, not a note that
+            # someone else "let him know": there is no one else here to tell.
+            return "I don't have an answer for that yet."
+        # Someone else entirely never sees the run's own words: no mention of tools,
+        # scopes, approval or why it failed. Aaron gets the full result separately (the
+        # note this call was given, in full, on his own thread).
+        return ("I do not have an answer ready for that right now. I have let Aaron "
+                "know, and he will follow up if there is more to share.")
 
     async def handle_followup(self, body: str, inbound_id: Optional[int] = None) -> bool:
         """Re-decide a message that was received while a request was running. The
