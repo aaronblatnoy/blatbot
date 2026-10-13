@@ -10,7 +10,8 @@ from typing import Any, Dict, List, Optional
 
 from ..gate.scopes import SCOPES, SCOPE_SYSTEM
 from ..gate.store import Request, Store, role_names
-from ..gate import cadence as cadence_mod, schedprop
+from ..gate import cadence as cadence_mod, schedprop, wording
+from ..gate import schedules as sched_mod
 from ..gate.schedules import DEFAULT_TIMEZONE
 from . import events
 
@@ -1040,13 +1041,12 @@ def health(gateway: Any, store: Store) -> Dict[str, Any]:
 
 _EMAIL_RE = re.compile(r"[\w.+-]+@[\w-]+\.[\w.-]+")
 _PHONE_RE = re.compile(r"(?:\+?1[-.\s]?)?\(?\d{3}\)?[-.\s]?\d{3}[-.\s]?\d{4}")
-# A hand-off prompt is the internal text a surface (a phone call, an inbound
-# channel) wrote for the model to act on, not something the owner would
-# recognize as a plain request. Recognized two ways: it opens with a phrase
-# like "Live phone call with ...", or it runs past one sentence (a plain
-# request summary is one short sentence).
-_HANDOFF_PREFIXES = ("live phone call with", "phone call with", "call with")
 _SENTENCE_SPLIT_RE = re.compile(r"(?<=[.!?])\s+")
+# Two failed requests count as "the same ask" (collapsed into one Stuck row)
+# when they share a task, or landed on the same thread within this window of
+# each other (a voice hand-off that failed and was retried a few seconds
+# later, before a task link is in place yet).
+_SAME_ASK_WINDOW_S = 120.0
 
 
 def _redact_contacts(text: str, store: Store) -> str:
@@ -1070,27 +1070,6 @@ def _redact_contacts(text: str, store: Store) -> str:
     return _PHONE_RE.sub(_sub, _EMAIL_RE.sub(_sub, text))
 
 
-def _is_handoff_text(summary: str) -> bool:
-    text = (summary or "").strip()
-    if not text:
-        return True
-    if text.lower().startswith(_HANDOFF_PREFIXES):
-        return True
-    sentences = [s for s in _SENTENCE_SPLIT_RE.split(text) if s.strip()]
-    return len(sentences) > 1
-
-
-def _request_plain_text(request: Request) -> str:
-    """The owner-facing text for a request: its summary, unless that summary
-    is an internal hand-off prompt, in which case his own original message
-    stands in for it -- whole, never cut."""
-    summary = (request.summary or "").strip()
-    if _is_handoff_text(summary):
-        original = (request.original_message or "").strip()
-        return original or summary
-    return summary
-
-
 def _first_sentence(text: str) -> str:
     for piece in _SENTENCE_SPLIT_RE.split((text or "").strip()):
         if piece.strip():
@@ -1098,9 +1077,42 @@ def _first_sentence(text: str) -> str:
     return ""
 
 
-def _request_display(request: Request, store: Store) -> str:
-    name = (request.sender_name or request.sender or "Someone").strip() or "Someone"
-    return _redact_contacts(name, store)
+def _looks_like_bare_identifier(text: str) -> bool:
+    """A sender "name" that is really just a phone number or an email address --
+    never shown to the owner as who is asking."""
+    t = (text or "").strip()
+    if not t:
+        return True
+    return bool(_EMAIL_RE.fullmatch(t) or _PHONE_RE.fullmatch(t))
+
+
+def _request_who(request: Request, store: Store) -> str:
+    """A real name for whoever this request is from, or "" when all the store has
+    is a bare phone number or email -- callers drop the "who said this" framing
+    entirely rather than ever show that raw identifier."""
+    for candidate in (request.sender_name, request.sender):
+        name = _redact_contacts((candidate or "").strip(), store)
+        if name and not _looks_like_bare_identifier(name):
+            return name
+    return ""
+
+
+def _request_title_and_plain(store: Store, request: Request) -> "tuple[str, str]":
+    """(title, plain) for a request, from wording.plain_title: never the voice
+    hand-off's internal preamble, a "blatbot:"/"caller:" line, a phone number,
+    or text cut by length (see gate/wording.py)."""
+    plain = _redact_contacts(wording.plain_title(store, request), store)
+    title = _first_sentence(plain) or plain or "A request"
+    return title, plain
+
+
+def _request_result_text(request: Request) -> str:
+    """What happened on a finished request, for Done today: its own result text
+    if the executor recorded one, else its plain ask (there is nothing better
+    to show)."""
+    status = request.status or {}
+    text = str(status.get("summary") or status.get("error") or request.raw_output or "").strip()
+    return _first_sentence(text) or text
 
 
 def _request_row(request: Request, store: Store, *, kind: str, since_field: str,
@@ -1115,10 +1127,14 @@ def _request_row(request: Request, store: Store, *, kind: str, since_field: str,
 def _stuck_pending_requests(store: Store) -> List[Dict[str, Any]]:
     out = []
     for request in store.pending():
-        plain = _redact_contacts(_request_plain_text(request), store)
-        who = _request_display(request, store)
-        title = _first_sentence(plain) or f"{who} is waiting on you"
-        sentence = f"{who} is asking: {plain}" if plain else f"{who} is waiting on your yes."
+        if request.schedule_id:
+            continue  # a schedule's own run, represented by its Stuck schedule row
+        who = _request_who(request, store)
+        title, plain = _request_title_and_plain(store, request)
+        if plain:
+            sentence = f"{who} is asking: {plain}" if who else f"Waiting on your yes: {plain}."
+        else:
+            sentence = f"{who} is waiting on your yes." if who else "Waiting on your yes."
         actions = [
             {"action": "approve", "label": "Approve",
              "target": {"endpoint": "requests/decide", "id": request.id, "decision": "yes"}},
@@ -1130,19 +1146,11 @@ def _stuck_pending_requests(store: Store) -> List[Dict[str, Any]]:
     return out
 
 
-def _failure_reason(request: Request) -> str:
-    status = request.status or {}
-    for field in ("summary", "error"):
-        text = str(status.get(field) or "").strip()
-        if text:
-            return _first_sentence(text) or text
-    return "it could not finish"
-
-
-def _stuck_failed_requests(store: Store, now: float) -> List[Dict[str, Any]]:
-    """Requests that failed in the last 24 hours and were never followed by a
-    later successful request on the same task -- a retry that worked clears
-    the earlier failure from this list."""
+def _failed_request_candidates(store: Store, now: float) -> List[Dict[str, Any]]:
+    """Requests that failed in the last 24 hours, were never followed by a later
+    successful request on the same task, and are not a schedule's own run (that
+    is represented by the schedule's Stuck row instead). Each candidate carries
+    its task id, for clustering "the same ask" together."""
     cutoff = now - 86400.0
     recent = store.recent_requests(limit=500)
     by_task: Dict[int, List[Request]] = {}
@@ -1152,7 +1160,7 @@ def _stuck_failed_requests(store: Store, now: float) -> List[Dict[str, Any]]:
             by_task.setdefault(task_id, []).append(request)
     out = []
     for request in recent:
-        if request.state != "failed" or request.updated_at < cutoff:
+        if request.schedule_id or request.state != "failed" or request.updated_at < cutoff:
             continue
         task_id = store.task_id_for_request(request.id)
         if task_id is not None:
@@ -1162,11 +1170,48 @@ def _stuck_failed_requests(store: Store, now: float) -> List[Dict[str, Any]]:
             )
             if later_success:
                 continue
-        plain = _redact_contacts(_request_plain_text(request), store)
-        title = _first_sentence(plain) or "A request"
-        reason = _failure_reason(request)
-        sentence = f"{plain}: {reason}." if plain else f"A request could not finish: {reason}."
-        out.append(_request_row(request, store, kind="request", since_field="since_text",
+        out.append({"request": request, "task_id": task_id})
+    return out
+
+
+def _cluster_same_ask(candidates: List[Dict[str, Any]]) -> List[List[Dict[str, Any]]]:
+    """Group failed-request candidates that are the same ask: sharing a task, or
+    the same thread within _SAME_ASK_WINDOW_S of the cluster's latest member so
+    far. Each cluster is returned oldest-first; the caller reports only its
+    latest member."""
+    clusters: List[List[Dict[str, Any]]] = []
+    for item in sorted(candidates, key=lambda c: c["request"].created_at):
+        placed = False
+        for cluster in clusters:
+            rep = cluster[-1]
+            same_task = item["task_id"] is not None and item["task_id"] == rep["task_id"]
+            same_thread_soon = (
+                item["request"].chat_id == rep["request"].chat_id
+                and abs(item["request"].created_at - rep["request"].created_at) <= _SAME_ASK_WINDOW_S
+            )
+            if same_task or same_thread_soon:
+                cluster.append(item)
+                placed = True
+                break
+        if not placed:
+            clusters.append([item])
+    return clusters
+
+
+def _stuck_failed_requests(store: Store, now: float) -> List[Dict[str, Any]]:
+    """One row per distinct failed ask (see _cluster_same_ask), reported from its
+    latest attempt. The sentence is always "<plain title>: <why, in plain
+    words>." -- wording.failure_in_words never returns the raw error string,
+    and there is no "Try again" action because no console endpoint retries a
+    request yet."""
+    candidates = _failed_request_candidates(store, now)
+    out = []
+    for cluster in _cluster_same_ask(candidates):
+        latest = cluster[-1]["request"]
+        title, _plain = _request_title_and_plain(store, latest)
+        reason = wording.failure_in_words(latest.status or {})
+        sentence = f"{title}: {reason}."
+        out.append(_request_row(latest, store, kind="request", since_field="since_text",
                                  sentence=sentence, title=title, actions=[]))
     return out
 
@@ -1208,7 +1253,9 @@ def _schedule_fix_actions(schedule: Any, *, paused: bool) -> List[Dict[str, Any]
 def _stuck_schedules(store: Store) -> List[Dict[str, Any]]:
     """Schedules paused with a reason, or active schedules whose last run did
     not complete (so the owner sees trouble before it gets to three strikes
-    and pauses itself)."""
+    and pauses itself). Exactly one row per schedule: the reason always goes
+    through sched_mod._normalize_reason, so a run's own first-person RESULT
+    text ("I could not find ...") never shows up as the scheduler's words."""
     out = []
     for schedule in store.schedules(states=["paused"]):
         if not schedule.cadence_kind:
@@ -1218,21 +1265,21 @@ def _stuck_schedules(store: Store) -> List[Dict[str, Any]]:
                        {"action": "stop", "label": "Stop",
                         "target": {"endpoint": "schedules/action", "id": schedule.id, "action": "stop"}}]
         else:
-            why = schedule.last_outcome or "it stopped running"
+            why = sched_mod._normalize_reason(schedule.last_outcome) if schedule.last_outcome else "it stopped running"
             actions = _schedule_fix_actions(schedule, paused=True)
         out.append({
             "kind": "schedule", "id": schedule.id, "title": schedule.title,
-            "sentence": f"{schedule.title}: {why}.".replace("..", "."),
+            "sentence": f"{schedule.title}: {why}.",
             "since_text": _schedule_time_text(schedule.updated_at, schedule.timezone), "actions": actions,
         })
     for schedule in store.schedules(states=["active"]):
         last = _last_non_skipped_run(store, schedule.id)
         if not last or last.get("outcome") == "complete":
             continue
-        why = last.get("result_line") or "it did not finish"
+        why = sched_mod._normalize_reason(last.get("result_line") or "")
         out.append({
             "kind": "schedule", "id": schedule.id, "title": schedule.title,
-            "sentence": f"{schedule.title}: {why}.".replace("..", "."),
+            "sentence": f"{schedule.title}: {why}.",
             "since_text": _schedule_time_text(last.get("finished_at") or last.get("started_at"), schedule.timezone),
             "actions": _schedule_fix_actions(schedule, paused=False),
         })
@@ -1254,10 +1301,12 @@ def _running_items(store: Store) -> List[Dict[str, Any]]:
             sentence = f"{schedule.title} is running now."
             kind = "schedule"
         else:
-            plain = _redact_contacts(_request_plain_text(request), store)
-            who = _request_display(request, store)
-            title = _first_sentence(plain) or f"A request from {who}"
-            sentence = f"{who}: {plain}" if plain else f"{who}'s request is running."
+            who = _request_who(request, store)
+            title, plain = _request_title_and_plain(store, request)
+            if plain:
+                sentence = f"{who}: {plain}" if who else plain
+            else:
+                sentence = f"{who}'s request is running." if who else "A request is running."
             kind = "request"
         out.append({
             "kind": kind, "id": request.id, "title": title, "sentence": sentence,
@@ -1280,20 +1329,33 @@ def _midnight_epoch(timezone_name: str, now: float) -> float:
 
 
 def _done_today_items(store: Store, now: float) -> List[Dict[str, Any]]:
+    """Finished things, and things that failed with no fix available -- never an
+    item that is also listed under Stuck. A schedule's non-complete run is
+    always represented there instead (while it is active, or by the paused
+    schedule once three strikes pause it), so only its complete runs land
+    here; a failed request currently flagged Stuck is excluded by id, so only
+    a failure outside the 24-hour window or already superseded shows up here,
+    with the same never-raw-error wording Stuck uses."""
     cutoff = _midnight_epoch(DEFAULT_TIMEZONE, now)
+    stuck_failed_ids = {c["request"].id for c in _failed_request_candidates(store, now)}
     items: List[Dict[str, Any]] = []
     for request in store.recent_requests(limit=500):
         if request.schedule_id or request.state not in ("done", "failed", "rejected"):
             continue
-        if request.updated_at < cutoff:
+        if request.updated_at < cutoff or request.id in stuck_failed_ids:
             continue
-        plain = _redact_contacts(_request_plain_text(request), store)
-        who = _request_display(request, store)
-        title = _first_sentence(plain) or f"A request from {who}"
-        outcome = "finished" if request.state == "done" else (
-            "failed" if request.state == "failed" else "could_not_finish")
-        result = request.summary or plain or "No result recorded."
-        sentence = f"{who}: {_redact_contacts(result, store)}"
+        who = _request_who(request, store)
+        title, plain = _request_title_and_plain(store, request)
+        if request.state == "done":
+            outcome = "finished"
+            result = _request_result_text(request) or plain or "Finished."
+        elif request.state == "failed":
+            outcome = "failed"
+            result = wording.failure_in_words(request.status or {}) + "."
+        else:
+            outcome = "could_not_finish"
+            result = _request_result_text(request) or "Declined."
+        sentence = f"{who}: {result}" if who else f"{title}: {result}"
         items.append({
             "kind": "request", "id": request.id, "title": title, "sentence": sentence,
             "outcome": outcome, "time_text": _schedule_time_text(request.updated_at, DEFAULT_TIMEZONE),
@@ -1304,15 +1366,13 @@ def _done_today_items(store: Store, now: float) -> List[Dict[str, Any]]:
             finished = run.get("finished_at")
             if finished is None or finished < _midnight_epoch(schedule.timezone, now):
                 continue
-            if run.get("outcome") == "skipped":
-                continue
-            outcome = "finished" if run.get("outcome") == "complete" else (
-                "failed" if run.get("outcome") == "failed" else "could_not_finish")
+            if run.get("outcome") != "complete":
+                continue  # any other outcome is represented under Stuck instead, never here too
             result = run.get("result_line") or run.get("final_status") or "No result recorded."
             items.append({
                 "kind": "schedule", "id": schedule.id, "title": schedule.title,
                 "sentence": f"{schedule.title}: {result}",
-                "outcome": outcome, "time_text": _schedule_time_text(finished, schedule.timezone),
+                "outcome": "finished", "time_text": _schedule_time_text(finished, schedule.timezone),
                 "actions": [], "_ts": finished,
             })
     items.sort(key=lambda row: row["_ts"], reverse=True)

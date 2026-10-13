@@ -621,9 +621,11 @@ class GateSession:
             if needs_action:
                 from .router import RouterRequest
                 emails = [e for e in _EMAIL.findall(message) if e.lower() != self._sender().lower()]
-                out.request = RouterRequest(prompt=self.build_task_prompt(body, prior, task),
-                                            scopes=["web"], summary=str(task.get("title") or message[:100])[:160],
-                                            counterpart=emails[0] if (approver and emails) else None)
+                out.request = RouterRequest(
+                    prompt=self.build_task_prompt(body, prior, task),
+                    scopes=["web"],
+                    summary=str(task.get("title") or wording.fallback_title_from_message(message)),
+                    counterpart=emails[0] if (approver and emails) else None)
                 await self.jev_scopes(out, strict=True)
                 await self.jev_knowledge(out)
                 # A follow-up on a task keeps the tools its earlier requests had: "try again"
@@ -655,8 +657,8 @@ class GateSession:
             return
         if na and out.request is None:
             from .router import RouterRequest
-            title = (task or {}).get("title") or (out.task_title or "") or message[:80]
-            out.request = RouterRequest(prompt="(built from source)", scopes=["web"], summary=f"Act on: {title}"[:120])
+            title = (task or {}).get("title") or (out.task_title or "") or wording.fallback_title_from_message(message)
+            out.request = RouterRequest(prompt="(built from source)", scopes=["web"], summary=f"Act on: {title}")
             logger.info("[gate %s] jev: action needed (p=%.2f); router proposed none", self.chat_id, res["p"])
         elif not na and out.request is not None:
             logger.info("[gate %s] jev: no action needed (p=%.2f); dropping router request %r",
@@ -1683,8 +1685,13 @@ class GateSessionManager:
         happens, the request ends up on exactly one task. This cannot be skipped."""
         req = out.request
         # A task is titled by the router, else by its request summary, else by the message
-        # that started it. Never a placeholder: the title is what every later pick compares.
-        fallback = " ".join((message or "").split())[:90]
+        # that started it. Never a placeholder, and never cut by length: a voice hand-off's
+        # `message` is its whole call transcript, so the fallback here pulls the caller's own
+        # words out of it (wording.fallback_title_from_message) rather than slicing the raw
+        # transcript -- that slice used to land, verbatim and cut mid-word, as both the task
+        # title and (via the "else by its request summary" rule two lines down, when the
+        # router proposed none) the request's own summary.
+        fallback = wording.fallback_title_from_message(message)
         summary = (req.summary if req else "") or fallback or "Untitled task"
         sender = session._sender()
         sender_name = session._sender_name() or sender

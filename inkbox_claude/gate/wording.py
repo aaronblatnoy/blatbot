@@ -268,3 +268,105 @@ def send_what_you_have_text(status: Dict[str, Any]) -> str:
     because the person explicitly asked to see it."""
     text = str(status.get("final_status") or status.get("raw") or status.get("summary") or "").strip()
     return text or "There is nothing more to send; the run left no findings."
+
+
+# ---------------------------------------------------------------------------
+# Naming a request to the owner, and building a plain fallback title/summary
+# for one, from a raw inbound message or an already-created request.
+#
+# A live phone call hands a request off with its whole transcript as
+# original_message (build_delegation_query in live.py) -- a preamble, prior
+# turns for context, then "What was just said (act on this):" followed by the
+# caller's and Blatbot's own lines. Nothing here ever shows that preamble, a
+# "blatbot:" line, a phone number, or text force-cut by length: when there is
+# no real summary yet, the caller's own words stand in for one.
+# ---------------------------------------------------------------------------
+
+_HANDOFF_PREFIXES = ("live phone call with",)
+_WHAT_WAS_SAID_MARKER = "What was just said (act on this):"
+_CALLER_PREFIX = "caller:"
+
+
+def _is_handoff_shaped(summary: str) -> bool:
+    return (summary or "").strip().lower().startswith(_HANDOFF_PREFIXES)
+
+
+def _is_cut_of(summary: str, original: str) -> bool:
+    """Whether `summary` looks like a hard character slice of `original` rather
+    than a real summary someone wrote: a strict, shorter prefix that does not
+    end on a sentence boundary and stops mid-word (the next character in the
+    source is itself a word character). A short summary that genuinely ends a
+    sentence, or that just happens to be a prefix followed by a space or
+    punctuation, is never flagged."""
+    summary = (summary or "").strip()
+    original = (original or "").strip()
+    if not summary or not original or summary == original or len(summary) >= len(original):
+        return False
+    if not original.startswith(summary):
+        return False
+    if summary[-1:] in ".!?":
+        return False
+    next_char = original[len(summary):len(summary) + 1]
+    return next_char.isalnum() or next_char == "'"
+
+
+def caller_lines(transcript: str) -> List[str]:
+    """The caller's own words from a voice hand-off transcript: every "caller:"
+    line under "What was just said (act on this):", or every "caller:" line in
+    the whole transcript when that section is missing. Never a "blatbot:" line,
+    never the preamble above it."""
+    text = transcript or ""
+    if _WHAT_WAS_SAID_MARKER in text:
+        text = text.split(_WHAT_WAS_SAID_MARKER, 1)[1]
+    out: List[str] = []
+    for raw_line in text.splitlines():
+        line = raw_line.strip()
+        if line.lower().startswith(_CALLER_PREFIX):
+            said = line[len(_CALLER_PREFIX):].strip()
+            if said:
+                out.append(said)
+    return out
+
+
+def fallback_title_from_message(message: str) -> str:
+    """A plain task/request title built in code from a raw inbound message,
+    never cut by length: the caller's own words when the message is a voice
+    hand-off transcript (see caller_lines), else the message itself,
+    whitespace-collapsed and whole."""
+    text = " ".join((message or "").split())
+    if _is_handoff_shaped(text):
+        lines = caller_lines(message)
+        if lines:
+            return " ".join(lines)
+        return "a phone call"
+    return text or "Untitled task"
+
+
+def looks_like_fallback_title(title: Optional[str], message: str) -> bool:
+    """Whether `title` is still exactly the code-built fallback above (never a
+    real title a person or the router wrote), so a better title found later is
+    free to replace it."""
+    if title in (None, "", "Untitled task"):
+        return True
+    return title == fallback_title_from_message(message)
+
+
+def plain_title(store: Any, req: Any) -> str:
+    """The request named to the owner, anywhere a request is named (overview
+    rows, failure/success messages, the progress reply): its own summary when
+    that already reads as plain text, else the caller's own words pulled from
+    a voice hand-off transcript. Never the hand-off preamble, never a
+    "blatbot:" line, never a phone number, never cut by length.
+
+    `store` is accepted for parity with the rest of the console's
+    contact-aware wording (and in case a future hand-off shape ever needs a
+    contact lookup); plain_title itself never needs one; it only ever reads
+    the caller's own spoken words, which carry no identifier for themselves."""
+    summary = (getattr(req, "summary", "") or "").strip()
+    original = (getattr(req, "original_message", "") or "").strip()
+    if summary and not _is_handoff_shaped(summary) and not _is_cut_of(summary, original):
+        return summary
+    lines = caller_lines(original)
+    if lines:
+        return " ".join(lines)
+    return "a phone call"

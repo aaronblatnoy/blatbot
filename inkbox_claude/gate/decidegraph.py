@@ -22,6 +22,8 @@ from typing import Any, Dict, List, Optional, TypedDict
 from langchain_core.runnables import RunnableConfig
 from langgraph.graph import END, START, StateGraph
 
+from . import wording
+
 logger = logging.getLogger(__name__)
 
 
@@ -186,9 +188,11 @@ async def build_request(state: DecideState, config: RunnableConfig) -> Dict[str,
     from .router import RouterRequest
     task = state["task"]
     emails = [e for e in gm._EMAIL.findall(state["message"]) if e.lower() != s._sender().lower()]
-    req = RouterRequest(prompt=s.build_task_prompt(state["body"], state["prior"], task),
-                        scopes=["web"], summary=str(task.get("title") or state["message"][:100])[:160],
-                        counterpart=emails[0] if (s.is_approver() and emails) else None)
+    req = RouterRequest(
+        prompt=s.build_task_prompt(state["body"], state["prior"], task),
+        scopes=["web"],
+        summary=str(task.get("title") or wording.fallback_title_from_message(state["message"])),
+        counterpart=emails[0] if (s.is_approver() and emails) else None)
     return {"request": req}
 
 
@@ -304,10 +308,10 @@ async def finalize(state: DecideState, config: RunnableConfig) -> Dict[str, Any]
     if task is not None:
         out.task = f"T{task['id']}"
         title = " ".join((out.task_title or "").split())
-        if title and title != task.get("title") and task.get("title") in (None, "", "Untitled task", " ".join(state["body"].split())[:90]):
+        if title and title != task.get("title") and wording.looks_like_fallback_title(task.get("title"), state["body"]):
             s.m.store.set_task_title(task["id"], title)
             if out.request is not None and out.request.summary == task.get("title"):
-                out.request.summary = title[:160]
+                out.request.summary = title
         if out.task_summary:
             s.m.store.set_task_summary(task["id"], out.task_summary)
     elif state["pick"] == "none" and not state["needs_action"]:

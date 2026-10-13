@@ -71,10 +71,10 @@ def _add_run(store, schedule_id, *, outcome="complete", result_line="done",
 def _make_request(store, *, title_task=None, summary="Approve the donor mailing list.",
                    original_message="Can you approve the donor mailing list?",
                    state="pending", sender_name="Jordan", schedule_id=None,
-                   status=None):
+                   status=None, chat_id="owner"):
     task_id = title_task or store.create_task(summary)["id"]
     request = store.create_request(
-        chat_id="owner", sender="jordan@example.test", sender_name=sender_name, mode="console",
+        chat_id=chat_id, sender="jordan@example.test", sender_name=sender_name, mode="console",
         subject="", original_message=original_message, summary=summary, scopes=[], prompt=summary,
         state=state, task_id=task_id, schedule_id=schedule_id,
     )
@@ -171,7 +171,9 @@ def test_active_schedule_whose_last_run_did_not_complete_is_stuck(tmp_path):
 
     row = next(r for r in result["stuck"] if r["id"] == schedule.id)
     assert row["kind"] == "schedule"
-    assert "The total did change" in row["sentence"]
+    # The run's own RESULT sentence is normalized (schedules._normalize_reason),
+    # not shown verbatim/capitalized as the run wrote it.
+    assert "the total did change" in row["sentence"]
 
 
 def test_schedule_proposal_waiting_for_yes_is_stuck_with_approve_and_reject(tmp_path):
@@ -196,7 +198,10 @@ def test_a_failed_request_in_the_last_day_is_stuck(tmp_path):
     result = api.overview(FakeGateway(FakeManager(store)), store)
 
     row = next(r for r in result["stuck"] if r["kind"] == "request" and r["id"] == request.id)
-    assert "vendor portal timed out" in row["sentence"]
+    # Never the raw error string -- wording.failure_in_words' plain clause for a
+    # timeout-shaped error.
+    assert "vendor portal timed out" not in row["sentence"]
+    assert row["sentence"] == "Wire the vendor invoice.: it took too long."
     assert row["actions"] == []  # no retry endpoint exists
 
 
@@ -241,27 +246,74 @@ def test_failed_request_not_superseded_without_a_later_success_is_still_stuck(tm
 
     result = api.overview(FakeGateway(FakeManager(store)), store)
 
-    assert failed.id in [r["id"] for r in result["stuck"] if r["kind"] == "request"]
+    # Two failures on the same task, neither followed by a success, are the same
+    # ask -- collapsed into one row, reported from the latest attempt.
+    request_rows = [r for r in result["stuck"] if r["kind"] == "request"]
+    assert len(request_rows) == 1
+    assert request_rows[0]["id"] == another_failure.id
+    assert failed.id not in [r["id"] for r in request_rows]
+
+
+def test_failed_requests_on_different_tasks_and_threads_stay_separate(tmp_path):
+    store = make_store(tmp_path)
+    first = _make_request(store, summary="Wire the vendor invoice.", state="failed",
+                          status={"error": "timed out"})
+    store._db.execute("UPDATE requests SET chat_id=? WHERE id=?", ("thread-a", first.id))
+    store._db.commit()
+    _backdate(store, first.id, created_at=time.time() - 3600, updated_at=time.time() - 3600)
+    second = _make_request(store, summary="Draft the weekly memo.", state="failed",
+                           status={"error": "timed out"})
+    store._db.execute("UPDATE requests SET chat_id=? WHERE id=?", ("thread-b", second.id))
+    store._db.commit()
+    _backdate(store, second.id, created_at=time.time() - 1800, updated_at=time.time() - 1800)
+
+    result = api.overview(FakeGateway(FakeManager(store)), store)
+
+    ids = {r["id"] for r in result["stuck"] if r["kind"] == "request"}
+    assert ids == {first.id, second.id}
 
 
 # ---------------------------------------------------------------------------
 # A hand-off prompt is never shown; the owner's original message stands in.
 # ---------------------------------------------------------------------------
 
-def test_handoff_prompt_summary_is_replaced_by_the_owners_original_message(tmp_path):
-    store = make_store(tmp_path)
-    request = _make_request(
-        store,
-        summary="Live phone call with an unknown caller about a billing dispute that needs context.",
-        original_message="Can you call the billing company back about the overcharge?",
-        state="pending",
+def _realistic_voice_transcript(phone="+15550123456", ask="sign up for the pottery course"):
+    """The exact shape live.py's build_delegation_query hands off: a preamble
+    naming the caller, an "Earlier in the call" section, then "What was just
+    said (act on this):" with alternating blatbot:/caller: lines -- made-up
+    phone number and ask, same section headings and line prefixes as the
+    real thing."""
+    preamble = (
+        f"Live phone call with {phone}. Blatbot's voice side has handed this off because the caller needs "
+        "something done or looked up. The lines below are speech-recognition transcript, so expect misheard "
+        "words, unfinished phrases and later corrections; trust the latest version of what they said."
     )
+    earlier = "blatbot: Hi, this is Blatbot, Aaron's assistant.\ncaller: Hey, I had a question."
+    fresh = (
+        f"blatbot: What can I help with?\ncaller: I want to {ask}.\n"
+        "blatbot: Let me check on that for you."
+    )
+    return "\n".join([
+        preamble, "", "Earlier in the call (already handled, for context only):", earlier, "",
+        "What was just said (act on this):", fresh, "",
+        "Work out what the caller is asking for right now and handle it.",
+    ])
+
+
+def test_handoff_prompt_summary_is_replaced_by_the_caller_own_words(tmp_path):
+    store = make_store(tmp_path)
+    transcript = _realistic_voice_transcript()
+    cut_summary = transcript[:90]  # reproduces the historical 90-character-cut bug exactly
+    request = _make_request(store, summary=cut_summary, original_message=transcript, state="pending")
 
     result = api.overview(FakeGateway(FakeManager(store)), store)
 
     row = next(r for r in result["stuck"] if r["id"] == request.id)
     assert "Live phone call with" not in row["sentence"]
-    assert "overcharge" in row["sentence"]
+    assert "+15550123456" not in row["sentence"]
+    assert "pottery course" in row["sentence"]
+    assert "blatbot:" not in row["sentence"].lower()
+    assert "caller:" not in row["sentence"].lower()
 
 
 def test_sentences_are_whole_never_cut(tmp_path):
@@ -273,6 +325,104 @@ def test_sentences_are_whole_never_cut(tmp_path):
 
     row = next(r for r in result["stuck"] if r["id"] == request.id)
     assert long_summary in row["sentence"]
+
+
+# ---------------------------------------------------------------------------
+# Realistic shapes from the real database (coordinator's merged-backend pass):
+# a 90-char-cut hand-off summary, the JSON buffer-size error, and a schedule
+# run with a first-person RESULT line. Every sentence everywhere is scanned
+# for the exact forbidden substrings the coordinator named.
+# ---------------------------------------------------------------------------
+
+_FORBIDDEN_SUBSTRINGS = ("Live phone call", "blatbot:", "caller:", "JSON", "bytes", "\n")
+_PHONE_RE_FOR_TEST = __import__("re").compile(r"(?:\+?1[-.\s]?)?\(?\d{3}\)?[-.\s]?\d{3}[-.\s]?\d{4}")
+
+
+def _assert_no_forbidden_text(sentence):
+    for bad in _FORBIDDEN_SUBSTRINGS:
+        assert bad not in sentence, f"{bad!r} found in sentence: {sentence!r}"
+    assert not _PHONE_RE_FOR_TEST.search(sentence), f"a phone number found in sentence: {sentence!r}"
+
+
+def test_realistic_voice_hand_off_request_produces_a_clean_sentence_everywhere(tmp_path):
+    store = make_store(tmp_path)
+    transcript = _realistic_voice_transcript(phone="+15557654321", ask="reschedule the orientation session")
+    cut_summary = transcript[:90]
+
+    # One copy pending (Stuck/approval), one running, one failed with the exact
+    # JSON buffer-size error the coordinator quoted, one done today -- each on
+    # its own thread, since the store's own dedupe (same thread, approved/
+    # running, within its window) would otherwise fold these made-up fixture
+    # rows into one another.
+    pending = _make_request(store, summary=cut_summary, original_message=transcript, state="pending",
+                            chat_id="voice-1")
+    running = _make_request(store, summary=cut_summary, original_message=transcript, state="running",
+                            chat_id="voice-2")
+    failed = _make_request(store, summary=cut_summary, original_message=transcript, state="failed",
+                           chat_id="voice-3",
+                           status={"error": "Failed to decode JSON: JSON message exceeded maximum "
+                                            "buffer size of 1048576 bytes."})
+    done = _make_request(store, summary=cut_summary, original_message=transcript, state="done",
+                         chat_id="voice-4",
+                         status={"summary": "Rescheduled the orientation session to Friday."})
+
+    result = api.overview(FakeGateway(FakeManager(store)), store)
+
+    all_sentences = (
+        [r["sentence"] for r in result["stuck"]]
+        + [r["sentence"] for r in result["running"]]
+        + [r["sentence"] for r in result["done_today"]]
+    )
+    assert all_sentences  # the fixture actually produced rows to check
+    for sentence in all_sentences:
+        _assert_no_forbidden_text(sentence)
+
+    pending_row = next(r for r in result["stuck"] if r["id"] == pending.id)
+    assert "orientation session" in pending_row["sentence"]
+
+    running_row = next(r for r in result["running"] if r["id"] == running.id)
+    assert "orientation session" in running_row["sentence"]
+
+    failed_row = next(r for r in result["stuck"] if r["id"] == failed.id)
+    assert failed_row["sentence"] == "I want to reschedule the orientation session.: it ran out of room handling something too large."
+
+    done_row = next(r for r in result["done_today"] if r["id"] == done.id)
+    assert "Rescheduled the orientation session to Friday" in done_row["sentence"]
+
+
+def test_schedule_with_first_person_failed_run_is_stuck_once_with_normalized_reason(tmp_path):
+    store = make_store(tmp_path)
+    schedule = _make_schedule(store, title="Donor tracker sync", state="active")
+    # The schedule's own run also creates a request row (schedule_id set) -- this
+    # must never also appear as a second, separate Stuck "request" row.
+    task_id = store.create_task(schedule.title)["id"]
+    run_request = store.create_request(
+        chat_id="owner", sender="owner", sender_name="Blatbot", mode="schedule", subject="",
+        original_message="", summary="Checking the donor tracker.", scopes=["web"],
+        prompt="check the donor tracker", state="failed", task_id=task_id, schedule_id=schedule.id,
+    )
+    store.set_state(run_request.id, "failed", status={"error": "could not find the tracker page"})
+    _add_run(store, schedule.id, outcome="failed",
+             result_line="I could not find the donor tracker page.")
+
+    result = api.overview(FakeGateway(FakeManager(store)), store)
+
+    schedule_rows = [r for r in result["stuck"] if r["id"] == schedule.id]
+    assert len(schedule_rows) == 1
+    assert schedule_rows[0]["sentence"] == "Donor tracker sync: it could not find the donor tracker page."
+    assert run_request.id not in [r["id"] for r in result["stuck"] if r["kind"] == "request"]
+    assert run_request.id not in [r["id"] for r in result["done_today"] if r["kind"] == "request"]
+
+
+def test_stuck_schedule_run_is_not_also_listed_under_done_today(tmp_path):
+    store = make_store(tmp_path)
+    schedule = _make_schedule(store, title="Inbox triage", state="active")
+    _add_run(store, schedule.id, outcome="incomplete", result_line="The total did change again (+$200).")
+
+    result = api.overview(FakeGateway(FakeManager(store)), store)
+
+    assert any(r["id"] == schedule.id for r in result["stuck"])
+    assert not any(r["id"] == schedule.id and r["kind"] == "schedule" for r in result["done_today"])
 
 
 # ---------------------------------------------------------------------------
