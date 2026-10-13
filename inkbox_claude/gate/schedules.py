@@ -147,6 +147,86 @@ def _shown(ts: Optional[float], timezone_name: str) -> str:
     return clock
 
 
+_REPAIR_DELAY_MINUTES_RE = re.compile(r"\bdelay_minutes\s+(\d+)\b")
+_REPAIR_EVERY_UNIT_RE = re.compile(r"\bevery\s+(\d+)\s+(minute|minutes|hour|hours)\b", re.IGNORECASE)
+
+# A tool-shaped identifier (word_word, the shape every registered tool's short
+# name takes) immediately followed by a call-like "(" or "with", or preceded
+# by "call" -- the two phrasings the old continue-kind instructions used
+# ("call schedule_continue with delay_minutes 240", "schedule_continue(...)").
+_REPAIR_TOOL_CALL_RE = re.compile(r"\b([a-zA-Z][a-zA-Z0-9]*_[a-zA-Z0-9_]*)\b\s*(?:\(|with\b)")
+_REPAIR_CALL_PREFIX_RE = re.compile(r"\bcall\s+([a-zA-Z][a-zA-Z0-9_]*)\b")
+
+
+def _repair_known_tool_names() -> "set":
+    """Every tool the registry actually grants, by its short name (after the
+    last `__`) and its full name -- a prompt naming anything outside this set
+    in a call-shaped phrase is naming a tool that does not exist."""
+    names = set()
+    for info in SCOPES.values():
+        for tool in info.get("tools") or []:
+            names.add(tool)
+            names.add(tool.rsplit("__", 1)[-1])
+    return names
+
+
+def _repair_recover_timing(prompt: str) -> Optional[Dict[str, Any]]:
+    """A cadence recovered from the prompt's own old instructions: a
+    `delay_minutes N` or "every N minutes/hours" phrase gives `every` N
+    minutes (hours converted). None when the prompt states no timing at all."""
+    m = _REPAIR_DELAY_MINUTES_RE.search(prompt or "")
+    if m:
+        return {"cadence_kind": "every", "cadence": {"minutes": int(m.group(1))}}
+    m = _REPAIR_EVERY_UNIT_RE.search(prompt or "")
+    if m:
+        n = int(m.group(1))
+        if m.group(2).lower().startswith("hour"):
+            n *= 60
+        return {"cadence_kind": "every", "cadence": {"minutes": n}}
+    return None
+
+
+def _repair_dead_tool_names(paragraph: str, known: "set") -> List[str]:
+    found: List[str] = []
+    for pattern in (_REPAIR_TOOL_CALL_RE, _REPAIR_CALL_PREFIX_RE):
+        for m in pattern.finditer(paragraph):
+            name = m.group(1)
+            if "_" in name and name not in known and name not in found:
+                found.append(name)
+    return found
+
+
+def _repair_prompt_paragraphs(prompt: str) -> "tuple[List[Dict[str, str]], str]":
+    """Every paragraph of `prompt` that instructs calling a tool not in the
+    registry, with why, and the prompt that remains once they are cut.
+    Paragraphs are split on a blank line, matching how these old prompts were
+    written (one instruction block per paragraph)."""
+    known = _repair_known_tool_names()
+    paragraphs = re.split(r"\n\s*\n", prompt or "")
+    changes: List[Dict[str, str]] = []
+    kept: List[str] = []
+    for para in paragraphs:
+        dead = _repair_dead_tool_names(para, known)
+        if dead:
+            changes.append({
+                "remove": para.strip(),
+                "why": f"it tells the run to call {dead[0]}, which no longer exists",
+            })
+        else:
+            kept.append(para)
+    return changes, "\n\n".join(kept)
+
+
+def _repair_join(parts: List[str]) -> str:
+    if not parts:
+        return ""
+    if len(parts) == 1:
+        return parts[0]
+    if len(parts) == 2:
+        return f"{parts[0]} and {parts[1]}"
+    return ", ".join(parts[:-1]) + ", and " + parts[-1]
+
+
 class ScheduleService:
     def __init__(self, manager: Any):
         self.manager = manager
@@ -528,6 +608,85 @@ class ScheduleService:
             return self.store.update_schedule(schedule_id, state="active", next_run=next_run,
                                               consecutive_failures=0)
         raise ValueError(f"unknown action: {action}")
+
+    # -- one-step repair --------------------------------------------------
+    def repair_plan(self, schedule_id: int) -> Dict[str, Any]:
+        """What would make a stuck schedule runnable again, worked out by code:
+        a timing when none is set (recovered from its old instructions when
+        they state one), the capabilities its prompt needs but does not have,
+        and any paragraph instructing a tool that no longer exists. Returns
+        `needed=False` when nothing here applies -- a healthy schedule has
+        nothing to repair."""
+        from . import schedprop
+        schedule = self.store.get_schedule(schedule_id)
+        if schedule is None:
+            raise ValueError(f"no such schedule: {schedule_id}")
+        sentence_parts: List[str] = []
+        timing: Optional[Dict[str, Any]] = None
+        if not schedule.cadence_kind:
+            recovered = _repair_recover_timing(schedule.prompt)
+            if recovered is not None:
+                text = cadence_module.describe(recovered["cadence_kind"], recovered["cadence"], schedule.timezone)
+                timing = {"cadence_kind": recovered["cadence_kind"], "cadence": recovered["cadence"], "text": text}
+                sentence_parts.append(f"a timing ({text}, from its old instructions)")
+            else:
+                sentence_parts.append("a timing you need to choose")
+        missing = schedprop.missing_capabilities(schedule.prompt, schedule.scopes)
+        add_capabilities = [{"scope": name, "label": schedprop.label(name)} for name in missing]
+        if add_capabilities:
+            sentence_parts.append(f"permission to {schedprop.labels(missing)}")
+        prompt_changes, new_prompt = _repair_prompt_paragraphs(schedule.prompt)
+        if prompt_changes:
+            sentence_parts.append("its instructions mention a tool that no longer exists")
+        needed = bool(timing or (not schedule.cadence_kind) or add_capabilities or prompt_changes)
+        # cadence_kind missing with no recovered timing still counts as needed
+        # (the sentence already says so above); only the "nothing at all to
+        # fix" case returns needed=False.
+        if not sentence_parts:
+            return {"needed": False, "sentence": "", "timing": None, "add_capabilities": [],
+                    "prompt_changes": [], "new_prompt": schedule.prompt}
+        sentence = f"It needs {_repair_join(sentence_parts)}."
+        return {"needed": True, "sentence": sentence, "timing": timing,
+                "add_capabilities": add_capabilities, "prompt_changes": prompt_changes,
+                "new_prompt": new_prompt}
+
+    async def repair_apply(self, schedule_id: int, *, owner: bool,
+                           timing: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+        """Apply a repair_plan() in one step: sets the timing (the plan's own
+        recovered one, or the one passed in when the plan had none), adds the
+        missing capabilities, and replaces the prompt. Only the timing and
+        capabilities/prompt change -- nothing else about the schedule is
+        touched. If only the timing was missing it applies at once and
+        resumes; a prompt or capability change needs his yes, same as edit()."""
+        if not owner:
+            raise PermissionError("only Aaron can create or change schedules")
+        plan = self.repair_plan(schedule_id)
+        if not plan["needed"]:
+            schedule = self.store.get_schedule(schedule_id)
+            return {"schedule": schedule, "applied": {}, "needs_approval": False,
+                    "message": f"{schedule.title} does not need repair."}
+        chosen_timing = plan["timing"] or timing
+        if chosen_timing is None and not self.store.get_schedule(schedule_id).cadence_kind:
+            raise ValueError("It needs a timing and none was given.")
+        changes: Dict[str, Any] = {}
+        if chosen_timing is not None:
+            changes["cadence_kind"] = chosen_timing["cadence_kind"]
+            changes["cadence"] = chosen_timing["cadence"]
+        add_scopes = [c["scope"] for c in plan["add_capabilities"]]
+        if add_scopes or plan["prompt_changes"]:
+            schedule = self.store.get_schedule(schedule_id)
+            changes["scopes"] = sorted(set(schedule.scopes) | set(add_scopes))
+            changes["prompt"] = plan["new_prompt"]
+        result = await self.edit(schedule_id, owner=owner, changes=changes)
+        if not result["needs_approval"] and result["schedule"].state == "paused":
+            # Only the timing changed: no prompt/scope change means edit() never
+            # moves the schedule out of 'paused' on its own (edit() only flips
+            # next_run for an already-active schedule) -- resume it here so a
+            # timing-only repair really does apply and resume in one step.
+            resumed = await self.action(schedule_id, "resume", owner=owner)
+            result = {"schedule": resumed, "applied": result["applied"], "needs_approval": False,
+                      "message": f"{resumed.title} repaired and resumed."}
+        return result
 
     # -- firing --------------------------------------------------------------
     async def tick(self, now: Optional[float] = None) -> None:
