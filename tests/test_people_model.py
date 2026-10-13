@@ -535,3 +535,37 @@ def test_delete_person_also_deletes_who_merged_into_them(store):
     assert store.get_person(keep["id"]) is None
     # The merged person does not come back to life with their old role.
     assert store.get_person(merged["id"]) is None
+
+
+def test_update_person_endpoint_refuses_non_empty_scopes_for_any_person(store):
+    created = console_api.create_person_endpoint(store, {"display": "New", "role": "partner", "note": ""})
+    with pytest.raises(console_api.ValidationError):
+        console_api.update_person_endpoint(store, {"id": created["id"], "scopes": ["web"]})
+    # Refused before the store was ever touched: scopes stayed empty.
+    assert store.get_person(created["id"])["scopes"] == []
+
+
+def test_update_person_endpoint_refuses_granting_the_commander_role(store):
+    """The store's own _guard_commander_write already refuses this (commander
+    is assigned once, by the startup pin, never through an API write); this
+    confirms the console endpoint surfaces that refusal as a plain
+    ValidationError (not an uncaught PermissionError) rather than ever
+    reaching the store with a role change that could grant it."""
+    second = console_api.create_person_endpoint(store, {"display": "Someone else", "role": "", "note": ""})
+    with pytest.raises(console_api.ValidationError):
+        console_api.update_person_endpoint(store, {"id": second["id"], "role": "commander"})
+    assert "commander" not in role_names(store.get_person(second["id"])["role"])
+
+
+def test_store_itself_refuses_granting_commander_to_anyone_via_the_api(store):
+    """Direct verification of the store's own guard, per the coordinator's
+    request: the commander role is pinned once by the startup/verified-handle
+    mechanism (ensure_commander_role/commander_person_id), never grantable
+    through create_person or update_person -- even to the very first person,
+    since neither call is how commander gets pinned."""
+    with pytest.raises(PermissionError):
+        store.create_person(display="First", role="commander")
+    second = store.create_person(display="Second", role="")
+    with pytest.raises(PermissionError):
+        store.update_person(second["id"], role="commander")
+    assert "commander" not in role_names(store.get_person(second["id"])["role"])

@@ -267,11 +267,25 @@ def create_person_endpoint(store: Store, payload: Dict[str, Any]) -> Dict[str, A
 
 
 def update_person_endpoint(store: Store, payload: Dict[str, Any]) -> Dict[str, Any]:
+    """Roles carry permissions, not people: this endpoint refuses a non-empty
+    scopes for any person (there is no such thing as a per-person scope grant
+    outside a role), and refuses any change here that would add or remove the
+    locked commander role -- that membership is sacred enough that it is never
+    changed through the generic person-editor endpoint at all."""
     person_id = _required_text(payload.get("id"), "id")
+    if payload.get("scopes"):
+        raise ValidationError("A person can't be given scopes directly; only a role grants permissions.")
     changes: Dict[str, Any] = {}
     if "display" in payload:
         changes["display"] = _text(payload.get("display"), "display")
     if "role" in payload:
+        current = store.get_person(person_id)
+        if current is None:
+            raise ValidationError(f"no such person: {person_id}")
+        before = set(role_names(current.get("role")))
+        after = set(role_names(_text(payload.get("role"), "role")))
+        if ("commander" in before) != ("commander" in after):
+            raise ValidationError("The commander role can't be changed here.")
         changes["role"] = _text(payload.get("role"), "role")
     if "scopes" in payload:
         changes["scopes"] = _scopes(payload.get("scopes") or [])
