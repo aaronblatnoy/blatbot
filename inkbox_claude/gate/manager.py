@@ -2474,6 +2474,17 @@ class GateSessionManager:
         out["widened_scopes"] = wanted
         return out
 
+    def _answered_from_attached_notes(self, req: Request) -> bool:
+        """True when this request was given vault notes in its prompt (knowledge scopes
+        with a non-empty attachment), so an answer without a tool call can be real."""
+        if not any(str(sc).startswith("vault:") for sc in (req.scopes or [])):
+            return False
+        try:
+            return bool(self.vault_attachment_for(req))
+        except Exception:
+            logger.exception("[gate] could not rebuild the vault attachment for #%s", req.id)
+            return False
+
     async def _insist_it_actually_ran(self, req: Request, status: Dict[str, Any], context: str,
                                       model: Optional[str]) -> Dict[str, Any]:
         """A request exists because a tool was needed. Reporting success without having
@@ -2485,8 +2496,11 @@ class GateSessionManager:
         second refusal to act is reported as a failure rather than dressed up as a result."""
         if status.get("confirm") or not status.get("ok") or status.get("tool_calls"):
             return status
+        if self._answered_from_attached_notes(req):
+            # His own notes were attached to this run's prompt and the answer came from
+            # them: nothing needed looking up, so no tool call is the right outcome.
+            return status
         logger.warning("[gate] #%s reported success with no tool call; insisting it runs", req.id)
-        print("DEBUG insist: status=", status)
         insist = (context + "\n\n--- THIS RUN ---\nThe last attempt returned without using a tool and "
                   "said the work was already done. It was not. Whatever the record above says was "
                   "answered before, answer it again now by looking, and report what you find this "

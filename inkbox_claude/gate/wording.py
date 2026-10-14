@@ -204,6 +204,22 @@ def has_partial_findings(status: Dict[str, Any]) -> bool:
     return bool(final) and final != "(no status text)"
 
 
+def run_own_explanation(status: Dict[str, Any]) -> str:
+    """What a run said for itself when it stopped on its own: no exception, no
+    refused tool, no limit -- it ran, could not go on, and explained. Its closing
+    text, whole, with markdown marks and the STATUS line removed. "" otherwise."""
+    if status.get("error") or _classify(status) != "other":
+        return ""
+    final = str(status.get("final_status") or "").strip()
+    if not final or final == "(no status text)":
+        return ""
+    lines = [ln for ln in final.splitlines() if not ln.strip().upper().startswith("STATUS:")]
+    text = "\n".join(lines).strip()
+    text = re.sub(r"[*_`#]+", "", text)
+    text = re.sub(r"\n{3,}", "\n\n", text)
+    return text.strip()
+
+
 def failure_message(summary: str, status: Dict[str, Any]) -> str:
     """The whole message a person receives for a failed request: never
     'That failed.', never an exception or SDK string, never markdown."""
@@ -218,6 +234,11 @@ def failure_message(summary: str, status: Dict[str, Any]) -> str:
         else:
             clause = "I've hit a usage limit and can't run anything right now."
         return f"{clause} I'll need you to try again after that."
+    own = run_own_explanation(status)
+    if own:
+        # The run itself stopped and said why (a name it could not match, a detail
+        # it needs). That account is the answer; "something broke" would hide it.
+        return own
     msg = f"I couldn't finish {summary}: {failure_in_words(status)}. {next_step(status)}"
     if has_partial_findings(status):
         msg += ' I have part of it; say "send what you have".'

@@ -609,3 +609,17 @@ def test_attachment_falls_back_to_the_scope_when_no_choice_was_kept(tmp_path, mo
     m, _sent, _root = _manager_with_vault(tmp_path, monkeypatch)
     block = m.vault_attachment_for(_approved(["vault:areas/garden-shed"], request_id=99))
     assert "The roof was patched in spring." in block and "Repainted the door blue." in block
+
+
+def test_an_answer_from_attached_notes_is_not_failed_for_using_no_tool(tmp_path, monkeypatch):
+    import asyncio
+    m, _sent, _root = _manager_with_vault(tmp_path, monkeypatch)
+    req = _approved(["vault:areas/garden-shed"], request_id=11)
+    status = {"ok": True, "tool_calls": [], "summary": "The roof was patched in spring."}
+    out = asyncio.run(m._insist_it_actually_ran(req, status, "ctx", None))
+    assert out is status and out["ok"] is True
+
+
+def test_no_notes_attached_still_insists(tmp_path, monkeypatch):
+    m, _sent, _root = _manager_with_vault(tmp_path, monkeypatch)
+    assert m._answered_from_attached_notes(_approved(["web"], request_id=12)) is False

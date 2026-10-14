@@ -362,3 +362,21 @@ def test_progress_reply_failed_branch_uses_plain_title_not_raw_summary(tmp_path)
     reply = s._progress_reply(req)
     assert handoff_summary not in reply
     assert "live phone call with an unidentified caller" not in reply
+
+
+def test_a_run_that_stopped_and_explained_is_reported_in_its_own_words():
+    status = {"ok": False, "tool_calls": ["mcp__host__telegram_find_chats"], "denied": [],
+              "final_status": 'No chat named "Harbor" on Telegram.\n\n**Missing**: the actual name of the chat. '
+                              'Closest: "Harbor Crew Chat". Please confirm which one.\n\n'
+                              'STATUS: FAILED — could not find a chat matching "Harbor"'}
+    msg = wording.failure_message("the request from the 11:24 PM call", status)
+    assert msg == ('No chat named "Harbor" on Telegram.\n\nMissing: the actual name of the chat. '
+                   'Closest: "Harbor Crew Chat". Please confirm which one.')
+    assert "something broke" not in msg and "try again" not in msg and "STATUS" not in msg
+
+
+def test_an_exception_still_gets_the_plain_failure_wording():
+    status = {"ok": False, "error": "Failed to decode JSON: JSON message exceeded maximum buffer size of 1048576 bytes...",
+              "final_status": "partial notes"}
+    assert wording.run_own_explanation(status) == ""
+    assert "ran out of room" in wording.failure_message("the task", status)
