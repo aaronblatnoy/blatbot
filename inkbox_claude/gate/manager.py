@@ -240,7 +240,40 @@ class GateSession:
     def _sender(self) -> str:
         return str((self.reply_meta or {}).get("sender") or self.chat_id)
 
+    def _known_person(self) -> Dict[str, Any]:
+        """Who the sender is in Aaron's people records, matched on any handle the message
+        carries (phone, email, Telegram id), the same match that decides their permissions.
+        Empty when no record matches, or when the handles point at two different people."""
+        if self.is_approver():
+            return {"person": "Aaron Blatnoy", "role": "owner"}
+        try:
+            found = self.m.store.resolve_handles(self.handles())
+        except Exception:
+            logger.exception("[gate] could not look up who the sender is")
+            return {}
+        if found.get("conflict") or not str(found.get("person") or "").strip():
+            return {}
+        return {"person": str(found["person"]).strip(), "role": str(found.get("role") or "").strip()}
+
     def _sender_name(self) -> str:
+        """The sender's name: the person on record first, whatever the channel calls them
+        ("SP", a bare number, an email display name) only when nobody on record matches."""
+        known = self._known_person().get("person")
+        return known or self._channel_name()
+
+    def _sender_label(self) -> str:
+        """Who the sender is, said plainly enough that a run never has to guess."""
+        if self.is_approver():
+            return "Aaron Blatnoy (the owner)"
+        known = self._known_person()
+        if known:
+            return known["person"] + (f" ({known['role']})" if known.get("role") else "")
+        name = self._channel_name()
+        shown = f"{name}, " if name else ""
+        return f"{shown}someone who is not in Aaron's people records"
+
+    def _channel_name(self) -> str:
+        """The name the channel itself attached to the message."""
         c = (self.reply_meta or {}).get("contact") or {}
         if isinstance(c, dict):
             name = str(c.get("name") or "").strip()
@@ -269,7 +302,7 @@ class GateSession:
     def person(self) -> Person:
         """The sender as one person: contact id plus every email/phone/name we know."""
         c = (self.reply_meta or {}).get("contact")
-        p = Person.from_contact(c if isinstance(c, dict) else None, self._sender(), self._sender_name())
+        p = Person.from_contact(c if isinstance(c, dict) else None, self._sender(), self._channel_name())
         self.m.store.remember_person(p)
         return p
 
@@ -279,7 +312,7 @@ class GateSession:
         meta = self.reply_meta or {}
         c = meta.get("contact") if isinstance(meta.get("contact"), dict) else {}
         out = [self._sender(), str(meta.get("telegram_user_id") or ""), str((c or {}).get("id") or ""),
-               str((c or {}).get("name") or ""), self._sender_name()]
+               str((c or {}).get("name") or ""), self._channel_name()]
         tg = str(meta.get("telegram_user_id") or "")
         if self.mode == "telegram":
             # Telegram stamps the numeric id; nothing else on a Telegram message is proof of
@@ -514,7 +547,7 @@ class GateSession:
     def build_task_prompt(self, body: str, history: List[Dict[str, Any]], task: Dict[str, Any]) -> str:
         """The prompt Claude runs: the sender's own words, the recent conversation, and
         the task's ledger. No model paraphrases the request. Claude reads the source."""
-        who = "Aaron Blatnoy (the owner)" if self.is_approver() else (self._sender_name() or self._sender())
+        who = self._sender_label()
         addr = self._sender()
         # Whole messages, not clipped ones: a half-read line is worse than a missing one,
         # and the window matches what the judgments upstream were given.
