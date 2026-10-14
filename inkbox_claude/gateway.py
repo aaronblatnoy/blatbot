@@ -1700,10 +1700,26 @@ class InkboxGateway:
             return self.cfg.signing_key
         return os.getenv(f"INKBOX_WEBHOOK_SECRET_{provider_name.upper()}", "")
 
+    def _telegram_known_name(self, u: Dict[str, Any]) -> Dict[str, Any]:
+        """The sender as Blatbot knows them. A Telegram display name is whatever the person
+        typed ("SP"); when their Telegram id is linked to a person, that person's name is who
+        is talking, everywhere the message goes next."""
+        store = getattr(self.sessions, "store", None) if self.sessions else None
+        from_id = str(u.get("from_id") or "").strip()
+        if store is None or not from_id:
+            return u
+        try:
+            person = str(store.resolve_handles([f"telegram:{from_id}"]).get("person") or "").strip()
+        except Exception as exc:
+            logger.warning("[bridge] could not resolve telegram sender %s: %s", from_id, exc)
+            return u
+        return dict(u, name=person) if person else u
+
     async def _telegram_group_maybe(self, u: Dict[str, Any]) -> None:
         """A group message that did not name the bot. Ask Jev whether it is the bot's to
         answer; stay quiet unless it says yes. Silence is the default: an undecided or
         failed judgment says nothing rather than barging into the humans' conversation."""
+        u = self._telegram_known_name(u)
         chat_id = u["chat_id"]
         picker = getattr(self.sessions, "task_picker", None) if self.sessions else None
         if picker is None:
@@ -1775,7 +1791,15 @@ class InkboxGateway:
             for row in store.history(chat_id, limit):
                 if row.get("kind") != "inbound":
                     continue
-                head = str(row.get("text") or "").split(":", 1)[0].strip()
+                text = str(row.get("text") or "")
+                head = ""
+                if text.startswith("[telegram group:"):
+                    frame = text.partition("]")[0]
+                    for part in frame.split("|"):
+                        if part.strip().startswith("from:"):
+                            head = part.split(":", 1)[1].strip()
+                else:
+                    head = text.split(":", 1)[0].strip()
                 if head and len(head) <= 40 and "\n" not in head and head not in names:
                     names.append(head)
         except Exception as exc:
@@ -1811,6 +1835,7 @@ class InkboxGateway:
 
     async def _telegram_dispatch(self, u: Dict[str, Any]) -> None:
         """Hand one Telegram message to its session, with the group framing applied."""
+        u = self._telegram_known_name(u)
         chat_id, from_id, name, text = u["chat_id"], u["from_id"], u["name"], u["text"]
         meta = {"sender": f"telegram:{from_id}", "to": chat_id, "telegram_chat_id": chat_id,
                 "telegram_user_id": from_id, "contact": {"name": name} if name else {},
