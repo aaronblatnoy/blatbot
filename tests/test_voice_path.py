@@ -396,3 +396,50 @@ def test_voice_dedupe_hit_says_got_it_not_the_models_acknowledgement(tmp_path):
 
     assert out == "Got it."
     assert "On it, deploying now." not in out
+
+
+def test_voice_trust_off_a_call_requests_result_reaches_the_owner_once_first_person(tmp_path):
+    """Item C1 (dormant but real): with voice NOT trusted as the approver, a request
+    born from a call on Aaron's own number is approved later on text, by which time
+    the session for its (the call's) chat_id no longer reads as voice or as the
+    owner. The result still reaches him once, on his own text channel, in the first
+    person -- never the "[Blatbot #N ...]" framing a stranger's request gets, and
+    never a second, garbage send through the stale call session."""
+    m, sent = phone_manager(tmp_path, trust=False, active=False)
+    t = m.store.create_task("deploy the app")
+    req = m.store.create_request(chat_id="p1", sender=AARON_PHONE, sender_name="Caller", mode="voice",
+                                 subject="", original_message="deploy the app", summary="deploy the app",
+                                 scopes=["web"], prompt="deploy the app", state="approved", task_id=t["id"])
+    m.executor.result = {"ok": True, "summary": "Deployed successfully.",
+                         "tool_calls": ["mcp__coolify__deploy"], "raw": "x"}
+    # The call session's mode has long since reset to a text default by now; it is
+    # never put back into "voice" for this request's approval/execution.
+    async def go():
+        await m.execute(req)
+    asyncio.run(go())
+
+    answers = [row for row in sent if row[1] and "Deployed successfully" in row[1]]
+    assert len(answers) == 1, f"expected exactly one delivery, got {answers}"
+    assert "[Blatbot #" not in answers[0][1]
+    assert answers[0][2] == "imessage"
+
+
+def test_voice_trust_on_still_delivers_normally(tmp_path):
+    """With GATE_VOICE_TRUST_APPROVER on, is_aaron_on_phone()/is_approver() already
+    identify the owner live; item C1's request-shaped fallback changes nothing about
+    normal delivery in that case."""
+    m, sent = phone_manager(tmp_path, trust=True, active=False)
+    t = m.store.create_task("deploy the app")
+    req = m.store.create_request(chat_id="p1", sender=AARON_PHONE, sender_name="Caller", mode="voice",
+                                 subject="", original_message="deploy the app", summary="deploy the app",
+                                 scopes=["web"], prompt="deploy the app", state="approved", task_id=t["id"])
+    m.executor.result = {"ok": True, "summary": "Deployed successfully.",
+                         "tool_calls": ["mcp__coolify__deploy"], "raw": "x"}
+
+    async def go():
+        await m.execute(req)
+    asyncio.run(go())
+
+    answers = [row for row in sent if row[1] and "Deployed successfully" in row[1]]
+    assert len(answers) == 1, f"expected exactly one delivery, got {answers}"
+    assert "[Blatbot #" not in answers[0][1]

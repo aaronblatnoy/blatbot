@@ -2019,8 +2019,22 @@ class GateSessionManager:
     def _is_owner_request(self, req: Request) -> bool:
         """Did this come from the person the assistant works for? His own requests send in
         his name, so he reads anything that would go out. A request from anyone else was
-        already shown to him and approved before it ran, and its answer goes back to them."""
-        return req.chat_id == OWNER_THREAD or req.chat_id in self._approver_chat_ids()
+        already shown to him and approved before it ran, and its answer goes back to them.
+
+        Item C1: judged from the REQUEST's own identity (its chat_id, and its mode plus
+        sender for a call), never from whatever mode the live session for that chat_id
+        happens to be in right now. A session's mode is a transient, per-turn value --
+        set to "voice" only for the duration of a call and restored to a text default
+        once it ends -- so by the time an approved call request finishes (voice not
+        trusted as the approver, so the approval itself happened later, on text), the
+        session for its chat_id no longer reads as voice, or as the owner, at all. This
+        grants no power: is_approver()/GATE_VOICE_TRUST_APPROVER already decided, at
+        request-creation time, whether the request ran at all -- this only decides how
+        its result is worded and where it goes once it is already finished."""
+        if req.chat_id == OWNER_THREAD or req.chat_id in self._approver_chat_ids():
+            return True
+        return bool(req.mode == "voice" and self.approver_phone
+                   and _digits(req.sender) == _digits(self.approver_phone))
 
     async def ask_confirmation(self, req: Request, status: Dict[str, Any]) -> None:
         """A destructive call is waiting. Park the request as pending with the exact call
@@ -2766,10 +2780,36 @@ class GateSessionManager:
             if told_already:
                 return wording.same_limit_message(status)
             return message
-        from_aaron = session.is_approver() or session.is_aaron_on_phone() or req.chat_id in self._approver_chat_ids()
+        from_aaron = self._is_owner_request(req)
+        # Item C1: a request born from a call by the owner's own number, with voice not
+        # trusted as the approver, is approved later on text -- by the time this runs,
+        # the session for req.chat_id (the call's own chat_id) no longer reads as a live
+        # call or as the owner (self.mode has long since reset). Its result still has to
+        # reach him, once, on a channel that actually exists: his own text channel,
+        # first person, never the "[Blatbot #N ...]" framing a stranger's request gets,
+        # and never a send through this stale session (which has no voice channel open
+        # any more and may hold a bare contact id instead of a real one).
+        from_owner_call = (from_aaron and req.mode == "voice"
+                          and req.chat_id not in self._approver_chat_ids() and req.chat_id != OWNER_THREAD)
         note = f"Task #{req.id} {outcome}: {req.summary}\nResult:\n{result}"
         # Messages live on the person's record, which for the owner spans every surface.
         meanwhile = self.store.inbound_since(self.get(req.chat_id).record_id, req.created_at)
+        if from_owner_call:
+            # Delivered once, directly, in the first person (wording.py's own text
+            # already reads that way), never through this stale session's
+            # mode-dependent send_to_sender and never with the "[Blatbot #N ...]"
+            # third-person framing a stranger's request gets.
+            record_id = self.get(req.chat_id).record_id
+            self.store.add_message(record_id, "system", note)
+            already = req.inbound_id and "answer" in self.store.responses_to(req.inbound_id)
+            if not already:
+                text_out = wording.same_limit_message(status) if (told_already and not ok) else message
+                await self.send_to_approver(text_out)
+                if req.inbound_id:
+                    self.store.add_message(record_id, "outbound", text_out, "imessage",
+                                           reply_to=req.inbound_id, role="answer")
+            session.typing_stop()
+            return ""
         if from_aaron:
             if not ok:
                 # A failed request's message is always wording.py's own text, on every
