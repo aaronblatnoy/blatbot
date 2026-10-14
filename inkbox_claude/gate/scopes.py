@@ -5,7 +5,7 @@ applied by Claude Code on top of every scope and cannot be widened here."""
 from __future__ import annotations
 
 import os
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Optional
 
 # Which Google accounts the workspace tools act as. Set in the environment; the
 # defaults are placeholders so no real address lives in the source.
@@ -385,3 +385,14 @@ TOOL_PURPOSE: Dict[str, str] = {
     "mcp__sjba-admin__sjba_list_events": "SJBA EVENTS listed on the website.",
     "mcp__sjba-admin__sjba_list_upcoming_events": "SJBA UPCOMING EVENTS on the website.",
 }
+
+
+def scope_for_tool(tool: str) -> Optional[str]:
+    """The one permission to ask for when this tool was refused. Several scopes can carry
+    the same tool (every notes folder carries the notes search, for one); asking for all
+    of them is noise. A whole-system scope beats a folder-level one, and among those the
+    narrowest, so the ask is the smallest grant that lets the tool run."""
+    owners = [name for name, spec in SCOPES.items() if tool in (spec.get("tools") or [])]
+    if not owners:
+        return None
+    return min(owners, key=lambda n: (":" in n, len(SCOPES[n].get("tools") or []), n))

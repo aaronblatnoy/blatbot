@@ -71,10 +71,7 @@ def _reset_time(text: str) -> Optional[str]:
 
 
 def _tool_scope(tool: str) -> Optional[str]:
-    for name, spec in _scopes.SCOPES.items():
-        if tool in (spec.get("tools") or []):
-            return name
-    return None
+    return _scopes.scope_for_tool(tool)
 
 
 def _system_for_tool(tool: str) -> Optional[str]:

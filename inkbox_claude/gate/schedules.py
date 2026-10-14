@@ -19,7 +19,7 @@ from typing import Any, Dict, List, Optional
 from zoneinfo import ZoneInfo
 
 from . import cadence as cadence_module
-from .scopes import SCOPES, tools_for
+from .scopes import SCOPES, scope_for_tool, tools_for
 from .store import Request, Schedule, sha256
 
 logger = logging.getLogger(__name__)
@@ -307,7 +307,8 @@ class ScheduleService:
         await self.manager.send_schedule_notice(schedule, text)
 
     def _scopes_for_tool(self, tool: str) -> List[str]:
-        return [name for name, info in SCOPES.items() if tool in (info.get("tools") or [])]
+        best = scope_for_tool(tool)
+        return [best] if best else []
 
     def _run_row_for_request(self, schedule_id: int, request_id: Optional[int]) -> Optional[Dict[str, Any]]:
         if request_id is None:
