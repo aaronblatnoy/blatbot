@@ -731,14 +731,38 @@ class GateSession:
                         self.chat_id, res["p"], out.request.summary)
             out.request = None
 
+    def _standing_scopes(self) -> List[str]:
+        """Everything this sender may use without asking: every tool scope for the owner,
+        their role's scopes for a member with one, nothing for anyone else (who still
+        goes through the picker and the owner's approval)."""
+        if self.is_approver():
+            return [sc for sc in SCOPES if not sc.startswith("vault:")]
+        try:
+            role_scopes = list(self.trust().get("scopes") or [])
+        except Exception:
+            logger.exception("[gate %s] could not read the sender's role", self.chat_id)
+            return []
+        return [sc for sc in SCOPES if sc in role_scopes]
+
     async def jev_scopes(self, out: RouterOutput, strict: bool = False,
                          owner_generous: bool = True) -> None:
         """Replace the router's scope list with Jev's judgment when it yields a
         non-empty set. Empty or unavailable: the router's list stands. Code never
         lets this widen beyond the fixed scope map, since pydantic already
         validated names and the executor only ever grants mapped tools."""
+        if out.request is None:
+            return
+        standing = self._standing_scopes()
+        if self.is_approver():
+            # The owner may have anything, never guessed from the wording of the ask: a
+            # guess that leaves out the one system the work needed is a failed run for nothing.
+            out.request.scopes = standing
+            logger.info("[gate %s] scopes granted (owner, everything): %s", self.chat_id, standing)
+            return
         picker = self.m.task_picker
-        if picker is None or out.request is None:
+        if picker is None:
+            if standing:
+                out.request.scopes = list(dict.fromkeys(list(out.request.scopes) + standing))
             return
         res = {"scopes": None}
         if strict and hasattr(picker, "judge_scopes_tree"):
@@ -770,7 +794,13 @@ class GateSession:
         if not chosen:
             logger.info("[gate %s] scope judgment undecided (%s); keeping router scopes %s",
                         self.chat_id, res.get("reason"), out.request.scopes)
+            if standing:
+                out.request.scopes = list(dict.fromkeys(list(out.request.scopes) + standing))
             return
+        if standing:
+            # A member with a role has everything that role allows on every run. What the
+            # judgment adds beyond the role is the part that still waits for the owner.
+            chosen = list(dict.fromkeys(list(chosen) + standing))
         if set(chosen) != set(out.request.scopes):
             logger.info("[gate %s] scopes: router %s -> jev %s", self.chat_id, out.request.scopes, chosen)
         out.request.scopes = chosen
@@ -2364,7 +2394,7 @@ class GateSessionManager:
         if not (is_latest or (now - req.updated_at) <= 1800):
             return False
         approved = self._retry_approval(session, req)
-        new_req = self.retry_request(req, approved=approved)
+        new_req = self.retry_request(req, approved=approved, inbound_id=session.inbound_id)
         if new_req is None:
             # The request being retried is itself still approved/running (a race:
             # it had not actually finished failing when this phrase arrived). Never
@@ -2407,7 +2437,7 @@ class GateSessionManager:
                 f"What should it be allowed to do: {schedprop.short_labels(denied)}?", role="answer")
             return True
         new_scopes = [sc for sc in mapped if sc not in req.scopes]
-        grown = self.retry_request(req, approved=True)
+        grown = self.retry_request(req, approved=True, inbound_id=session.inbound_id)
         if grown is None:
             # Already running again (a race); nothing left to widen or start.
             return True
@@ -2461,7 +2491,7 @@ class GateSessionManager:
 
     async def _grant_blanket_and_retry(self, session: "GateSession", req: Request) -> None:
         new_scopes = self._blanket_grant_scopes(req, req.status or {})
-        grown = self.retry_request(req, approved=True)
+        grown = self.retry_request(req, approved=True, inbound_id=session.inbound_id)
         if grown is None:
             # Already running again (a race); nothing left to widen or start.
             return
@@ -2712,7 +2742,8 @@ class GateSessionManager:
                         req.id, len(attachment.included), len(attachment.overflow))
         return attachment.block
 
-    def retry_request(self, req: Request, *, approved: bool) -> Optional[Request]:
+    def retry_request(self, req: Request, *, approved: bool,
+                      inbound_id: Optional[int] = None) -> Optional[Request]:
         """Re-create a failed request exactly as it was asked: the same prompt,
         scopes and task, through the store's own create_request_once -- never a
         shortcut around approval. The caller recognizes "try again" on an inbound
@@ -2742,7 +2773,10 @@ class GateSessionManager:
             chat_id=req.chat_id, sender=req.sender, sender_name=req.sender_name, mode=req.mode,
             subject=req.subject, original_message=req.original_message, summary=req.summary,
             scopes=list(req.scopes), prompt=req.prompt, state="approved" if approved else "pending",
-            task_id=task_id, inbound_id=req.inbound_id, bypass_dedupe=True)
+            # A retry is started by a new message ("try again", "let it ..."): its result
+            # answers that message. Tied to the original ask, which already got the
+            # failure, the result would be dropped as a second answer.
+            task_id=task_id, inbound_id=inbound_id or req.inbound_id, bypass_dedupe=True)
         return new_req
 
     async def execute(self, req: Request, notify: bool = True) -> str:

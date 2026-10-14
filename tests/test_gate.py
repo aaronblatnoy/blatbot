@@ -926,9 +926,7 @@ def test_jev_scopes_replace_router_scopes_and_executor_gets_them(tmp_path):
         await asyncio.sleep(0.05)
     asyncio.run(go())
     r = m.store.get_request(1)
-    assert set(r.scopes) == {"tamid_drive_write", "tamid_drive_read"}
-    assert m.task_picker.scope_calls[-1]["router_scopes"] == ["calendar"]
-    assert "calendar" not in m.task_picker.scope_calls[-1]["scopes"] or True  # all scopes offered
+    assert set(r.scopes) == set(sc for sc in gm.SCOPES if not sc.startswith("vault:"))  # the owner may use anything; nothing is guessed
 
 
 def test_jev_scopes_undecided_keeps_router_scopes(tmp_path):
@@ -1014,7 +1012,7 @@ def test_jev_first_builds_request_from_task_not_router(tmp_path):
     # The router was told the decision before writing its reply, and no router hint reached Jev.
     assert m.router.calls[0]["action"] is True and m.router.calls[0]["action_task"] == t["title"]
     assert p.calls[-1]["router_hint"] is None
-    assert p.scope_calls[-1]["router_scopes"] is None
+    assert set(r.scopes) == set(sc for sc in gm.SCOPES if not sc.startswith("vault:"))  # the owner may use anything; nothing is guessed
     assert any("On it." == s[1] for s in sent)
 
 
@@ -1041,7 +1039,7 @@ def test_jev_first_new_task_titled_by_router_scopes_fallback_when_undecided(tmp_
     asyncio.run(go())
     r = m.store.get_request(1)
     assert r.summary == "Book lunch with Sam Rivera"
-    assert r.scopes == ["web"]                              # undecided: the read-only web scope, never empty
+    assert set(r.scopes) == set(sc for sc in gm.SCOPES if not sc.startswith("vault:"))  # the owner may use anything; nothing is guessed
 
 
 def test_jev_first_stranger_request_waits_for_aaron(tmp_path):
@@ -1502,7 +1500,7 @@ def test_owner_requests_get_jev_scopes_plus_likely_writes_only(tmp_path):
         await asyncio.sleep(0.05)
     asyncio.run(go())
     scopes = set(m.store.get_request(1).scopes)
-    assert scopes == {"calendar", "tamid_drive_write"}
+    assert scopes == set(sc for sc in gm.SCOPES if not sc.startswith("vault:"))  # the owner may use anything; nothing is guessed
 
 
 def test_a_request_nobody_could_act_on_asks_instead_of_running(tmp_path):
@@ -1643,8 +1641,8 @@ def test_a_run_stopped_for_want_of_a_scope_gets_it_once(tmp_path):
         await m.get("aaron").handle_inbound("when is deliverable 2 due", "imessage", approver_meta())
         await asyncio.sleep(0.2)
     asyncio.run(go())
-    assert len(runs) == 2, "it should be given what it said it needed and run again"
-    assert "brightspace_read" in runs[1]
+    assert len(runs) == 1, "the owner's run already has everything, so it never hits the wall"
+    assert "brightspace_read" in runs[0]
     assert m.store.get_request(1).state == "done"
 
 
@@ -2051,3 +2049,30 @@ def test_second_usage_limit_failure_on_text_says_same_limit_not_nothing(tmp_path
     same_limit = [x for x in sent if "same limit" in x[1].lower()]
     assert len(same_limit) == 1, f"expected the short suppressed line, got {sent[-3:]}"
     assert "3:10pm" in same_limit[0][1]
+
+
+def test_a_member_runs_with_everything_their_role_allows(tmp_path):
+    """A member with a role gets the whole role on every run, not a guess at part of it."""
+    m, sent = make_manager(tmp_path)
+    m.store.set_role("colleague", ["calendar", "contacts"], "works with Aaron")
+    m.store.set_trust("cand@nyu.edu", person="Cand Idate", role="colleague")
+    m.router.next = RouterOutput(reply="On it.", task="new", task_title="x",
+                                 request=RouterRequest(prompt="book", scopes=["calendar"], summary="book"))
+    asyncio.run(m.get("c1").handle_inbound("book tuesday", "email", stranger_meta()))
+    r = m.store.get_request(1)
+    assert set(r.scopes) == {"calendar", "contacts"}
+    assert r.state in ("approved", "running", "done")
+
+
+def test_a_retry_answers_the_message_that_started_it(tmp_path):
+    m, sent = make_manager(tmp_path)
+    t = m.store.create_task("retry")["id"]
+    first = m.store.add_message("aaron", "inbound", "what is due", "imessage")
+    req, _ = m.store.create_request_once(chat_id="aaron", sender="+15550100001", sender_name="", mode="imessage",
+                                         subject="", original_message="what is due", summary="due",
+                                         scopes=["web"], prompt="p", state="approved", task_id=t,
+                                         inbound_id=first)
+    m.store.set_state(req.id, "failed")
+    second = m.store.add_message("aaron", "inbound", "try again", "imessage")
+    again = m.retry_request(m.store.get_request(req.id), approved=True, inbound_id=second)
+    assert again.inbound_id == second
