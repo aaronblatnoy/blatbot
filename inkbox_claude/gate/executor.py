@@ -36,6 +36,24 @@ from .store import Request, sha256
 
 logger = logging.getLogger(__name__)
 
+QUOTA_COOLDOWN_SECONDS = 30 * 60
+_QUOTA_RESET_RE = re.compile(
+    r"resets?\s+(\d{1,2}(?::\d{2})?\s*(?:am|pm)?(?:\s*\([^)]*\))?)", re.I)
+
+
+def is_quota_error(text: str) -> bool:
+    """Whether an executor exception says Claude Code is temporarily unavailable."""
+    low = str(text or "").lower()
+    return (("hit your" in low and "limit" in low)
+            or "rate limit" in low
+            or "overloaded" in low)
+
+
+def quota_reset_time(text: str) -> Optional[str]:
+    """Return the provider's reset time verbatim, when one was supplied."""
+    match = _QUOTA_RESET_RE.search(str(text or ""))
+    return match.group(1).strip().rstrip(".") if match else None
+
 
 def vault_prefixes_for_scopes(scopes: List[str]) -> Optional[List[str]]:
     """The vault-relative path prefixes a run's granted scopes allow the vault
@@ -185,6 +203,16 @@ class Executor:
         self.timeout_s = timeout_s
         # Addresses/conversations the gateway itself replies to (the owner's).
         self.protected = list(protected or [])
+        self._quota_until: Optional[float] = None
+        self._quota_reset_text: Optional[str] = None
+
+    def quota_state(self) -> Dict[str, Any]:
+        """Current in-process Claude Code quota cooldown, for health reporting."""
+        if self._quota_until is not None and self._quota_until > time.time():
+            return {"state": "exhausted", "reset_time": self._quota_reset_text}
+        self._quota_until = None
+        self._quota_reset_text = None
+        return {"state": "ok"}
 
     allow_send = False        # set for one run, after the owner has read the draft and said yes
     held_send: Optional[Dict[str, Any]] = None   # the call that was stopped, for the gate to show him
@@ -206,6 +234,19 @@ class Executor:
         used, and no task ledger is added, for an ordinary request."""
         if sha256(req.prompt) != req.prompt_sha256:
             return {"ok": False, "error": "prompt hash mismatch; refused to run", "tool_calls": []}
+        quota = self.quota_state()
+        if quota["state"] == "exhausted":
+            now = time.time()
+            message = "Claude Code quota is exhausted; skipping launch."
+            return {
+                "ok": False, "quota_error": True, "reset_time": quota.get("reset_time"),
+                "error": message, "summary": message, "final_status": message,
+                "tool_calls": [], "tool_results": [], "denied": [], "held": False,
+                "raw": "", "steps": [], "stop": False, "result_line": "", "note": "",
+                "changed": None, "blocked": False, "needs": "",
+                "engine": f"claude:{model or self.model}", "started_at": now,
+                "finished_at": now, "cost_usd": None,
+            }
         started_at = time.time()
         vault_prefixes = vault_prefixes_for_scopes(req.scopes)
         allowed = tools_for(req.scopes)
@@ -381,11 +422,18 @@ class Executor:
         except Exception as exc:  # noqa: BLE001
             logger.exception("executor failed for request %s", req.id)
             finished_at = time.time()
-            return {"ok": False, "error": str(exc), "tool_calls": tool_calls, "raw": "\n".join(texts),
+            error = str(exc)
+            quota_error = is_quota_error(error)
+            reset_time = quota_reset_time(error) if quota_error else None
+            if quota_error:
+                self._quota_until = finished_at + QUOTA_COOLDOWN_SECONDS
+                self._quota_reset_text = reset_time
+            return {"ok": False, "error": error, "tool_calls": tool_calls, "raw": "\n".join(texts),
                     "stop": False, "result_line": "", "final_status": "", "note": "",
                     "denied": [{"tool": d["tool"], "reason": d.get("denied", "scope")} for d in denied_steps],
                     "held": bool(self.held_send or held_destructive), "tool_results": tool_results,
-                    "started_at": started_at, "finished_at": finished_at, "cost_usd": None}
+                    "started_at": started_at, "finished_at": finished_at, "cost_usd": None,
+                    **({"quota_error": True, "reset_time": reset_time} if quota_error else {})}
 
         finished_at = time.time()
         raw = "\n".join(texts).strip()

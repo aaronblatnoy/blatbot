@@ -160,6 +160,8 @@ def failure_category(status: Dict[str, Any]) -> str:
 def usage_limit_reset_text(status: Dict[str, Any]) -> Optional[str]:
     """The reset time exactly as a usage-limit error gave it (e.g. "3:10pm
     (America/New_York)"), or None when the error named no reset time."""
+    if status.get("reset_time"):
+        return str(status["reset_time"])
     text = f"{status.get('error') or ''} {status.get('final_status') or ''}"
     return _reset_time(text)
 

@@ -1112,11 +1112,10 @@ class GateSession:
                 # Item A5: checking for the fold BEFORE calling decide() here would save
                 # a model round on a certain dedupe hit, but it cannot be done safely:
                 # the running_for_thread check just above already covers every case
-                # where create_request_once's own dedupe (same chat_id AND sender,
-                # approved/running, within the window) would also fire -- that check
-                # is thread-wide (any sender), this one is sender-scoped, so whenever
-                # it would hit, running_for_thread already folded this fragment through
-                # the branch above and returned. The only way create_request_once's
+                # where create_request_once's content-based dedupe would also fire --
+                # running_for_thread is broader while a request remains open, so it has
+                # already folded this fragment through the branch above and returned.
+                # The only way create_request_once's
                 # dedupe still fires below is a race in the time decide() itself takes
                 # (another fragment's request lands mid-call) -- a window too narrow to
                 # pre-check meaningfully, so the model round still happens; only the
@@ -1147,9 +1146,8 @@ class GateSession:
                     scopes=out.request.scopes, prompt=out.request.prompt,
                     state="approved" if approver else "pending", task_id=task["id"], inbound_id=self.inbound_id)
                 if not created:
-                    # Another fragment of this same ask, from this same caller, already
-                    # has a request approved or running on this thread within the dedupe
-                    # window: never execute a second run of it, and never treat this
+                    # Another copy of this same ask already has a recent request on this
+                    # thread: never execute a second run of it, and never treat this
                     # fragment as having just created or widened anything.
                     logger.info("[gate %s] voice fragment deduped onto existing request #%s; "
                                 "not running it a second time", self.chat_id, req.id)
@@ -1421,10 +1419,9 @@ class GateSession:
             inbound_id=self.inbound_id,
         )
         if not created:
-            # Another message from this same sender on this thread already has a
-            # request approved or running within the dedupe window: the ack for a
-            # second one is never sent (there is no second run to acknowledge), it
-            # is never executed again, and its scopes are never widened -- all three
+            # Another copy of this ask on this thread already has a recent request:
+            # its ack is never sent, it is never executed again, and its scopes are
+            # never widened -- all three
             # belong to whichever turn actually created the row this one found.
             logger.info("[gate %s] request deduped onto #%s for sender %s; not acknowledging or running again",
                         self.chat_id, req.id, self._sender())
@@ -2605,6 +2602,8 @@ class GateSessionManager:
             status = await self.executor.run(req, context=context, model=model,
                                              from_owner=_owner_request(self, req),
                                              **run_kwargs)
+            if status.get("quota_error"):
+                return await self._run_quota_fallback(req, context, status)
             status = await self._grant_what_it_asked_for(req, status, context, model)
             return await self._insist_it_actually_ran(req, status, context, model)
         status = await self.jev_agent.run(req, context=context)
@@ -2629,9 +2628,34 @@ class GateSessionManager:
         findings = status.get("raw") or ""
         fallback = await self.executor.run(req, context=context, prior_work=findings,
                                            from_owner=_owner_request(self, req))
+        if fallback.get("quota_error"):
+            return await self._run_quota_fallback(req, context, fallback)
         fallback["escalated"] = True
         fallback["jev_attempt"] = {k: status.get(k) for k in ("error", "tool_calls", "jev_calls", "prose_calls", "seconds", "steps", "raw")}
         return fallback
+
+    async def _run_quota_fallback(self, req: Request, context: str,
+                                  quota_status: Dict[str, Any]) -> Dict[str, Any]:
+        """Use the always-constructed Jev caller while Claude Code is cooling down."""
+        if os.getenv("TYPESAFE_API_KEY") and getattr(self, "caller", None) is not None:
+            try:
+                status = await self.caller.run(req, context=context)
+                if status.get("ok") or status.get("tool_calls"):
+                    status["quota_fallback"] = True
+                    return status
+            except Exception:  # noqa: BLE001
+                logger.exception("[gate] jev quota fallback failed for request #%s", req.id)
+        reset_time = quota_status.get("reset_time")
+        when = f" until {reset_time}" if reset_time else " until it resets"
+        message = f"Blatbot's model quota is exhausted{when}; try again after that."
+        return {
+            **quota_status,
+            "ok": False,
+            "quota_error": True,
+            "error": message,
+            "summary": message,
+            "final_status": message,
+        }
 
     SLOW_ACK_AFTER_S = 7.0      # the default; the live value is read per run below
 

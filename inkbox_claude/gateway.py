@@ -1633,7 +1633,11 @@ class InkboxGateway:
     # ------------------------------------------------------------------
 
     async def _handle_health(self, request: "web.Request") -> "web.Response":
-        return web.json_response({"ok": True, "identity": self.cfg.identity})
+        quota = {"state": "ok"}
+        executor = getattr(self.sessions, "executor", None) if self.sessions is not None else None
+        if executor is not None:
+            quota = executor.quota_state()
+        return web.json_response({"ok": True, "identity": self.cfg.identity, "quota": quota})
 
     def _prune_dedup_ids(self) -> None:
         now = time.time()
