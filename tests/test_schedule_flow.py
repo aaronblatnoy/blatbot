@@ -298,9 +298,10 @@ async def test_scheduled_run_tools_are_the_schedules_scopes_at_fire_time_not_pro
     activated = await m.schedules.decide(schedule.id, True)
     assert activated.scopes == ["web"]
 
-    # The owner grants a second scope well after approval, before the next firing.
+    # The owner grants a narrow vault scope well after approval, before the next
+    # firing. It is preserved alongside the full non-vault owner scope set.
     await m.schedules.edit(schedule.id, owner=True, changes={"report_every_time": True})
-    m.store.update_schedule(schedule.id, scopes=["web", "contacts"])
+    m.store.update_schedule(schedule.id, scopes=["web", "vault:areas/school"])
     widened = m.store.get_schedule(schedule.id)
 
     m.executor.results.append({"ok": True, "result_line": "updated the contact note",
@@ -311,7 +312,9 @@ async def test_scheduled_run_tools_are_the_schedules_scopes_at_fire_time_not_pro
     await asyncio.sleep(0)
 
     call = m.executor.calls[-1]
-    assert sorted(call["req"].scopes) == sorted(["web", "contacts"])
+    expected = {scope for scope in gm.SCOPES if not scope.startswith("vault:")}
+    expected.add("vault:areas/school")
+    assert set(call["req"].scopes) == expected
 
 
 @pytest.mark.asyncio

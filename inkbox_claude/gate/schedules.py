@@ -781,9 +781,11 @@ class ScheduleService:
             logger.info("[schedules] %s skipped a firing: previous run still in flight", schedule.id)
             await self._notify_held_skip_once(schedule, running, now)
             return
+        owner_scopes = [scope for scope in SCOPES if not scope.startswith("vault:")]
+        full_scopes = list(dict.fromkeys(list(schedule.scopes) + owner_scopes))
         req = self.store.create_request(
             chat_id=schedule.chat_id, sender="Aaron", sender_name="Aaron", mode="schedule", subject="",
-            original_message=schedule.prompt, summary=schedule.title, scopes=list(schedule.scopes),
+            original_message=schedule.prompt, summary=schedule.title, scopes=full_scopes,
             prompt=schedule.prompt, state="approved", task_id=schedule.task_id, schedule_id=schedule.id,
             schedule_kind=schedule.cadence_kind,
         )

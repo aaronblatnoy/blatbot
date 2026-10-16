@@ -12,6 +12,7 @@ import pytest
 
 import inkbox_claude.gate as gate_pkg
 from inkbox_claude.gate import schedules as sched_mod
+from inkbox_claude.gate.scopes import tools_for
 from inkbox_claude.gate.store import Store
 
 
@@ -159,6 +160,22 @@ async def test_first_run_notifies(env):
     store.set_state(req.id, "done")
     assert len(manager.notices) == before + 1
     assert "all clear" in manager.notices[-1][1]
+
+
+@pytest.mark.asyncio
+async def test_fired_schedule_gets_full_owner_scope_and_keeps_vault_scope(env):
+    store, manager, service, task_id = env
+    schedule = await _propose(service, task_id, scopes=["web", "vault:areas/school"])
+    activated = await service.decide(schedule.id, True)
+
+    await service._fire(activated, activated.next_run)
+    await asyncio.sleep(0)
+
+    request = manager.executed[-1]
+    tools = tools_for(request.scopes)
+    assert "vault:areas/school" in request.scopes
+    assert any("telegram" in tool for tool in tools)
+    assert any(name in tool for tool in tools for name in ("vault_read", "vault_search", "vault_list"))
 
 
 @pytest.mark.asyncio
