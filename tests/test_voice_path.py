@@ -384,9 +384,13 @@ def test_voice_dedupe_hit_says_got_it_not_the_models_acknowledgement(tmp_path):
         # create_request_once fires for real.
         m.store.create_request_once = real_create
         t = m.store.create_task("deploy the app (race)")
+        # The race must carry the SAME content the real call below will use (original_message
+        # is the raw transcript body, prompt is the router's parsed request) -- dedupe is
+        # content-scoped (same prompt hash or original_message on the same thread), not just
+        # sender-scoped, so a mismatched race fixture here would never actually hit the fold.
         real_create(chat_id="p1", sender="+15550100001", sender_name="Caller", mode="voice",
-                   subject="", original_message="deploy the app", summary="deploy the app",
-                   scopes=["web"], prompt="deploy the app", state="approved", task_id=t["id"])
+                   subject="", original_message="go ahead and deploy it", summary="deploy the app",
+                   scopes=["web"], prompt="Deploy the app", state="approved", task_id=t["id"])
         return real_create(*args, **kwargs)
     m.store.create_request_once = racy_create
 
