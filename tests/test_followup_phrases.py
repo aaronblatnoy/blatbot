@@ -573,13 +573,13 @@ async def test_blanket_permission_ignores_a_schedules_own_failed_run(manager, tm
 
 
 # ---------------------------------------------------------------------------
-# Item 5 (unsafe): create_request_once's dedupe is scoped by sender as well as
+# Item 5 (unsafe): create_request_once's dedupe is scoped by exact content and
 # thread, a caller that gets an existing request back never acknowledges,
 # executes or widens it, and retry_request never dedupes against a different
 # request.
 # ---------------------------------------------------------------------------
 
-def test_create_request_once_dedupe_is_scoped_by_sender(tmp_path):
+def test_create_request_once_dedupe_is_scoped_by_content(tmp_path):
     from inkbox_claude.gate.store import Store
     s = Store(str(tmp_path / "g.db"))
     t = s.create_task("do x")
@@ -596,14 +596,20 @@ def test_create_request_once_dedupe_is_scoped_by_sender(tmp_path):
         prompt="book a different flight", state="approved", task_id=t["id"])
     assert created_b
     assert req_b.id != req_a.id
-    # Alice asking again right away (same sender, same thread, still approved/running)
-    # IS deduped -- the sender-scoping narrows the match, it doesn't remove it.
+    # A different ask by Alice is also a new request; sender alone is not enough.
     req_a2, created_a2 = s.create_request_once(
         chat_id="group-1", sender="alice", sender_name="Alice", mode="imessage", subject="",
         original_message="book a flight again", summary="book a flight again", scopes=["web"],
         prompt="book a flight again", state="approved", task_id=t["id"])
-    assert not created_a2
-    assert req_a2.id == req_a.id
+    assert created_a2
+    assert req_a2.id not in (req_a.id, req_b.id)
+    # An exact replay of that handoff is deduped to the row that already covers it.
+    duplicate, created_duplicate = s.create_request_once(
+        chat_id="group-1", sender="alice", sender_name="Alice", mode="imessage", subject="",
+        original_message="book a flight again", summary="book a flight again", scopes=["web"],
+        prompt="book a flight again", state="approved", task_id=t["id"])
+    assert not created_duplicate
+    assert duplicate.id == req_a2.id
 
 
 def test_retry_request_bypasses_dedupe_against_a_different_request(tmp_path):

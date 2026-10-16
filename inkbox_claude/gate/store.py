@@ -2182,12 +2182,11 @@ class Store:
         return [int(r["task_id"]) for r in rows]
 
     # -- requests --------------------------------------------------------
-    # A second create_request for the same thread, this close behind an approved or
-    # running one, is the same ask arriving twice (a race between the guard's read and
-    # this insert, or several fragments of one voice utterance) rather than a fresh
-    # one -- see running_for_thread's docstring for why schedule requests are excluded
-    # both ways: a scheduled run never counts as "busy" here, and never blocks one either.
-    DEDUPE_WINDOW_S = 120
+    # A request with the same exact prompt or original message on the same thread this
+    # close behind an unfinished one is the same handoff arriving twice, not a fresh ask.
+    # A quota-failed handoff is included so an automatic retry cannot multiply rows while
+    # the executor is known to be unavailable. Scheduled firings remain independent.
+    DEDUPE_WINDOW_S = 10 * 60
 
     def create_request(self, *, chat_id: str, sender: str, sender_name: str, mode: str, subject: str,
                        original_message: str, summary: str, scopes: List[str], prompt: str,
@@ -2216,16 +2215,11 @@ class Store:
         always part of a task.
 
         Refuses (returning the already-existing request instead of inserting a second
-        one, with created=False) when this is a non-schedule request and a non-schedule
-        request from the SAME SENDER on the same thread is already approved or running
-        and was created within the last DEDUPE_WINDOW_S seconds. Scoping the dedupe by
-        sender as well as thread matters in a group thread (a second person's ask within
-        the window must get their own request, not be folded into the first person's)
-        and for a retry/follow-up phrase, which never shares this sender-scoped dedupe at
-        all -- see `bypass_dedupe`, used only by GateSessionManager.retry_request, which
-        re-creates a request for the SAME sender as the one it is retrying and must not
-        have that retry fold into the very request it is retrying (or into some other
-        unrelated approved/running request of that sender's that raced it).
+        one, with created=False) when this is a non-schedule request and a request on the
+        same thread has the same prompt hash or original message, was created within the
+        last DEDUPE_WINDOW_S seconds, and is pending/approved/running or failed because
+        of model quota exhaustion. See `bypass_dedupe`, used by an explicit retry, which
+        must create a fresh request even when it repeats the same prompt.
 
         A caller that gets created=False back owns none of the consequences of having
         just made a request: it must not acknowledge it, must not execute it a second
@@ -2243,13 +2237,22 @@ class Store:
             if not self._db.execute("SELECT 1 FROM tasks WHERE id=?", (task_id,)).fetchone():
                 raise TaskRequired(f"task T{task_id} does not exist")
             if schedule_id is None and not bypass_dedupe:
-                dupe = self._db.execute(
-                    "SELECT * FROM requests WHERE chat_id=? AND sender=? AND state IN ('approved','running') "
-                    "AND schedule_id IS NULL AND created_at>? ORDER BY id DESC LIMIT 1",
-                    (chat_id, sender, now - self.DEDUPE_WINDOW_S),
-                ).fetchone()
-                if dupe:
-                    return Request.from_row(dupe), False
+                candidates = self._db.execute(
+                    "SELECT * FROM requests WHERE chat_id=? AND schedule_id IS NULL AND created_at>? "
+                    "AND (prompt_sha256=? OR original_message=?) ORDER BY id DESC",
+                    (chat_id, now - self.DEDUPE_WINDOW_S, sha256(prompt), original_message),
+                ).fetchall()
+                for candidate in candidates:
+                    if candidate["state"] in ("pending", "approved", "running"):
+                        return Request.from_row(candidate), False
+                    if candidate["state"] == "failed":
+                        try:
+                            status = json.loads(candidate["status_json"] or "{}")
+                        except Exception:
+                            status = {}
+                        from .wording import is_usage_limit_failure
+                        if status.get("quota_error") or is_usage_limit_failure(status):
+                            return Request.from_row(candidate), False
             cur = self._db.execute(
                 "INSERT INTO requests(chat_id,sender,sender_name,mode,subject,original_message,summary,"
                 "scopes_json,prompt,prompt_sha256,state,created_at,updated_at,task_id,inbound_id,schedule_id,schedule_kind) "
