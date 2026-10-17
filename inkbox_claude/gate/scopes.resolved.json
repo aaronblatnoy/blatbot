@@ -241,6 +241,18 @@
   "mcp__coolify-vox__teams": "Manage teams: list/get/get_members/get_current/get_current_members",
   "mcp__coolify-vox__validate_server": "Validate server connection"
  },
+ "dol": {
+  "mcp__dol__dol_consultant_map": "Investment consultants ranked by number of plans advised, with assets and their largest clients. plan_type: pension (any pension plan), pension_db (defined benefit only) or any.",
+  "mcp__dol__dol_get_plan": "Full detail for one plan: size, members, funding status, asset mix, every paid service provider grouped by role, and a link to the filed PDF.",
+  "mcp__dol__dol_lookalikes": "Plans that share a consultant, administrator, actuary, managers or union family with the given plan, most similar first, with the reason for each match.",
+  "mcp__dol__dol_provider_changes": "Providers a plan added or dropped between loaded years, by role. A manager change marks a past portfolio transition.",
+  "mcp__dol__dol_provider_clients": "List the plans that pay a given provider, largest first. Use it to see every plan a consultant advises.",
+  "mcp__dol__dol_search_plans": "Find plans by name, sponsor or EIN, largest first. query: words that must all appear in the plan or sponsor name, or an exact EIN. plan_type: any, pension_db (defined benefit), pension_dc (defined contribution) or welfare. multiemployer: true for union plans run jointly by a union and several employers.",
+  "mcp__dol__dol_search_providers": "Find service providers by name, with how many plans pay them and those plans' total assets. role: optional filter, one of consultant (investment consultant), other_consultant, manager, custodian, administrator, actuary, broker, legal, accountant.",
+  "mcp__dol__dol_status": "Which years of Form 5500 data are loaded, with row counts and when each was loaded.",
+  "mcp__dol__dol_sync": "Download one year of Form 5500 bulk data from the Department of Labor and (re)load it. About a minute. year: dataset year, for plan years beginning in that year. The latest complete year is usually two behind today. force_download: fetch the files again even if already on disk (the department refreshes them monthly).",
+  "mcp__dol__dol_transition_prospects": "Rank plans by how likely they are to need large portfolio trades (transition management prospects). Score parts: size, share of assets held as individual securities, number of investment managers, managers added or dropped since the prior year, and trigger events (final filing, weak or full funding). consultant: keep only plans advised by a consultant whose name contains this text."
+ },
  "pension-filings": {
   "mcp__pension-filings__consultant_map": "Investment consultants/advisors/managers ranked by number of plans advised and total assets advised, with sample client plans, filtered by minimum plan assets.",
   "mcp__pension-filings__describe_data": "Tables, columns (one-line meanings), row counts, loaded plan years, and caveats (filing age, no state/city funds, PDF-extract coverage, unconfirmed code tables). Call this first.",

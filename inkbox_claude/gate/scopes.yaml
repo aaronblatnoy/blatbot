@@ -240,6 +240,17 @@ systems:
         grants:
         - coolify_corgi_control
         - coolify_corgi_read
+  dol_filings:
+    description: 'dol-mcp: the Department of Labor Form 5500 public filing data server (local SQLite copy on
+      black-sky). Related to, but a separate server from, pension_filings (the Postgres-backed copy with signals).
+      Use this one when asked for dol-mcp or dol_ specifically; otherwise prefer pension_filings.'
+    always:
+    - dol_read
+    leaves:
+      dol_sync:
+        question: Refresh the local Form 5500 data from the Department of Labor's public bulk data.
+        grants:
+        - dol_sync
 
 scopes:
   calendar:
@@ -1098,3 +1109,35 @@ scopes:
     - env_vars
     - application
     - database
+  dol_read:
+    description: 'Form 5500 pension/benefit plan filings (US Department of Labor public data, local SQLite copy
+      on black-sky): plans, who advises and manages them (Schedule C), provider changes, lookalikes, consultant
+      map, transition prospects. Read-only. Data is 7-10 months old; state and city pension funds are not here.'
+    label: look up Form 5500 filings (dol-mcp)
+    ask: 'look up Form 5500 filings'
+    synonyms:
+    - dol mcp
+    - form 5500
+    - dol filings
+    read: true
+    tools:
+    - mcp__dol__dol_status
+    - mcp__dol__dol_search_plans
+    - mcp__dol__dol_get_plan
+    - mcp__dol__dol_search_providers
+    - mcp__dol__dol_provider_clients
+    - mcp__dol__dol_provider_changes
+    - mcp__dol__dol_lookalikes
+    - mcp__dol__dol_consultant_map
+    - mcp__dol__dol_transition_prospects
+  dol_sync:
+    description: 'Refresh the local Form 5500 SQLite copy from the Department of Labor''s public bulk data (downloads
+      a new filing year or forces a re-download).'
+    label: refresh the Form 5500 local data
+    ask: 'refresh the Form 5500 data'
+    synonyms:
+    - sync dol data
+    - resync form 5500
+    read: false
+    tools:
+    - mcp__dol__dol_sync
