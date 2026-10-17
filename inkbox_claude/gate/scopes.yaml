@@ -212,6 +212,35 @@ systems:
     always:
     - pension_filings_read
     leaves: {}
+  corgi_crm:
+    description: 'Corgi Command, the Corgi NYC pension-fund CRM for the ANOS growth mandate (''corgi'', ''the
+      CRM'', ''bigdough'', ''corgiiq''): ranked pension funds, recommended targets, fund contacts, signals, the
+      outreach log, poaching/recruiting records, prospect lists, tasks and the transition-manager call list.
+      Not the pension filings database (public DOL Form 5500 data) and not the public web.'
+    always:
+    - corgi_read
+    leaves:
+      corgi_write:
+        question: 'Change something in Corgi Command: log or edit outreach, add or update a user, ingest lead-gen,
+          update or import prospects, work a poaching/recruiting record, post or action a task, or touch the
+          transition-manager call list.'
+        grants:
+        - corgi_write
+  coolify_corgi:
+    description: 'The Corgi NYC Coolify instance (ANOS/Corgi deployments), separate from black-sky''s own Coolify
+      and the Vox Coolify.'
+    always: []
+    leaves:
+      coolify_corgi_read:
+        question: Read the Corgi NYC Coolify.
+        grants:
+        - coolify_corgi_read
+      coolify_corgi_control:
+        question: 'Change the Corgi NYC Coolify: deploy, restart, stop, start, edit env vars.'
+        grants:
+        - coolify_corgi_control
+        - coolify_corgi_read
+
 scopes:
   calendar:
     description: 'TAMID calendar: read and write the club''s Google Calendar (org@example.org; interviews, club
@@ -879,3 +908,193 @@ scopes:
     server: pension-filings
     include:
     - '*'
+  corgi_read:
+    description: 'Corgi Command (the Corgi NYC pension-fund CRM for the ANOS growth mandate): pension funds ranked
+      by transition probability, recommended targets, fund contacts, signals, the outreach log, poaching/recruiting
+      records, prospect lists, tasks and the transition-manager call list. Read-only.'
+    label: look up Corgi Command (the pension CRM)
+    ask: 'look up Corgi Command'
+    synonyms:
+    - corgi crm
+    - corgi command
+    - pension crm
+    - bigdough
+    - corgiiq
+    read: true
+    tools:
+    - mcp__corgi-crm__crm_whoami
+    - mcp__corgi-crm__crm_bigcorgi
+    - mcp__corgi-crm__crm_corgiiq
+    - mcp__corgi-crm__crm_data_coverage
+    - mcp__corgi-crm__crm_data_sources
+    - mcp__corgi-crm__crm_export_outreach_log
+    - mcp__corgi-crm__crm_export_targets
+    - mcp__corgi-crm__crm_fund_filter_options
+    - mcp__corgi-crm__crm_get_fund
+    - mcp__corgi-crm__crm_get_fund_contacts
+    - mcp__corgi-crm__crm_get_fund_outreach
+    - mcp__corgi-crm__crm_get_fund_score
+    - mcp__corgi-crm__crm_get_manager
+    - mcp__corgi-crm__crm_get_manager_watch_funds
+    - mcp__corgi-crm__crm_get_public_plan
+    - mcp__corgi-crm__crm_get_signal
+    - mcp__corgi-crm__crm_list_managers_watch
+    - mcp__corgi-crm__crm_list_outreach_activities
+    - mcp__corgi-crm__crm_list_sign_ins
+    - mcp__corgi-crm__crm_list_targets
+    - mcp__corgi-crm__crm_list_users
+    - mcp__corgi-crm__crm_outreach_due
+    - mcp__corgi-crm__crm_outreach_funds
+    - mcp__corgi-crm__crm_outreach_options
+    - mcp__corgi-crm__crm_prospects_export_list
+    - mcp__corgi-crm__crm_prospects_get_list
+    - mcp__corgi-crm__crm_prospects_get_person
+    - mcp__corgi-crm__crm_prospects_list_firms
+    - mcp__corgi-crm__crm_prospects_list_lists
+    - mcp__corgi-crm__crm_prospects_list_people
+    - mcp__corgi-crm__crm_prospects_options
+    - mcp__corgi-crm__crm_prospects_plan_import
+    - mcp__corgi-crm__crm_recruiting_export_list_sheet
+    - mcp__corgi-crm__crm_recruiting_export_people
+    - mcp__corgi-crm__crm_recruiting_get_list
+    - mcp__corgi-crm__crm_recruiting_get_person
+    - mcp__corgi-crm__crm_recruiting_get_rules
+    - mcp__corgi-crm__crm_recruiting_list_activity
+    - mcp__corgi-crm__crm_recruiting_list_lists
+    - mcp__corgi-crm__crm_recruiting_list_people
+    - mcp__corgi-crm__crm_recruiting_options
+    - mcp__corgi-crm__crm_scoring_method
+    - mcp__corgi-crm__crm_search_funds
+    - mcp__corgi-crm__crm_search_managers
+    - mcp__corgi-crm__crm_search_public_plans
+    - mcp__corgi-crm__crm_search_signals
+    - mcp__corgi-crm__crm_shared_outreach_entries
+    - mcp__corgi-crm__crm_shared_outreach_get_target
+    - mcp__corgi-crm__crm_shared_outreach_logger_counts
+    - mcp__corgi-crm__crm_shared_outreach_options
+    - mcp__corgi-crm__crm_shared_outreach_targets
+    - mcp__corgi-crm__crm_tasks_activity
+    - mcp__corgi-crm__crm_tasks_get
+    - mcp__corgi-crm__crm_tasks_get_workstream
+    - mcp__corgi-crm__crm_tasks_list
+    - mcp__corgi-crm__crm_tasks_mine
+    - mcp__corgi-crm__crm_tasks_no_workstream
+    - mcp__corgi-crm__crm_tasks_options
+    - mcp__corgi-crm__crm_tasks_overview
+    - mcp__corgi-crm__crm_tm_call_list
+  corgi_write:
+    description: 'Change Corgi Command: log, edit or remove outreach activity; add or update CRM users; ingest
+      lead-gen; update or import prospects; add, update, remove or restore poaching/recruiting people, rules,
+      clearances, reviewers and verdicts; shared outreach entries and standing; post, update or action tasks;
+      the transition-manager call list. Needs Aaron''s yes for anything that removes, restores or reverts a
+      record.'
+    label: change Corgi Command (the pension CRM)
+    ask: 'change something in Corgi Command'
+    synonyms:
+    - log outreach in corgi
+    - update the corgi crm
+    - edit the pension crm
+    read: false
+    tools:
+    - mcp__corgi-crm__crm_add_user
+    - mcp__corgi-crm__crm_update_user
+    - mcp__corgi-crm__crm_ingest_leadgen
+    - mcp__corgi-crm__crm_edit_outreach_activity
+    - mcp__corgi-crm__crm_log_outreach_activity
+    - mcp__corgi-crm__crm_remove_outreach_activity
+    - mcp__corgi-crm__crm_set_outreach_status
+    - mcp__corgi-crm__crm_prospects_import_file
+    - mcp__corgi-crm__crm_prospects_remove_person
+    - mcp__corgi-crm__crm_prospects_restore_person
+    - mcp__corgi-crm__crm_prospects_update_field
+    - mcp__corgi-crm__crm_prospects_update_list
+    - mcp__corgi-crm__crm_prospects_update_segment
+    - mcp__corgi-crm__crm_recruiting_add_clearance
+    - mcp__corgi-crm__crm_recruiting_add_person
+    - mcp__corgi-crm__crm_recruiting_add_reviewer
+    - mcp__corgi-crm__crm_recruiting_add_rule
+    - mcp__corgi-crm__crm_recruiting_import_file
+    - mcp__corgi-crm__crm_recruiting_import_list
+    - mcp__corgi-crm__crm_recruiting_log_contacts
+    - mcp__corgi-crm__crm_recruiting_make_review_sheet
+    - mcp__corgi-crm__crm_recruiting_record_list_verdict
+    - mcp__corgi-crm__crm_recruiting_record_verdicts
+    - mcp__corgi-crm__crm_recruiting_remove_clearance
+    - mcp__corgi-crm__crm_recruiting_remove_contact
+    - mcp__corgi-crm__crm_recruiting_remove_own_call
+    - mcp__corgi-crm__crm_recruiting_remove_person
+    - mcp__corgi-crm__crm_recruiting_remove_rule
+    - mcp__corgi-crm__crm_recruiting_remove_verdict
+    - mcp__corgi-crm__crm_recruiting_restore_clearance
+    - mcp__corgi-crm__crm_recruiting_restore_contact
+    - mcp__corgi-crm__crm_recruiting_restore_person
+    - mcp__corgi-crm__crm_recruiting_restore_rule
+    - mcp__corgi-crm__crm_recruiting_restore_verdict
+    - mcp__corgi-crm__crm_recruiting_revert_change
+    - mcp__corgi-crm__crm_recruiting_set_desk_reviewers
+    - mcp__corgi-crm__crm_recruiting_set_desk_tip
+    - mcp__corgi-crm__crm_recruiting_set_own_call
+    - mcp__corgi-crm__crm_recruiting_set_stage
+    - mcp__corgi-crm__crm_recruiting_update_list
+    - mcp__corgi-crm__crm_recruiting_update_person
+    - mcp__corgi-crm__crm_recruiting_update_reviewer
+    - mcp__corgi-crm__crm_shared_outreach_add_entry
+    - mcp__corgi-crm__crm_shared_outreach_remove_entry
+    - mcp__corgi-crm__crm_shared_outreach_restore_entry
+    - mcp__corgi-crm__crm_shared_outreach_set_standing
+    - mcp__corgi-crm__crm_tasks_add_link
+    - mcp__corgi-crm__crm_tasks_add_workstream
+    - mcp__corgi-crm__crm_tasks_post
+    - mcp__corgi-crm__crm_tasks_remove_link
+    - mcp__corgi-crm__crm_tasks_revert_change
+    - mcp__corgi-crm__crm_tasks_take_action
+    - mcp__corgi-crm__crm_tasks_update
+    - mcp__corgi-crm__crm_tasks_update_workstream
+    - mcp__corgi-crm__crm_tm_call_list_add
+    - mcp__corgi-crm__crm_tm_call_list_approve
+    - mcp__corgi-crm__crm_tm_call_list_remove
+    - mcp__corgi-crm__crm_tm_call_list_unapprove
+  coolify_corgi_read:
+    description: 'read the Corgi NYC Coolify (ANOS/Corgi deployments, separate from black-sky''s own Coolify):
+      infrastructure overview, apps, services, databases, deployments, logs, env var names, health, docs'
+    label: read the Corgi NYC Coolify
+    ask: 'check the Corgi NYC Coolify apps'
+    synonyms:
+    - corgi coolify
+    - anos coolify
+    read: true
+    server: coolify-corgi
+    include:
+    - get_*
+    - list_*
+    - diagnose_*
+    - find_issues
+    - projects
+    - environments
+    - logs
+    - application_logs
+    - deployment
+    - search_docs
+    - scheduled_tasks
+    - database_backups
+    - validate_server
+  coolify_corgi_control:
+    description: 'change the Corgi NYC Coolify: deploy, restart, stop, start, redeploy, edit env vars (each needs
+      Aaron''s yes)'
+    label: deploy and control the Corgi NYC Coolify
+    ask: 'deploy and control the Corgi NYC Coolify'
+    synonyms:
+    - deploy on corgi coolify
+    - restart a corgi coolify app
+    read: false
+    server: coolify-corgi
+    include:
+    - deploy
+    - control
+    - restart_project_apps
+    - redeploy_project
+    - stop_all_apps
+    - bulk_env_update
+    - env_vars
+    - application
+    - database
