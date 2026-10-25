@@ -1,5 +1,6 @@
 version: 1
 where_things_live:
+- "Corgi NYC's Vercel projects, deployments, deployment logs and domains: the corgi-vercel-read server, pinned to the Corgi NYC Vercel team (corgi-nyc-d9fde6ec) only. Never any other Vercel team or Aaron's personal account, never a browser."
 - "Corgi NYC's repos, pull requests, issues, CI runs and deployments: the corgi-github-read server, pinned to the Corgi-NYC GitHub organization only. Never Aaron's personal GitHub account, never a browser."
 - 'TAMID applicants, interviews, interview schedules, coffee chats, rosters, forms, board availability: the TAMID
   workspace (sheets, forms, Gmail) and the TAMID calendar. Never the public web.'
@@ -252,6 +253,16 @@ systems:
         question: Refresh the local Form 5500 data from the Department of Labor's public bulk data.
         grants:
         - dol_sync
+
+  corgi_vercel:
+    description: "The Corgi NYC Vercel team (corgi-nyc-d9fde6ec), and nothing else: projects, deployments and
+      their state, deployment build/runtime log summaries, and domains. Pinned to that team at the server: the
+      corgi-vercel-read MCP server hardcodes teamId=corgi-nyc-d9fde6ec on every request, so it cannot read any
+      other Vercel team or a personal account. Read-only; no redeploy, cancel, promote, rollback, or env-write
+      tool exists."
+    always:
+    - corgi_vercel_read
+    leaves: {}
 
   corgi_github:
     description: "Corgi NYC's GitHub organization (Corgi-NYC on github.com), and nothing else: repos, pull
@@ -1179,3 +1190,26 @@ scopes:
     - mcp__github-corgi__gh_get_workflow_run
     - mcp__github-corgi__gh_list_deployments
     - mcp__github-corgi__gh_get_deployment_statuses
+  corgi_vercel_read:
+    description: "The Corgi NYC Vercel team (corgi-nyc-d9fde6ec) only: list projects, read one project, list
+      deployments (filterable by project and readyState), read one deployment's status, summarize a deployment's
+      build/runtime log (counts by event type plus the last few error lines, not the raw log), and list domains.
+      The corgi-vercel-read server hardcodes teamId=corgi-nyc-d9fde6ec on every request, so it cannot reach any
+      other Vercel team or Aaron's personal account. No redeploy, cancel, promote, rollback, or env-write tool
+      exists here."
+    label: check status on the Corgi NYC Vercel team
+    ask: "check Corgi NYC's Vercel (projects, deployments, logs, domains)"
+    synonyms:
+    - corgi vercel
+    - corgi deployments
+    - corgi nyc vercel
+    - vercel status
+    - deployment status
+    read: true
+    tools:
+    - mcp__vercel-corgi__vercel_list_projects
+    - mcp__vercel-corgi__vercel_get_project
+    - mcp__vercel-corgi__vercel_list_deployments
+    - mcp__vercel-corgi__vercel_get_deployment
+    - mcp__vercel-corgi__vercel_get_deployment_log_summary
+    - mcp__vercel-corgi__vercel_list_domains

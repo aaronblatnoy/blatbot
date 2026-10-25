@@ -565,5 +565,13 @@
   "mcp__tamid-linkedin__li_delete_post": "PERMANENTLY deletes a post (or repost) from the TAMID at NYU LinkedIn account. Irreversible. Requires confirm: true, which must reflect a human's explicit approval to delete this specific post URN, never an assumption. Only posts authored or reshared by the authenticated account can be deleted.",
   "mcp__tamid-linkedin__li_publish_post": "PUBLISHES a post to the live TAMID at NYU LinkedIn account. This is public and immediately visible. Requires confirm: true, which must reflect a human's explicit approval of this specific post, never an assumption. Stage the post with li_stage_post first.",
   "mcp__tamid-linkedin__li_stage_post": "Stages a post WITHOUT any network call to LinkedIn. Runs the text checks and returns the exact JSON body that li_publish_post would send, so a human can read the post and the link preview before anything goes live. Nothing is created on LinkedIn by this tool."
+ },
+ "vercel-corgi": {
+  "mcp__vercel-corgi__vercel_get_deployment": "Get one deployment's full status (readyState, target, meta, build errors) on the Corgi NYC team.",
+  "mcp__vercel-corgi__vercel_get_deployment_log_summary": "Summarize a deployment's build/runtime events: counts by type and the last few error/warning lines, not the full raw log.",
+  "mcp__vercel-corgi__vercel_get_project": "Get one Corgi NYC project's details by its id or name.",
+  "mcp__vercel-corgi__vercel_list_deployments": "List deployments on the Corgi NYC team, optionally filtered to one project and/or a readyState (BUILDING, READY, ERROR, QUEUED, CANCELED).",
+  "mcp__vercel-corgi__vercel_list_domains": "List domains on the Corgi NYC team, optionally scoped to one project.",
+  "mcp__vercel-corgi__vercel_list_projects": "List projects on the Corgi NYC Vercel team (name, id, framework, latest production deployment state)."
  }
 }
