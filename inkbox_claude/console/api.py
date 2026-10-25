@@ -50,6 +50,29 @@ def settings_set(store: Any, payload: Dict[str, Any]) -> Dict[str, Any]:
     return {"ok": True, "settings": gate_settings.describe()}
 
 
+def groups_list(store: Any) -> List[Dict[str, Any]]:
+    """Every known group chat, across every channel, with its current response mode --
+    the console's per-chat speaking-rules list."""
+    return store.known_group_chats()
+
+
+def groups_set_mode(store: Any, payload: Dict[str, Any]) -> Dict[str, Any]:
+    """Set one chat's response mode from the console dropdown. The same store method
+    the "blatbot mode ..." chat command uses, and the same event afterward."""
+    from ..gate.roommode import MODES
+    chat_id = _required_text(payload.get("chat_id"), "chat_id")
+    mode = _required_text(payload.get("response_mode") or payload.get("mode"), "response_mode")
+    mode = mode.strip().lower()
+    if mode not in MODES:
+        raise ValidationError(f"response_mode must be one of {sorted(MODES)}")
+    try:
+        store.set_response_mode(chat_id, mode)
+    except ValueError as exc:
+        raise ValidationError(str(exc)) from exc
+    events.publish("groups.changed", {"chat_id": chat_id, "response_mode": mode})
+    return {"ok": True, "groups": store.known_group_chats()}
+
+
 class ValidationError(ValueError):
     """A command payload is invalid and should become an HTTP 400."""
 

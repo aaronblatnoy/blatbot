@@ -14,6 +14,7 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
 from .pgdb import PGConnection, is_postgres_target
+from .roommode import MODES as ROOM_MODES, DEFAULT_GROUP_MODE, normalize_mode as _normalize_room_mode
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS threads (
@@ -21,6 +22,7 @@ CREATE TABLE IF NOT EXISTS threads (
   state TEXT NOT NULL DEFAULT 'idle',
   mode TEXT,
   meta_json TEXT,
+  response_mode TEXT NOT NULL DEFAULT '',
   updated_at REAL NOT NULL
 );
 CREATE TABLE IF NOT EXISTS messages (
@@ -206,6 +208,7 @@ CREATE TABLE IF NOT EXISTS threads (
   state TEXT NOT NULL DEFAULT 'idle',
   mode TEXT,
   meta_json TEXT,
+  response_mode TEXT NOT NULL DEFAULT '',
   updated_at DOUBLE PRECISION NOT NULL
 );
 CREATE TABLE IF NOT EXISTS messages (
@@ -740,7 +743,8 @@ class Store:
                 # open connection at every start-up.
                 have = {(r["table_name"], r["column_name"]) for r in self._db.execute(
                     "SELECT table_name, column_name FROM information_schema.columns "
-                    "WHERE table_schema = current_schema() AND table_name IN ('schedules', 'messages')")}
+                    "WHERE table_schema = current_schema() AND table_name IN "
+                    "('schedules', 'messages', 'threads')")}
                 tables = {t for t, _ in have}
                 for table, column, ddl in (
                     ("schedules", "cadence_kind", "TEXT NOT NULL DEFAULT ''"),
@@ -751,6 +755,10 @@ class Store:
                     ("schedules", "origin_chat_id", "TEXT NOT NULL DEFAULT ''"),
                     ("schedules", "last_note", "TEXT NOT NULL DEFAULT ''"),
                     ("messages", "schedule_id", "BIGINT"),
+                    # Per-chat response mode for group conversations (natural | mention |
+                    # silent); see roommode.py. Empty string means unset -- resolved by
+                    # roommode.effective_mode(), not by this column's own default.
+                    ("threads", "response_mode", "TEXT NOT NULL DEFAULT ''"),
                 ):
                     if table in tables and (table, column) not in have:
                         self._db.execute(f"ALTER TABLE {table} ADD COLUMN IF NOT EXISTS {column} {ddl}")
@@ -781,6 +789,12 @@ class Store:
                     # bare reply on that thread can be understood as answering that schedule.
                     self._db.execute("ALTER TABLE messages ADD COLUMN schedule_id INTEGER")
                     self._db.execute("CREATE INDEX IF NOT EXISTS messages_schedule ON messages(schedule_id)")
+                thcols = {r["name"] for r in self._db.execute("PRAGMA table_info(threads)")}
+                if "response_mode" not in thcols:
+                    # Per-chat response mode for group conversations (natural | mention |
+                    # silent); see roommode.py. Empty string means unset -- resolved by
+                    # roommode.effective_mode(), not by this column's own default.
+                    self._db.execute("ALTER TABLE threads ADD COLUMN response_mode TEXT NOT NULL DEFAULT ''")
                 scols = {r["name"] for r in self._db.execute("PRAGMA table_info(schedules)")}
                 for col, ddl in (
                     ("cadence_kind", "ALTER TABLE schedules ADD COLUMN cadence_kind TEXT NOT NULL DEFAULT ''"),
@@ -1106,6 +1120,112 @@ class Store:
         if not r or not r["meta_json"]:
             return None
         return {"mode": r["mode"], "meta": json.loads(r["meta_json"])}
+
+    # -- per-chat response mode (natural | mention | silent), see roommode.py -----
+    def get_response_mode(self, chat_id: str) -> str:
+        """The mode explicitly set on this chat, or "" when it was never set. Callers
+        resolve "" to the product default through roommode.effective_mode() -- this
+        method never guesses a default itself, so a caller can tell "never set" from
+        "set to natural"."""
+        if not chat_id:
+            return ""
+        with self._lock:
+            r = self._db.execute("SELECT response_mode FROM threads WHERE chat_id=?", (chat_id,)).fetchone()
+        return _normalize_room_mode(r["response_mode"]) if r else ""
+
+    def set_response_mode(self, chat_id: str, mode: str) -> None:
+        """Set how freely Blatbot may speak into this chat without being asked, for
+        any chat on any channel -- the one write path both the console dropdown and
+        the "blatbot mode ..." chat command use. Upserts the thread row, so this
+        works even for a chat that has never sent a message through the gate (set
+        ahead of time from the console, or named from a DM)."""
+        if not chat_id:
+            raise ValueError("chat_id is required")
+        mode = (mode or "").strip().lower()
+        if mode not in ROOM_MODES:
+            raise ValueError(f"not a response mode: {mode!r} (expected one of {ROOM_MODES})")
+        with self._lock:
+            self._db.execute(
+                "INSERT INTO threads(chat_id,state,mode,meta_json,response_mode,updated_at) "
+                "VALUES(?,?,?,?,?,?) "
+                "ON CONFLICT(chat_id) DO UPDATE SET response_mode=excluded.response_mode, "
+                "updated_at=excluded.updated_at",
+                (chat_id, "idle", None, None, mode, time.time()),
+            )
+            self._db.commit()
+
+    _GROUP_FROM_TAG_RE = re.compile(r"\bfrom[:=]\s*([^\s|]+(?:\s[^\s|]+)?)", re.IGNORECASE)
+    _GROUP_PLAIN_NAME_RE = re.compile(r"^([^\n:]{1,40}):\s")
+
+    def _group_member_names(self, chat_id: str, limit: int = 300) -> List[str]:
+        """Best-effort distinct senders seen in a group thread's stored history, for the
+        console's member count. Not a membership roster (a person who never spoke is
+        invisible to it) -- there is no membership list anywhere in this store, only
+        the record of who has actually said something."""
+        names: List[str] = []
+        for row in self.history(chat_id, limit):
+            if row.get("kind") != "inbound":
+                continue
+            text = str(row.get("text") or "")
+            m = self._GROUP_FROM_TAG_RE.search(text)
+            name = m.group(1).strip() if m else ""
+            if not name:
+                m2 = self._GROUP_PLAIN_NAME_RE.match(text)
+                name = m2.group(1).strip() if m2 else ""
+            if name and name not in names:
+                names.append(name)
+        return names
+
+    def known_group_chats(self) -> List[Dict[str, Any]]:
+        """Every group chat Blatbot has ever spoken in or read, across every channel,
+        for the console's per-chat response-mode list: chat_id, channel, a display
+        title, a best-effort member count, and the chat's effective mode (its explicit
+        value, or the "mention" default when it was never set)."""
+        with self._lock:
+            if self._is_pg:
+                rows = self._db.execute(
+                    "SELECT chat_id, mode, meta_json, response_mode, updated_at FROM threads "
+                    "WHERE (COALESCE(meta_json,'{}')::jsonb->>'conversation_kind') = 'group' "
+                    "ORDER BY updated_at DESC"
+                ).fetchall()
+            else:
+                rows = self._db.execute(
+                    "SELECT chat_id, mode, meta_json, response_mode, updated_at FROM threads "
+                    "WHERE json_extract(COALESCE(meta_json,'{}'),'$.conversation_kind')='group' "
+                    "ORDER BY updated_at DESC"
+                ).fetchall()
+        out: List[Dict[str, Any]] = []
+        for r in rows:
+            chat_id = str(r["chat_id"])
+            try:
+                meta = json.loads(r["meta_json"] or "{}")
+            except Exception:
+                meta = {}
+            title = " ".join(str(meta.get("group_title") or "").split())
+            channel = str(r["mode"] or "").strip() or "unknown"
+            out.append({
+                "chat_id": chat_id,
+                "channel": channel,
+                "title": title or f"{channel} group {chat_id}",
+                "member_count": len(self._group_member_names(chat_id)),
+                "response_mode": _normalize_room_mode(r["response_mode"]) or DEFAULT_GROUP_MODE,
+                "updated_at": r["updated_at"],
+            })
+        return out
+
+    def find_group_chat_by_name(self, name: str) -> Optional[Dict[str, Any]]:
+        """A known group chat by display title, for the "blatbot mode <chat name>
+        <mode>" command sent from a DM. Exact match (case-insensitive) wins; failing
+        that, the single chat whose title contains the name, if there is only one."""
+        needle = " ".join(str(name or "").split()).lower()
+        if not needle:
+            return None
+        groups = self.known_group_chats()
+        for g in groups:
+            if g["title"].strip().lower() == needle:
+                return g
+        matches = [g for g in groups if needle in g["title"].strip().lower()]
+        return matches[0] if len(matches) == 1 else None
 
     # -- messages --------------------------------------------------------
     def add_message(self, chat_id: str, kind: str, text: str, mode: str = "",

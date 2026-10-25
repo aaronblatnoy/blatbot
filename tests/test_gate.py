@@ -926,7 +926,7 @@ def test_jev_scopes_replace_router_scopes_and_executor_gets_them(tmp_path):
         await asyncio.sleep(0.05)
     asyncio.run(go())
     r = m.store.get_request(1)
-    assert set(r.scopes) == set(sc for sc in gm.SCOPES if not sc.startswith("vault:"))  # the owner may use anything; nothing is guessed
+    assert set(r.scopes) == set(sc for sc in gm.SCOPES if not sc.startswith("vault:")) | {gm.BLATBOT_ADMIN_SCOPE}  # the owner may use anything; nothing is guessed
 
 
 def test_jev_scopes_undecided_keeps_router_scopes(tmp_path):
@@ -1012,7 +1012,7 @@ def test_jev_first_builds_request_from_task_not_router(tmp_path):
     # The router was told the decision before writing its reply, and no router hint reached Jev.
     assert m.router.calls[0]["action"] is True and m.router.calls[0]["action_task"] == t["title"]
     assert p.calls[-1]["router_hint"] is None
-    assert set(r.scopes) == set(sc for sc in gm.SCOPES if not sc.startswith("vault:"))  # the owner may use anything; nothing is guessed
+    assert set(r.scopes) == set(sc for sc in gm.SCOPES if not sc.startswith("vault:")) | {gm.BLATBOT_ADMIN_SCOPE}  # the owner may use anything; nothing is guessed
     assert any("On it." == s[1] for s in sent)
 
 
@@ -1039,7 +1039,7 @@ def test_jev_first_new_task_titled_by_router_scopes_fallback_when_undecided(tmp_
     asyncio.run(go())
     r = m.store.get_request(1)
     assert r.summary == "Book lunch with Sam Rivera"
-    assert set(r.scopes) == set(sc for sc in gm.SCOPES if not sc.startswith("vault:"))  # the owner may use anything; nothing is guessed
+    assert set(r.scopes) == set(sc for sc in gm.SCOPES if not sc.startswith("vault:")) | {gm.BLATBOT_ADMIN_SCOPE}  # the owner may use anything; nothing is guessed
 
 
 def test_jev_first_stranger_request_waits_for_aaron(tmp_path):
@@ -1500,7 +1500,7 @@ def test_owner_requests_get_jev_scopes_plus_likely_writes_only(tmp_path):
         await asyncio.sleep(0.05)
     asyncio.run(go())
     scopes = set(m.store.get_request(1).scopes)
-    assert scopes == set(sc for sc in gm.SCOPES if not sc.startswith("vault:"))  # the owner may use anything; nothing is guessed
+    assert scopes == set(sc for sc in gm.SCOPES if not sc.startswith("vault:")) | {gm.BLATBOT_ADMIN_SCOPE}  # the owner may use anything; nothing is guessed
 
 
 def test_a_request_nobody_could_act_on_asks_instead_of_running(tmp_path):

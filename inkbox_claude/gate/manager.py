@@ -23,7 +23,7 @@ from . import settings as _settings
 from .jevagent import JevAgent, enabled as jev_agent_enabled
 from .taskpick import TaskPicker, enabled as jev_enabled
 from .router import Router, RouterOutput, RouterRequest, ScheduleCommand
-from .scopes import SCOPES, READ_SCOPES, EXPLICIT_ONLY_SCOPES
+from .scopes import SCOPES, READ_SCOPES, EXPLICIT_ONLY_SCOPES, BLATBOT_ADMIN_SCOPE
 from .store import Person, Request, Store, TaskRequired, task_key
 from .schedules import ScheduleService
 from . import schedprop
@@ -734,9 +734,12 @@ class GateSession:
     def _standing_scopes(self) -> List[str]:
         """Everything this sender may use without asking: every tool scope for the owner,
         their role's scopes for a member with one, nothing for anyone else (who still
-        goes through the picker and the owner's approval)."""
+        goes through the picker and the owner's approval). The owner's grant also
+        includes blatbot_admin -- Blatbot's own settings (gate/hosttools.py ADMIN_*
+        tools) -- which is never a key in SCOPES at all, so no role can ever pick it
+        up: this line is the only place it is ever granted."""
         if self.is_approver():
-            return [sc for sc in SCOPES if not sc.startswith("vault:")]
+            return [sc for sc in SCOPES if not sc.startswith("vault:")] + [BLATBOT_ADMIN_SCOPE]
         try:
             role_scopes = list(self.trust().get("scopes") or [])
         except Exception:
@@ -895,7 +898,11 @@ class GateSession:
     def reply_meta_for_store(self) -> Dict[str, Any]:
         keep = {k: v for k, v in (self.reply_meta or {}).items()
                 if k in ("to", "sender", "subject", "thread_id", "conversation_id", "conversation_kind",
-                         "message_id", "in_reply_to", "references")}
+                         "message_id", "in_reply_to", "references",
+                         # A group's display name, so the console's group-chats list (and
+                         # find_group_chat_by_name for the "blatbot mode <chat name> ..."
+                         # command) has a real name instead of the bare chat_id.
+                         "group_title")}
         return keep
 
     async def run_consult(self, *args: Any, **kwargs: Any) -> str:
@@ -1708,17 +1715,20 @@ class GateSessionManager:
         # scheduled run's sends are checked against is exactly this, nothing wider.
         protected = [str(cfg.approver_imessage_conversation_id or ""), str(getattr(cfg, "approver_phone", "") or ""),
                      str(_tg.approver_id() or "")]
+        # manager=self on all three: lets the executor/agent reach manager.store and
+        # manager.schedules for Blatbot's own ADMIN_* tools (gate/hosttools.py). Every
+        # one of those calls still checks is_commander itself before doing anything.
         self.executor = Executor(mcp_server=mcp_server, cwd=exec_cwd, model=cfg.claude_model or "sonnet",
-                                 protected=protected)
+                                 protected=protected, manager=self)
         # GATE_EXECUTOR=jev runs requests through the typed-judgment agent
         # (Jev picks tools, code fills arguments, DeepSeek writes prose only when
         # needed); Claude Code stays as the fallback unless GATE_EXECUTOR_FALLBACK=none.
         self.jev_agent: Optional[JevAgent] = JevAgent(inkbox_server=mcp_server, router=self.router,
-                                                      protected=protected) if jev_agent_enabled() else None
+                                                      protected=protected, manager=self) if jev_agent_enabled() else None
         # One confirmed call has to be runnable whoever the executor is: when the owner has
         # read a draft and said yes, the same call goes out, and nothing else does.
         self.caller: JevAgent = self.jev_agent or JevAgent(inkbox_server=mcp_server, router=self.router,
-                                                           protected=protected)
+                                                           protected=protected, manager=self)
         self.jev_fallback = (os.getenv("GATE_EXECUTOR_FALLBACK") or "claude").strip().lower() != "none"
         logger.info("[gate] executor: %s", "jev agent (fallback %s)" % ("claude" if self.jev_fallback else "none") if self.jev_agent else "claude code")
         self.task_picker: Optional[TaskPicker] = TaskPicker() if jev_enabled() else None

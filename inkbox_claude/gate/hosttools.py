@@ -133,13 +133,22 @@ async def telegram_read_chat(args: Dict[str, Any]) -> str:
     return "\n".join([TELEGRAM_HEADER, ""] + lines + ["", TELEGRAM_FOOTER])
 
 
-def sdk_server(*, vault_prefixes: Optional[List[str]] = None) -> Any:
+def sdk_server(*, vault_prefixes: Optional[List[str]] = None, manager: Any = None,
+               is_commander: bool = False) -> Any:
     """The same tool as an in-process MCP server for the Claude Code executor.
 
     vault_prefixes bounds vault_search/vault_read/vault_list to the vault-relative
     path prefixes the running request's knowledge scopes cover; None means every
     scope granted carries the whole-vault vault_read scope (or the caller is the
-    owner's unrestricted fallback path), so every note is reachable."""
+    owner's unrestricted fallback path), so every note is reachable.
+
+    manager/is_commander back the ADMIN_* tools below (Blatbot's own settings):
+    manager is the live GateSessionManager (its .store and .schedules), and
+    is_commander is whether THIS request's sender is the verified commander on a
+    verified channel (manager._is_owner_request-derived). Both are request-scoped
+    and passed in fresh by the executor on every call -- the admin tools check
+    is_commander themselves, so this is the hard gate even if allowed_tools ever
+    let an admin_* tool name through for someone else."""
     from claude_agent_sdk import create_sdk_mcp_server, tool
 
     @tool("host_status", DESCRIPTION, SCHEMA)
@@ -170,8 +179,43 @@ def sdk_server(*, vault_prefixes: Optional[List[str]] = None) -> Any:
     async def _telegram_read_chat(args: Dict[str, Any]) -> Dict[str, Any]:
         return {"content": [{"type": "text", "text": await telegram_read_chat(args)}]}
 
+    @tool("admin_list_settings", ADMIN_LIST_SETTINGS_DESCRIPTION, ADMIN_LIST_SETTINGS_SCHEMA)
+    async def _admin_list_settings(args: Dict[str, Any]) -> Dict[str, Any]:
+        return {"content": [{"type": "text", "text": await admin_list_settings(args, manager, is_commander)}]}
+
+    @tool("admin_get_setting", ADMIN_GET_SETTING_DESCRIPTION, ADMIN_GET_SETTING_SCHEMA)
+    async def _admin_get_setting(args: Dict[str, Any]) -> Dict[str, Any]:
+        return {"content": [{"type": "text", "text": await admin_get_setting(args, manager, is_commander)}]}
+
+    @tool("admin_set_setting", ADMIN_SET_SETTING_DESCRIPTION, ADMIN_SET_SETTING_SCHEMA)
+    async def _admin_set_setting(args: Dict[str, Any]) -> Dict[str, Any]:
+        return {"content": [{"type": "text", "text": await admin_set_setting(args, manager, is_commander)}]}
+
+    @tool("admin_list_roles", ADMIN_LIST_ROLES_DESCRIPTION, ADMIN_LIST_ROLES_SCHEMA)
+    async def _admin_list_roles(args: Dict[str, Any]) -> Dict[str, Any]:
+        return {"content": [{"type": "text", "text": await admin_list_roles(args, manager, is_commander)}]}
+
+    @tool("admin_set_role_scopes", ADMIN_SET_ROLE_SCOPES_DESCRIPTION, ADMIN_SET_ROLE_SCOPES_SCHEMA)
+    async def _admin_set_role_scopes(args: Dict[str, Any]) -> Dict[str, Any]:
+        return {"content": [{"type": "text", "text": await admin_set_role_scopes(args, manager, is_commander)}]}
+
+    @tool("admin_set_person_role", ADMIN_SET_PERSON_ROLE_DESCRIPTION, ADMIN_SET_PERSON_ROLE_SCHEMA)
+    async def _admin_set_person_role(args: Dict[str, Any]) -> Dict[str, Any]:
+        return {"content": [{"type": "text", "text": await admin_set_person_role(args, manager, is_commander)}]}
+
+    @tool("admin_schedule", ADMIN_SCHEDULE_DESCRIPTION, ADMIN_SCHEDULE_SCHEMA)
+    async def _admin_schedule(args: Dict[str, Any]) -> Dict[str, Any]:
+        return {"content": [{"type": "text", "text": await admin_schedule(args, manager, is_commander)}]}
+
+    @tool("admin_set_chat_mode", ADMIN_SET_CHAT_MODE_DESCRIPTION, ADMIN_SET_CHAT_MODE_SCHEMA)
+    async def _admin_set_chat_mode(args: Dict[str, Any]) -> Dict[str, Any]:
+        return {"content": [{"type": "text", "text": await admin_set_chat_mode(args, manager, is_commander)}]}
+
     tools = [_host_status, _vault_search, _vault_read, _vault_list,
-             _telegram_find_chats, _telegram_list_chats, _telegram_read_chat]
+             _telegram_find_chats, _telegram_list_chats, _telegram_read_chat,
+             _admin_list_settings, _admin_get_setting, _admin_set_setting,
+             _admin_list_roles, _admin_set_role_scopes, _admin_set_person_role,
+             _admin_schedule, _admin_set_chat_mode]
     return create_sdk_mcp_server(name="host", version="1.0.0", tools=tools)
 
 
@@ -423,3 +467,300 @@ def vault_search(args: Dict[str, Any], prefixes: Optional[List[str]] = None) -> 
         out += [f"{i}: {ln.strip()}" for i, ln in enumerate(text.splitlines(), 1)
                 if any(w in ln.lower() for w in words)]
     return "\n".join([f"{found} of {len(notes)} notes contain {' '.join(words)!r}"] + out)
+
+
+# ---------------------------------------------------------------------------
+# Blatbot's own settings: read and change anything the console already exposes
+# (Settings, Roles, People, Schedules, and per-chat response mode once that
+# console surface lands). Commander-only. Every write below calls the SAME
+# console/api.py function the web console calls -- settings_set, upsert_role,
+# update_person_endpoint, schedule_action -- never raw SQL, so validation and
+# the commander lock (LOCKED_ROLES, the refusal to touch scopes directly) run
+# exactly as they do for a click in the console. Nothing here can grant the
+# "blatbot_admin" scope itself to any role: that scope is never written into
+# scopes.yaml, so SCOPES has no such key and add_role_scope/upsert_role would
+# refuse it as unknown -- the owner's standing grant in manager.py is the only
+# path to these tools at all (see gate/scopes.py BLATBOT_ADMIN_SCOPE).
+# ---------------------------------------------------------------------------
+
+_ADMIN_REFUSAL = "Only Aaron, as the verified commander, can read or change Blatbot's own settings."
+
+
+def _commander_only(is_commander: bool) -> Optional[str]:
+    return None if is_commander else _ADMIN_REFUSAL
+
+
+ADMIN_LIST_SETTINGS_DESCRIPTION = (
+    "LIST EVERY BLATBOT SETTING the console's Settings page exposes: name, current value, where it comes "
+    "from (console, environment, or default), and its label. Commander-only. Read-only."
+)
+ADMIN_LIST_SETTINGS_SCHEMA = {"type": "object", "properties": {}}
+
+ADMIN_GET_SETTING_DESCRIPTION = (
+    "READ ONE BLATBOT SETTING by its console name (e.g. GATE_CONFIRM_SENDS) or its plain label (e.g. "
+    "\"Show me anything it would send\"). Commander-only. Read-only."
+)
+ADMIN_GET_SETTING_SCHEMA = {"type": "object", "required": ["key"], "properties": {
+    "key": {"type": "string", "description": "a setting's console name (GATE_...) or its plain label"}}}
+
+ADMIN_SET_SETTING_DESCRIPTION = (
+    "CHANGE ONE BLATBOT SETTING the console's Settings page exposes, by its console name or plain label, to "
+    "a new value (true/false, a number, a choice, or text -- whatever that setting takes). Refused for a name "
+    "the console does not know. Commander-only."
+)
+ADMIN_SET_SETTING_SCHEMA = {"type": "object", "required": ["key", "value"], "properties": {
+    "key": {"type": "string", "description": "a setting's console name (GATE_...) or its plain label"},
+    "value": {"type": "string", "description": "the new value, as that setting takes it: true/false, a number, a choice, or text"}}}
+
+ADMIN_LIST_ROLES_DESCRIPTION = (
+    "LIST EVERY BLATBOT ROLE from the console's Roles page: name, note, how many scopes and members it has, "
+    "and whether it is locked (the commander role, never editable here). Commander-only. Read-only."
+)
+ADMIN_LIST_ROLES_SCHEMA = {"type": "object", "properties": {}}
+
+ADMIN_SET_ROLE_SCOPES_DESCRIPTION = (
+    "SET A BLATBOT ROLE'S SCOPES (console Roles page) to exactly this list, replacing whatever it held. "
+    "Refused for the commander role, for an unknown role, or for any scope name the console does not "
+    "recognize. Commander-only."
+)
+ADMIN_SET_ROLE_SCOPES_SCHEMA = {"type": "object", "required": ["role", "scopes"], "properties": {
+    "role": {"type": "string", "description": "a role's name, e.g. corgi teammate"},
+    "scopes": {"type": "array", "items": {"type": "string"},
+               "description": "the complete scope list this role should hold after the change"}}}
+
+ADMIN_SET_PERSON_ROLE_DESCRIPTION = (
+    "SET ONE PERSON'S ROLE (console People page) by their display name or a contact value (email, phone, "
+    "Telegram id). Refused if it would add or remove the commander role, or if the name matches more than "
+    "one person (say which one by a contact value instead). Commander-only."
+)
+ADMIN_SET_PERSON_ROLE_SCHEMA = {"type": "object", "required": ["person", "role"], "properties": {
+    "person": {"type": "string", "description": "a person's display name, or a contact value (email, phone, Telegram id)"},
+    "role": {"type": "string", "description": "the role name to set them to, e.g. corgi teammate, general"}}}
+
+ADMIN_SCHEDULE_DESCRIPTION = (
+    "PAUSE, RESUME, OR RUN NOW one Blatbot schedule (console Schedules page), by its title or numeric id. "
+    "Commander-only."
+)
+ADMIN_SCHEDULE_SCHEMA = {"type": "object", "required": ["action", "schedule"], "properties": {
+    "action": {"type": "string", "enum": ["pause", "resume", "run_now"]},
+    "schedule": {"type": "string", "description": "a schedule's title (or its numeric id, if known)"}}}
+
+ADMIN_SET_CHAT_MODE_DESCRIPTION = (
+    "SET ONE GROUP CHAT'S RESPONSE MODE (natural, mention, or silent), where the console offers per-chat "
+    "modes. Commander-only."
+)
+ADMIN_SET_CHAT_MODE_SCHEMA = {"type": "object", "required": ["chat", "mode"], "properties": {
+    "chat": {"type": "string", "description": "a group chat's title or id"},
+    "mode": {"type": "string", "description": "the response mode to set, e.g. natural, mention, silent"}}}
+
+
+def _settings_rows(manager: Any) -> List[Dict[str, Any]]:
+    from ..console import api as console_api
+    return console_api.settings_list(manager.store)
+
+
+def _find_setting(manager: Any, key: str) -> Optional[Dict[str, Any]]:
+    want = str(key or "").strip().lower()
+    for row in _settings_rows(manager):
+        if row["name"].lower() == want or (row.get("label") or "").lower() == want:
+            return row
+    return None
+
+
+async def admin_list_settings(args: Dict[str, Any], manager: Any, is_commander: bool = False) -> str:
+    refusal = _commander_only(is_commander)
+    if refusal:
+        return refusal
+    rows = _settings_rows(manager)
+    if not rows:
+        return "(no settings registered)"
+    return "\n".join(f"{r['name']} = {r['value']!r} ({r['source']}) -- {r['label']}" for r in rows)
+
+
+async def admin_get_setting(args: Dict[str, Any], manager: Any, is_commander: bool = False) -> str:
+    refusal = _commander_only(is_commander)
+    if refusal:
+        return refusal
+    key = str(args.get("key") or "").strip()
+    row = _find_setting(manager, key)
+    if row is None:
+        names = ", ".join(r["name"] for r in _settings_rows(manager))
+        return f"ERROR: no setting named {key!r}. Known settings: {names}"
+    return f"{row['name']} = {row['value']!r} ({row['source']}) -- {row['label']}"
+
+
+async def admin_set_setting(args: Dict[str, Any], manager: Any, is_commander: bool = False) -> str:
+    refusal = _commander_only(is_commander)
+    if refusal:
+        return refusal
+    from ..console import api as console_api
+    key = str(args.get("key") or "").strip()
+    row = _find_setting(manager, key)
+    if row is None:
+        names = ", ".join(r["name"] for r in _settings_rows(manager))
+        return f"ERROR: no setting named {key!r}. Known settings: {names}"
+    old_value = row["value"]
+    try:
+        console_api.settings_set(manager.store, {"name": row["name"], "value": args.get("value")})
+    except console_api.ValidationError as exc:
+        return f"ERROR: {exc}"
+    new_row = _find_setting(manager, row["name"])
+    new_value = new_row["value"] if new_row else args.get("value")
+    return f"Changed {row['label']}: {old_value!r} -> {new_value!r}."
+
+
+async def admin_list_roles(args: Dict[str, Any], manager: Any, is_commander: bool = False) -> str:
+    refusal = _commander_only(is_commander)
+    if refusal:
+        return refusal
+    from ..console import api as console_api
+    rows = console_api.roles(manager.store)
+    if not rows:
+        return "(no roles)"
+    out = []
+    for r in rows:
+        lock = " (locked)" if r.get("locked") else ""
+        note = f" -- {r['note']}" if r.get("note") else ""
+        out.append(f"{r['name']}{lock}: {len(r.get('scopes') or [])} scopes, "
+                    f"{r.get('people_count', 0)} members{note}")
+    return "\n".join(out)
+
+
+async def admin_set_role_scopes(args: Dict[str, Any], manager: Any, is_commander: bool = False) -> str:
+    refusal = _commander_only(is_commander)
+    if refusal:
+        return refusal
+    from ..console import api as console_api
+    from .scopes import SCOPES as _ALL_SCOPES
+    role_name = str(args.get("role") or "").strip().lower()
+    scopes_in = args.get("scopes")
+    if not isinstance(scopes_in, list):
+        return "ERROR: scopes must be a list of scope names"
+    unknown = [s for s in scopes_in if s not in _ALL_SCOPES]
+    if unknown:
+        return f"ERROR: unknown scope(s): {', '.join(unknown)}"
+    roles_now = console_api.roles(manager.store)
+    existing = next((r for r in roles_now if r["name"] == role_name), None)
+    if existing is None:
+        names = ", ".join(r["name"] for r in roles_now)
+        return f"ERROR: no role named {role_name!r}. Known roles: {names}"
+    old_scopes = sorted(existing.get("scopes") or [])
+    try:
+        console_api.upsert_role(manager.store, {"name": role_name, "scopes": scopes_in,
+                                                 "note": existing.get("note") or ""})
+    except console_api.ValidationError as exc:
+        return f"ERROR: {exc}"
+    new_scopes = sorted(set(scopes_in))
+    return f"Changed {role_name}'s scopes: {old_scopes} -> {new_scopes}."
+
+
+def _match_people(manager: Any, text: str) -> List[Dict[str, Any]]:
+    from ..console import api as console_api
+    want = text.strip().lower()
+    if not want:
+        return []
+    out = []
+    for p in console_api.people_directory(manager.store)["people"]:
+        hay = (p.get("display") or "").lower() + " " + " ".join(
+            str(c.get("value") or "") for c in (p.get("contacts") or []))
+        if want in hay:
+            out.append(p)
+    return out
+
+
+async def admin_set_person_role(args: Dict[str, Any], manager: Any, is_commander: bool = False) -> str:
+    refusal = _commander_only(is_commander)
+    if refusal:
+        return refusal
+    from ..console import api as console_api
+    person_text = str(args.get("person") or "").strip()
+    role_name = str(args.get("role") or "").strip().lower()
+    if not person_text:
+        return "ERROR: a person is required"
+    if not role_name:
+        return "ERROR: a role is required"
+    matches = _match_people(manager, person_text)
+    if not matches:
+        return f"ERROR: no person matches {person_text!r}. Check the exact name on the console People page."
+    if len(matches) > 1:
+        names = "; ".join(
+            f"{m.get('display')} ({', '.join(str(c.get('value')) for c in (m.get('contacts') or []))})"
+            for m in matches)
+        return (f"ERROR: {person_text!r} matches more than one person: {names}. "
+                f"Say which one by their email, phone, or Telegram id.")
+    person = matches[0]
+    old_role = person.get("role") or "(none)"
+    try:
+        console_api.update_person_endpoint(manager.store, {"id": person["id"], "role": role_name})
+    except console_api.ValidationError as exc:
+        return f"ERROR: {exc}"
+    return f"Changed {person.get('display') or person_text}'s role: {old_role} -> {role_name}."
+
+
+def _match_schedule(manager: Any, text: str) -> Any:
+    text = str(text or "").strip()
+    rows = manager.store.schedules()
+    if text.isdigit():
+        for s in rows:
+            if str(s.id) == text:
+                return s
+    want = text.lower()
+    hits = [s for s in rows if want and want in (s.title or "").lower()]
+    return hits[0] if len(hits) == 1 else None
+
+
+async def admin_schedule(args: Dict[str, Any], manager: Any, is_commander: bool = False) -> str:
+    refusal = _commander_only(is_commander)
+    if refusal:
+        return refusal
+    from ..console import api as console_api
+    action = str(args.get("action") or "").strip().lower().replace("-", "_").replace(" ", "_")
+    if action not in ("pause", "resume", "run_now"):
+        return "ERROR: action must be one of: pause, resume, run_now"
+    text = str(args.get("schedule") or "").strip()
+    schedule = _match_schedule(manager, text)
+    if schedule is None:
+        names = ", ".join(f"{s.id}:{s.title}" for s in manager.store.schedules())
+        return f"ERROR: no single schedule matches {text!r}. Known schedules: {names or '(none)'}"
+    old_state = schedule.state
+    try:
+        result = await console_api.schedule_action(manager, {"id": schedule.id, "action": action})
+    except (console_api.ScheduleActionConflict, console_api.ValidationError) as exc:
+        return f"ERROR: {exc}"
+    new_state = result["schedule"]["state"]
+    return f"Changed {schedule.title}: {old_state} -> {new_state}."
+
+
+async def admin_set_chat_mode(args: Dict[str, Any], manager: Any, is_commander: bool = False) -> str:
+    refusal = _commander_only(is_commander)
+    if refusal:
+        return refusal
+    chat_text = str(args.get("chat") or "").strip()
+    mode = str(args.get("mode") or "").strip().lower()
+    if not chat_text:
+        return "ERROR: a chat is required"
+    store = getattr(manager, "store", None)
+    set_fn = getattr(store, "set_response_mode", None)
+    if not callable(set_fn):
+        return "Per-chat response modes are not available in the console yet; nothing changed."
+    chat_id, title = chat_text, chat_text
+    find_fn = getattr(store, "find_group_chat_by_name", None)
+    if callable(find_fn):
+        group = find_fn(chat_text)
+        if group:
+            chat_id, title = group["chat_id"], group["title"]
+    get_fn = getattr(store, "get_response_mode", None)
+    old_mode = (get_fn(chat_id) if callable(get_fn) else "") or "(default)"
+    # The same console/api.py function the console's dropdown POSTs to
+    # (console/api.py groups_set_mode), when it exists; falls back to the
+    # store method directly for a build where that endpoint has not landed yet.
+    from ..console import api as console_api
+    set_mode_endpoint = getattr(console_api, "groups_set_mode", None)
+    try:
+        if callable(set_mode_endpoint):
+            set_mode_endpoint(store, {"chat_id": chat_id, "response_mode": mode})
+        else:
+            set_fn(chat_id, mode)
+    except (ValueError, getattr(console_api, "ValidationError", ValueError)) as exc:
+        return f"ERROR: {exc}"
+    return f"Changed {title}'s response mode: {old_mode} -> {mode}."

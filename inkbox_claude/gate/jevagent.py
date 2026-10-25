@@ -102,6 +102,14 @@ VIRTUAL_TOOLS: Dict[str, Dict[str, Any]] = {
     "mcp__host__vault_search": {"description": hosttools.VAULT_SEARCH_DESCRIPTION, "schema": hosttools.VAULT_SEARCH_SCHEMA},
     "mcp__host__vault_read": {"description": hosttools.VAULT_READ_DESCRIPTION, "schema": hosttools.VAULT_READ_SCHEMA},
     "mcp__host__vault_list": {"description": hosttools.VAULT_LIST_DESCRIPTION, "schema": hosttools.VAULT_LIST_SCHEMA},
+    "mcp__host__admin_list_settings": {"description": hosttools.ADMIN_LIST_SETTINGS_DESCRIPTION, "schema": hosttools.ADMIN_LIST_SETTINGS_SCHEMA},
+    "mcp__host__admin_get_setting": {"description": hosttools.ADMIN_GET_SETTING_DESCRIPTION, "schema": hosttools.ADMIN_GET_SETTING_SCHEMA},
+    "mcp__host__admin_set_setting": {"description": hosttools.ADMIN_SET_SETTING_DESCRIPTION, "schema": hosttools.ADMIN_SET_SETTING_SCHEMA},
+    "mcp__host__admin_list_roles": {"description": hosttools.ADMIN_LIST_ROLES_DESCRIPTION, "schema": hosttools.ADMIN_LIST_ROLES_SCHEMA},
+    "mcp__host__admin_set_role_scopes": {"description": hosttools.ADMIN_SET_ROLE_SCOPES_DESCRIPTION, "schema": hosttools.ADMIN_SET_ROLE_SCOPES_SCHEMA},
+    "mcp__host__admin_set_person_role": {"description": hosttools.ADMIN_SET_PERSON_ROLE_DESCRIPTION, "schema": hosttools.ADMIN_SET_PERSON_ROLE_SCHEMA},
+    "mcp__host__admin_schedule": {"description": hosttools.ADMIN_SCHEDULE_DESCRIPTION, "schema": hosttools.ADMIN_SCHEDULE_SCHEMA},
+    "mcp__host__admin_set_chat_mode": {"description": hosttools.ADMIN_SET_CHAT_MODE_DESCRIPTION, "schema": hosttools.ADMIN_SET_CHAT_MODE_SCHEMA},
     # A web search done THROUGH the browser: the Playwright server opens the local
     # SearXNG results page (which queries Google/Bing server-side, so no bot walls)
     # and reads it. Two browser calls, one tool from the agent's point of view.
@@ -234,11 +242,18 @@ class ToolBox:
     (mcp__<server>__<tool>). External servers come from the process-wide warm
     pool: started on first use, then kept across requests."""
 
-    def __init__(self, inkbox_server: Any, mcp_config: Dict[str, Dict[str, Any]]):
+    def __init__(self, inkbox_server: Any, mcp_config: Dict[str, Dict[str, Any]],
+                manager: Any = None, is_commander: bool = False):
         self._inkbox = inkbox_server
         self._cfg = mcp_config
         self._sessions: Dict[str, Any] = {}
         self._schemas: Dict[str, Dict[str, Any]] = {}
+        # Back the admin_* tools (Blatbot's own settings, gate/hosttools.py); both are
+        # request-scoped and only ever true/non-None for the verified commander's own
+        # request (see JevAgent.run_loop / jevgraph.run, which pass "blatbot_admin" in
+        # req.scopes through to is_commander here -- the same check call() enforces).
+        self._manager = manager
+        self._is_commander = is_commander
 
     async def __aenter__(self) -> "ToolBox":
         return self
@@ -297,6 +312,22 @@ class ToolBox:
             return hosttools.vault_read(args)
         if name == "mcp__host__vault_list":
             return hosttools.vault_list(args)
+        if name.startswith("mcp__host__admin_"):
+            # Defense in depth: only ever actually runs for the verified commander,
+            # whatever req.scopes said -- see ToolBox.__init__.
+            fn = {
+                "mcp__host__admin_list_settings": hosttools.admin_list_settings,
+                "mcp__host__admin_get_setting": hosttools.admin_get_setting,
+                "mcp__host__admin_set_setting": hosttools.admin_set_setting,
+                "mcp__host__admin_list_roles": hosttools.admin_list_roles,
+                "mcp__host__admin_set_role_scopes": hosttools.admin_set_role_scopes,
+                "mcp__host__admin_set_person_role": hosttools.admin_set_person_role,
+                "mcp__host__admin_schedule": hosttools.admin_schedule,
+                "mcp__host__admin_set_chat_mode": hosttools.admin_set_chat_mode,
+            }.get(name)
+            if fn is None:
+                raise ValueError(f"unknown admin tool: {name}")
+            return await fn(args, self._manager, self._is_commander)
         server, short = split_tool(name)
         if server == "inkbox":
             from mcp import types as mt
@@ -789,12 +820,15 @@ def _date_role(name: str, desc: str) -> Optional[str]:
 
 class JevAgent:
     def __init__(self, *, inkbox_server: Any, router: Any, mcp_config: Optional[Dict[str, Any]] = None,
-                 max_steps: Optional[int] = None, protected: Optional[List[str]] = None):
+                 max_steps: Optional[int] = None, protected: Optional[List[str]] = None, manager: Any = None):
         self.protected = list(protected or [])
         self.inkbox_server = inkbox_server
         self.router = router
         self.mcp_config = mcp_config if mcp_config is not None else mcp_config_from_claude_json()
         self.max_steps = int(max_steps or os.getenv("JEV_AGENT_MAX_STEPS") or 12)
+        # The live GateSessionManager, threaded into ToolBox so the admin_* tools
+        # (Blatbot's own settings) can reach manager.store/manager.schedules.
+        self.manager = manager
 
     async def run(self, req: Request, context: str = "") -> Dict[str, Any]:
         """Run one request. The LangGraph engine (jevgraph) is the default: the same
@@ -820,7 +854,8 @@ class JevAgent:
                                  "background": req.prompt if req.prompt != req.original_message else "", **_now_facts(),
                                  "accounts": {"org_google": ORG_ACCOUNT, "owner_google": OWNER_ACCOUNT}}
         try:
-            async with ToolBox(self.inkbox_server, self.mcp_config) as box:
+            async with ToolBox(self.inkbox_server, self.mcp_config, manager=self.manager,
+                               is_commander="blatbot_admin" in (req.scopes or [])) as box:
                 tool_options: Dict[str, str] = {}
                 for name in allowed:
                     try:

@@ -31,7 +31,7 @@ import threading
 import time
 import uuid
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Awaitable, Callable, Dict, List, Optional, Tuple
 
 try:
     from aiohttp import WSMsgType, web
@@ -89,6 +89,7 @@ try:
     from .webhook_providers import match_provider
     from . import telegram
     from .gate import rooms
+    from .gate import roommode
 except ImportError:  # pragma: no cover - direct local import/test fallback
     from a2a_delegations import find_by_task as find_a2a_delegation
     from config import (
@@ -121,6 +122,7 @@ except ImportError:  # pragma: no cover - direct local import/test fallback
     from webhook_providers import match_provider
     import telegram
     from gate import rooms
+    from gate import roommode
 
 logger = logging.getLogger(__name__)
 
@@ -1837,6 +1839,75 @@ class InkboxGateway:
         except Exception as exc:
             logger.warning("[bridge] could not record overheard group message: %s", exc)
 
+    def _group_mode_blocks_reply(self, chat_id: str, text: str) -> bool:
+        """True when this chat's response mode means the message below must not reach
+        Jev or the model at all: silent always, or mention without Blatbot's name at
+        the message's start. Checked for every iMessage/SMS group message before any
+        judgment runs, so a silent or mention-only room costs nothing beyond this
+        lookup and, on a block, one stored line. Telegram has its own richer check
+        (it also has @mentions and reply-to-bot) inline in _handle_telegram."""
+        store = getattr(self.sessions, "store", None) if self.sessions else None
+        if store is None:
+            # No store to ask means no configured mode either way -- fail open to
+            # today's natural behavior rather than read "can't look it up" as "stay
+            # quiet", which would make an infrastructure hiccup look like silence.
+            return False
+        mode = roommode.effective_mode(store.get_response_mode(chat_id))
+        if mode == "silent":
+            return True
+        return mode == "mention" and not roommode.addressed_by_name(text)
+
+    def _overhear_group_text(self, chat_id: str, channel: str, sender: str, text: str) -> None:
+        """Record a group message Blatbot's mode kept it from answering, so later turns
+        and the morning digest still see it -- the iMessage/SMS twin of
+        _telegram_overhear, which has its own name-resolution step Telegram alone needs."""
+        store = getattr(self.sessions, "store", None) if self.sessions else None
+        if store is None:
+            return
+        try:
+            store.add_message(chat_id, "inbound", f"{sender}: {text}", channel)
+        except Exception as exc:
+            logger.warning("[bridge] could not record overheard %s group message: %s", channel, exc)
+
+    async def _maybe_handle_mode_command(self, text: str, *, channel: str, is_commander: bool,
+                                          self_chat_id: str, self_label: str,
+                                          reply: "Callable[[str], Awaitable[None]]") -> bool:
+        """"blatbot mode natural|mention|silent" (this chat) or "blatbot mode <chat
+        name> natural|mention|silent" (from a DM, naming another chat). Runs before
+        anything else touches Jev or the model -- a plain string match, never a
+        judged turn -- so the commander can always change a chat's mode, even one
+        currently set to silent. Returns True once `text` is recognised as this
+        command at all (including a refusal), so the caller never falls through to
+        normal processing for it."""
+        parsed = roommode.parse_mode_command(text)
+        if parsed is None:
+            return False
+        if not is_commander:
+            # Not a security boundary we need to explain to a stranger: say nothing
+            # different than for any other message they sent, just do not act on it.
+            return False
+        store = getattr(self.sessions, "store", None) if self.sessions else None
+        if store is None:
+            return False
+        chat_name, mode = parsed
+        if chat_name:
+            match = store.find_group_chat_by_name(chat_name)
+            if match is None:
+                await reply(f"I could not find a group chat called {chat_name}.")
+                return True
+            target_chat_id, target_label = match["chat_id"], match["title"]
+        else:
+            target_chat_id, target_label = self_chat_id, self_label
+        store.set_response_mode(target_chat_id, mode)
+        from .console import events
+        events.publish("groups.changed", {"chat_id": target_chat_id, "response_mode": mode,
+                                           "channel": channel})
+        if chat_name:
+            await reply(f"Set {target_label}'s mode to {mode}.")
+        else:
+            await reply(f"Set this chat's mode to {mode}.")
+        return True
+
     async def _telegram_dispatch(self, u: Dict[str, Any]) -> None:
         """Hand one Telegram message to its session, with the group framing applied."""
         u = self._telegram_known_name(u)
@@ -1887,6 +1958,24 @@ class InkboxGateway:
             recent = self._tg_recent.setdefault(chat_id, [])
             recent.append(f"{name or from_id}: {text}")
             del recent[:-8]
+        is_commander = str(from_id) == (telegram.approver_id() or "").strip()
+        handled = await self._maybe_handle_mode_command(
+            text, channel="telegram", is_commander=is_commander,
+            self_chat_id=f"tg:{chat_id}", self_label=u.get("group_title") or chat_id,
+            reply=lambda message: telegram.send_message(chat_id, message))
+        if handled:
+            return web.json_response({"ok": True, "mode_command": True})
+        if u["is_group"]:
+            # A chat tuned to "silent" never replies, and "mention" only replies when
+            # addressed -- resolved and checked before Jev or the model ever runs, so
+            # an unaddressed message in either costs nothing beyond this lookup. No
+            # store to ask means fail open to natural, same reasoning as
+            # _group_mode_blocks_reply.
+            store = getattr(self.sessions, "store", None) if self.sessions else None
+            mode = roommode.effective_mode(store.get_response_mode(f"tg:{chat_id}")) if store else "natural"
+            if mode == "silent" or (mode == "mention" and not u["addressed"]):
+                self._telegram_overhear(u)
+                return web.json_response({"ok": True, "mode": mode})
         if u["is_group"] and not u["addressed"]:
             # Privacy mode is off, so every group message arrives. The bot was not named,
             # so Jev decides whether this is nonetheless its to answer. The webhook returns
@@ -2749,6 +2838,9 @@ class InkboxGateway:
             "agent_identity": agent_identity,
             "contact_memories": memories,
         }
+        if is_group and self._group_mode_blocks_reply(chat_id, text):
+            self._overhear_group_text(chat_id, "sms", sender, text)
+            return web.json_response({"ok": True, "mode": "blocked"})
         # A fresh inbound starts a fresh logical reply — reset its failed-send budget.
         self._clear_outbound_failures("sms", conversation_id, sender, chat_id=chat_id)
         await self.sessions.get(chat_id).handle_inbound(body, "sms", meta)
@@ -2843,6 +2935,9 @@ class InkboxGateway:
             "contact_memories": memories,
             "conversation_kind": "group" if is_group else "direct",
         }
+        if is_group and self._group_mode_blocks_reply(chat_id, text):
+            self._overhear_group_text(chat_id, "imessage", sender, text)
+            return web.json_response({"ok": True, "mode": "blocked"})
         # A fresh inbound starts a fresh logical reply — reset its failed-send budget.
         self._clear_outbound_failures("imessage", conversation_id, sender, chat_id=chat_id)
         session = self.sessions.get(chat_id)

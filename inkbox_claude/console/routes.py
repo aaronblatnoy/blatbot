@@ -344,6 +344,14 @@ async def post_settings(request: web.Request) -> web.StreamResponse:
     return _json(api.settings_set(_manager(request).store, await _payload(request)))
 
 
+async def get_groups(request: web.Request) -> web.StreamResponse:
+    return _json({"groups": api.groups_list(_manager(request).store)})
+
+
+async def post_groups_mode(request: web.Request) -> web.StreamResponse:
+    return _json(api.groups_set_mode(_manager(request).store, await _payload(request)))
+
+
 def register(app: web.Application, gateway: Any) -> None:
     """Mount only the console API and event stream. Page rendering lives in the
     separate blatbot-console frontend repo now."""
@@ -407,6 +415,8 @@ def register(app: web.Application, gateway: Any) -> None:
     app.router.add_get("/console/api/health", _endpoint(get_health))
     app.router.add_get("/console/api/settings", _endpoint(get_settings))
     app.router.add_post("/console/api/settings", _endpoint(post_settings, mutation=True))
+    app.router.add_get("/console/api/groups", _endpoint(get_groups))
+    app.router.add_post("/console/api/groups/mode", _endpoint(post_groups_mode, mutation=True))
     app.router.add_get("/console/events", get_events)
     for path in (
         "/console/api/overview", "/console/api/home", "/console/api/people", "/console/api/people/sync",
@@ -417,7 +427,7 @@ def register(app: web.Application, gateway: Any) -> None:
         "/console/api/roles/members/remove", "/console/api/roles/scopes/add", "/console/api/roles/scopes/remove", "/console/api/roles/set_level", "/console/api/roles/set_send", "/console/api/roles/set_notes",
         "/console/api/scopes", "/console/api/scopes/breakdown", "/console/api/requests",
         "/console/api/requests/decide", "/console/api/tasks", "/console/api/health",
-        "/console/api/settings",
+        "/console/api/settings", "/console/api/groups", "/console/api/groups/mode",
     ):
         app.router.add_route("OPTIONS", path, _options)
     app.router.add_route("OPTIONS", "/console/events", _options)

@@ -631,7 +631,8 @@ async def run(agent: "ja.JevAgent", req: Any, context: str = "") -> Dict[str, An
                              **ja._now_facts(), "accounts": {"org_google": ja.ORG_ACCOUNT, "owner_google": ja.OWNER_ACCOUNT}}
     steps: List[Dict[str, Any]] = []
     try:
-        async with ja.ToolBox(agent.inkbox_server, agent.mcp_config) as box:
+        async with ja.ToolBox(agent.inkbox_server, agent.mcp_config, manager=agent.manager,
+                              is_commander="blatbot_admin" in (req.scopes or [])) as box:
             tool_options: Dict[str, str] = {}
             for name in allowed:
                 try:

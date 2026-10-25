@@ -396,3 +396,36 @@ def scope_for_tool(tool: str) -> Optional[str]:
     if not owners:
         return None
     return min(owners, key=lambda n: (":" in n, len(SCOPES[n].get("tools") or []), n))
+
+
+# ---------------------------------------------------------------------------
+# blatbot_admin: Blatbot's own settings (see gate/hosttools.py ADMIN_* tools).
+# Deliberately NOT a key in scopes.yaml/SCOPES: add_role_scope/upsert_role
+# validate scope names against SCOPES, so no role can ever be granted this
+# scope through the console or any admin tool -- the owner's standing-scope
+# grant in manager.py._standing_scopes (which appends BLATBOT_ADMIN_SCOPE only
+# for the verified commander) is the one and only path to it. tools_for below
+# is redefined, not edited in place, to keep this addition small and separate
+# from the generated registry above.
+# ---------------------------------------------------------------------------
+
+BLATBOT_ADMIN_SCOPE = "blatbot_admin"
+BLATBOT_ADMIN_TOOLS: List[str] = [
+    "mcp__host__admin_list_settings",
+    "mcp__host__admin_get_setting",
+    "mcp__host__admin_set_setting",
+    "mcp__host__admin_list_roles",
+    "mcp__host__admin_set_role_scopes",
+    "mcp__host__admin_set_person_role",
+    "mcp__host__admin_schedule",
+    "mcp__host__admin_set_chat_mode",
+]
+
+_generated_tools_for = tools_for
+
+
+def tools_for(scopes: List[str]) -> List[str]:
+    out = _generated_tools_for(scopes)
+    if BLATBOT_ADMIN_SCOPE in (scopes or []):
+        out += [t for t in BLATBOT_ADMIN_TOOLS if t not in out]
+    return out
