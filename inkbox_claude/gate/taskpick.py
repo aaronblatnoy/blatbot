@@ -163,7 +163,9 @@ class TaskPicker:
                                 for key in groups}, category_state, category_level=True)
             timings["categories"] = round(time.monotonic() - start, 3)
             logger.info("ledger tree categories: %s", scores)
-            chosen = {key for key in groups if scores.get(key, 0) >= self.min_confidence}
+            # Opening a category only exposes metadata to round two, never bodies or permissions.
+            # Use a generous bar here; the task verdict still has to clear min_confidence.
+            chosen = {key for key in groups if scores.get(key, 0) >= min(0.3, self.min_confidence)}
             candidates = {f"T{t['id']}": t for key in chosen for t in groups[key]}
             if not candidates:
                 return {"ids": [], "timings": timings, "reason": "no relevant category"}

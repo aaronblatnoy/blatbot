@@ -47,7 +47,7 @@ def test_tree_two_levels_and_confident_overflow(monkeypatch):
         async def __aexit__(self, *a): pass
         async def post(self, url, headers, json):
             calls.append(json)
-            answers = {key: {'noul': (0.1 if key == 'server' else 0.95 if key in ('T1', 'T2', 'T3') else 0.8)} for key in json['questions']}
+            answers = {key: {'noul': (0.1 if key == 'server' else 0.4 if key == 'tamid_workspace' else 0.95 if key in ('T1', 'T2', 'T3') else 0.8)} for key in json['questions']}
             if len(calls) == 2:
                 answers['T4'] = {'noul': 0.95}
             return SimpleNamespace(raise_for_status=lambda: None, json=lambda: {'answers': answers})
