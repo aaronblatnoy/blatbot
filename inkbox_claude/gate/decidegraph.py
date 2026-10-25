@@ -4,7 +4,7 @@ Every step between "a message arrived" and "a request exists (or only a reply
 goes out)" is a node. Independent judgments run in parallel:
 
     START -> [pick_task || judge_action] -> join
-          -> [write_reply (DeepSeek)  ||  attach_task -> build_request -> [judge_scopes -> inherit_scopes || record_event]]
+          -> [write_reply (DeepSeek)  ||  attach_task -> build_request -> [scope || vault || event] -> inherit_scopes]
           -> finalize -> END
 
 The reply writer never gates the request: the task is attached and the request
@@ -16,6 +16,7 @@ GATE_DECIDE_GRAPH=0 runs the session's plain sequence instead.
 
 from __future__ import annotations
 
+import asyncio
 import logging
 from typing import Any, Dict, List, Optional, TypedDict
 
@@ -44,6 +45,7 @@ class DecideState(TypedDict, total=False):
     p_actionable: float
     # the reply writer's outputs (DeepSeek)
     reply: Optional[str]
+    reply_verdict: Dict[str, Any]
     task_title: Optional[str]
     task_summary: Optional[str]
     schedule: Any
@@ -68,6 +70,9 @@ def _label(s: Any) -> str:
 
 async def pick_task(state: DecideState, config: RunnableConfig) -> Dict[str, Any]:
     s = _s(config)
+    fast_id = getattr(s, "_ledger_fast_id", None)
+    if fast_id is not None:
+        return {"pick": f"T{fast_id}", "task_choice": f"T{fast_id}"}
     pick = await s.m.task_picker.pick(message=state["message"], history=state["prior"],
                                       candidates=s.candidate_tasks(state["message"]), sender_label=_label(s),
                                       router_hint=None, proposed_title="")
@@ -157,7 +162,10 @@ async def write_reply(state: DecideState, config: RunnableConfig) -> Dict[str, A
                                  action_task=(peek or {}).get("title") or "",
                                  ask=bool(state["needs_action"] and not state["actionable"]),
                                  schedules_context=s._schedules_context())
-    return {"reply": out.reply, "task_title": out.task_title, "task_summary": out.task_summary,
+    picker = s.m.task_picker
+    verdict = (await picker.judge_reply(reply=out.reply, message=state["message"])
+               if out.reply and hasattr(picker, "judge_reply") else {})
+    return {"reply_verdict": verdict, "reply": out.reply, "task_title": out.task_title, "task_summary": out.task_summary,
             "schedule": out.schedule, "schedule_command": out.schedule_command}
 
 
@@ -196,25 +204,21 @@ async def build_request(state: DecideState, config: RunnableConfig) -> Dict[str,
     return {"request": req}
 
 
-async def judge_scopes(state: DecideState, config: RunnableConfig) -> Dict[str, Any]:
+async def judge_request(state: DecideState, config: RunnableConfig) -> Dict[str, Any]:
+    """Independent judgments share immutable inputs; merge their separate request copies."""
     s = _s(config)
     from .router import RouterOutput
-    out = RouterOutput(request=state["request"])
-    await s.jev_scopes(out, strict=True)
-    return {"request": out.request}
-
-
-async def judge_knowledge(state: DecideState, config: RunnableConfig) -> Dict[str, Any]:
-    """Which notes in the vault this request needs: the knowledge-scope traversal,
-    run alongside the rest of the decision step rather than inside the executor
-    (fast, so a plain lookup does not sit waiting on Claude Code to search for
-    itself). See GateSession.jev_knowledge for the judgment and what it merges
-    into the request's scope list."""
-    s = _s(config)
-    from .router import RouterOutput
-    out = RouterOutput(request=state["request"])
-    await s.jev_knowledge(out)
-    return {"request": out.request}
+    scope_out = RouterOutput(request=state["request"].model_copy(deep=True))
+    vault_out = RouterOutput(request=state["request"].model_copy(deep=True))
+    await asyncio.gather(s.jev_scopes(scope_out, strict=True), s.jev_knowledge(vault_out),
+                         s.jev_event(state["task"], state["body"], state["prior"],
+                                     RouterOutput(request=state["request"])))
+    req = scope_out.request
+    # Vault selection contributes only vault scopes; the seed request's web scope is not a verdict.
+    req.scopes = list(dict.fromkeys(list(req.scopes) +
+                                   [sc for sc in vault_out.request.scopes if sc.startswith("vault:")]))
+    req.knowledge_notes = vault_out.request.knowledge_notes
+    return {"request": req}
 
 
 async def inherit_scopes(state: DecideState, config: RunnableConfig) -> Dict[str, Any]:
@@ -261,8 +265,7 @@ async def finalize(state: DecideState, config: RunnableConfig) -> Dict[str, Any]
                                 and not state.get("schedule_command") else None))
     asking = bool(state["needs_action"] and not state["actionable"])
     picker = s.m.task_picker
-    verdict = (await picker.judge_reply(reply=out.reply, message=state["message"])
-               if out.reply and picker is not None and hasattr(picker, "judge_reply") else {})
+    verdict = state.get("reply_verdict", {})
     promises = verdict.get("promises_action")
     if promises is None:
         promises = gm._promises_action(out.reply or "")
@@ -327,7 +330,7 @@ def build_graph():
     for name, fn in (("pick_task", pick_task), ("judge_action", judge_action),
                      ("judge_actionable", judge_actionable), ("join_judgments", join_judgments),
                      ("write_reply", write_reply), ("attach_task", attach_task), ("build_request", build_request),
-                     ("judge_scopes", judge_scopes), ("judge_knowledge", judge_knowledge),
+                     ("judge_request", judge_request),
                      ("inherit_scopes", inherit_scopes), ("record_event", record_event),
                      ("finalize", finalize)):
         g.add_node(name, fn)
@@ -337,10 +340,8 @@ def build_graph():
     g.add_edge(["pick_task", "judge_action", "judge_actionable"], "join_judgments")
     g.add_conditional_edges("join_judgments", after_join, ["write_reply", "attach_task", "finalize"])
     g.add_conditional_edges("attach_task", after_attach, {"build_request": "build_request", "record_event": "record_event"})
-    g.add_edge("build_request", "judge_scopes")
-    g.add_edge("build_request", "record_event")
-    g.add_edge("judge_scopes", "judge_knowledge")
-    g.add_edge("judge_knowledge", "inherit_scopes")
+    g.add_edge("build_request", "judge_request")
+    g.add_edge("judge_request", "inherit_scopes")
     # finalize waits for every branch that ran (LangGraph defers a node until all its
     # active predecessors in the superstep have finished).
     g.add_edge("write_reply", "finalize")

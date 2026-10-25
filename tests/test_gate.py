@@ -1873,16 +1873,14 @@ def test_decide_graph_nodes_and_edges():
     g = decidegraph.build_graph().get_graph()
     nodes = set(g.nodes) - {"__start__", "__end__"}
     assert nodes == {"pick_task", "judge_action", "judge_actionable", "join_judgments", "write_reply", "attach_task",
-                     "build_request", "judge_scopes", "judge_knowledge", "inherit_scopes", "record_event", "finalize"}
+                     "build_request", "judge_request", "inherit_scopes", "record_event", "finalize"}
     edges = {(e.source, e.target) for e in g.edges}
     # the two Jev judgments fan out from START and join
     assert ("__start__", "pick_task") in edges and ("__start__", "judge_action") in edges
     assert ("pick_task", "join_judgments") in edges and ("judge_action", "join_judgments") in edges
-    # scopes and the event classification fan out after the request is built
-    assert ("build_request", "judge_scopes") in edges and ("build_request", "record_event") in edges
-    # the knowledge-scope traversal runs after the tool scope tree, on the same request
-    assert ("judge_scopes", "judge_knowledge") in edges
-    assert ("judge_knowledge", "inherit_scopes") in edges
+    # Independent scope, knowledge and event judgments gather inside judge_request.
+    assert ("build_request", "judge_request") in edges
+    assert ("judge_request", "inherit_scopes") in edges
     # everything merges in finalize
     assert ("write_reply", "finalize") in edges and ("inherit_scopes", "finalize") in edges and ("record_event", "finalize") in edges
 

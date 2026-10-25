@@ -64,6 +64,7 @@ CREATE TABLE IF NOT EXISTS requests (
   updated_at REAL NOT NULL
 );
 CREATE INDEX IF NOT EXISTS requests_state ON requests(state);
+
 CREATE TABLE IF NOT EXISTS tasks (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   key TEXT NOT NULL DEFAULT '',  -- legacy (pre-participants) counterpart key; unused for new tasks
@@ -75,6 +76,8 @@ CREATE TABLE IF NOT EXISTS tasks (
 );
 CREATE INDEX IF NOT EXISTS tasks_key ON tasks(key, updated_at);
 CREATE INDEX IF NOT EXISTS tasks_state ON tasks(state, updated_at);
+CREATE INDEX IF NOT EXISTS tasks_live_activity ON tasks(updated_at DESC, id)
+  WHERE state IN ('open','waiting_aaron','running');
 CREATE TABLE IF NOT EXISTS task_participants (
   task_id INTEGER NOT NULL,
   key TEXT NOT NULL,             -- one way to reach the person: email | phone digits | lowercase name
@@ -259,6 +262,7 @@ CREATE TABLE IF NOT EXISTS requests (
   schedule_kind TEXT NOT NULL DEFAULT ''
 );
 CREATE INDEX IF NOT EXISTS requests_state ON requests(state);
+CREATE INDEX IF NOT EXISTS requests_task_latest ON requests(task_id, id DESC);
 CREATE TABLE IF NOT EXISTS tasks (
   id BIGSERIAL PRIMARY KEY,
   key TEXT NOT NULL DEFAULT '',
@@ -271,6 +275,8 @@ CREATE TABLE IF NOT EXISTS tasks (
 );
 CREATE INDEX IF NOT EXISTS tasks_key ON tasks(key, updated_at);
 CREATE INDEX IF NOT EXISTS tasks_state ON tasks(state, updated_at);
+CREATE INDEX IF NOT EXISTS tasks_live_activity ON tasks(updated_at DESC, id)
+  WHERE state IN ('open','waiting_aaron','running');
 CREATE TABLE IF NOT EXISTS task_participants (
   task_id BIGINT NOT NULL,
   key TEXT NOT NULL,
@@ -819,6 +825,12 @@ class Store:
                 self._migrate_schedule_cadence_model()
                 self._seed_contact_kinds_locked()
                 self._db.commit()
+            if self._is_pg:
+                self._db.execute("ALTER TABLE tasks ADD COLUMN IF NOT EXISTS waiting_on TEXT NOT NULL DEFAULT ''")
+            elif "waiting_on" not in {r["name"] for r in self._db.execute("PRAGMA table_info(tasks)")}:
+                self._db.execute("ALTER TABLE tasks ADD COLUMN waiting_on TEXT NOT NULL DEFAULT ''")
+            self._db.execute("CREATE INDEX IF NOT EXISTS requests_task_latest ON requests(task_id, id DESC)")
+            self._db.commit()
             n_tasks = self._db.execute("SELECT COUNT(*) AS n FROM tasks").fetchone()["n"]
             n_fts = self._db.execute("SELECT COUNT(*) AS n FROM task_fts").fetchone()["n"]
         if n_fts < n_tasks:
@@ -3102,6 +3114,41 @@ class Store:
                 f"WHERE p.key IN ({marks}) {cond} ORDER BY t.updated_at DESC LIMIT ?", (*keys, limit),
             ).fetchall()
         return [self.get_task(int(r["id"])) for r in rows]  # type: ignore[misc]
+
+    def set_task_waiting_on(self, task_id: int, waiting_on: str) -> None:
+        """Persist the event judgment's waiting party separately from prose."""
+        with self._lock:
+            self._db.execute("UPDATE tasks SET waiting_on=? WHERE id=?", (waiting_on, task_id))
+            self._db.commit()
+
+    def ledger_index(self, *, is_approver: bool, person: str = "", chat_id: str = "",
+                     thread_ids: Optional[List[int]] = None, now: Optional[float] = None) -> Dict[str, Any]:
+        """Read metadata only, through the live/activity index. Never fetch event bodies."""
+        from .ledger import index_entry
+        cutoff = (time.time() if now is None else now) - 14 * 86400
+        where = "t.state IN ('open','waiting_aaron','running')"
+        args: List[Any] = []
+        if not is_approver:
+            keys = self.person_keys(person) if person else []
+            access = ["EXISTS (SELECT 1 FROM task_events e WHERE e.task_id=t.id AND e.chat_id=?)"]
+            args.append(chat_id)
+            if keys:
+                access.append("EXISTS (SELECT 1 FROM task_participants p WHERE p.task_id=t.id "
+                              f"AND p.key IN ({','.join('?' for _ in keys)}))")
+                args.extend(keys)
+            if thread_ids:
+                access.append(f"t.id IN ({','.join('?' for _ in thread_ids)})")
+                args.extend(thread_ids)
+            where += " AND (" + " OR ".join(access) + ")"
+        with self._lock:
+            dropped = self._db.execute(f"SELECT COUNT(*) AS n FROM tasks t WHERE {where} AND t.updated_at<?",
+                                       (*args, cutoff)).fetchone()["n"]
+            rows = self._db.execute(
+                "SELECT t.id,t.title,t.state,t.updated_at,t.waiting_on,"
+                "(SELECT r.scopes_json FROM requests r WHERE r.task_id=t.id ORDER BY r.id DESC LIMIT 1) AS scopes_json "
+                f"FROM tasks t WHERE {where} AND t.updated_at>=? ORDER BY t.updated_at DESC,t.id DESC",
+                (*args, cutoff)).fetchall()
+        return {"tasks": [index_entry(dict(r)) for r in rows], "dropped": int(dropped)}
 
     def open_tasks(self, limit: int = 30) -> List[Dict[str, Any]]:
         with self._lock:

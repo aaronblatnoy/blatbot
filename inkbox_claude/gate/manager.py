@@ -371,7 +371,7 @@ class GateSession:
             return
         who = "Aaron" if approver else (self._sender_name() or self._sender())
         label = kind.replace("_", " ")
-        line = f"{who} {label}: {body.strip()[:300]}"
+        line = f"{who} {label}: {body.strip()}"
         new_state: Optional[str] = None
         if res.get("resolves_task", 0) >= 0.8 and out.request is None:
             new_state = "done"
@@ -380,6 +380,11 @@ class GateSession:
         elif task.get("state") in ("done", "failed") and kind in ("asked_for_something", "changed_or_corrected"):
             new_state = "open"
         self.m.store.task_event(task["id"], kind, line, chat_id=self.record_id, state=new_state)
+        waiting = res.get("waiting_on")
+        if waiting in ("owner", "other", "nobody"):
+            people = ", ".join(p.get("display") or p.get("key") or "" for p in task.get("participants") or [])
+            self.m.store.set_task_waiting_on(task["id"], {
+                "owner": "Aaron", "other": people or "other participant", "nobody": "nobody"}[waiting])
         if not out.task_summary:
             # The router gave no summary this turn: keep the ledger honest with a short one.
             wo = res.get("waiting_on")
@@ -435,7 +440,7 @@ class GateSession:
             kw: Dict[str, Any] = dict(text=tq.text or "", states=tq.states, touched_within_days=tq.touched_within_days,
                                       created_within_days=tq.created_within_days, has_participants=tq.has_participants,
                                       chat_id=self.record_id if tq.this_conversation else "",
-                                      date_from=tq.date_from, date_to=tq.date_to, limit=tq.limit)
+                                      date_from=tq.date_from, date_to=tq.date_to, limit=min(tq.limit, 3))
             if self.is_approver():
                 kw["participant"] = tq.participant or ""
             else:
@@ -457,6 +462,16 @@ class GateSession:
         logger.info("[gate %s] task query -> %d match(es), %d new to the router", self.chat_id, res["total"], len(shown))
         if not shown:
             return ""
+        if hasattr(self, "_ledger_selected_ids"):
+            # Lookup hits share the body budget with the initial tree selection.
+            budget = max(3, len(self._ledger_selected_ids))
+            matched = set(self._found_task_ids)
+            kept = sorted(self._ledger_selected_ids, key=lambda tid: tid not in matched)
+            kept = kept[:max(0, budget - len(shown))]
+            self._found_task_ids = [int(t["id"]) for t in shown]
+            self._ledger_selected_ids = kept
+            self._ledger_candidates = [t for t in self._ledger_candidates if t["id"] in kept]
+            self._ledger_memory = "\n\n".join(self.m.store.task_memory_for_task(tid) for tid in kept) or "(no tasks on record)"
         text = self.m.store.render_tasks(shown)
         if res["total"] > len(res["tasks"]):
             text += f"\n\n({res['total'] - len(res['tasks'])} more matched; narrow the lookup to see them)"
@@ -467,6 +482,15 @@ class GateSession:
         this chat's recent tasks, every live task, tasks of people the message names,
         full-text hits on the message's own words, and the lookup's finds. Scored by how
         many signals agree plus recency, capped at 25 cards for the pick."""
+        if hasattr(self, "_ledger_candidates"):
+            candidates = list(self._ledger_candidates)
+            existing = {t["id"] for t in candidates}
+            for tid in self._found_task_ids:
+                if tid not in existing:
+                    task = self.m.store.get_task(tid)
+                    if task:
+                        candidates.append(task)
+            return candidates
         approver = self.is_approver()
         score: Dict[int, float] = {}
         order: List[int] = []
@@ -520,6 +544,10 @@ class GateSession:
         The router's own answer stays as the fallback and as a hint to Jev."""
         picker = self.m.task_picker
         if picker is None:
+            return
+        fast_id = getattr(self, "_ledger_fast_id", None)
+        if fast_id is not None:
+            out.task = f"T{fast_id}"
             return
         cands = self.candidate_tasks()
         approver = self.is_approver()
@@ -637,8 +665,10 @@ class GateSession:
                 return await decidegraph.decide(self, body=body, message=message, prior=prior, mode=mode,
                                                 memory=memory, found=found)
         label = "Aaron, the owner" if approver else (self._sender_name() or self._sender())
-        pick = await picker.pick(message=message, history=prior, candidates=self.candidate_tasks(),
-                                 sender_label=label, router_hint=None, proposed_title="")
+        fast_id = getattr(self, "_ledger_fast_id", None)
+        pick = ({"choice": f"T{fast_id}"} if fast_id is not None else
+                await picker.pick(message=message, history=prior, candidates=self.candidate_tasks(),
+                                  sender_label=label, router_hint=None, proposed_title=""))
         choice = pick.get("choice")
         task_choice = None if choice in (None, "none") else choice
         peek = self._peek_task(RouterOutput(task=task_choice))
@@ -843,23 +873,66 @@ class GateSession:
             out.request.scopes = merged
             out.request.knowledge_notes = list(res.get("notes") or [])
 
+    async def indexed_task_memory(self, history: List[Dict[str, Any]], message: str) -> str:
+        from .ledger import render_index, continuation_id
+        start = time.monotonic()
+        result = self.m.store.ledger_index(
+            is_approver=self.is_approver(), person=self._sender(), chat_id=self.record_id,
+            thread_ids=self.m.store.task_ids_for_thread(self.thread_key()))
+        entries = result["tasks"]
+        index = render_index(entries)
+        self._ledger_fast_id = continuation_id(
+            message, entries, self.m.store.task_ids_for_chat(self.record_id), history)
+        timings = {"index": round(time.monotonic() - start, 3)}
+        picker = self.m.task_picker
+        if self._ledger_fast_id is not None:
+            ids = [self._ledger_fast_id]
+            timings["fast_path"] = True
+        elif picker is not None and hasattr(picker, "judge_ledger_tree"):
+            pick = await picker.judge_ledger_tree(message=message, history=history, entries=entries)
+            ids = pick.get("ids")
+            timings.update(pick.get("timings") or {})
+            if ids is None:
+                ids = [t["id"] for t in entries[:3]]
+        else:
+            ids = [t["id"] for t in entries[:3]]
+        allowed = {t["id"] for t in entries}
+        ids = list(dict.fromkeys(tid for tid in ids if tid in allowed))
+        self._ledger_selected_ids = ids
+        self._ledger_candidates = [t for tid in ids for t in entries if t["id"] == tid]
+        self._found_task_ids = []
+        load_start = time.monotonic()
+        blocks = [self.m.store.task_memory_for_task(tid) for tid in ids]
+        self._ledger_memory = "\n\n".join(block for block in blocks if block) or "(no tasks on record)"
+        timings["bodies"] = round(time.monotonic() - load_start, 3)
+        timings["total"] = round(time.monotonic() - start, 3)
+        self._ledger_log = (len(entries), len(index), timings, result["dropped"], start)
+        return self._ledger_memory
+
+    def log_ledger_selection(self, memory: str, found: str) -> None:
+        count, chars, timings, dropped, start = self._ledger_log
+        timings = dict(timings, total=round(time.monotonic() - start, 3))
+        ids = list(dict.fromkeys(self._ledger_selected_ids + self._found_task_ids))
+        logger.info("[gate %s] ledger index: %d tasks, %d chars -> picked %s (%d chars) timings=%s dropped_stale=%d",
+                    self.chat_id, count, chars, [f"T{tid}" for tid in ids],
+                    len(memory) + len(found), timings, dropped)
+
     def task_memory(self) -> str:
-        mem = self.m.store.task_memory(self.record_id, is_approver=self.is_approver(),
-                                       person="" if self.is_approver() else self._sender())
-        extra = []
-        for tid in self.m.store.task_ids_for_thread(self.thread_key()):
-            if f"Task T{tid} " not in mem:
-                t = self.m.store.task_with_events(tid)
-                if t and t["state"] != "closed":
-                    extra.append(t)
-        if extra:
-            block = self.m.store.render_tasks(extra)
-            mem = block if mem == "(no tasks on record)" else mem + "\n\n" + block
-        return mem
+        if hasattr(self, "_ledger_memory"):
+            return self._ledger_memory
+        # Synchronous callers have no message to judge. Keep a bounded metadata fallback.
+        result = self.m.store.ledger_index(is_approver=self.is_approver(), person=self._sender(),
+                                          chat_id=self.record_id,
+                                          thread_ids=self.m.store.task_ids_for_thread(self.thread_key()))
+        return "\n\n".join(self.m.store.task_memory_for_task(t["id"])
+                             for t in result["tasks"][:3]) or "(no tasks on record)"
 
     # -- gateway interface ---------------------------------------------------
     async def handle_inbound(self, text: str, mode: str, meta: Dict[str, Any]) -> None:
         async with self._lock:
+            self.__dict__.pop("_ledger_memory", None)
+            self.__dict__.pop("_ledger_candidates", None)
+            self.__dict__.pop("_ledger_fast_id", None)
             self.mode = mode
             self.reply_meta = dict(meta or {})
             self.m.store.set_thread(self.chat_id, "routing", mode, self.reply_meta_for_store())
@@ -982,7 +1055,7 @@ class GateSession:
                              "or not here. This is background, not a menu and not a limit on what you can do:\n"
                              + "\n".join(out))
                 else:
-                    notes = "What's on record with this caller:\n" + self.task_memory()[-1500:]
+                    notes = "What's on record with this caller:\n" + self.task_memory()
             finally:
                 self.mode, self.reply_meta = prev2
         except Exception:
@@ -1088,9 +1161,10 @@ class GateSession:
             try:
                 approver = self.is_approver()
                 history = self.m.store.history(self.record_id, limit=20)
-                memory = self.task_memory()
-                logger.info("[gate %s] ledger loaded (voice consult): %d chars", self.chat_id, len(memory))
+                memory = await self.indexed_task_memory(history[:-1], body)
                 found = await self.lookup_tasks(history[:-1], body, memory)
+                memory = self._ledger_memory
+                self.log_ledger_selection(memory, found)
                 # One request per ask, including from the trusted caller: the realtime
                 # voice model hands this consult one transcript fragment at a time, so
                 # one spoken request can arrive as several calls a few seconds apart.
@@ -1284,10 +1358,16 @@ class GateSession:
             prior, message = history, "(No new message from the sender. A system note with a task result was just added above. Write the reply the sender should receive: for Aaron, give him the answer or outcome clearly and naturally, in his voice preference (brief, no emojis); for anyone else, tell them only what concerns them, without internal details. Reply null only if there is truly nothing to say. Do not create a request.)"
         else:
             prior, message = history[:-1], body  # the new inbound is already stored last
-        memory = self.task_memory()
-        logger.info("[gate %s] ledger loaded: %d task(s), %d chars", self.chat_id,
-                    memory.count("\nTask T") + (1 if memory.startswith("Task T") else 0), len(memory))
+        if system_note:
+            # A result belongs to the task just completed, even when it has left the live index.
+            ids = self.m.store.task_ids_for_chat(self.record_id, limit=3)
+            memory = "\n\n".join(self.m.store.task_memory_for_task(tid) for tid in ids) or "(no tasks on record)"
+        else:
+            memory = await self.indexed_task_memory(prior, message)
         found = "" if system_note else await self.lookup_tasks(prior, message, memory)
+        if not system_note:
+            memory = self._ledger_memory
+            self.log_ledger_selection(memory, found)
         task: Optional[Dict[str, Any]] = None
         running = None if system_note else self.m.store.running_for_thread(self.chat_id)
         if running is not None:

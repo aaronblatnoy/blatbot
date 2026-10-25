@@ -57,7 +57,7 @@ def candidate_view(t: Dict[str, Any], now: Optional[float] = None) -> Dict[str, 
         "people_involved": who or ["nobody in particular"],
         "state": t.get("state"),
         "last_touched": _age(now - float(t.get("updated_at") or now)),
-        "recent_events": [f"{e.get('kind')}: {str(e.get('text') or '')[:160]}" for e in events[-4:]],
+        "recent_events": [f"{e.get('kind')}: {str(e.get('text') or '')}" for e in events[-4:]],
     }
 
 
@@ -80,9 +80,9 @@ def _last_request_outcome(task: Optional[Dict[str, Any]]) -> str:
     for e in reversed(task.get("events") or []):
         k = e.get("kind")
         if k in ("done", "failed"):
-            return f"{k}: {str(e.get('text') or '')[:200]}"
+            return f"{k}: {str(e.get('text') or '')}"
         if k in ("request", "approved"):
-            return f"requested, not finished: {str(e.get('text') or '')[:160]}"
+            return f"requested, not finished: {str(e.get('text') or '')}"
     return "nothing has run on this task yet"
 
 
@@ -130,6 +130,54 @@ class TaskPicker:
         self.min_confidence = float(min_confidence if min_confidence is not None
                                     else (os.getenv("TYPESAFE_TASK_MIN_CONF") or 0.55))
         self.timeout = timeout
+
+    async def judge_ledger_tree(self, *, message: str, history: List[Dict[str, Any]],
+                                entries: List[Dict[str, Any]]) -> Dict[str, Any]:
+        """Choose categories, then task metadata within those branches; never read bodies."""
+        timings: Dict[str, float] = {}
+        if not entries or not self.api_key:
+            return {"ids": [], "timings": timings, "reason": "empty or disabled"}
+        groups: Dict[str, List[Dict[str, Any]]] = {}
+        for entry in entries:
+            for category in entry["categories"]:
+                groups.setdefault(category, []).append(entry)
+        async def ask(options, state, category_level=False):
+            body = {"model": self.model, "state": state, "questions": {
+                key: {"type": "noul", "instructions": {"question":
+                    ("Does new_message refer to any task listed under this category in ledger_index_by_category? "
+                     "Match the ongoing work by task titles, even if different tools are needed now."
+                     if category_level else "Does new_message refer to this task or require its record?"),
+                    "topic": key, "task_or_category": value},
+                    "criteria": {"true": "The message needs one or more task records here.", "false": "Not relevant"}}
+                for key, value in options.items()}}
+            async with httpx.AsyncClient(timeout=self.timeout) as client:
+                response = await client.post(TYPESAFE_URL, headers={"Authorization": f"Bearer {self.api_key}"}, json=body)
+                response.raise_for_status()
+                return {key: float((value or {}).get("noul") or 0) for key, value in response.json()["answers"].items()}
+        state = {"new_message": message, "conversation": _history_text(history, 6)}
+        try:
+            start = time.monotonic()
+            category_state = dict(state, ledger_index_by_category={
+                key: [entry["line"] for entry in value] for key, value in groups.items()})
+            scores = await ask({key: SCOPE_TREE_SYSTEMS.get(key, "Uncategorized work")
+                                for key in groups}, category_state, category_level=True)
+            timings["categories"] = round(time.monotonic() - start, 3)
+            logger.info("ledger tree categories: %s", scores)
+            chosen = {key for key in groups if scores.get(key, 0) >= self.min_confidence}
+            candidates = {f"T{t['id']}": t for key in chosen for t in groups[key]}
+            if not candidates:
+                return {"ids": [], "timings": timings, "reason": "no relevant category"}
+            start = time.monotonic()
+            scores = await ask({key: t["line"] for key, t in candidates.items()}, state)
+            timings["tasks"] = round(time.monotonic() - start, 3)
+            ranked = sorted((key for key in candidates if scores.get(key, 0) >= self.min_confidence),
+                            key=lambda key: -scores[key])
+            # Additional bodies need individual near-certain relevance, not a broad category hit.
+            selected = [key for i, key in enumerate(ranked) if i < 3 or scores[key] >= 0.9]
+            return {"ids": [candidates[key]["id"] for key in selected], "timings": timings, "reason": "ok"}
+        except Exception:
+            logger.warning("ledger tree judgment unavailable", exc_info=True)
+            return {"ids": None, "timings": timings, "reason": "unavailable"}
 
     async def judge_grounded(self, *, reply: str, results: str, question: str) -> Dict[str, Any]:
         """Before a result is delivered: is every factual claim in `reply` supported
@@ -887,7 +935,7 @@ class TaskPicker:
                 "instructions": {
                     "question": "Does acting on `new_message` need a task that is NOT in `tasks_already_in_view`?",
                     "how_to_decide": [
-                        "The view already holds every live task for this sender. A follow-up, correction, "
+                        "The view holds selected relevant tasks for this sender. A follow-up, correction, "
                         "or status question about work listed there needs no lookup.",
                         "A person, subject, or piece of work named in the message that no title in the view "
                         "covers needs a lookup.",

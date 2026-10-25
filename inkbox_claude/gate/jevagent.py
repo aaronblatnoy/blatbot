@@ -1523,9 +1523,9 @@ def is_write_tool(name: str) -> bool:
     return bool(_WRITE_RE.search(name.split("__")[-1]))
 
 
-_LABELED_ID_RE = re.compile(r"(?:\b(?:ID|id|Id)|[A-Za-z_]+(?:Id|ID|_id))\"?\s*[:=]\s*\"?([^\s\"'|,)>}\]]+)")
+_LABELED_ID_RE = re.compile(r"(?<![A-Za-z_])(?:\b(?:ID|id|Id)|[A-Za-z_]+(?:Id|ID|_id))\"?\s*[:=]\s*\"?([^\s\"'|,)>}\]]+)")
 _ID_RE = re.compile(r"\b(?=[A-Za-z0-9_-]*\d)[A-Za-z0-9_-]{16,}\b")
-_EMAIL_RE = re.compile(r"[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}")
+_EMAIL_RE = re.compile(r"(?<![A-Za-z0-9._%+-])[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}")
 _PHONE_RE = re.compile(r"\+?1?[ (.-]*\d{3}[ ).-]*\d{3}[ .-]*\d{4}")
 
 
