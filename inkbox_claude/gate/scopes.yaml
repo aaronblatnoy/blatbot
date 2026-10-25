@@ -1,5 +1,6 @@
 version: 1
 where_things_live:
+- "Corgi NYC's repos, pull requests, issues, CI runs and deployments: the corgi-github-read server, pinned to the Corgi-NYC GitHub organization only. Never Aaron's personal GitHub account, never a browser."
 - 'TAMID applicants, interviews, interview schedules, coffee chats, rosters, forms, board availability: the TAMID
   workspace (sheets, forms, Gmail) and the TAMID calendar. Never the public web.'
 - 'TAMID and SJBA board members, their roles, positions and titles, bios, headshots, club events, contact-form
@@ -251,6 +252,16 @@ systems:
         question: Refresh the local Form 5500 data from the Department of Labor's public bulk data.
         grants:
         - dol_sync
+
+  corgi_github:
+    description: "Corgi NYC's GitHub organization (Corgi-NYC on github.com), and nothing else: repos, pull
+      requests, issues, Actions workflow runs, and deployments for the Corgi/ANOS/CorgiIQ/Boomify repos. Pinned
+      to the Corgi-NYC org at the server: the corgi-github-read MCP server hardcodes the owner in every request
+      path and refuses any repo argument naming a different owner, so it cannot read Aaron's personal GitHub
+      account or any other organization. Read-only."
+    always:
+    - corgi_github_read
+    leaves: {}
 
 scopes:
   calendar:
@@ -1141,3 +1152,30 @@ scopes:
     read: false
     tools:
     - mcp__dol__dol_sync
+  corgi_github_read:
+    description: "Corgi NYC's GitHub organization only (Corgi-NYC): list repos, read one repo, pull requests,
+      issues, Actions workflow runs and their status, and deployments. The corgi-github-read server hardcodes
+      the Corgi-NYC owner in every request path and refuses a repo argument naming any other owner, so it
+      cannot reach Aaron's personal GitHub account or any other org. No write, merge, close, or dispatch tool
+      exists here."
+    label: check status in the Corgi NYC GitHub org
+    ask: "check Corgi NYC's GitHub (repos, PRs, issues, CI, deployments)"
+    synonyms:
+    - corgi github
+    - corgi repos
+    - corgi nyc github
+    - corgi pull requests
+    - corgi ci status
+    - corgi actions
+    - corgi deployments
+    read: true
+    tools:
+    - mcp__github-corgi__gh_list_repos
+    - mcp__github-corgi__gh_get_repo
+    - mcp__github-corgi__gh_list_pull_requests
+    - mcp__github-corgi__gh_get_pull_request
+    - mcp__github-corgi__gh_list_issues
+    - mcp__github-corgi__gh_list_workflow_runs
+    - mcp__github-corgi__gh_get_workflow_run
+    - mcp__github-corgi__gh_list_deployments
+    - mcp__github-corgi__gh_get_deployment_statuses
