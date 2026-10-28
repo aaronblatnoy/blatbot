@@ -60,7 +60,10 @@ def _cadence_text(schedule: Any) -> str:
 
 
 def _last_non_skipped_run(store: Store, schedule_id: int) -> Optional[Dict[str, Any]]:
+    schedule = store.get_schedule(schedule_id)
     for row in store.schedule_runs(schedule_id):
+        if schedule and row.get("started_at", 0) < schedule.failure_reset_at:
+            continue
         if row.get("outcome") != "skipped":
             return row
     return None
@@ -360,27 +363,25 @@ def _stuck_schedule_proposals(store: Store) -> List[Dict[str, Any]]:
     return out
 
 
-def _schedule_fix_actions(schedule: Any, *, paused: bool) -> List[Dict[str, Any]]:
-    actions: List[Dict[str, Any]] = []
+def _schedule_fix_actions(schedule: Any, *, paused: bool,
+                          run: Optional[Dict[str, Any]] = None) -> List[Dict[str, Any]]:
+    run = run or {}
+    kind = run.get("failure_class") or sched_mod.classify_failure(run)["failure_class"]
+    if kind == "usage_limit" and schedule.state == "active" and (schedule.retry_at or schedule.next_run):
+        when = sched_mod._shown(schedule.retry_at or schedule.next_run, schedule.timezone)
+        return [{"action": "wait", "label": f"Wait, auto-retrying at {when}", "target": None}]
     missing = schedprop.missing_capabilities(schedule.prompt, schedule.scopes)
+    for item in run.get("denied") or []:
+        tool = item.get("tool", "") if isinstance(item, dict) else str(item)
+        scope = sched_mod.scope_for_tool(tool)
+        if scope and scope not in missing:
+            missing.append(scope)
     if missing:
-        merged = list(dict.fromkeys(list(schedule.scopes) + missing))
-        actions.append({
-            "action": "add_capability", "label": f"Let it {schedprop.labels(missing)}",
-            "target": {"endpoint": "schedules/edit", "id": schedule.id, "scopes": merged},
-        })
-    if paused:
-        actions.append({"action": "resume", "label": "Resume",
-                         "target": {"endpoint": "schedules/action", "id": schedule.id, "action": "resume"}})
-    else:
-        # Still active, merely had a failed/incomplete last run: offer to try it
-        # again right now rather than only Stop, which is all an active schedule
-        # used to be offered here.
-        actions.append({"action": "run_now", "label": "Run now",
-                         "target": {"endpoint": "schedules/action", "id": schedule.id, "action": "run_now"}})
-    actions.append({"action": "stop", "label": "Stop",
-                    "target": {"endpoint": "schedules/action", "id": schedule.id, "action": "stop"}})
-    return actions
+        return [{"action": "add_capability", "label": f"Let it {schedprop.labels(missing)}",
+                 "target": {"endpoint": "schedules/edit", "id": schedule.id,
+                            "scopes": list(dict.fromkeys(list(schedule.scopes) + missing))}}]
+    return [{"action": "run_now", "label": "Run now",
+             "target": {"endpoint": "schedules/action", "id": schedule.id, "action": "run_now"}}]
 
 
 def _capability_say(missing: List[str]) -> Optional[str]:
@@ -411,11 +412,9 @@ def _stuck_schedules(store: Store, service: Any) -> List[Dict[str, Any]]:
                                        "target": {"endpoint": "schedules/repair", "id": schedule.id}}
     for schedule in store.schedules(states=["paused"]):
         plan = service.repair_plan(schedule.id)
-        if plan["needed"]:
+        if plan["needed"] and (not schedule.cadence_kind or plan.get("prompt_changes") or plan.get("timing")):
             why = _lead_lower(plan["sentence"])
-            actions = [repair_action(schedule),
-                       {"action": "stop", "label": "Stop",
-                        "target": {"endpoint": "schedules/action", "id": schedule.id, "action": "stop"}}]
+            actions = [repair_action(schedule)]
             out.append({
                 "kind": "schedule", "id": schedule.id, "title": schedule.title,
                 "sentence": f"{schedule.title}: {why}",
@@ -423,9 +422,12 @@ def _stuck_schedules(store: Store, service: Any) -> List[Dict[str, Any]]:
                 "say": "repair it",
             })
             continue
-        why = sched_mod._normalize_reason(schedule.last_outcome) if schedule.last_outcome else "it stopped running"
+        last = _last_non_skipped_run(store, schedule.id)
+        if schedule.failure_reset_at and not last and not schedule.last_outcome and not plan["needed"]:
+            continue
+        why = sched_mod.failure_reason(last) if last else sched_mod._normalize_reason(schedule.last_outcome or "it stopped running")
         missing = schedprop.missing_capabilities(schedule.prompt, schedule.scopes)
-        actions = _schedule_fix_actions(schedule, paused=True)
+        actions = _schedule_fix_actions(schedule, paused=True, run=last)
         out.append({
             "kind": "schedule", "id": schedule.id, "title": schedule.title,
             "sentence": f"{schedule.title}: {why}.",
@@ -436,13 +438,13 @@ def _stuck_schedules(store: Store, service: Any) -> List[Dict[str, Any]]:
         last = _last_non_skipped_run(store, schedule.id)
         if not last or last.get("outcome") == "complete":
             continue
-        why = sched_mod._normalize_reason(last.get("result_line") or "")
+        why = sched_mod.failure_reason(last)
         missing = schedprop.missing_capabilities(schedule.prompt, schedule.scopes)
         out.append({
             "kind": "schedule", "id": schedule.id, "title": schedule.title,
             "sentence": f"{schedule.title}: {why}.",
             "since_text": _schedule_time_text(last.get("finished_at") or last.get("started_at"), schedule.timezone),
-            "actions": _schedule_fix_actions(schedule, paused=False),
+            "actions": _schedule_fix_actions(schedule, paused=False, run=last),
             "say": _capability_say(missing),
         })
     return out
@@ -534,8 +536,8 @@ def _done_today_items(store: Store, now: float) -> List[Dict[str, Any]]:
             if run.get("outcome") != "complete":
                 continue  # any other outcome is represented under Stuck instead, never here too
             result = sched_mod._normalize_reason(
-                run.get("result_line") or run.get("final_status") or "")
-            if not result or result == "it did not say why":
+                run.get("result_line") or run.get("final_status") or "no result recorded")
+            if not result:
                 result = "no result recorded"
             items.append({
                 "kind": "schedule", "id": schedule.id, "title": schedule.title,

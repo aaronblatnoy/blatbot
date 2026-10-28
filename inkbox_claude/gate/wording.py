@@ -52,10 +52,10 @@ _LOGIN_WORDS = (
     "invalid credentials", "forbidden", "login failed", "re-login",
 )
 _USAGE_LIMIT_WORDS = (
-    "session limit", "usage limit", "rate limit", "quota", "overloaded", "credit balance",
+    "429", "too many requests", "session limit", "weekly limit", "usage limit", "rate limit", "quota", "overloaded", "credit balance",
 )
 _RESET_TIME_RE = re.compile(
-    r"resets?\s+(\d{1,2}(?::\d{2})?\s*(?:am|pm)?(?:\s*\([^)]*\))?)", re.I)
+    r"resets?\s+((?:[A-Za-z]{3}\s+\d{1,2},?\s+)?\d{1,2}(?::\d{2})?\s*(?:am|pm)?(?:\s*\([^)]*\))?)", re.I)
 
 
 def _is_usage_limit(text: str) -> bool:

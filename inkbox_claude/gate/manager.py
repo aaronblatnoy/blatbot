@@ -2904,6 +2904,8 @@ class GateSessionManager:
         if schedule_revision is None and req.schedule_id:
             fresh = self.store.get_request(req.id)
             schedule_revision = (fresh.status or {}).get("schedule_revision") if fresh else None
+        fresh = self.store.get_request(req.id) if req.schedule_id else None
+        usage_retry = ((fresh.status or {}).get("usage_retry", False) if fresh else False)
         session = self.get(req.chat_id)
         slow_ack: Optional[asyncio.Task] = None
         if notify and req.mode in ("imessage", "telegram"):
@@ -2930,6 +2932,7 @@ class GateSessionManager:
         ok = bool(status.get("ok"))
         if schedule_revision is not None:
             status["schedule_revision"] = schedule_revision
+            status["usage_retry"] = usage_retry
         self.store.set_state(req.id, "done" if ok else "failed",
                              status=status, raw_output=status.get("raw"))
         self.store.set_thread(req.chat_id, "idle")

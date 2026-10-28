@@ -832,8 +832,11 @@ def _run_view(run: Dict[str, Any], timezone_name: str) -> Dict[str, Any]:
     finished = run.get("finished_at")
     duration = (finished - started) if (started is not None and finished is not None) else None
     outcome = str(run.get("outcome") or "")
+    classification = run if run.get("failure_class") or outcome in ("complete", "skipped", "interrupted", "") else sched_mod.classify_failure(run, timezone_name, finished)
     return {
         "id": run["id"], "started_at": started, "started_text": _schedule_time_text(started, timezone_name),
+        "failure_class": classification.get("failure_class") or "",
+        "failure_reason": classification.get("failure_reason") or "", "reset_at": classification.get("reset_at"),
         "duration_seconds": duration, "outcome": outcome,
         "outcome_label": OUTCOME_LABELS.get(outcome, outcome),
         "result_line": run.get("result_line") or "", "final_status": run.get("final_status") or "",
@@ -896,6 +899,8 @@ def _schedule_view(store: Store, service: Any, schedule: Any) -> Dict[str, Any]:
         "cadence_kind": schedule.cadence_kind, "cadence": _public_cadence(schedule.cadence),
         "cadence_text": _cadence_text(schedule), "timezone": schedule.timezone,
         "timezone_label": _timezone_label(schedule.timezone),
+        "retry_at": schedule.retry_at,
+        "retry_text": _schedule_time_text(schedule.retry_at, schedule.timezone) if schedule.retry_at else None,
         "next_run": next_run, "next_run_text": _schedule_time_text(next_run, schedule.timezone),
         "next_run_in_seconds": (next_run - time.time()) if next_run is not None else None,
         "report_every_time": schedule.report_every_time,
