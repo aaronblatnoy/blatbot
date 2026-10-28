@@ -139,6 +139,8 @@ CREATE TABLE IF NOT EXISTS schedules (
   origin_mode TEXT NOT NULL DEFAULT '',
   origin_chat_id TEXT NOT NULL DEFAULT '',
   last_note TEXT NOT NULL DEFAULT '',
+  failure_reset_at DOUBLE PRECISION NOT NULL DEFAULT 0,
+  retry_at DOUBLE PRECISION,
   created_at REAL NOT NULL,
   updated_at REAL NOT NULL
 );
@@ -156,7 +158,10 @@ CREATE TABLE IF NOT EXISTS schedule_runs (
   denied_json TEXT NOT NULL DEFAULT '[]',
   note TEXT NOT NULL DEFAULT '',
   changed INTEGER NOT NULL DEFAULT 0,
-  cost_usd REAL
+  cost_usd REAL,
+  failure_class TEXT NOT NULL DEFAULT '',
+  failure_reason TEXT NOT NULL DEFAULT '',
+  reset_at REAL
 );
 CREATE INDEX IF NOT EXISTS schedule_runs_schedule ON schedule_runs(schedule_id, id);
 CREATE TABLE IF NOT EXISTS persons (
@@ -353,6 +358,8 @@ CREATE TABLE IF NOT EXISTS schedules (
   origin_mode TEXT NOT NULL DEFAULT '',
   origin_chat_id TEXT NOT NULL DEFAULT '',
   last_note TEXT NOT NULL DEFAULT '',
+  failure_reset_at DOUBLE PRECISION NOT NULL DEFAULT 0,
+  retry_at DOUBLE PRECISION,
   created_at DOUBLE PRECISION NOT NULL,
   updated_at DOUBLE PRECISION NOT NULL
 );
@@ -370,7 +377,10 @@ CREATE TABLE IF NOT EXISTS schedule_runs (
   denied_json TEXT NOT NULL DEFAULT '[]',
   note TEXT NOT NULL DEFAULT '',
   changed INTEGER NOT NULL DEFAULT 0,
-  cost_usd DOUBLE PRECISION
+  cost_usd DOUBLE PRECISION,
+  failure_class TEXT NOT NULL DEFAULT '',
+  failure_reason TEXT NOT NULL DEFAULT '',
+  reset_at DOUBLE PRECISION
 );
 CREATE INDEX IF NOT EXISTS schedule_runs_schedule ON schedule_runs(schedule_id, id);
 CREATE TABLE IF NOT EXISTS persons (
@@ -652,12 +662,15 @@ class Schedule:
     origin_mode: str
     origin_chat_id: str
     last_note: str
+    failure_reset_at: float
+    retry_at: Optional[float]
     created_at: float
     updated_at: float
 
     @classmethod
     def from_row(cls, r: sqlite3.Row) -> "Schedule":
         return cls(
+            failure_reset_at=float(r["failure_reset_at"] or 0), retry_at=r["retry_at"],
             id=int(r["id"]), chat_id=str(r["chat_id"]), task_id=int(r["task_id"]),
             title=str(r["title"]), prompt=str(r["prompt"]), prompt_sha256=str(r["prompt_sha256"]),
             kind=str(r["kind"]), cron=str(r["cron"] or ""),
@@ -825,6 +838,23 @@ class Store:
                 self._migrate_schedule_cadence_model()
                 self._seed_contact_kinds_locked()
                 self._db.commit()
+            # Failure metadata is additive for both existing SQLite and Postgres stores.
+            for table, columns in {
+                "schedules": {"failure_reset_at": "DOUBLE PRECISION NOT NULL DEFAULT 0",
+                              "retry_at": "DOUBLE PRECISION"},
+                "schedule_runs": {"failure_class": "TEXT NOT NULL DEFAULT ''",
+                                  "failure_reason": "TEXT NOT NULL DEFAULT ''",
+                                  "reset_at": "DOUBLE PRECISION"},
+            }.items():
+                if self._is_pg:
+                    have = {r["column_name"] for r in self._db.execute(
+                        "SELECT column_name FROM information_schema.columns "
+                        "WHERE table_schema=current_schema() AND table_name=?", (table,))}
+                else:
+                    have = {r["name"] for r in self._db.execute(f"PRAGMA table_info({table})")}
+                for column, ddl in columns.items():
+                    if column not in have:
+                        self._db.execute(f"ALTER TABLE {table} ADD COLUMN {column} {ddl}")
             if self._is_pg:
                 self._db.execute("ALTER TABLE tasks ADD COLUMN IF NOT EXISTS waiting_on TEXT NOT NULL DEFAULT ''")
             elif "waiting_on" not in {r["name"] for r in self._db.execute("PRAGMA table_info(tasks)")}:
@@ -2699,7 +2729,7 @@ class Store:
                    "scopes_json", "report_mode", "state", "next_run", "last_run", "last_request_id",
                    "run_count", "max_runs", "deadline", "notes", "revision", "consecutive_failures",
                    "last_outcome", "cadence_kind", "cadence", "cadence_json", "report_every_time",
-                   "until", "origin_mode", "origin_chat_id", "last_note"}
+                   "until", "origin_mode", "origin_chat_id", "last_note", "failure_reset_at", "retry_at"}
         bad = set(changes) - allowed
         if bad:
             raise ValueError(f"unknown schedule columns: {sorted(bad)}")
@@ -2746,15 +2776,17 @@ class Store:
     def finish_schedule_run(self, run_id: int, *, finished_at: float, complete: bool,
                             outcome: str, result_line: str, final_status: str,
                             denied: Optional[List[Dict[str, Any]]], note: str,
-                            changed: bool, cost_usd: Optional[float]) -> None:
+                            changed: bool, cost_usd: Optional[float], failure_class: str = "",
+                            failure_reason: str = "", reset_at: Optional[float] = None) -> None:
         """Record the result of a run. `final_status` and `result_line` are stored
         whole -- never cut, however long the model's closing text ran."""
         with self._lock:
             self._db.execute(
                 "UPDATE schedule_runs SET finished_at=?, complete=?, outcome=?, result_line=?, "
-                "final_status=?, denied_json=?, note=?, changed=?, cost_usd=? WHERE id=?",
+                "final_status=?, denied_json=?, note=?, changed=?, cost_usd=?, "
+                "failure_class=?, failure_reason=?, reset_at=? WHERE id=?",
                 (finished_at, int(bool(complete)), outcome, result_line, final_status,
-                 json.dumps(denied or []), note, int(bool(changed)), cost_usd, int(run_id)),
+                 json.dumps(denied or []), note, int(bool(changed)), cost_usd, failure_class, failure_reason, reset_at, int(run_id)),
             )
             self._db.commit()
 
@@ -2783,6 +2815,7 @@ class Store:
             "request_id": int(r["request_id"]) if r["request_id"] is not None else None,
             "started_at": float(r["started_at"]),
             "finished_at": float(r["finished_at"]) if r["finished_at"] is not None else None,
+            "failure_class": r["failure_class"], "failure_reason": r["failure_reason"], "reset_at": r["reset_at"],
             "complete": bool(r["complete"]), "outcome": str(r["outcome"] or ""),
             "result_line": str(r["result_line"] or ""), "final_status": str(r["final_status"] or ""),
             "denied": json.loads(r["denied_json"] or "[]"), "note": str(r["note"] or ""),

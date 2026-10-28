@@ -277,7 +277,7 @@ async def test_paused_after_three_notice_whole_string(tmp_path):
         await asyncio.sleep(0)
         activated = m.store.get_schedule(schedule.id)
     assert sent[-1][1] == ('Price watch is paused after three runs that could not finish. '
-                           'Say "start it again" when it is fixed.')
+                           'the page timed out. Run now when it is fixed.')
 
 
 # ---------------------------------------------------------------------------
@@ -365,7 +365,7 @@ def test_normalize_reason_rewrites_first_person_and_keeps_names(line, expected_s
 def test_normalize_reason_never_blank_or_punctuation_only(line):
     from inkbox_claude.gate.schedules import _normalize_reason
     reason = _normalize_reason(line)
-    assert reason == "it did not say why"
+    assert reason == "it could not finish the scheduled task"
     assert ".." not in reason
     assert reason.strip() == reason
 
@@ -421,3 +421,23 @@ async def test_list_and_last_never_say_waiting_across_every_state(tmp_path):
     reply = await schedcmd.handle(m, session, _command("list"))
     assert "waiting" not in reply.lower()
     assert "paused: it could not read that Telegram group" in reply
+
+
+@pytest.mark.asyncio
+async def test_real_manager_preserves_usage_retry_marker_and_never_pauses(tmp_path):
+    m, sent = make_manager(tmp_path)
+    await _propose_via_manager(m, title='Quota watch', prompt='check a public page',
+                               cadence_kind='every', cadence={'minutes': 240}, scopes=['web'])
+    schedule = m.store.schedules(states=['proposed'])[0]
+    current = await m.schedules.decide(schedule.id, True)
+    for attempt in range(2):
+        m.executor.results.append({'ok': False, 'error': 'weekly limit',
+                                   'final_status': 'weekly limit', 'finished_at': time.time()})
+        await m.schedules.tick(now=current.next_run)
+        await asyncio.sleep(0)
+        current = m.store.get_schedule(schedule.id)
+        assert current.state == 'active'
+        assert current.consecutive_failures == 0
+        assert (current.retry_at is not None) == (attempt == 0)
+    assert m.store.last_schedule_run(schedule.id)['failure_class'] == 'usage_limit'
+    assert not any('paused' in text for _, text, _, _ in sent)

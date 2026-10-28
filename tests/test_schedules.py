@@ -501,7 +501,10 @@ async def test_three_consecutive_incomplete_runs_pause_and_then_nothing_fires(en
         store.set_state(req.id, "done")
         current = store.get_schedule(schedule.id)
     assert current.state == "paused"
-    assert "paused after three" in manager.notices[-1][1]
+    assert len(manager.approver_texts) == 1
+    assert "paused after three" in manager.approver_texts[0]
+    await service.finished(req, dict(status))
+    assert len(manager.approver_texts) == 1
     runs_before = len(manager.executed)
     await service.tick(now=current.next_run or time.time() + 10)
     assert len(manager.executed) == runs_before  # paused: nothing fires
@@ -786,3 +789,134 @@ def test_run_outcome_ok_with_no_tool_results_key_is_unaffected():
 def test_blocked_reason_fallback_is_it_did_not_give_a_reason():
     from inkbox_claude.gate.schedules import ScheduleService
     assert ScheduleService._blocked_reason({}) == "it did not give a reason"
+
+@pytest.mark.parametrize('status, kind', [
+    ({'error': "You've hit your weekly limit - resets Oct 16, 2pm (exit code: 1)"}, 'usage_limit'),
+    ({'error': 'HTTP 429 rate limit'}, 'usage_limit'),
+    ({'denied': [{'tool': 'mcp__unknown__read_messages'}]}, 'missing_permission'),
+    ({'error': 'connection reset'}, 'tool_network_error'),
+    ({'ok': True, 'result_line': 'I could not find the report'}, 'could_not_finish'),
+])
+def test_failure_classes(status, kind):
+    assert sched_mod.classify_failure(status)['failure_class'] == kind
+
+
+def test_weekly_reset_parses_incident_date():
+    from datetime import datetime
+    from zoneinfo import ZoneInfo
+    tz = ZoneInfo('America/New_York')
+    now = datetime(2026, 10, 15, 12, tzinfo=tz).timestamp()
+    result = sched_mod.classify_failure({'error': "You've hit your weekly limit - resets Oct 16, 2pm (exit code: 1)"}, now=now)
+    assert result['reset_at'] == datetime(2026, 10, 16, 14, tzinfo=tz).timestamp()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize('reset_delay', [60, 86400, None])
+async def test_usage_limit_retries_once_without_strikes(env, reset_delay):
+    from datetime import datetime, timezone
+    store, manager, service, task_id = env
+    schedule = await _propose(service, task_id)
+    schedule = await service.decide(schedule.id, True)
+    store.update_schedule(schedule.id, consecutive_failures=2)
+    now = time.time()
+    schedule = store.update_schedule(schedule.id, next_run=now)
+    await service._fire(schedule, now)
+    await asyncio.sleep(0)
+    req = manager.executed[-1]
+    reset = datetime.fromtimestamp(now + reset_delay, timezone.utc).isoformat() if reset_delay else ''
+    status = {'error': 'usage limit', 'reset_time': reset, 'finished_at': now}
+    next_regular = store.get_schedule(schedule.id).next_run
+    await service.finished(req, status)
+    updated = store.get_schedule(schedule.id)
+    assert updated.state == 'active'
+    assert updated.consecutive_failures == 2
+    assert updated.retry_at == pytest.approx(min(now + reset_delay, next_regular) if reset_delay else next_regular)
+    assert store.schedule_runs(schedule.id)[0]['failure_class'] == 'usage_limit'
+    assert not manager.approver_texts
+    store.set_state(req.id, 'done')
+    await service._fire(updated, updated.next_run)
+    await asyncio.sleep(0)
+    req = manager.executed[-1]
+    await service.finished(req, status)
+    assert store.get_schedule(schedule.id).retry_at is None
+    assert store.get_schedule(schedule.id).consecutive_failures == 2
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize('action', ['resume', 'edit'])
+async def test_resume_and_edit_clear_old_failure_and_ignore_inflight_run(env, action):
+    from inkbox_claude.gate.overview import _last_non_skipped_run
+    store, manager, service, task_id = env
+    schedule = await _propose(service, task_id)
+    schedule = await service.decide(schedule.id, True)
+    await service._fire(schedule, time.time() - 10)
+    await asyncio.sleep(0)
+    req = manager.executed[-1]
+    await service.finished(req, {'error': 'network down'})
+    # A second in-flight request belongs to the old schedule revision.
+    store.set_state(req.id, 'done')
+    schedule = store.get_schedule(schedule.id)
+    await service._fire(schedule, time.time() - 1)
+    await asyncio.sleep(0)
+    inflight = manager.executed[-1]
+    if action == 'resume':
+        await service.action(schedule.id, 'pause', owner=True)
+        await service.action(schedule.id, 'resume', owner=True)
+    else:
+        await service.edit(schedule.id, owner=True, changes={'title': 'Changed'})
+    assert _last_non_skipped_run(store, schedule.id) is None
+    assert store.get_schedule(schedule.id).consecutive_failures == 0
+    await service.finished(inflight, {'error': 'network down'})
+    assert store.get_schedule(schedule.id).consecutive_failures == 0
+    assert _last_non_skipped_run(store, schedule.id) is None
+
+
+@pytest.mark.asyncio
+async def test_once_usage_failure_has_exactly_one_retry_and_persists(env):
+    from datetime import datetime, timezone
+    store, manager, service, task_id = env
+    now = time.time()
+    schedule = await _propose(service, task_id, cadence_kind='once',
+                              cadence={'at': datetime.fromtimestamp(now + 60, timezone.utc).isoformat()})
+    schedule = await service.decide(schedule.id, True)
+    for attempt in range(2):
+        await service._fire(schedule, schedule.next_run)
+        await asyncio.sleep(0)
+        req = manager.executed[-1]
+        await service.finished(req, {'error': 'rate limit', 'reset_time': datetime.fromtimestamp(now + 3600, timezone.utc).isoformat()})
+        store.set_state(req.id, 'done')
+        schedule = store.get_schedule(schedule.id)
+        assert schedule.consecutive_failures == 0
+        assert (schedule.retry_at is not None) == (attempt == 0)
+    assert schedule.next_run is None
+    assert len(store.schedule_runs(schedule.id)) == 2
+
+
+def test_model_could_not_notice_does_not_claim_missing_permission(env):
+    store, manager, service, task_id = env
+    run = {'outcome': 'incomplete', 'result_line': 'I could not find any matching events'}
+    schedule = types.SimpleNamespace(title='Calendar check')
+    text = service.notice_text(schedule, run, None)
+    assert 'it could not find any matching events' in text
+    assert 'not allowed' not in text
+    assert text.endswith('Run now.')
+
+
+def test_failure_metadata_survives_store_reopen(tmp_path):
+    path = str(tmp_path / 'persistent.db')
+    store = Store(path)
+    task = store.create_task('Persistence')
+    schedule = store.create_schedule(chat_id='owner', task_id=task['id'], title='Persistence',
+                                     prompt='Check a public page', kind='every', scopes=['web'],
+                                     timezone='America/New_York', report_mode='changed')
+    store.update_schedule(schedule.id, retry_at=1234567890, failure_reset_at=1234000000)
+    run_id = store.create_schedule_run(schedule.id, None, 1234000001)
+    store.finish_schedule_run(run_id, finished_at=1234000010, complete=False, outcome='failed',
+                              result_line='', final_status='usage limit', denied=[], note='',
+                              changed=False, cost_usd=None, failure_class='usage_limit',
+                              failure_reason='it hit a usage limit', reset_at=1234567890)
+    reopened = Store(path)
+    assert reopened.get_schedule(schedule.id).retry_at == 1234567890
+    assert reopened.get_schedule(schedule.id).failure_reset_at == 1234000000
+    assert reopened.last_schedule_run(schedule.id)['failure_class'] == 'usage_limit'
+    assert reopened.last_schedule_run(schedule.id)['reset_at'] == 1234567890

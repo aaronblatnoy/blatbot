@@ -151,7 +151,7 @@ def test_a_pending_request_alone_makes_it_stuck(tmp_path):
 # Each kind of stuck item, with the right sentence and actions.
 # ---------------------------------------------------------------------------
 
-def test_paused_schedule_with_a_reason_is_stuck_with_resume_and_stop(tmp_path):
+def test_paused_schedule_with_a_reason_offers_one_run_now_action(tmp_path):
     store = make_store(tmp_path)
     schedule = _make_schedule(store, title="Weekly backup check", cadence_kind="weekly",
                               cadence={"day": "mon", "time": "06:00"}, state="paused",
@@ -165,7 +165,7 @@ def test_paused_schedule_with_a_reason_is_stuck_with_resume_and_stop(tmp_path):
     assert row["kind"] == "schedule"
     assert row["sentence"] == "Weekly backup check: it is not allowed to look up and edit contacts."
     actions = {a["action"] for a in row["actions"]}
-    assert "resume" in actions and "stop" in actions
+    assert actions == {"run_now"}
 
 
 def test_paused_schedule_with_no_cadence_gets_repair_action(tmp_path):
@@ -199,7 +199,7 @@ def test_active_schedule_whose_last_run_did_not_complete_is_stuck(tmp_path):
     assert "the total did change" in row["sentence"]
 
 
-def test_active_schedule_with_a_failed_run_offers_run_now_and_stop_not_resume(tmp_path):
+def test_active_schedule_with_a_failed_run_offers_one_run_now_action(tmp_path):
     store = make_store(tmp_path)
     schedule = _make_schedule(store, title="Donor tracker sync", state="active")
     _add_run(store, schedule.id, outcome="failed", result_line="could not reach the page")
@@ -209,7 +209,7 @@ def test_active_schedule_with_a_failed_run_offers_run_now_and_stop_not_resume(tm
     row = next(r for r in result["stuck"] if r["id"] == schedule.id)
     actions = {a["action"] for a in row["actions"]}
     assert "run_now" in actions
-    assert "stop" in actions
+    assert len(actions) == 1
     assert "resume" not in actions  # it was never paused
 
 
@@ -797,3 +797,27 @@ async def test_retry_endpoint_runs_the_owners_own_request_at_once(tmp_path):
     assert manager.approval_texts == []
     new_req = store.get_request(result["id"])
     assert new_req.state == "approved"
+
+
+def test_incident_final_status_has_reason_and_wait_action(tmp_path):
+    store = make_store(tmp_path)
+    schedule = _make_schedule(store)
+    _add_run(store, schedule.id, outcome='failed', result_line='',
+             final_status="You've hit your weekly limit - resets Oct 16, 2pm (exit code: 1)")
+    row = next(r for r in api.overview(FakeGateway(FakeManager(store)), store)['stuck'] if r['id'] == schedule.id)
+    assert 'weekly limit' in row['sentence']
+    assert 'did not say why' not in row['sentence']
+    assert len(row['actions']) == 1
+    assert row['actions'][0]['action'] == 'wait'
+
+
+def test_denied_capability_is_the_only_fix(tmp_path):
+    store = make_store(tmp_path)
+    schedule = _make_schedule(store)
+    _add_run(store, schedule.id, outcome='incomplete', result_line='',
+             denied=[{'tool': 'mcp__inkbox__inkbox_lookup_contact'}])
+    row = next(r for r in api.overview(FakeGateway(FakeManager(store)), store)['stuck'] if r['id'] == schedule.id)
+    assert len(row['actions']) == 1
+    assert row['actions'][0]['label'].startswith('Let it ')
+    assert 'contacts' in row['actions'][0]['target']['scopes']
+    assert 'permission' in row['sentence']

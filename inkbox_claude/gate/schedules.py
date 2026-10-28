@@ -14,7 +14,7 @@ import json
 import logging
 import re
 import time
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import Any, Dict, List, Optional
 from zoneinfo import ZoneInfo
 
@@ -131,10 +131,10 @@ def _normalize_reason(line: str) -> str:
     not"/"I can't"/etc rewritten to "it ...", and the first letter lower-cased
     unless it looks like a capitalized name. Never returns "", ".", " ." or
     anything ending in "..": a blank or punctuation-only line falls back to
-    "it did not say why"."""
+    "it could not finish the scheduled task"."""
     text = (line or "").strip().rstrip(". \t")
     if not text:
-        return "it did not say why"
+        return "it could not finish the scheduled task"
     low = text.lower()
     for prefix, repl in _I_REWRITES:
         if low.startswith(prefix):
@@ -145,7 +145,79 @@ def _normalize_reason(line: str) -> str:
     if text[:1].isupper() and word in _LOWER_STARTERS:
         text = text[0].lower() + text[1:]
     text = text.strip().rstrip(".")
-    return text or "it did not say why"
+    return text or "it could not finish the scheduled task"
+
+
+def classify_failure(status: Dict[str, Any], timezone_name: str = DEFAULT_TIMEZONE,
+                     now: Optional[float] = None) -> Dict[str, Any]:
+    """Persist a stable failure class and a human explanation with each run."""
+    from . import wording, schedprop
+    if run_outcome(status) == "complete":
+        return {"failure_class": "", "failure_reason": "", "reset_at": None}
+    category = wording.failure_category(status)
+    reset_at = None
+    if category == "usage_limit":
+        kind = "usage_limit"
+        reset = wording.usage_limit_reset_text(status)
+        if reset:
+            reset_at = _parse_reset(reset, timezone_name, time.time() if now is None else now)
+        reason = "it hit a usage limit" + (f" until {reset}" if reset else "")
+    elif status.get("denied"):
+        kind = "missing_permission"
+        scopes = []
+        for item in status["denied"]:
+            tool = item.get("tool", "") if isinstance(item, dict) else str(item)
+            scope = scope_for_tool(tool)
+            label = schedprop.labels([scope]) if scope else tool.rsplit("__", 1)[-1].replace("_", " ")
+            if label and label not in scopes:
+                scopes.append(label)
+        reason = "it needs permission to " + (" and ".join(scopes) or "use the required tools")
+    elif category in ("network", "timeout", "buffer") or status.get("error") or any(
+            not r.get("ok") for r in status.get("tool_results") or []):
+        kind, reason = "tool_network_error", "a tool or network error interrupted the run"
+    else:
+        kind, reason = "could_not_finish", "it could not finish the scheduled task"
+    return {"failure_class": kind, "failure_reason": reason, "reset_at": reset_at}
+
+
+def _parse_reset(text: str, timezone_name: str, now: float) -> Optional[float]:
+    """Provider reset dates use the schedule zone unless a zone is supplied."""
+    zone = re.search(r"\(([A-Za-z_]+/[A-Za-z_/]+)\)", text)
+    try:
+        tz = ZoneInfo(zone.group(1) if zone else timezone_name)
+    except (KeyError, ValueError):
+        tz = ZoneInfo(timezone_name)
+    local = datetime.fromtimestamp(now, tz)
+    clean = re.sub(r"\s*\([^)]*\).*", "", text).strip().rstrip(".")
+    try:
+        dt = datetime.fromisoformat(clean.replace("Z", "+00:00"))
+        return (dt if dt.tzinfo else dt.replace(tzinfo=tz)).timestamp()
+    except ValueError:
+        pass
+    clean = re.sub(r"\s+", " ", clean.replace(",", " ")).strip()
+    for fmt in ("%b %d %I%p", "%b %d %I:%M%p", "%I:%M%p", "%I%p",
+                "%b %d %I %p", "%b %d %I:%M %p", "%I:%M %p", "%I %p"):
+        try:
+            parsed = datetime.strptime(clean, fmt)
+        except ValueError:
+            continue
+        dated = "%b" in fmt
+        try:
+            dt = local.replace(month=parsed.month if dated else local.month,
+                               day=parsed.day if dated else local.day, hour=parsed.hour,
+                               minute=parsed.minute, second=0, microsecond=0)
+        except ValueError:
+            continue
+        if dt.timestamp() <= now:
+            dt = dt.replace(year=dt.year + 1) if dated else dt + timedelta(days=1)
+        return dt.timestamp()
+    return None
+
+
+def failure_reason(run: Dict[str, Any]) -> str:
+    classified = run if run.get("failure_class") else classify_failure(run)
+    return _normalize_reason(run.get("result_line") or run.get("final_status")
+                             or classified.get("failure_reason") or "it could not finish the scheduled task")
 
 
 def _first_sentence(text: str) -> str:
@@ -616,6 +688,10 @@ class ScheduleService:
             await self._notice(updated, _insert_before_reply_yes(
                 self._proposal_text(updated), extra_proposal_note))
             message = f"Updated proposal sent for {updated.title}."
+        if immediate or needs_approval:
+            updated = self.store.update_schedule(schedule_id, failure_reset_at=time.time(),
+                                                 retry_at=None, consecutive_failures=0, last_outcome="",
+                                                 revision=old.revision + 1)
         logger.info("[schedules] %s edited (needs_approval=%s)", schedule_id, needs_approval)
         return {"schedule": updated, "applied": immediate, "needs_approval": needs_approval,
                 "message": message}
@@ -653,8 +729,9 @@ class ScheduleService:
                 missing = self._missing(schedule.prompt, schedule.scopes)
                 if missing:
                     raise ValueError(f"missing capability: {self._labels(missing)}")
-                self.store.update_schedule(schedule_id, state="active", consecutive_failures=0)
-            return self.store.update_schedule(schedule_id, next_run=now)
+                self.store.update_schedule(schedule_id, state="active", consecutive_failures=0,
+                                           failure_reset_at=now, retry_at=None, last_outcome="", revision=schedule.revision + 1)
+            return self.store.update_schedule(schedule_id, next_run=now, retry_at=None)
         if action == "stop":
             return self.store.update_schedule(schedule_id, state="ended", next_run=None,
                                               last_outcome="stopped")
@@ -667,7 +744,8 @@ class ScheduleService:
             next_run = cadence_module.next_run(schedule.cadence_kind, schedule.cadence,
                                                schedule.timezone, now)
             return self.store.update_schedule(schedule_id, state="active", next_run=next_run,
-                                              consecutive_failures=0)
+                                              consecutive_failures=0, failure_reset_at=now,
+                                              retry_at=None, last_outcome="", revision=schedule.revision + 1)
         raise ValueError(f"unknown action: {action}")
 
     # -- one-step repair --------------------------------------------------
@@ -791,11 +869,13 @@ class ScheduleService:
         )
         # The revision this run started from: finished() refuses to act on a signal
         # from an older revision if the owner edited the schedule while it ran.
-        self.store.set_state(req.id, "approved", status={"schedule_revision": schedule.revision})
+        self.store.set_state(req.id, "approved", status={"schedule_revision": schedule.revision,
+                                                          "usage_retry": schedule.retry_at is not None})
         next_run = cadence_module.next_run(schedule.cadence_kind, schedule.cadence, schedule.timezone, now)
+        req = self.store.get_request(req.id)
         self.store.create_schedule_run(schedule.id, req.id, now)
         self.store.update_schedule(schedule.id, next_run=next_run, last_run=now, last_request_id=req.id,
-                                   run_count=schedule.run_count + 1)
+                                   run_count=schedule.run_count + 1, retry_at=None)
         self.store.task_event(schedule.task_id, "request", f"Scheduled run: {schedule.title}",
                               chat_id=schedule.chat_id, request_id=req.id, state="running")
         logger.info("[schedules] %s fired: request #%s", schedule.id, req.id)
@@ -889,7 +969,10 @@ class ScheduleService:
         schedule = self.store.get_schedule(req.schedule_id)
         if schedule is None:
             return True
+        classification = classify_failure(status, schedule.timezone, status.get("finished_at"))
         outcome = run_outcome(status)
+        if classification["failure_class"] == "usage_limit":
+            outcome = "failed"
         complete = outcome == "complete"
         finished_at = status.get("finished_at") or time.time()
         result_line = str(status.get("result_line") or "")
@@ -900,6 +983,8 @@ class ScheduleService:
         # created by _fire before the executor was awaited -- the previous run to
         # compare against for "changed" is the next one back, not that row.
         run_row = self._run_row_for_request(schedule.id, req.id)
+        if run_row and run_row.get("finished_at") is not None:
+            return True  # Completion callbacks may be delivered more than once.
         recent = self.store.schedule_runs(schedule.id, limit=2)
         prev = next((r for r in recent if r.get("id") != (run_row or {}).get("id")), None)
         # The model's own CHANGED: yes/no (schedrun.parse_closing) is the source of truth
@@ -916,11 +1001,12 @@ class ScheduleService:
         run_id = run_row["id"] if run_row else self.store.create_schedule_run(schedule.id, req.id, finished_at)
         self.store.finish_schedule_run(run_id, finished_at=finished_at, complete=complete, outcome=outcome,
                                        result_line=result_line, final_status=final_status, denied=denied,
-                                       note=note, changed=changed, cost_usd=status.get("cost_usd"))
+                                       note=note, changed=changed, cost_usd=status.get("cost_usd"), **classification)
         logger.info("[schedules] %s run #%s finished: outcome=%s", schedule.id, run_id, outcome)
+        stored_status = (self.store.get_request(req.id).status or {})
         started_revision = status.get("schedule_revision")
         if started_revision is None:
-            started_revision = (req.status or {}).get("schedule_revision")
+            started_revision = (req.status or {}).get("schedule_revision", stored_status.get("schedule_revision"))
         stale = schedule.state != "active" or (
             started_revision is not None and started_revision != schedule.revision)
         if stale:
@@ -937,6 +1023,20 @@ class ScheduleService:
             if send:
                 await self._notice(schedule, self.notice_text(schedule, run_dict, None))
             return True
+        if classification["failure_class"] == "usage_limit":
+            retry = None
+            if not status.get("usage_retry", (req.status or {}).get("usage_retry", stored_status.get("usage_retry"))):
+                reset = classification["reset_at"]
+                # A missing reset uses the next cadence; once-only jobs get one delayed retry.
+                retry = min(t for t in (reset, schedule.next_run) if t is not None) if (
+                    reset is not None or schedule.next_run is not None) else finished_at + 3600
+            updated = self.store.update_schedule(schedule.id, retry_at=retry,
+                                                 next_run=retry if retry is not None else schedule.next_run,
+                                                 last_outcome=classification["failure_reason"])
+            await self._notice(updated, f"{schedule.title}: {classification['failure_reason']}. "
+                               + (f"Wait, auto-retrying at {_shown(retry, schedule.timezone)}."
+                                  if retry is not None else "Waiting for the next scheduled run."))
+            return True
         if note:
             self.store.update_schedule(schedule.id, last_note=note)
         run_dict = {"outcome": outcome, "result_line": result_line, "final_status": final_status,
@@ -950,9 +1050,9 @@ class ScheduleService:
             # cleared, and stays paused until the owner grants a capability
             # ("let it <label>") or tells it where to find the thing.
             updated = self.store.update_schedule(schedule.id, state="paused", next_run=None,
-                                                 last_outcome=result_line or "blocked")
+                                                 last_outcome=failure_reason({**status, **classification}))
             logger.info("[schedules] %s paused: blocked (%s)", schedule.id, result_line or "no reason given")
-            await self._notice(updated, self.notice_text(updated, run_dict, None))
+            await self.manager.send_to_approver(self.notice_text(updated, run_dict, None))
             return True
         stop = bool(status.get("stop"))
         failures = 0 if complete else schedule.consecutive_failures + 1
@@ -966,11 +1066,11 @@ class ScheduleService:
             return True
         if failures >= 3:
             updated = self.store.update_schedule(schedule.id, state="paused", next_run=None,
-                                                 consecutive_failures=failures, last_outcome=result_line)
+                                                 consecutive_failures=failures, last_outcome=failure_reason({**status, **classification}))
             logger.info("[schedules] %s paused: three consecutive runs that could not finish", schedule.id)
             paused_run = dict(run_dict)
             paused_run["paused"] = True
-            await self._notice(updated, self.notice_text(updated, paused_run, None))
+            await self.manager.send_to_approver(self.notice_text(updated, paused_run, None))
             return True
         extra: Dict[str, Any] = {}
         if schedule.cadence_kind == "once":
@@ -1025,7 +1125,7 @@ class ScheduleService:
         title = _title_for_sentence(schedule.title)
         if run.get("paused"):
             return (f'{title} is paused after three runs that could not finish. '
-                    'Say "start it again" when it is fixed.')
+                    f'{failure_reason(run)}. Run now when it is fixed.')
         outcome = run.get("outcome")
         result_line = run.get("result_line") or ""
         if outcome == "complete":
@@ -1033,6 +1133,8 @@ class ScheduleService:
             if schedule.cadence_kind != "once" and next_run is not None:
                 text += f" Next check {_shown(next_run, schedule.timezone)}."
             return text
+        if outcome == "incomplete" and not run.get("denied"):
+            return f"{title} could not finish: {failure_reason(run)}. Run now."
         if outcome == "incomplete":
             scope_names: List[str] = []
             for item in run.get("denied") or []:
