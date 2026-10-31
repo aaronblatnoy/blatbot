@@ -1751,6 +1751,26 @@ def _owner_request(manager: Any, req: Request) -> bool:
         return False
 
 
+_ACTION_WORDS = ("delete", "remove", "trash", "cancel", "replace", "clear", "purge", "archive",
+                 "move", "create", "update", "add", "restart", "stop", "deploy", "publish", "submit")
+
+
+def _derive_action_word(short: str, shown: Dict[str, Any]) -> str:
+    """A plain English verb for a held destructive call, when one is plainly there:
+    the call's own `action` argument (the common "manage_X" shape -- see is_destructive
+    in jevagent.py, which already reads this same field) when it's a single recognized
+    word, else a recognized verb token in the tool's own short name. Empty when neither
+    names one -- the caller falls back to its own wording rather than guessing."""
+    act = str(shown.get("action") or "").strip().lower()
+    if act in _ACTION_WORDS:
+        return act
+    tokens = short.lower().split("_")
+    for word in _ACTION_WORDS:
+        if word in tokens:
+            return word
+    return ""
+
+
 def _draft_text(args: Dict[str, Any]) -> str:
     """One outbound message, laid out as the person reading it would want to check it:
     who it reaches first, then what it says, whole and unedited."""
@@ -2048,7 +2068,9 @@ class GateSessionManager:
         if req.original_message:
             parts.append(f'"{req.original_message.strip()}"')
         if req.scopes:
-            parts.append(f"It would use {schedprop.short_labels(req.scopes)}.")
+            # Scope labels are already verb phrases ("look up and manage your Stern
+            # calendar"), so this reads as one sentence, not "It would use <verb phrase>."
+            parts.append(f"It would {schedprop.short_labels(req.scopes)}.")
         marker = "--- AARON'S INSTRUCTIONS ---"
         if marker in req.prompt:
             parts.append("Your instructions: " + req.prompt.split(marker, 1)[1].strip())
@@ -2236,9 +2258,16 @@ class GateSessionManager:
                 return text
         except Exception:
             logger.debug("[gate] confirmation phrasing failed", exc_info=True)
-        detail = " ".join(a.strip() for a in about if a.strip())
-        if not detail:
-            detail = "I don't have more detail on what this affects."
+        items = [a.strip() for a in about if a.strip()]
+        if not items:
+            return "Before I do this, I need your yes. I don't have more detail on what this affects."
+        detail = " ".join(items)
+        verb = _derive_action_word(short, shown)
+        if verb:
+            sentence = f"{verb} {detail}"
+            if not sentence.endswith((".", "!", "?")):
+                sentence += "."
+            return f"Before I do this, I need your yes: {sentence}"
         return f"Before I do this, I need your yes. {detail}"
 
     async def perform_confirmed(self, req: Request) -> None:
