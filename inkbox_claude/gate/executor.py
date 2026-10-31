@@ -327,7 +327,10 @@ class Executor:
                             f"reached: {who}. Do not try another tool or another route to send it. Put the "
                             "whole thing in your final status, exactly as you would send it: every "
                             "recipient, every cc, the subject, and the full text, then stop."))
-                elif confirm_sends and not self.allow_send:
+                elif confirm_sends and not self.allow_send and not (
+                        recipients_of(input_data or {})
+                        and all(_is_owner_handle(r, self.protected) for r in recipients_of(input_data or {}))):
+                    # A text to Aaron himself never needs his sign-off; only third parties are held.
                     who = ", ".join(recipients_of(input_data or {})) or "(no recipient in the call)"
                     self.held_send = {"tool": tool_name, "args": dict(input_data or {}), "to": who}
                     return PermissionResultDeny(message=(

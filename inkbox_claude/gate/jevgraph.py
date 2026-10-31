@@ -406,6 +406,9 @@ async def fill_one(item: Dict[str, Any], config: RunnableConfig) -> Dict[str, An
     return {"filled": [{"__round__": item["round"], "tool": item["tool"], "args": args, "primary": item["primary"]}]}
 
 
+from .executor import _is_owner_handle  # noqa: E402
+
+
 def _owner_asked(req: Any) -> bool:
     """Did this request come from the person the assistant works for? His own sends are him
     speaking through it, so he reads them first; anyone else's request he already approved.
@@ -436,7 +439,9 @@ async def guard(state: AgentState, config: RunnableConfig) -> Dict[str, Any]:
         logger.info("jev graph: refusing %s to the requester; finishing with findings", choice)
         return {"outcome": "ok", "batch": []}
     from .settings import get as _setting
-    if ja.is_outbound_message(choice, args) and _owner_asked(req) and bool(_setting("GATE_CONFIRM_SENDS")):
+    _recips = ja.recipients_of(args)
+    _to_owner = bool(_recips) and all(_is_owner_handle(r, agent.protected) for r in _recips)
+    if ja.is_outbound_message(choice, args) and _owner_asked(req) and bool(_setting("GATE_CONFIRM_SENDS")) and not _to_owner:
         # The same rule as the other executor: words put in front of someone else are shown
         # to the owner before they go, whichever engine composed them.
         who = ", ".join(ja.recipients_of(args)) or "(no recipient named in the call)"
