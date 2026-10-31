@@ -37,6 +37,10 @@ HANDOFF_LINE = (
     "Thanks! I'll confirm that with Aaron and get back to you shortly.\n\n"
     "Blatbot\nExecutive Assistant to Aaron Blatnoy"
 )
+_MODE_LABEL = {
+    "imessage": "iMessage", "sms": "text", "email": "email",
+    "voice": "phone call", "telegram": "Telegram",
+}
 EXPIRE_SECONDS = 24 * 3600
 # Item C2: how long a call's failed ask is still "the same ask" for folding purposes
 # on timing alone -- long enough to cover the tail end of one spoken turn, short
@@ -1766,15 +1770,10 @@ def _draft_text(args: Dict[str, Any]) -> str:
         if got:
             lines.append(f"{label}: {got}")
     body = val("body", "message", "text", "content", "caption")
-    rest = {k: v for k, v in args.items()
-            if k not in {"to", "recipient", "recipients", "to_email", "email", "phone", "number", "cc", "bcc",
-                         "subject", "title", "body", "message", "text", "content", "caption", "user_google_email"}}
     out = "\n".join(lines)
     if body:
         out += ("\n\n" if out else "") + body
-    if rest:
-        out += ("\n\n" if out else "") + json.dumps(rest, ensure_ascii=False)
-    return out or json.dumps(args, ensure_ascii=False)
+    return out or "There's a message to send, but I couldn't lay out its parts plainly."
 
 
 class GateSessionManager:
@@ -2032,23 +2031,29 @@ class GateSessionManager:
         except Exception:
             logger.exception("[gate] FYI to approver failed")
 
+    def _approval_reply_text(self, req: Request) -> str:
+        if len(self.store.pending()) <= 1:
+            return "Reply yes, no, or edit: <instructions>"
+        return (f'Reply "#{req.id} yes", "#{req.id} no", '
+                f'or "#{req.id} edit: <instructions>".')
+
     def format_request(self, req: Request, revised: bool = False) -> str:
-        who = f"{req.sender_name} ({req.sender})" if req.sender_name else req.sender
-        subj = f"\nSubject: {req.subject}" if req.subject else ""
-        head = f"[Blatbot #{req.id}{' revised' if revised else ''}] {who} via {req.mode}{subj}"
+        name = req.sender_name or req.sender
+        mode_label = _MODE_LABEL.get(req.mode, req.mode)
+        head = f"{name} ({mode_label}) wants you to{' (revised)' if revised else ''}:"
+        lines = [head, req.summary]
+        if req.subject:
+            lines.append(f"Subject: {req.subject}")
+        parts = ["\n".join(lines)]
+        if req.original_message:
+            parts.append(f'"{req.original_message.strip()}"')
+        if req.scopes:
+            parts.append(f"It would use {schedprop.short_labels(req.scopes)}.")
         marker = "--- AARON'S INSTRUCTIONS ---"
-        yours = ""
         if marker in req.prompt:
-            yours = "Your instructions: " + req.prompt.split(marker, 1)[1].strip() + "\n\n"
-        return (
-            f"{head}\n\n--- Their message ---\n{req.original_message}\n\n"
-            f"--- Blatbot wants ---\n{req.summary}\nTools: {', '.join(req.scopes)}\n\n"
-            "Claude will read their message and the task record and act on it with only those tools.\n"
-            + yours +
-            f"Reply \"#{req.id} yes\" to run, \"#{req.id} no\" to drop, "
-            f"or \"#{req.id} edit: <instructions>\" to add instructions (you will see it again before it runs). "
-            "A bare yes/no works when this is the only one pending."
-        )
+            parts.append("Your instructions: " + req.prompt.split(marker, 1)[1].strip())
+        parts.append(self._approval_reply_text(req))
+        return "\n\n".join(parts)
 
     def resolve_task(self, session: GateSession, out: RouterOutput, message: str = "") -> Dict[str, Any]:
         """Decide which task a request belongs to. Always returns a task.
@@ -2200,10 +2205,13 @@ class GateSessionManager:
         self.task_note(req, "request", f"Waiting on Aaron to confirm: {short} {json.dumps(shown, ensure_ascii=False)}", state="waiting_aaron")
         if c.get("kind") == "send":
             # Not a summary of a message: the message. He approves the words that will go out.
-            plain = f"[Blatbot #{req.id}] Nothing has been sent. This is what would go out:\n\n{_draft_text(shown)}"
+            plain = f"Nothing has been sent. This is what would go out:\n\n{_draft_text(shown)}"
         else:
             plain = await self._phrase_confirmation(req, short, shown, c.get("about") or [])
-        full_text = f"{plain}\nReply \"#{req.id} yes\" to do it or \"#{req.id} no\" to leave it alone."
+        if len(self.store.pending()) <= 1:
+            full_text = f"{plain}\nReply yes to do it or no to leave it alone."
+        else:
+            full_text = f'{plain}\nReply "#{req.id} yes" to do it or "#{req.id} no" to leave it alone.'
         schedule = self.store.get_schedule(req.schedule_id) if req.schedule_id else None
         if schedule is not None:
             # A held call that belongs to a scheduled run asks on that
@@ -2225,12 +2233,13 @@ class GateSessionManager:
                  "what_it_refers_to": about[:6]})
             text = " ".join((text or "").split())
             if text:
-                return f"[Blatbot #{req.id}] {text}"
+                return text
         except Exception:
             logger.debug("[gate] confirmation phrasing failed", exc_info=True)
-        return (f"[Blatbot #{req.id}] Before I do this, I need your yes.\n"
-                f"Action: {short} {json.dumps(shown, ensure_ascii=False)}\nIt refers to:\n"
-                + ("\n".join(f"  {ln}" for ln in about) or "  (no further detail found)"))
+        detail = " ".join(a.strip() for a in about if a.strip())
+        if not detail:
+            detail = "I don't have more detail on what this affects."
+        return f"Before I do this, I need your yes. {detail}"
 
     async def perform_confirmed(self, req: Request) -> None:
         """The owner said yes: run exactly the stored call, then finish the request."""
@@ -2353,6 +2362,11 @@ class GateSessionManager:
                 # The pending request is on a different thread; this thread's own
                 # proposal (handled further below) answers the bare yes/no instead.
             else:
+                req = pending[0]
+        elif len(pending) == 1 and re.match(r"^edit\s*:\s*.+$", t, re.I | re.S):
+            from . import schedcmd
+            chat_id = getattr(session, "record_id", None) or getattr(session, "chat_id", "")
+            if not schedcmd._open_proposals(self.store, chat_id):
                 req = pending[0]
         elif len(pending) >= 2:
             # Two or more ordinary requests are pending (on any thread): with only

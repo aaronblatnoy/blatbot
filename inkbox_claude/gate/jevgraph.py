@@ -448,7 +448,7 @@ async def guard(state: AgentState, config: RunnableConfig) -> Dict[str, Any]:
         logger.info("jev graph: %s would reach %s; holding for the owner", choice.split("__")[-1], who)
         return {"outcome": "confirm", "batch": [], "error": "confirmation required",
                 "confirm": {"tool": choice, "args": args, "kind": "send",
-                            "about": [f"It would go to: {who}"]}}
+                            "about": [who]}}
     if ja.is_destructive(choice, args):
         about = ja._mentions(steps, args)
         if not about:

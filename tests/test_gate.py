@@ -4,6 +4,7 @@ executor hash refusal, routing with a stubbed router. No network."""
 from __future__ import annotations
 
 import asyncio
+import itertools
 import time
 import json
 from types import SimpleNamespace
@@ -116,10 +117,10 @@ def test_stranger_request_goes_to_aaron_and_waits(tmp_path):
         prompt="Book Tue 6pm", scopes=["calendar", "email_send"], summary="book chat"))
     asyncio.run(m.get("c1").handle_inbound("can we do tue 6pm?", "email", stranger_meta()))
     pend = m.store.pending(); assert len(pend) == 1
-    approver_msgs = [x for x in sent if x[2] == "imessage" and "[Blatbot #" in x[1]]
+    approver_msgs = [x for x in sent if x[2] == "imessage" and "wants you to:" in x[1]]
     assert len(approver_msgs) == 1
     text = approver_msgs[0][1]
-    assert "can we do tue 6pm?" in text and "book chat" in text and "calendar, email_send" in text
+    assert "can we do tue 6pm?" in text and "book chat" in text and gm.schedprop.short_labels(["calendar", "email_send"]) in text
     sender_msgs = [x for x in sent if x[2] == "email"]
     assert sender_msgs and "confirm that with Aaron" in sender_msgs[0][1]
     assert m.store.thread_state("c1") == "awaiting_aaron"
@@ -470,7 +471,7 @@ def test_realtime_consult_stranger_is_gated(tmp_path):
         prompt="Book Tue 6pm", scopes=["calendar"], summary="book chat"))
     out = asyncio.run(m.get("p1").voice_consult("book me tuesday", voice_meta("+12125550100")))
     assert "Aaron" in out and m.executor.ran == [] and len(m.store.pending()) == 1
-    assert [x for x in sent if x[2] == "imessage" and "[Blatbot #" in x[1]]
+    assert [x for x in sent if x[2] == "imessage" and "wants you to:" in x[1]]
 
 
 def test_realtime_consult_plain_answer(tmp_path):
@@ -971,7 +972,7 @@ def test_jev_action_creates_request_when_router_missed_it(tmp_path):
     pend = m.store.pending()
     assert len(pend) == 1 and pend[0].scopes == ["tamid_drive_write"]
     assert "Here is my application" in pend[0].prompt and m.store.task_id_for_request(pend[0].id) == t["id"]
-    assert any("[Blatbot #" in x[1] for x in sent)  # went to Aaron for approval
+    assert any(x[2] == "imessage" and "Sam Rivera (email) wants you to:" in x[1] for x in sent)
 
 
 def test_jev_action_drops_request_router_invented(tmp_path):
@@ -1051,7 +1052,7 @@ def test_jev_first_stranger_request_waits_for_aaron(tmp_path):
     r = m.store.get_request(1)
     assert r.state == "pending" and r.scopes == ["calendar"]
     assert m.router.calls[-1]["action"] is True
-    assert any("[Blatbot #1]" in s[1] for s in sent)
+    assert any(s[2] == "imessage" and "Cand Idate (email) wants you to:" in s[1] for s in sent)
 
 
 def test_jev_first_follow_up_inherits_task_scopes(tmp_path):
@@ -1453,7 +1454,7 @@ def test_destructive_call_asks_the_owner_and_runs_only_on_yes(tmp_path):
         await asyncio.sleep(0.15)
         assert performed == []                                                   # nothing changed yet
         ask = [t for _, t, *_ in sent if "Before I do this" in t]
-        assert len(ask) == 1 and "delete" in ask[0] and "Sam Rivera and TAMID at NYU (Quant)" in ask[0]
+        assert len(ask) == 1 and "Sam Rivera and TAMID at NYU (Quant)" in ask[0]
         assert m.store.get_request(1).state == "pending"
         await s.handle_inbound("#1 yes", "imessage", approver_meta())
         await asyncio.sleep(0.15)
@@ -1719,7 +1720,7 @@ def test_telegram_is_just_another_surface_for_permissions(tmp_path, monkeypatch)
     asyncio.run(m.get("tg:999").handle_inbound("book me a slot", "telegram", telegram_meta("999")))
     req = m.store.get_request(1)
     assert req is not None and req.state == "pending", "a stranger on Telegram must wait for Aaron"
-    assert any("Blatbot #1" in str(row) for row in sent), sent
+    assert any("wants you to:" in str(row) for row in sent), sent
 
     # The owner, on the same surface, runs immediately: the id is his.
     m2, sent2 = make_manager(tmp_path / "b")
@@ -2074,3 +2075,109 @@ def test_a_retry_answers_the_message_that_started_it(tmp_path):
     second = m.store.add_message("aaron", "inbound", "try again", "imessage")
     again = m.retry_request(m.store.get_request(req.id), approved=True, inbound_id=second)
     assert again.inbound_id == second
+
+
+_pretty_request_counter = itertools.count(1)
+
+
+def _pretty_request(m, **overrides):
+    # Each call gets its own chat_id by default: create_request dedupes a second
+    # request with the same chat_id + prompt within the dedupe window, which would
+    # silently hand back request #1 instead of making a genuinely second pending
+    # request -- exactly what the multi-pending tests below need to exist.
+    n = next(_pretty_request_counter)
+    fields = dict(
+        chat_id=f"sarah-{n}", sender="+15550100002", sender_name="Sarah Kim",
+        mode="imessage", subject="", original_message="hey can we push the meeting to 4",
+        summary="Move Thursday's TAMID meeting to 4pm", scopes=["stern_calendar"],
+        prompt="Move the meeting", state="pending",
+        task_id=m.store.create_task("Move the meeting")["id"],
+    )
+    fields.update(overrides)
+    return m.store.create_request(**fields)
+
+
+def test_approval_text_plain_single_and_numbered_multiple(tmp_path):
+    m, _ = make_manager(tmp_path)
+    req = _pretty_request(m)
+    text = m.format_request(req)
+    assert text.startswith("Sarah Kim (iMessage) wants you to:\nMove Thursday's TAMID meeting to 4pm")
+    assert '"hey can we push the meeting to 4"' in text
+    assert not any(token in text for token in ("---", "Tools:", "[", "stern_calendar", req.sender))
+    assert "calendar" in text and "Reply yes, no, or edit:" in text
+    _pretty_request(m)
+    text = m.format_request(req)
+    assert f'"#{req.id} yes"' in text and f'"#{req.id} edit:' in text
+    assert "Reply yes, no" not in text
+
+
+def test_approval_text_optional_parts_and_unknown_mode(tmp_path):
+    m, _ = make_manager(tmp_path)
+    req = _pretty_request(m, sender_name="", mode="fax", subject="Meeting",
+                          original_message="", scopes=[],
+                          prompt="Move it\n\n--- AARON'S INSTRUCTIONS ---\nAfter class")
+    assert m.format_request(req, revised=True) == (
+        '+15550100002 (fax) wants you to (revised):\n'
+        "Move Thursday's TAMID meeting to 4pm\nSubject: Meeting\n\n"
+        "Your instructions: After class\n\nReply yes, no, or edit: <instructions>"
+    )
+
+
+@pytest.mark.parametrize("command", ["edit: After class", "EDIT : After\nclass", "#1 edit: After class", "1 edit: After class"])
+def test_edit_single_pending_revises_without_running(tmp_path, command):
+    m, sent = make_manager(tmp_path)
+    req = _pretty_request(m)
+    assert asyncio.run(m.handle_approver_command(m.get("aaron"), command))
+    revised = m.store.get_request(req.id)
+    assert revised.state == "pending" and revised.revision == 1
+    assert revised.prompt.endswith(command.split(":", 1)[1].strip())
+    assert "revised" in sent[-1][1] and "Your instructions:" in sent[-1][1]
+    assert m.executor.ran == []
+
+
+@pytest.mark.parametrize("proposal", [False, True])
+def test_bare_edit_does_not_claim_ambiguous_request(tmp_path, monkeypatch, proposal):
+    from inkbox_claude.gate import schedcmd
+    m, sent = make_manager(tmp_path)
+    req = _pretty_request(m)
+    if proposal:
+        monkeypatch.setattr(schedcmd, "_open_proposals", lambda *args: [SimpleNamespace(title="Daily check")])
+    else:
+        _pretty_request(m)
+    assert not asyncio.run(m.handle_approver_command(m.get("aaron"), "edit: After class"))
+    assert m.store.get_request(req.id).revision == 0
+    assert sent == []
+
+
+def test_confirmation_fallback_is_plain(tmp_path):
+    m, sent = make_manager(tmp_path)
+    req = _pretty_request(m)
+    status = {"confirm": {"tool": "mcp__tamid-drive__manage_event",
+                         "args": {"action": "delete", "event_id": "evt_QUANT01"},
+                         "about": ['"Sam Rivera and TAMID at NYU (Quant)" Fri 10/2 3:00 PM']}}
+    asyncio.run(m.ask_confirmation(req, status))
+    text = sent[-1][1]
+    assert "Before I do this" in text and "Sam Rivera" in text
+    assert not any(token in text for token in ("Action:", "{", "manage_event", "[Blatbot #"))
+    assert text.endswith("Reply yes to do it or no to leave it alone.")
+    assert asyncio.run(m._phrase_confirmation(req, "manage_event", {}, [])) == (
+        "Before I do this, I need your yes. I don't have more detail on what this affects."
+    )
+
+
+def test_send_confirmation_drops_internal_arguments_and_numbers_multiple(tmp_path):
+    m, sent = make_manager(tmp_path)
+    req = _pretty_request(m)
+    status = {"confirm": {"kind": "send", "tool": "mcp__inkbox__inkbox_send_email",
+                         "args": {"to": "Sarah Kim", "subject": "Meeting", "body": "4pm works.",
+                                  "internal_option": {"secret": True}},
+                         "about": ["Not displayed"]}}
+    asyncio.run(m.ask_confirmation(req, status))
+    plain = "Nothing has been sent. This is what would go out:\n\nTo: Sarah Kim\nSubject: Meeting\n\n4pm works."
+    assert sent[-1][1] == plain + "\nReply yes to do it or no to leave it alone."
+    _pretty_request(m)
+    asyncio.run(m.ask_confirmation(req, status))
+    assert sent[-1][1] == plain + f'\nReply "#{req.id} yes" to do it or "#{req.id} no" to leave it alone.'
+    assert gm._draft_text({"internal_option": True}) == (
+        "There's a message to send, but I couldn't lay out its parts plainly."
+    )

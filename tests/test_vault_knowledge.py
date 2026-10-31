@@ -12,7 +12,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from inkbox_claude.gate import hosttools
+from inkbox_claude.gate import hosttools, schedprop
 from inkbox_claude.gate import vaultscopes
 from inkbox_claude.gate.executor import vault_prefixes_for_scopes
 from inkbox_claude.gate.taskpick import TaskPicker
@@ -397,7 +397,7 @@ def test_approval_text_names_the_knowledge_scope(tmp_path, monkeypatch):
         inbound_id=None,
     )
     text = m.format_request(req)
-    assert "vault:areas/garden-shed" in text
+    assert schedprop.label("vault:areas/garden-shed") in text
 
 
 # --------------------------------------------------------------------------- attachment

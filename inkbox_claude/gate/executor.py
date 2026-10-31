@@ -509,7 +509,7 @@ class Executor:
         if self.held_send is not None:
             # Something was going to be said to someone else. It is not sent, it is shown.
             out["confirm"] = {"tool": self.held_send["tool"], "args": self.held_send["args"],
-                              "about": [f"It would go to: {self.held_send['to']}"], "kind": "send"}
+                              "about": [self.held_send["to"]], "kind": "send"}
             out["ok"] = False
         elif held_destructive is not None:
             out["confirm"] = {"tool": held_destructive["tool"], "args": held_destructive["args"],
