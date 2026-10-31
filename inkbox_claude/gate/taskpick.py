@@ -576,7 +576,12 @@ class TaskPicker:
             notes.append((daily_rel, 1.0))
             logger.info("vault tree: daily note resolved in code -> %s", daily_rel)
 
-        # ---- round trip 1: every hub directly, plus non-container depth-1 scopes ----
+        # ---- round trip 1: every hub directly, plus non-container depth-1 scopes, PLUS
+        # every note under the vault's People area. People's notes never depend on which
+        # hub wins (they are expanded unconditionally either way, same as before) -- they
+        # only used to wait for a second round trip out of habit. Asking them alongside
+        # the hub nouls, in the SAME batched TypeSafe call, saves a full network round trip
+        # whenever nothing besides People turns out relevant: a name lookup, a bio, a role.
         candidates = vaultscopes.level1_candidates(discovered)
         q_lower = prompt.lower()
         level1: Dict[str, Any] = {}
@@ -588,9 +593,30 @@ class TaskPicker:
                 if info.title.strip().lower() not in q_lower:
                     continue
             level1[name] = info
+        people_scope = vaultscopes.find_people_scope(discovered)
+        people_notes: List = []
+        if people_scope:
+            info = discovered.get(people_scope)
+            if info is not None:
+                try:
+                    people_notes = vaultscopes.notes_under_bounded(root, info)
+                except Exception:
+                    people_notes = []
+
         chosen_top: List[str] = []
-        if level1:
+        per_hub: Dict[str, List[tuple]] = {}
+        if level1 or people_notes:
             questions = {name: noul(info.title, info.description or info.title) for name, info in level1.items()}
+            people_keyed: List[tuple] = []
+            for i, p in enumerate(people_notes):
+                key = f"{people_scope}::{i}"
+                people_keyed.append((key, p))
+                title = p.stem
+                try:
+                    opening = p.read_text(encoding="utf-8", errors="replace")[:vaultscopes.DESCRIPTION_CHARS]
+                except OSError:
+                    opening = ""
+                questions[key] = noul(title, opening)
             t0 = time.monotonic()
             try:
                 answers = await ask(questions)
@@ -600,19 +626,27 @@ class TaskPicker:
                     return {"scopes": None, "notes": [], "probabilities": {}, "reason": f"error: {exc}", "timings": timings}
             else:
                 timings["level1"] = time.monotonic() - t0
-                probs.update(answers)
-                chosen_top = [name for name, p in answers.items() if p >= VAULT_SCOPE_MIN_YES]
+                hub_answers = {name: p for name, p in answers.items() if name in level1}
+                probs.update(hub_answers)
+                chosen_top = [name for name, p in hub_answers.items() if p >= VAULT_SCOPE_MIN_YES]
                 logger.info("vault tree: level 1 %s | top=%s", chosen_top,
-                            sorted(answers.items(), key=lambda kv: -kv[1])[:5])
+                            sorted(hub_answers.items(), key=lambda kv: -kv[1])[:5])
                 for name in chosen_top:
                     if name not in chosen_scopes:
                         chosen_scopes.append(name)
+                if people_scope:
+                    bucket: List[tuple] = []
+                    for key, p in people_keyed:
+                        rel = str(p.relative_to(root))
+                        pr = answers.get(key, 0.0)
+                        probs[rel] = pr
+                        bucket.append((rel, pr))
+                    per_hub[people_scope] = bucket
 
-        # ---- round trip 2: every note under every chosen hub, plus People, batched once ----
-        people_scope = vaultscopes.find_people_scope(discovered)
-        hubs_to_expand = list(chosen_top)
-        if people_scope and people_scope not in hubs_to_expand:
-            hubs_to_expand.append(people_scope)
+        # ---- round trip 2: notes under every OTHER chosen hub (People is already resolved
+        # above, whether or not it was itself chosen). Skipped entirely when the task needs
+        # no hub besides People -- the common case now costs one round trip, not two. ----
+        hubs_to_expand = [h for h in chosen_top if h != people_scope]
 
         hub_notes: Dict[str, List] = {}
         for name in hubs_to_expand:
@@ -637,7 +671,8 @@ class TaskPicker:
                     opening = ""
                 questions2[key] = noul(title, opening)
 
-        per_hub: Dict[str, List[tuple]] = {name: [] for name in hubs_to_expand}
+        for name in hubs_to_expand:
+            per_hub.setdefault(name, [])
         if questions2:
             t0 = time.monotonic()
             try:
