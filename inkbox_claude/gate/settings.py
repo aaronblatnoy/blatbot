@@ -75,12 +75,20 @@ KNOBS: List[Dict[str, Any]] = [
      "help": "Only applies when the engine above is jev."},
 
     # -- the vault (second brain) --------------------------------------------
+    {"name": "GATE_CONTEXT_BUDGET_CHARS", "kind": "number", "default": 8000, "min": 1000, "max": 200000,
+     "step": 500, "group": "Vault",
+     "label": "Total context a run carries, in characters",
+     "help": "The task ledger and the vault attachment together are cut to roughly this many "
+             "characters before a run starts: the most recent and the matching ledger events, and "
+             "the vault sections/bullets that match the request, rather than every whole note and "
+             "the full task history. Raise it if answers are missing context the task actually "
+             "has; lower it to speed runs up further."},
     {"name": "GATE_VAULT_ATTACH_BUDGET_CHARS", "kind": "number", "default": 60000, "min": 2000, "max": 2000000,
      "step": 1000, "group": "Vault",
-     "label": "How much of the vault to attach to a run, in characters",
-     "help": "Notes Jev chose as relevant are attached to the run whole, in relevance order, until this "
-             "many characters are used. Notes beyond the budget are listed by path instead of attached, "
-             "so the run can still open them itself. Nothing is ever cut short."},
+     "label": "Hard ceiling on the vault attachment alone, in characters",
+     "help": "A second, looser cap on top of the total context budget above: the vault attachment "
+             "never exceeds this regardless of how little the ledger used. Notes beyond either "
+             "budget are listed by path instead of attached, so the run can still open them itself."},
 ]
 
 _BY_NAME = {k["name"]: k for k in KNOBS}

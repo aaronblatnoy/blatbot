@@ -148,3 +148,51 @@ def test_lookup_shares_body_budget_and_retains_overlapping_match(tmp_path):
     assert shown.count('Task T') <= 3
     assert f"Task T{tasks[-1]['id']} " in shown
     assert f"Task T{tasks[2]['id']} " in shown
+
+
+# ------------------------------------------- execution ledger: recent + matching events
+
+
+def test_execution_ledger_keeps_recent_and_matching_but_drops_the_rest(tmp_path):
+    store = Store(str(tmp_path / 'gate.db'))
+    task = store.create_task('Corgi status')
+    for i in range(20):
+        store.task_event(task['id'], 'note', f'unrelated housekeeping line {i} about nothing in particular')
+    store.task_event(task['id'], 'note', 'Pierce and Pierce demo is ready, corgi bullpen status green')
+    for i in range(20, 26):
+        store.task_event(task['id'], 'note', f'more recent unrelated housekeeping line {i}')
+    text, info = store.ledger_context_for_execution(
+        task['id'], 'what is the corgi bullpen status', recent=6, match_cap=6, budget_chars=8000)
+    assert 'corgi bullpen status green' in text          # older but matching event kept
+    assert 'housekeeping line 25' in text                # most recent event kept
+    assert 'housekeeping line 0' not in text             # old, unmatched, outside the recent window
+    assert info['pool'] == 27
+    assert info['dropped'] > 0
+    assert info['matched'] >= 1
+
+
+def test_execution_ledger_drops_whole_events_under_a_tight_budget_never_half_one(tmp_path):
+    store = Store(str(tmp_path / 'gate.db'))
+    task = store.create_task('Tight budget')
+    for i in range(10):
+        store.task_event(task['id'], 'note', f'event number {i} ' + ('padding ' * 50))
+    text, info = store.ledger_context_for_execution(
+        task['id'], 'nothing matches this', recent=6, match_cap=6, budget_chars=400)
+    assert len(text) < 10 * 400          # materially smaller than the unbounded ledger
+    # Every kept line is a complete event line -- no line is a truncated fragment
+    # of a "padding" run cut mid-word.
+    for line in text.splitlines():
+        if 'padding' in line:
+            assert line.rstrip().endswith('padding')   # whole event kept, never cut mid-word
+    assert info['pool'] == 10
+    assert info['kept'] >= 2                # never drops below the floor of 2 recent events
+    assert info['dropped'] > 0
+
+
+def test_execution_ledger_on_a_task_with_no_events(tmp_path):
+    store = Store(str(tmp_path / 'gate.db'))
+    task = store.create_task('Empty task')
+    text, info = store.ledger_context_for_execution(task['id'], 'anything', budget_chars=4000)
+    assert 'Empty task' in text
+    assert info['pool'] == 0
+    assert info['dropped'] == 0

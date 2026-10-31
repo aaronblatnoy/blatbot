@@ -2861,14 +2861,21 @@ class GateSessionManager:
             while len(self._knowledge_notes) > 500:
                 self._knowledge_notes.pop(next(iter(self._knowledge_notes)))
 
-    def vault_attachment_for(self, req: Request) -> str:
+    def vault_attachment_for(self, req: Request, *, ledger_chars: int = 0) -> str:
         """The owner's vault notes this approved request's knowledge scopes cover,
         as a delimited block for the run's context. Computed fresh from req.scopes
         at run time (never from req.prompt, which is hash-locked from approval), so
         it cannot be widened by anything that happened between approval and running:
         the scopes it reads here are exactly the ones Aaron's approval (or his own
         trust) already covers. Holding the whole-vault vault_read scope as well changes
-        only what the vault tools may open afterwards, not what is attached here."""
+        only what the vault tools may open afterwards, not what is attached here.
+
+        A note is attached whole only up to vaultscopes.SMALL_NOTE_CHARS; past that
+        it is cut to the sections/bullets that match the request (see
+        vaultscopes.build_relevant_attachment), so a run's vault attachment carries
+        the relevant paragraphs of six notes rather than all six of them whole.
+        `ledger_chars` is how much of the run's shared context budget the task
+        ledger already used, so the vault gets whatever is left of it."""
         names = [sc for sc in (req.scopes or []) if str(sc).startswith("vault:")]
         if not names:
             return ""
@@ -2892,11 +2899,17 @@ class GateSessionManager:
         # decision) every note the scopes cover is offered, in the vault's own order.
         chosen = [n for n in self._knowledge_notes.get(int(req.id), []) if n in covered]
         notes = chosen or covered
-        budget = int(_settings.get("GATE_VAULT_ATTACH_BUDGET_CHARS") or 60000)
-        attachment = vaultscopes.build_attachment(root, notes, budget_chars=budget)
-        if attachment.overflow:
-            logger.info("[gate] #%s vault attachment: %d notes attached, %d over budget listed by path",
-                        req.id, len(attachment.included), len(attachment.overflow))
+        total_budget = int(_settings.get("GATE_CONTEXT_BUDGET_CHARS") or 8000)
+        ceiling = int(_settings.get("GATE_VAULT_ATTACH_BUDGET_CHARS") or 60000)
+        budget = max(500, min(ceiling, total_budget - max(0, ledger_chars)))
+        attachment = vaultscopes.build_relevant_attachment(
+            root, notes, prompt=req.prompt or "", summary=req.summary or "", budget_chars=budget)
+        if attachment.overflow or attachment.dropped_units:
+            logger.info("[gate] #%s vault attachment: %d notes attached (%d chars), %d over budget "
+                        "listed by path, sections trimmed in %s",
+                        req.id, len(attachment.included), len(attachment.block),
+                        len(attachment.overflow),
+                        {p: f"{d}/{t}" for p, (d, t) in attachment.dropped_units.items()} or "none")
         return attachment.block
 
     def retry_request(self, req: Request, *, approved: bool,
@@ -2955,12 +2968,22 @@ class GateSessionManager:
             session.typing_start()
             slow_ack = asyncio.create_task(self._ack_if_slow(session, req))
         tid = self.store.task_id_for_request(req.id)
-        context = self.store.task_memory_for_task(tid) if tid else ""
-        vault_block = self.vault_attachment_for(req)
+        ledger_info: Dict[str, int] = {}
+        if tid:
+            ledger_budget = max(1500, int(int(_settings.get("GATE_CONTEXT_BUDGET_CHARS") or 8000) * 0.4))
+            context, ledger_info = self.store.ledger_context_for_execution(
+                tid, req.original_message or req.prompt or "", budget_chars=ledger_budget)
+        else:
+            context = ""
+        ledger_chars = len(context)
+        vault_block = self.vault_attachment_for(req, ledger_chars=ledger_chars)
         if vault_block:
             context = f"{context}\n\n{vault_block}" if context else vault_block
-        logger.info("[gate] executing #%s with ledger T%s (%d chars, vault attachment %d chars)",
-                    req.id, tid, len(context), len(vault_block))
+        logger.info("[gate] executing #%s with ledger T%s (%d chars, pool %s dropped %s matched %s) "
+                    "vault attachment %d chars",
+                    req.id, tid, ledger_chars,
+                    ledger_info.get("pool"), ledger_info.get("dropped"), ledger_info.get("matched"),
+                    len(vault_block))
         try:
             status = await self._run_executor(req, context)
         finally:

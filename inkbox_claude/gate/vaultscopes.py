@@ -414,6 +414,153 @@ def build_attachment(root: Path, notes: List[str], *, budget_chars: int) -> Atta
     return Attachment(block="\n".join(body), included=tuple(included), overflow=tuple(overflow))
 
 
+# -- cut to what matches, instead of attaching every chosen note whole ---------
+
+# A note this size or under is kept whole: splitting it would not save enough
+# of the budget to be worth the risk of losing context the request needed.
+SMALL_NOTE_CHARS = 1500
+
+_HEADER_RE = re.compile(r"^#{1,6}\s+\S")
+_BULLET_RE = re.compile(r"^\s*(?:[-*]|\d+\.)\s+\S")
+
+
+def _split_paragraphs_or_bullets(lines: List[str]) -> List[str]:
+    """One whole bullet item or blank-line paragraph per returned string, in
+    original order. A block is split into bullets only when bullets make up
+    most of it (the vault's dated-log notes are almost all bullet lists);
+    otherwise it is split on blank lines; a block with neither comes back as
+    one piece. Every line of the input appears in exactly one output string,
+    so a selection of these pieces never cuts a line in two."""
+    bullet_idxs = [i for i, l in enumerate(lines) if _BULLET_RE.match(l)]
+    if len(bullet_idxs) >= 3 and len(bullet_idxs) >= 0.25 * max(1, len(lines)):
+        chunks: List[str] = []
+        pre = "\n".join(lines[:bullet_idxs[0]]).strip()
+        if pre:
+            chunks.append(pre)
+        bounds = bullet_idxs + [len(lines)]
+        for i, start in enumerate(bullet_idxs):
+            chunk = "\n".join(lines[start:bounds[i + 1]]).strip()
+            if chunk:
+                chunks.append(chunk)
+        return chunks
+    text = "\n".join(lines)
+    paras = [p.strip() for p in re.split(r"\n\s*\n", text) if p.strip()]
+    if paras:
+        return paras
+    whole = text.strip()
+    return [whole] if whole else []
+
+
+def _split_units(text: str) -> List[Tuple[str, str]]:
+    """(header, body) pairs covering the whole note, in order. `header` is the
+    nearest enclosing markdown header line, or "" before any header / when the
+    note has none. Every character of the note lands in exactly one unit, so
+    keeping a subset of units never truncates one mid-sentence."""
+    lines = text.splitlines()
+    header_idxs = [i for i, l in enumerate(lines) if _HEADER_RE.match(l)]
+    if not header_idxs:
+        return [("", b) for b in _split_paragraphs_or_bullets(lines)]
+    units: List[Tuple[str, str]] = []
+    if header_idxs[0] > 0:
+        units.extend(("", b) for b in _split_paragraphs_or_bullets(lines[:header_idxs[0]]))
+    bounds = header_idxs + [len(lines)]
+    for i, start in enumerate(header_idxs):
+        header = lines[start]
+        body_lines = lines[start + 1:bounds[i + 1]]
+        units.extend((header, b) for b in _split_paragraphs_or_bullets(body_lines))
+    return units
+
+
+def _score_unit(header: str, body: str, query) -> int:
+    """Score by the unit's own body only. The enclosing header is the same for
+    every unit in a section (often the whole reason Jev chose the note in the
+    first place, e.g. a note titled after the very topic being asked about) so
+    it cannot discriminate between a section's units -- scoring it in would
+    mark every bullet of a matching note as relevant and defeat the cut."""
+    from . import relevance
+    return relevance.overlap_score(body, query)
+
+
+def _relevant_note_text(text: str, query) -> Tuple[str, int, int]:
+    """One note's text cut to its relevant units. Returns (text, units_dropped,
+    units_total). When nothing in the note scores against `query` (a note Jev
+    judged relevant on meaning, not wording, can still have zero lexical
+    overlap), the most recent one or two units stand in instead -- the vault's
+    notes read newest-at-the-bottom, so recency is the next best signal."""
+    if len(text) <= SMALL_NOTE_CHARS:
+        return text, 0, 1
+    units = _split_units(text)
+    if not units:
+        return text, 0, 1
+    scored = [_score_unit(h, b, query) for h, b in units]
+    keep_idx = {i for i, s in enumerate(scored) if s > 0}
+    if not keep_idx:
+        keep_idx = set(range(max(0, len(units) - 2), len(units)))
+    lines: List[str] = []
+    last_header: Optional[str] = None
+    for i in sorted(keep_idx):
+        header, body = units[i]
+        if header != last_header:
+            if header:
+                lines.append(header)
+            last_header = header
+        lines.append(body)
+    return "\n\n".join(lines), len(units) - len(keep_idx), len(units)
+
+
+@dataclass
+class RelevantAttachment:
+    block: str
+    included: Tuple[str, ...]                  # notes with at least one unit attached
+    overflow: Tuple[str, ...]                  # chosen notes that did not fit the budget at all
+    dropped_units: Dict[str, Tuple[int, int]]  # path -> (units dropped, units total), included notes only
+
+
+def build_relevant_attachment(root: Path, notes: List[str], *, prompt: str, summary: str,
+                              budget_chars: int) -> "RelevantAttachment":
+    """Like `build_attachment`, but a note over SMALL_NOTE_CHARS is cut to the
+    sections, paragraphs or bullets that lexically match `prompt`/`summary`
+    (plus a recency fallback when nothing matches), instead of attached whole.
+    Selection is always by whole unit, in the note's own order; nothing is cut
+    mid-sentence. Which notes did not fit the budget at all, and how many units
+    were dropped from a note that did, are reported for the caller to log --
+    never the dropped text itself."""
+    from . import relevance
+    if not notes:
+        return RelevantAttachment(block="", included=(), overflow=(), dropped_units={})
+    query = frozenset(relevance.tokens(prompt) | relevance.tokens(summary))
+    included: List[str] = []
+    overflow: List[str] = []
+    dropped_units: Dict[str, Tuple[int, int]] = {}
+    parts: List[str] = []
+    used = 0
+    for rel in notes:
+        p = root / rel
+        try:
+            text = p.read_text(encoding="utf-8", errors="replace")
+        except OSError:
+            overflow.append(rel)
+            continue
+        note_text, n_dropped, n_total = _relevant_note_text(text, query)
+        if included and used + len(note_text) > budget_chars:
+            overflow.append(rel)
+            continue
+        parts.append(f"## {rel}\n\n{note_text}")
+        used += len(note_text)
+        included.append(rel)
+        if n_dropped:
+            dropped_units[rel] = (n_dropped, n_total)
+    if not included:
+        return RelevantAttachment(block="", included=(), overflow=tuple(overflow), dropped_units={})
+    body = [ATTACH_HEADER, ""] + parts
+    if overflow:
+        body += ["", "Chosen but over the attachment budget; open with vault_read if needed:",
+                 *[f"- {p}" for p in overflow]]
+    body += ["", ATTACH_FOOTER]
+    return RelevantAttachment(block="\n".join(body), included=tuple(included),
+                              overflow=tuple(overflow), dropped_units=dropped_units)
+
+
 def path_allowed(rel: Path, prefixes: List[str]) -> bool:
     """True when a vault-relative path (already resolved, already checked to sit
     inside the vault and to contain no symlink component) falls under one of the

@@ -435,6 +435,64 @@ def test_attachment_lists_overflow_by_path_instead_of_cutting_a_note_short(tmp_p
     assert "Areas/Garden Shed/Paint.md" in att.block  # named in the overflow listing
 
 
+# -------------------------------------------------------- relevant (cut) attachment
+
+
+def test_relevant_attachment_keeps_a_small_note_whole(tmp_path):
+    root = make_vault(tmp_path / "vault")
+    att = vaultscopes.build_relevant_attachment(
+        root, ["Areas/Garden Shed/Roof.md"], prompt="anything", summary="", budget_chars=100000)
+    assert "The roof was patched in spring." in att.block
+    assert att.dropped_units == {}
+
+
+def test_relevant_attachment_cuts_a_big_bullet_log_to_matching_bullets(tmp_path):
+    root = tmp_path / "vault"
+    lines = ["# Corgi Bullpen Log", "", "Newest at the bottom.", ""]
+    for i in range(60):
+        lines.append(f"- entry {i}: unrelated housekeeping note about widget batch {i}.")
+    lines.append("- entry 60: Corgi Bullpen status is green, demo ready for Pierce and Pierce.")
+    text = "\n".join(lines)
+    assert len(text) > vaultscopes.SMALL_NOTE_CHARS
+    write(root / "Projects" / "Corgi Bullpen Log.md", text)
+    att = vaultscopes.build_relevant_attachment(
+        root, ["Projects/Corgi Bullpen Log.md"], prompt="what's the corgi bullpen status?",
+        summary="corgi bullpen status", budget_chars=100000)
+    assert "Corgi Bullpen status is green" in att.block
+    assert "widget batch 0" not in att.block           # irrelevant bullets dropped
+    assert "Projects/Corgi Bullpen Log.md" in att.dropped_units
+    dropped, total = att.dropped_units["Projects/Corgi Bullpen Log.md"]
+    assert dropped > 50 and total > dropped
+    assert len(att.block) < len(text)                  # materially smaller than the whole note
+
+
+def test_relevant_attachment_falls_back_to_the_most_recent_bullets_when_nothing_matches(tmp_path):
+    root = tmp_path / "vault"
+    lines = ["# Log", ""]
+    for i in range(40):
+        lines.append(f"- day {i}: nothing in this bullet relates to the query at all.")
+    lines.append("- day 40: the very last entry, still unrelated to the query.")
+    text = "\n".join(lines)
+    write(root / "Areas" / "Unrelated.md", text)
+    att = vaultscopes.build_relevant_attachment(
+        root, ["Areas/Unrelated.md"], prompt="zzz totally different topic zzz", summary="",
+        budget_chars=100000)
+    assert "the very last entry" in att.block           # recency fallback, not empty
+    assert "day 0:" not in att.block
+
+
+def test_relevant_attachment_never_drops_a_whole_note_silently(tmp_path):
+    """A note cut for size still shows up in `included`, never just vanishes."""
+    root = tmp_path / "vault"
+    lines = ["# Log", ""] + [f"- item {i}: filler filler filler." for i in range(40)]
+    text = "\n".join(lines)
+    write(root / "Areas" / "Big.md", text)
+    att = vaultscopes.build_relevant_attachment(
+        root, ["Areas/Big.md"], prompt="filler", summary="", budget_chars=100000)
+    assert att.included == ("Areas/Big.md",)
+    assert att.overflow == ()
+
+
 def test_vault_attachment_for_request_builds_from_granted_scopes_only(tmp_path, monkeypatch):
     from inkbox_claude.gate.store import Request
     m, _sent, root = _manager_with_vault(tmp_path, monkeypatch)

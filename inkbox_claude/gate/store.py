@@ -3412,6 +3412,59 @@ class Store:
             head += f"\n  Where it stands: {t['summary']}"
         return head
 
+    def ledger_context_for_execution(self, task_id: int, message: str, *, recent: int = 6,
+                                     match_cap: int = 6, budget_chars: int = 4000,
+                                     pool_limit: int = 40,
+                                     now: Optional[float] = None) -> Tuple[str, Dict[str, int]]:
+        """One task's ledger for an executor run: the most recent `recent`
+        events, plus up to `match_cap` older events that share a real word with
+        `message`, instead of the whole history every event-kind carries.
+        Trimmed to whole events only (oldest matched first, then oldest of the
+        recent set down to a floor of 2) until under `budget_chars`. Returns
+        (text, info); `info` is counts only -- pool size and how many events
+        were kept/dropped -- never event text, for the caller to log."""
+        from . import relevance
+        t = self.task_with_events(task_id, limit=pool_limit)
+        if not t:
+            return "", {"pool": 0, "kept": 0, "dropped": 0, "matched": 0}
+        now = now or time.time()
+        events = t["events"]
+        pool_n = len(events)
+        recent_idx = set(range(max(0, pool_n - recent), pool_n))
+        query = frozenset(relevance.tokens(message))
+        matched_idx: List[int] = []
+        if query:
+            for i, e in enumerate(events):
+                if i in recent_idx:
+                    continue
+                if relevance.overlap_score(e.get("text") or "", query):
+                    matched_idx.append(i)
+        matched_idx = matched_idx[-match_cap:]  # most recent matches win when there are more than the cap
+
+        def event_text(i: int) -> str:
+            e = events[i]
+            rid = f" (#{e['request_id']})" if e.get("request_id") else ""
+            return f"  - {_age(now - e['created_at'])} {e['kind']}{rid}: {e['text']}"
+
+        kept = set(recent_idx)
+        used = sum(len(event_text(i)) + 1 for i in kept)
+        for i in sorted(matched_idx, reverse=True):  # newest matched event first
+            cost = len(event_text(i)) + 1
+            if kept and used + cost > budget_chars:
+                continue  # over budget; this older matched event is dropped, not the recent ones
+            kept.add(i)
+            used += cost
+        # Even the recent set alone can bust the budget (one long event); drop
+        # the oldest of it down to a floor of 2, never the newest.
+        while used > budget_chars and len(kept & recent_idx) > 2:
+            oldest = min(kept & recent_idx)
+            kept.discard(oldest)
+            used -= len(event_text(oldest)) + 1
+        lines = [self._task_head(t)] + [event_text(i) for i in sorted(kept)]
+        info = {"pool": pool_n, "kept": len(kept), "dropped": pool_n - len(kept),
+                "matched": len(kept & set(matched_idx))}
+        return "\n".join(lines), info
+
     def task_memory_for_task(self, task_id: int, now: Optional[float] = None) -> str:
         """One task's ledger, for the executor's context."""
         t = self.task_with_events(task_id, limit=12)
