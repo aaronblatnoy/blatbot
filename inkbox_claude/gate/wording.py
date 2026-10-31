@@ -134,17 +134,34 @@ def _classify(status: Dict[str, Any]) -> str:
     'network', or 'other'. Order matters: usage_limit is checked first (an exhausted
     session has nothing to do with a buffer or a denied tool, even if the error text
     happens to also mention one), then a specific error signature (buffer, timeout)
-    wins over a refusal or network guess even if denied/held also happen to be set."""
-    text = f"{status.get('error') or ''} {status.get('final_status') or ''}"
-    if _is_usage_limit(text):
+    wins over a refusal or network guess even if denied/held also happen to be set.
+
+    usage_limit/buffer/timeout are read from `error` alone when `status` is a live
+    executor result (always has an "ok" key): executor.py only ever sets those three
+    signatures in `error`, and its exception/asyncio.TimeoutError branches both leave
+    final_status empty when they fire, so a genuine one is never missed this way. A
+    live run that instead completed normally and explained itself in final_status --
+    "the corgi-crm tool is rate-limited (429)", "the call to X timed out" -- is
+    describing some OTHER system's limit, not Blatbot's own; scanning final_status
+    for these words there mislabeled that case as Blatbot's own usage-limit outage
+    and threw away the run's real explanation for a generic, often wrong, "try again
+    after it resets" message. A persisted schedule-run record (store._schedule_run_from_row)
+    has no "ok" and no "error" column at all -- schedules.py folds the original error
+    into its stored final_status precisely because there is nowhere else to put it --
+    so for that shape final_status is still scanned, same as before."""
+    error_text = str(status.get("error") or "")
+    final_status_text = str(status.get("final_status") or "")
+    combined = f"{error_text} {final_status_text}"
+    usage_scan_text = error_text if "ok" in status else combined
+    if _is_usage_limit(usage_scan_text):
         return "usage_limit"
-    if _is_buffer_error(text):
+    if _is_buffer_error(usage_scan_text):
         return "buffer"
-    if _is_timeout(text):
+    if _is_timeout(usage_scan_text):
         return "timeout"
     if _denied_tools(status) or status.get("held"):
         return "refusal"
-    if _is_network_or_login(text):
+    if _is_network_or_login(combined):
         return "network"
     return "other"
 

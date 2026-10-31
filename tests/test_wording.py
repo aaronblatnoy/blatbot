@@ -346,6 +346,33 @@ def test_usage_limit_wins_over_an_incidental_quota_mention_in_a_denied_tool():
     assert msg.startswith("I've hit a usage limit")
 
 
+def test_a_live_runs_own_narration_about_a_third_party_rate_limit_is_not_our_usage_limit():
+    # The run completed normally (it has "ok"/"tool_calls", no "error") and explained
+    # in its own words that a TOOL it called was rate-limited -- that is not Blatbot's
+    # own Claude Code session/weekly/monthly limit, and must not be reported as one.
+    status = {"ok": False, "tool_calls": ["mcp__corgi-crm__crm_people_list"], "denied": [], "held": False,
+              "final_status": "The corgi-crm MCP server is not available -- it returns no tools "
+                              "(connection failed with a 429 rate-limit error)."}
+    assert wording.failure_category(status) != "usage_limit"
+
+
+def test_a_genuine_live_quota_exhaustion_is_still_caught_via_error():
+    status = {"ok": False, "final_status": "",
+              "error": "Claude Code returned an error result: You've hit your session limit "
+                       "· resets 3:10pm (America/New_York) (exit code: 1)"}
+    assert wording.failure_category(status) == "usage_limit"
+
+
+def test_a_stored_schedule_run_record_still_classifies_from_final_status():
+    # A persisted schedule run (store._schedule_run_from_row) has no "ok" and no
+    # "error" column at all -- schedules.py folds the original error into its
+    # stored final_status because there is nowhere else to put it -- so that shape
+    # must keep reading final_status for this classification.
+    stored_run = {"final_status": "You've hit your weekly limit - resets Oct 16, 2pm (exit code: 1)",
+                  "result_line": "", "denied": []}
+    assert wording.failure_category(stored_run) == "usage_limit"
+
+
 def test_progress_reply_failed_branch_uses_plain_title_not_raw_summary(tmp_path):
     """Item A11: _progress_reply's failed branch names the request by
     wording.plain_title, same as every other place a request is named -- never the
