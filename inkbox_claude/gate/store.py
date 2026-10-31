@@ -61,7 +61,8 @@ CREATE TABLE IF NOT EXISTS requests (
   status_json TEXT,
   raw_output TEXT,
   created_at REAL NOT NULL,
-  updated_at REAL NOT NULL
+  updated_at REAL NOT NULL,
+  pending_since REAL             -- when the row last became pending
 );
 CREATE INDEX IF NOT EXISTS requests_state ON requests(state);
 
@@ -264,7 +265,8 @@ CREATE TABLE IF NOT EXISTS requests (
   task_id BIGINT,
   inbound_id BIGINT,
   schedule_id BIGINT,
-  schedule_kind TEXT NOT NULL DEFAULT ''
+  schedule_kind TEXT NOT NULL DEFAULT '',
+  pending_since DOUBLE PRECISION
 );
 CREATE INDEX IF NOT EXISTS requests_state ON requests(state);
 CREATE INDEX IF NOT EXISTS requests_task_latest ON requests(task_id, id DESC);
@@ -763,7 +765,7 @@ class Store:
                 have = {(r["table_name"], r["column_name"]) for r in self._db.execute(
                     "SELECT table_name, column_name FROM information_schema.columns "
                     "WHERE table_schema = current_schema() AND table_name IN "
-                    "('schedules', 'messages', 'threads')")}
+                    "('schedules', 'messages', 'threads', 'requests')")}
                 tables = {t for t, _ in have}
                 for table, column, ddl in (
                     ("schedules", "cadence_kind", "TEXT NOT NULL DEFAULT ''"),
@@ -778,9 +780,14 @@ class Store:
                     # silent); see roommode.py. Empty string means unset -- resolved by
                     # roommode.effective_mode(), not by this column's own default.
                     ("threads", "response_mode", "TEXT NOT NULL DEFAULT ''"),
+                    ("requests", "pending_since", "DOUBLE PRECISION"),
                 ):
                     if table in tables and (table, column) not in have:
                         self._db.execute(f"ALTER TABLE {table} ADD COLUMN IF NOT EXISTS {column} {ddl}")
+                if "requests" in tables and ("requests", "pending_since") not in have:
+                    # backfill: a pending_since column that just got added has no history,
+                    # so treat every existing row's created_at as its pending_since.
+                    self._db.execute("UPDATE requests SET pending_since=created_at WHERE pending_since IS NULL")
                 self._db.executescript(SCHEMA_PG)
                 self._migrate_schedule_cadence_model()
                 self._seed_contact_kinds_locked()
@@ -796,6 +803,10 @@ class Store:
                     self._db.execute("ALTER TABLE requests ADD COLUMN schedule_id INTEGER")
                 if "schedule_kind" not in cols:
                     self._db.execute("ALTER TABLE requests ADD COLUMN schedule_kind TEXT NOT NULL DEFAULT ''")
+                if "pending_since" not in cols:
+                    self._db.execute("ALTER TABLE requests ADD COLUMN pending_since REAL")
+                    # backfill: treat every existing row's created_at as its pending_since.
+                    self._db.execute("UPDATE requests SET pending_since=created_at WHERE pending_since IS NULL")
                 mcols = {r["name"] for r in self._db.execute("PRAGMA table_info(messages)")}
                 if "reply_to" not in mcols:
                     # Every outbound is linked to the inbound it answers and typed ack|answer,
@@ -2417,11 +2428,11 @@ class Store:
                             return Request.from_row(candidate), False
             cur = self._db.execute(
                 "INSERT INTO requests(chat_id,sender,sender_name,mode,subject,original_message,summary,"
-                "scopes_json,prompt,prompt_sha256,state,created_at,updated_at,task_id,inbound_id,schedule_id,schedule_kind) "
-                "VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                "scopes_json,prompt,prompt_sha256,state,created_at,updated_at,task_id,inbound_id,schedule_id,schedule_kind,pending_since) "
+                "VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
                 (chat_id, sender, sender_name, mode, subject, original_message, summary,
                  json.dumps(scopes), prompt, sha256(prompt), state, now, now, task_id, inbound_id,
-                 schedule_id, schedule_kind),
+                 schedule_id, schedule_kind, now if state == "pending" else None),
             )
             self._db.commit()
             rid = cur.lastrowid
@@ -2632,11 +2643,14 @@ class Store:
 
     def set_state(self, rid: int, state: str, *, status: Optional[Dict[str, Any]] = None,
                   raw_output: Optional[str] = None) -> None:
+        now = time.time()
         with self._lock:
             self._db.execute(
                 "UPDATE requests SET state=?, status_json=COALESCE(?,status_json), "
-                "raw_output=COALESCE(?,raw_output), updated_at=? WHERE id=?",
-                (state, json.dumps(status) if status is not None else None, raw_output, time.time(), rid),
+                "raw_output=COALESCE(?,raw_output), updated_at=?, "
+                "pending_since=CASE WHEN ?='pending' THEN ? ELSE pending_since END WHERE id=?",
+                (state, json.dumps(status) if status is not None else None, raw_output, now,
+                 state, now, rid),
             )
             self._db.commit()
             tid = self._db.execute("SELECT task_id FROM requests WHERE id=?", (rid,)).fetchone()
@@ -2644,10 +2658,12 @@ class Store:
             self.reindex_task(int(tid["task_id"]))
 
     def revise_prompt(self, rid: int, prompt: str) -> Request:
+        now = time.time()
         with self._lock:
             self._db.execute(
-                "UPDATE requests SET prompt=?, prompt_sha256=?, revision=revision+1, state='pending', updated_at=? WHERE id=?",
-                (prompt, sha256(prompt), time.time(), rid),
+                "UPDATE requests SET prompt=?, prompt_sha256=?, revision=revision+1, state='pending', "
+                "updated_at=?, pending_since=? WHERE id=?",
+                (prompt, sha256(prompt), now, now, rid),
             )
             self._db.commit()
         return self.get_request(rid)  # type: ignore[return-value]
@@ -3508,13 +3524,14 @@ class Store:
         return "\n\n".join(blocks) if blocks else "(no tasks on record)"
 
     def expire_older_than(self, seconds: float) -> List[Request]:
+        """A request expires `seconds` after it last became pending, not after it was created."""
         cutoff = time.time() - seconds
         with self._lock:
             rows = self._db.execute(
-                "SELECT * FROM requests WHERE state='pending' AND created_at<?", (cutoff,)
+                "SELECT * FROM requests WHERE state='pending' AND COALESCE(pending_since, created_at)<?", (cutoff,)
             ).fetchall()
             self._db.execute(
-                "UPDATE requests SET state='expired', updated_at=? WHERE state='pending' AND created_at<?",
+                "UPDATE requests SET state='expired', updated_at=? WHERE state='pending' AND COALESCE(pending_since, created_at)<?",
                 (time.time(), cutoff),
             )
             self._db.commit()
