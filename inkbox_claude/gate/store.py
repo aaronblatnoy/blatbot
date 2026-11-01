@@ -3511,10 +3511,12 @@ class Store:
         cutoff = time.time() - seconds
         with self._lock:
             rows = self._db.execute(
-                "SELECT * FROM requests WHERE state='pending' AND created_at<?", (cutoff,)
+                # Measured from when the row last went back to pending (ask_confirmation and
+                # revise_prompt both move updated_at), not from when the request first arrived.
+                "SELECT * FROM requests WHERE state='pending' AND COALESCE(updated_at, created_at)<?", (cutoff,)
             ).fetchall()
             self._db.execute(
-                "UPDATE requests SET state='expired', updated_at=? WHERE state='pending' AND created_at<?",
+                "UPDATE requests SET state='expired', updated_at=? WHERE state='pending' AND COALESCE(updated_at, created_at)<?",
                 (time.time(), cutoff),
             )
             self._db.commit()
