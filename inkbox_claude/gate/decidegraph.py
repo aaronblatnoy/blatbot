@@ -23,6 +23,7 @@ from typing import Any, Dict, List, Optional, TypedDict
 from langchain_core.runnables import RunnableConfig
 from langgraph.graph import END, START, StateGraph
 
+from ..identity import OWNER_FIRST_NAME
 from . import wording
 
 logger = logging.getLogger(__name__)
@@ -62,7 +63,7 @@ def _s(config: RunnableConfig):
 
 
 def _label(s: Any) -> str:
-    return "Aaron, the owner" if s.is_approver() else (s._sender_name() or s._sender())
+    return f"{OWNER_FIRST_NAME}, the owner" if s.is_approver() else (s._sender_name() or s._sender())
 
 
 # ----------------------------------------------------------------------------- judgments (parallel)
@@ -92,7 +93,7 @@ async def judge_action(state: DecideState, config: RunnableConfig) -> Dict[str, 
     p = float(act.get("p") or 0.0)
     if needs is None:
         # Grey band. For the owner, acting costs seconds and not acting costs a re-ask,
-        # so lean to action; for anyone else a request means an approval text to Aaron,
+        # so lean to action; for anyone else a request means an approval text to the owner,
         # so the tie goes the other way. p==0.5 is the single most uncertain value the
         # judgment can return, so it must not be the one value that tips a stranger's
         # plain question into an approval request that can never be answered in words
@@ -130,7 +131,7 @@ def after_join(state: DecideState, config: RunnableConfig) -> List[str]:
     # With a request on the way, the owner gets no written acknowledgement: on a call the
     # voice model holds the line, on iMessage the typing indicator shows the work, and a
     # short line goes out only if the run takes long (see GateSessionManager.execute).
-    # Anyone else still hears that Aaron will be asked.
+    # Anyone else still hears that the owner will be asked.
     # The writer still runs (it names the task and writes where it stands); only its
     # acknowledgement is dropped in finalize for the owner's call or iMessage requests.
     if state["needs_action"] and not state["actionable"]:

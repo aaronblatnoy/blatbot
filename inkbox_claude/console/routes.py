@@ -125,7 +125,7 @@ _avatar_cache: Dict[str, Any] = {"at": 0.0, "body": b"", "type": ""}
 
 
 async def get_avatar(request: web.Request) -> web.StreamResponse:
-    """Blatbot's profile picture, fetched from its Inkbox identity and held for an hour,
+    """The assistant's profile picture, fetched from its Inkbox identity and held for an hour,
     so the console shows the real one without keeping a copy of its own."""
     now = time.time()
     if not _avatar_cache["body"] or now - _avatar_cache["at"] > _AVATAR_TTL:

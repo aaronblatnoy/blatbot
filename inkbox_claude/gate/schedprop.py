@@ -53,7 +53,7 @@ def labels(scopes: Iterable[str]) -> str:
 
 def short_label(scope: str) -> str:
     """label(), cut at a parenthetical detail -- the short, re-sayable form a
-    recovery phrase offers him ("act in Brightspace", never "act in Brightspace
+    recovery phrase offers him ("act in <system>", never "act in <system>
     (submit, post, mark complete)"). A label with no parenthesis is unchanged."""
     return label(scope).split("(", 1)[0].strip()
 
@@ -99,7 +99,7 @@ def _said_scopes(said_text: str) -> List[str]:
     # wins via the same sort below.
     candidates += [(len(label(name).lower()), name, label(name).lower()) for name in SCOPES]
     # And the short, parenthesis-free form of that same label: the recovery phrase
-    # offers him the short form ("act in Brightspace"), so his reply must be
+    # offers him the short form ("act in <system>"), so his reply must be
     # accepted whichever form he actually says back.
     candidates += [(len(short_label(name).lower()), name, short_label(name).lower())
                    for name in SCOPES if short_label(name) != label(name)]
@@ -200,7 +200,7 @@ _PERMISSION_RE = re.compile(
     r"\b(?:let it|allow it to|it can|it may|give it|it should be able to)\b(?!'t|not| not)")
 _VAGUE_PHRASES = ["do that", "fix that", "fix it"]
 # Comma is deliberately NOT a split point: several scope labels are
-# themselves comma-separated lists ("read TAMID's Drive, Sheets, Docs and
+# themselves comma-separated lists ("read the club's Drive, Sheets, Docs and
 # Forms"), and splitting on every comma would strand the "let it" phrase in
 # the first fragment and leave the rest unmatched. A negated tail is still
 # cut off below via _NEGATION_WORDS ("not"/"without"/etc), comma or no comma.

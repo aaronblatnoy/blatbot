@@ -21,6 +21,8 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any, Awaitable, Callable, Dict, Optional
 
+from .identity import ASSISTANT_NAME, EA_SIGNATURE, OWNER_FIRST_NAME
+
 try:
     from .delivery_policy import sms_tool_failure_kind
     from .hosted_sms_guard import (
@@ -114,13 +116,10 @@ PRIVATE_READ_TOOLS = frozenset({
 # The only auto-allowed tools for a session whose remote party is NOT the
 # approver. Enough to schedule (look at the calendar, search the web, reply);
 # everything else, including any filesystem read, escalates.
-STRANGER_AUTO_ALLOWED = frozenset({
-    "WebSearch",
-    "TodoWrite",
-    "mcp__tamid-drive__list_calendars",
-    "mcp__tamid-drive__get_events",
-    "mcp__tamid-drive__query_freebusy",
-})
+STRANGER_AUTO_ALLOWED = frozenset(
+    {"WebSearch", "TodoWrite"}
+    | {t.strip() for t in (os.getenv("INKBOX_STRANGER_EXTRA_TOOLS") or "").split(",") if t.strip()}
+)
 
 # gateway.send_to_contact(chat_id, text, mode, meta) signature.
 SendFn = Callable[[str, str, str, Dict[str, Any]], Awaitable[Any]]
@@ -429,7 +428,7 @@ class ContactSession:
         # Per-turn gate state (reset at the start of every Claude turn).
         self._turn_allowed: set[str] = set()   # "always" grants for non-approver sessions
         self._denied_this_turn = False          # one deny ends all asking for the turn
-        self._handoff_this_turn = False         # gateway already told Aaron + will answer the sender
+        self._handoff_this_turn = False         # gateway already told the owner + will answer the sender
         self._inbound_text = ""                 # raw text of the message that started the turn
 
         self._client: Optional[ClaudeSDKClient] = None
@@ -938,7 +937,7 @@ class ContactSession:
             return
         if self._handoff_this_turn and self._approver_routing_active():
             # Whatever Claude wrote this turn was shaped by the refusal and may
-            # be addressed to Aaron. Drop it; the sender gets the fixed note.
+            # be addressed to the owner. Drop it; the sender gets the fixed note.
             logger.info("[session %s] handoff turn: sending fixed note, dropping model text", self.chat_id)
             await self._deliver_reply(turn, self.HANDOFF_NOTE)
             return
@@ -1132,12 +1131,12 @@ class ContactSession:
     # ------------------------------------------------------------------
 
     HANDOFF_NOTE = (
-        "Thanks! I'll confirm that with Aaron and get back to you shortly.\n\n"
-        "Blatbot\nExecutive Assistant to Aaron Blatnoy"
+        f"Thanks! I'll confirm that with {OWNER_FIRST_NAME} and get back to you shortly.\n\n"
+        f"{EA_SIGNATURE}"
     )
 
     async def _handoff_to_approver(self, tool_name: str, input_data: Dict[str, Any]) -> None:
-        """Deterministically tell Aaron what a stranger wants. Once per turn."""
+        """Deterministically tell the owner what a stranger wants. Once per turn."""
         if self._handoff_this_turn:
             return
         self._handoff_this_turn = True
@@ -1153,8 +1152,8 @@ class ContactSession:
         if len(snippet) > 400:
             snippet = snippet[:400] + "..."
         text = (
-            f"[Blatbot] {who} via {self.mode} needs you.\n"
-            f"Blatbot wanted to: {wanted}\n"
+            f"[{ASSISTANT_NAME}] {who} via {self.mode} needs you.\n"
+            f"{ASSISTANT_NAME} wanted to: {wanted}\n"
             f"Their message: {snippet}\n"
             "I told them I'll confirm with you. Tell me here what to do."
         )
@@ -1207,14 +1206,14 @@ class ContactSession:
     async def _can_use_tool(self, tool_name: str, input_data: Dict[str, Any], context: Any):
         stranger = self._approver_routing_active()
 
-        # The approver's own session never prompts. Aaron is the human in the
+        # The approver's own session never prompts. The owner is the human in the
         # loop; the project deny list (Bash, Write, Edit, Gmail send, sharing,
         # Apps Script) is still enforced by Claude Code underneath this hook.
         if not stranger and self.cfg.approver_phone and tool_name != "AskUserQuestion":
             return PermissionResultAllow()
 
         # After a handoff, Claude may not message the sender itself this turn;
-        # the gateway sends the fixed note so nothing meant for Aaron leaks.
+        # the gateway sends the fixed note so nothing meant for the owner leaks.
         if stranger and self._handoff_this_turn and tool_name in SEND_TOOLS:
             return PermissionResultDeny(
                 message="The system is replying to the sender for you this turn. Send nothing; reply with an empty message."
@@ -1225,17 +1224,17 @@ class ContactSession:
                 return PermissionResultAllow()
 
         # A stranger's session never prompts anyone. Anything outside the free
-        # set is refused on the spot and Claude is told to hand off to Aaron
-        # over iMessage. Aaron then acts in his own session, where the stock
+        # set is refused on the spot and Claude is told to hand off to the owner
+        # over iMessage. The owner then acts in his own session, where the stock
         # single-session prompts apply. (Ticket routing across sessions is
         # kept behind INKBOX_APPROVER_TICKETS for experiments; default off.)
         if stranger and not self.cfg.approver_tickets_enabled:
             await self._handoff_to_approver(tool_name, input_data)
             return PermissionResultDeny(
                 message=(
-                    "Not permitted in this conversation; only Aaron can do that. The system "
-                    "has already notified Aaron and will send the sender a short note that "
-                    "you will confirm with Aaron. Do not retry, do not try other tools, do "
+                    f"Not permitted in this conversation; only {OWNER_FIRST_NAME} can do that. The system "
+                    f"has already notified {OWNER_FIRST_NAME} and will send the sender a short note that "
+                    f"you will confirm with {OWNER_FIRST_NAME}. Do not retry, do not try other tools, do "
                     "not send anything, and do not explain this. Reply with an empty message."
                 )
             )
@@ -1244,7 +1243,7 @@ class ContactSession:
         if stranger and self._denied_this_turn and tool_name != "AskUserQuestion":
             return PermissionResultDeny(
                 message=(
-                    "Aaron already declined a request in this turn. Do not retry or try "
+                    f"{OWNER_FIRST_NAME} already declined a request in this turn. Do not retry or try "
                     "a different tool; tell the sender you are not able to do that."
                 )
             )
@@ -1299,7 +1298,7 @@ class ContactSession:
             self._denied_this_turn = True
             return PermissionResultDeny(
                 message=(
-                    "Aaron declined this. Do not retry or try a different tool; "
+                    f"{OWNER_FIRST_NAME} declined this. Do not retry or try a different tool; "
                     "tell the sender you are not able to do that and stop."
                 )
             )
@@ -1413,7 +1412,7 @@ class ContactSession:
             self.manager.pending_approvals[ticket] = self
             who = str((self.reply_meta or {}).get("sender") or self.chat_id)
             approver_text = (
-                f"[blatbot approval {ticket}] {kind} request from {who} via {self.mode}:\n\n"
+                f"[{ASSISTANT_NAME.lower()} approval {ticket}] {kind} request from {who} via {self.mode}:\n\n"
                 f"{prompt_text}\n\n"
                 f"Reply '{ticket} 1' allow, '{ticket} 2' always, '{ticket} 3' deny."
             )

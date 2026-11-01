@@ -15,22 +15,19 @@ import re
 
 from typing import Any, Dict, List, Optional
 
+from ..identity import ASSISTANT_NAME
 from . import schedprop
 from . import scopes as _scopes
 
+# Generic server names that make sense with no club/org account configured.
+# A server the registry labels (servers.<name>.label, see gate/scopes.py
+# SERVERS) wins over this default -- that is how a club/org-specific name
+# (a club's Google Workspace, the owner's school account, ...) is supplied
+# without naming it in code.
 _TOOL_SYSTEM_NAMES: Dict[str, str] = {
-    "tamid-admin": "the TAMID website admin",
-    "sjba-admin": "the SJBA website admin",
-    "tamid-drive": "TAMID's Google Workspace",
-    "stern-drive": "Aaron's Stern Google account",
-    "tamid-instagram": "TAMID's Instagram",
-    "tamid-linkedin": "TAMID's LinkedIn",
-    "analytics-admin": "TAMID's Google Analytics",
-    "brightspace": "Brightspace",
     "coolify": "Coolify",
-    "coolify-vox": "the Vox Coolify instance",
     "playwright": "the web",
-    "inkbox": "Blatbot's own inbox",
+    "inkbox": f"{ASSISTANT_NAME}'s own inbox",
     "host": "the server",
     "advancedmd": "AdvancedMD",
     "availity": "Availity",
@@ -77,7 +74,8 @@ def _tool_scope(tool: str) -> Optional[str]:
 def _system_for_tool(tool: str) -> Optional[str]:
     parts = str(tool).split("__")
     server = parts[1] if len(parts) >= 3 else (parts[0] if parts else "")
-    return _TOOL_SYSTEM_NAMES.get(server)
+    label = _scopes.SERVERS.get(server, {}).get("label")
+    return label or _TOOL_SYSTEM_NAMES.get(server)
 
 
 def _denied_tools(status: Dict[str, Any]) -> List[str]:
@@ -141,9 +139,9 @@ def _classify(status: Dict[str, Any]) -> str:
     signatures in `error`, and its exception/asyncio.TimeoutError branches both leave
     final_status empty when they fire, so a genuine one is never missed this way. A
     live run that instead completed normally and explained itself in final_status --
-    "the corgi-crm tool is rate-limited (429)", "the call to X timed out" -- is
-    describing some OTHER system's limit, not Blatbot's own; scanning final_status
-    for these words there mislabeled that case as Blatbot's own usage-limit outage
+    "the inventory tool is rate-limited (429)", "the call to X timed out" -- is
+    describing some OTHER system's limit, not the assistant's own; scanning final_status
+    for these words there mislabeled that case as the assistant's own usage-limit outage
     and threw away the run's real explanation for a generic, often wrong, "try again
     after it resets" message. A persisted schedule-run record (store._schedule_run_from_row)
     has no "ok" and no "error" column at all -- schedules.py folds the original error
@@ -437,8 +435,8 @@ def send_what_you_have_text(status: Dict[str, Any]) -> str:
 # A live phone call hands a request off with its whole transcript as
 # original_message (build_delegation_query in live.py) -- a preamble, prior
 # turns for context, then "What was just said (act on this):" followed by the
-# caller's and Blatbot's own lines. Nothing here ever shows that preamble, a
-# "blatbot:" line, a phone number, or text force-cut by length: when there is
+# caller's and the assistant's own lines. Nothing here ever shows that preamble, an
+# "<assistant>:" line, a phone number, or text force-cut by length: when there is
 # no real summary yet, the caller's own words stand in for one.
 # ---------------------------------------------------------------------------
 
@@ -473,7 +471,7 @@ def _is_cut_of(summary: str, original: str) -> bool:
 def caller_lines(transcript: str) -> List[str]:
     """The caller's own words from a voice hand-off transcript: every "caller:"
     line under "What was just said (act on this):", or every "caller:" line in
-    the whole transcript when that section is missing. Never a "blatbot:" line,
+    the whole transcript when that section is missing. Never an "<assistant>:" line,
     never the preamble above it."""
     text = transcript or ""
     if _WHAT_WAS_SAID_MARKER in text:

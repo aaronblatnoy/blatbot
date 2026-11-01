@@ -45,7 +45,7 @@ def _ts(value: Any) -> float:
 
 class InkboxSDKDirectoryClient:
     """Pages every Inkbox channel this agent identity (plus the org's contacts
-    resource) exposes, for the console's "people Blatbot has spoken to" sync.
+    resource) exposes, for the console's "people the assistant has spoken to" sync.
 
     `inkbox` is the connected `inkbox.Inkbox` client, `identity` the
     `inkbox.agent_identity.AgentIdentity` the gateway logged in as.

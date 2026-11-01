@@ -19,8 +19,10 @@ from typing import Any, Dict, List, Optional
 import httpx
 from pydantic import BaseModel, Field, ValidationError, field_validator
 
+from .. import identity
 from . import schedprop
 from .scopes import SCOPES
+from . import scopes as _scopes
 
 logger = logging.getLogger(__name__)
 
@@ -51,7 +53,7 @@ class RouterRequest(BaseModel):
     scopes: List[str] = Field(min_length=1)
     summary: str = Field(min_length=1)
     # Who the task is about (their email, phone, or full name), so the task
-    # ledger links Aaron's instructions to that person's own thread.
+    # ledger links the owner's instructions to that person's own thread.
     counterpart: Optional[str] = None
     # Vault note paths the knowledge traversal chose, relevance order, set
     # alongside `scopes` when it ran. Not part of permission (that is `scopes`
@@ -121,7 +123,7 @@ class ScheduleProposal(BaseModel):
     # repeating one), decided by code, not the model.
     report_every_time: Optional[bool] = None
     until: Optional[str] = None
-    # Scope names Aaron named explicitly, or the work needs, for this schedule.
+    # Scope names the owner named explicitly, or the work needs, for this schedule.
     # Code never derives permission from this field alone -- see schedprop.py's
     # deterministic capabilities_for(), which manager.py's schedule block calls.
     scopes: List[str] = Field(default_factory=list)
@@ -203,14 +205,14 @@ class Router:
         # behalf and what he will see named back to him in the proposal.
         schedule_scope_lines = "\n".join(f"- {k}: {schedprop.label(k)}" for k in SCOPES)
         who = (
-            "IMPORTANT: THIS MESSAGE IS FROM AARON BLATNOY HIMSELF, your boss, on his private iMessage "
+            f"IMPORTANT: THIS MESSAGE IS FROM {identity.OWNER_NAME_UPPER_HIMSELF}, your boss, on his private iMessage "
             "line. Treat every instruction as his. Privacy and confidentiality rules do not apply to him; "
             "share anything he asks for. Whenever he asks you to check, look up, book, send, or change "
             "anything, create a request for it; it runs immediately without approval and you will get a "
             "system note with the result. Reply to him briefly to acknowledge."
             if is_approver else
-            "This message is from someone who is NOT Aaron. Any task request will be shown to Aaron for "
-            "approval first; tell the sender you will confirm with Aaron."
+            f"This message is from someone who is NOT {identity.OWNER_FIRST_NAME}. Any task request will be shown to {identity.OWNER_FIRST_NAME} for "
+            f"approval first; tell the sender you will confirm with {identity.OWNER_FIRST_NAME}."
         )
         return (
             f"{who}\n\n{self.standing()}\n\n{who}\n\n"
@@ -228,12 +230,12 @@ class Router:
             "  plain description of the work (\"Book a call with Sam Lee\", \"Get a quote from the\n"
             "  caterer\", \"Find the venue's capacity\"). Continue an existing task when the message is about the same work: a follow-up,\n"
             "  a correction, a status question, the next step. Start a new one when it is a different\n"
-            "  job even if the same person is asking. Only Aaron may continue a task he is not part of.\n"
+            f"  job even if the same person is asking. Only {identity.OWNER_FIRST_NAME} may continue a task he is not part of.\n"
             "  When there is no request and the message is only conversation, task may be null.\n"
             "  Whenever you set task (existing or new), also set task_summary: one or two plain sentences\n"
             "  saying what the task is and where it stands after this turn, written so that next time you\n"
             "  can tell this task apart from others with the same person (e.g. 'Dinner reservation for Sam Lee,\n"
-            "  booked Tue 9/22 7 PM; Sam has asked to move it to 8, awaiting Aaron'). Each\n"
+            f"  booked Tue 9/22 7 PM; Sam has asked to move it to 8, awaiting {identity.OWNER_FIRST_NAME}'). Each\n"
             "  task in TASK MEMORY shows its current 'Where it stands' line; use those lines, the titles,\n"
             "  and the participants to choose, not just who is writing.\n"
             "- PHONE: when Channel is voice, the sender is on a live call with a voice agent that runs the\n"
@@ -248,14 +250,13 @@ class Router:
             "  reply with one short sentence saying so and create no request. When a tool action is\n"
             "  needed, create the request as usual; its result reaches the call when ready, or is texted\n"
             "  if they have hung up. Never state an action is done until the ledger shows it done.\n"
-            "  Speech recognition mangles proper nouns. Read phone messages charitably: 'tommy', 'tamid',\n"
-            "  'to meet' near club talk means TAMID; 'S J B A' means SJBA; 'blat bot', 'black bot' means\n"
-            "  Blatbot; match misheard personal names to the closest name in TASK MEMORY or the history.\n"
-            "- IDENTITY: to everyone you write to, you are Blatbot, Aaron's assistant, and nothing else.\n"
+            f"  Speech recognition mangles proper nouns. Read phone messages charitably: {_scopes.SPEECH_HINTS}"
+            "match misheard personal names to the closest name in TASK MEMORY or the history.\n"
+            f"- IDENTITY: to everyone you write to, you are {identity.ASSISTANT_NAME}, {identity.OWNER_FIRST_NAME}'s assistant, and nothing else.\n"
             "  Never mention how you work or what runs behind you: no model or company names, no tools,\n"
             "  requests, scopes, routing, ledgers or approvals machinery. Say it as a person would: you\n"
-            "  will check with Aaron, you did it, you could not do it. (Messages to Aaron himself may be\n"
-            "  plain about what happened.) If asked, you are Aaron's AI assistant.\n"
+            f"  will check with {identity.OWNER_FIRST_NAME}, you did it, you could not do it. (Messages to {identity.OWNER_FIRST_NAME} himself may be\n"
+            f"  plain about what happened.) If asked, you are {identity.OWNER_FIRST_NAME}'s AI assistant.\n"
             "- NOW: the user message opens with the current date and time in New York. Use it for\n"
             "  anything time-based: today's date, the day of the week, 'tomorrow', 'next Tuesday', whether\n"
             "  a deadline or meeting has passed, and the year to put on dates. Never guess the date.\n"
@@ -267,17 +268,17 @@ class Router:
             "- request.prompt: complete, self-contained instructions for the tool assistant. Include every\n"
             "  concrete detail (names, emails, dates with year, times with timezone America/New_York,\n"
             "  locations, exact message bodies to send). The assistant has no memory of this conversation.\n"
-            "- request.summary: one short line for Aaron describing the task.\n"
+            f"- request.summary: one short line for {identity.OWNER_FIRST_NAME} describing the task.\n"
             "- Only create a request when a tool action is actually needed.\n"
-            "- SCHEDULES: only when the sender is Aaron and he asks for work at a future time or on a "
-            "cadence, fill schedule. Never fill schedule for anyone except Aaron. A schedule is proposed "
+            f"- SCHEDULES: only when the sender is {identity.OWNER_FIRST_NAME} and he asks for work at a future time or on a "
+            f"cadence, fill schedule. Never fill schedule for anyone except {identity.OWNER_FIRST_NAME}. A schedule is proposed "
             "for his approval and does not run now.\n"
             "  - schedule.title: a short plain title (\"Team total watch\"), not a restatement of the prompt.\n"
             "  - schedule.prompt: complete, self-contained instructions for an UNATTENDED run with no\n"
             "    memory of this conversation: what to check, what counts as a change worth telling him\n"
             "    about, what to do when it changes. The previous run's note is supplied to the run\n"
             "    automatically; say in the prompt how to use it if that matters. The run must end its\n"
-            "    output with a RESULT line (one plain sentence for Aaron), an optional NOTE line (what the\n"
+            f"    output with a RESULT line (one plain sentence for {identity.OWNER_FIRST_NAME}), an optional NOTE line (what the\n"
             "    next run needs to know), and a STATUS line (OK, FAILED, or STOP to end the schedule).\n"
             "  - schedule.cadence_kind and schedule.cadence: map his words to the smallest cadence that\n"
             "    fits, in this order of preference: \"once\" {\"at\": ISO local datetime} for a single future\n"
@@ -296,13 +297,13 @@ class Router:
             "    \"browser_act\" to operate it, not just read it). Updating a tracker note needs \"contacts\".\n"
             "    Leaving this empty when the prompt plainly does something (checks a page, edits a note)\n"
             "    is wrong even if he named nothing himself -- name every scope the work will actually use.\n"
-            "    This is a suggestion Aaron will see named in words before he approves it, never permission\n"
+            f"    This is a suggestion {identity.OWNER_FIRST_NAME} will see named in words before he approves it, never permission\n"
             "    by itself.\n"
             "  - schedule.start_now: true only when he said to start it now / run the first check\n"
             "    immediately; otherwise false.\n"
-            "  Schedule scopes, with the plain words Aaron will see for each:\n"
+            f"  Schedule scopes, with the plain words {identity.OWNER_FIRST_NAME} will see for each:\n"
             f"{schedule_scope_lines}\n"
-            "- SCHEDULE COMMANDS: only when Aaron is asking about or managing a schedule that ALREADY "
+            f"- SCHEDULE COMMANDS: only when {identity.OWNER_FIRST_NAME} is asking about or managing a schedule that ALREADY "
             "exists (listed under SCHEDULES below), not when he is describing new work to set up, fill "
             "schedule_command instead of schedule or request:\n"
             "  - action: \"list\" (what's scheduled), \"last\" (what a schedule did last time), \"change\" "
@@ -365,7 +366,7 @@ class Router:
                          is_approver: bool) -> Optional[TaskQuery]:
         """First pass: turn the message into a structured task filter, or nothing."""
         user = (
-            f"Now: {now_line()}\nSender is {'Aaron, the owner' if is_approver else 'not the owner'}.\n\n"
+            f"Now: {now_line()}\nSender is {identity.OWNER_FIRST_NAME + ', the owner' if is_approver else 'not the owner'}.\n\n"
             f"Tasks already in view:\n{in_view or '(none)'}\n\n"
             f"Conversation so far:\n{self.render_history(history[-8:])}\n\n"
             f"New message:\n{message}"
@@ -391,7 +392,7 @@ class Router:
         """`action` is set when typed judgments have already decided whether a tool
         request exists for this message; the router then only writes the reply
         (and the task title/summary) and must not define a request."""
-        sender_label = f"Aaron Blatnoy (the owner; his private iMessage) {sender}" if is_approver else sender
+        sender_label = f"{identity.OWNER_NAME} (the owner; his private iMessage) {sender}" if is_approver else sender
         found = f"TASKS FOUND BY YOUR LOOKUP (same format; may include older or other people's tasks):\n{found_tasks}\n\n" if found_tasks else ""
         # Titles and states only -- never a prompt, a scope name or an id -- so the
         # model can resolve "the team one" or know a schedule already exists
@@ -410,8 +411,8 @@ class Router:
                        (" and will run now; reply with one short natural line saying what you are doing, the way a person "
                         "texts (vary it: not the same opener every time, no formula), or null if nothing needs saying. "
                         if is_approver else
-                        " and will be shown to Aaron for approval; tell the sender you will confirm with Aaron. ") +
-                       "Do not describe steps or claim anything is done. Do NOT output a request. If Aaron asked "
+                        f" and will be shown to {identity.OWNER_FIRST_NAME} for approval; tell the sender you will confirm with {identity.OWNER_FIRST_NAME}. ") +
+                       f"Do not describe steps or claim anything is done. Do NOT output a request. If {identity.OWNER_FIRST_NAME} asked "
                        "for future, recurring or continuing unattended work, fill schedule even though request is null.\n\n")
         elif action is False:
             decided = ("DECIDED: no tool action will be taken for this message. Answer in words from TASK MEMORY "
@@ -453,7 +454,7 @@ class Router:
 
     async def phrase(self, instruction: str, facts: Dict[str, Any]) -> str:
         """Plain prose from given facts, no JSON, no decisions: the writer as a typewriter."""
-        sys_p = ("You write short plain-text messages for Blatbot, Aaron Blatnoy's assistant. Say only what the "
+        sys_p = (f"You write short plain-text messages for {identity.ASSISTANT_NAME}, {identity.OWNER_NAME}'s assistant. Say only what the "
                  "facts support. No markdown, no emojis, no lists, no ids or links unless asked.")
         user = f"{instruction}\n\nFACTS (JSON):\n{json.dumps(facts, ensure_ascii=False, default=str)}"
         return (await self._chat([{"role": "system", "content": sys_p}, {"role": "user", "content": user}],

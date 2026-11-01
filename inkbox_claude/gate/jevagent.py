@@ -38,7 +38,8 @@ from zoneinfo import ZoneInfo
 
 import httpx
 
-from .scopes import ORG_ACCOUNT, OWNER_ACCOUNT, TOOL_DESCRIPTIONS, TOOL_PURPOSE, blocks_requester_send, sends_to_requester, tools_for
+from ..identity import ASSISTANT_NAME, EA_SIGNATURE, OWNER_NAME
+from .scopes import ORG_ACCOUNT, OWNER_ACCOUNT, SERVERS, STOPWORDS, TOOL_DESCRIPTIONS, TOOL_PURPOSE, blocks_requester_send, google_account_for, sends_to_requester, tools_for
 from . import hosttools
 from .store import Request, sha256
 from .taskpick import TYPESAFE_URL
@@ -484,9 +485,9 @@ class Prose:
 
     async def write(self, instruction: str, facts: Dict[str, Any]) -> str:
         self.calls += 1
-        sys_p = ("You write short pieces of text for Blatbot, Executive Assistant to Aaron Blatnoy. "
+        sys_p = (f"You write short pieces of text for {ASSISTANT_NAME}, Executive Assistant to {OWNER_NAME}. "
                  "Use only the facts given. No emojis. No em dashes. Sign emails exactly:\n"
-                 "Best,\nBlatbot\nExecutive Assistant to Aaron Blatnoy\n"
+                 f"Best,\n{EA_SIGNATURE}\n"
                  "Never mention how you work or any tooling. Output only the requested text.")
         user = f"FACTS:\n{json.dumps(facts, ensure_ascii=False, default=str, indent=1)}\n\nWRITE:\n{instruction}"
         raw = await self.router._chat([{"role": "system", "content": sys_p}, {"role": "user", "content": user}],
@@ -589,9 +590,10 @@ def _goal_terms(goal: str) -> List[str]:
     capitalised words, numbers, emails."""
     words = re.findall(r"[A-Za-z][A-Za-z'-]{2,}|\d{2,}|[\w.+-]+@[\w.-]+", goal or "")
     stop = {"the", "and", "for", "with", "from", "that", "this", "what", "which", "who", "how", "many", "did",
-            "does", "check", "find", "look", "please", "tamid", "sjba", "form", "sheet", "responses", "fall",
+            "does", "check", "find", "look", "please", "form", "sheet", "responses", "fall",
             "spring", "his", "her", "their", "she", "him", "they", "are", "was", "were", "you", "can", "get",
             "list", "all", "out", "into", "about", "give", "show", "tell", "see", "new", "member", "application"}
+    stop |= set(STOPWORDS)
     out = []
     for w in words:
         lw = w.lower()
@@ -973,7 +975,7 @@ class JevAgent:
                                                     "look the item up (list or search it) before changing it"})
                             continue
                         # Nothing is deleted, cancelled or replaced without the owner's yes. The run
-                        # stops here with the exact call and what it refers to; the gate asks Aaron
+                        # stops here with the exact call and what it refers to; the gate asks the owner
                         # and performs this one call on "yes".
                         st = self._status(False, "confirmation required", steps, judge, prose, started)
                         st["confirm"] = {"tool": choice, "args": args, "about": about}
@@ -1050,7 +1052,7 @@ class JevAgent:
         spec: Dict[str, Any] = {}
         for name, sp in props.items():
             if name == "user_google_email":
-                fixed[name] = ORG_ACCOUNT if server == "tamid-drive" else OWNER_ACCOUNT
+                fixed[name] = google_account_for(server)
                 continue
             entry: Dict[str, Any] = {"type": sp.get("type") or "string", "required": name in required}
             if sp.get("description"):
@@ -1166,7 +1168,7 @@ class JevAgent:
         cands: Dict[str, List[Any]] = {}
         for name, spec in props.items():
             if name == "user_google_email":
-                args[name] = ORG_ACCOUNT if server == "tamid-drive" else OWNER_ACCOUNT
+                args[name] = google_account_for(server)
                 continue
             typ = spec.get("type") or "string"
             if name not in required:

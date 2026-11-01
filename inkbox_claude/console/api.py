@@ -9,7 +9,8 @@ import time
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
-from ..gate.scopes import SCOPES, SCOPE_SYSTEM
+from ..identity import ASSISTANT_NAME, OWNER_FIRST_NAME
+from ..gate.scopes import SCOPES, SCOPE_SYSTEM, SYSTEM_LABELS
 from ..gate.store import Request, Store, TaskRequired, role_names
 from ..gate import cadence as cadence_mod, schedprop, wording
 from ..gate import schedules as sched_mod
@@ -58,7 +59,7 @@ def groups_list(store: Any) -> List[Dict[str, Any]]:
 
 def groups_set_mode(store: Any, payload: Dict[str, Any]) -> Dict[str, Any]:
     """Set one chat's response mode from the console dropdown. The same store method
-    the "blatbot mode ..." chat command uses, and the same event afterward."""
+    the "<assistant name> mode ..." chat command uses, and the same event afterward."""
     from ..gate.roommode import MODES
     chat_id = _required_text(payload.get("chat_id"), "chat_id")
     mode = _required_text(payload.get("response_mode") or payload.get("mode"), "response_mode")
@@ -412,7 +413,7 @@ def _scope_kind(name: str, spec: Dict[str, Any]) -> str:
     something, so a role at Read there would silently also be able to change things.
     A scope counts as read here only when wording.truly_read_only agrees its tools
     cannot change anything; everything else is write (or send, when it can make
-    Blatbot speak as itself)."""
+    the assistant speak as itself)."""
     if spec.get("read") and wording.truly_read_only(name):
         return "read"
     tools = [str(t).lower() for t in (spec.get("tools") or [])]
@@ -437,7 +438,7 @@ def _scope_detail(name: str, *, roles_holding: Optional[Dict[str, List[str]]] = 
 
 
 _SEND_WARNING = (
-    "People in this role can have Blatbot send messages without Aaron seeing them first."
+    f"People in this role can have {ASSISTANT_NAME} send messages without {OWNER_FIRST_NAME} seeing them first."
 )
 
 
@@ -687,7 +688,7 @@ async def decide_request(manager: Any, payload: Dict[str, Any]) -> Dict[str, Any
     if decision == "edit" and not note:
         raise ValidationError("an edit needs a note")
     result = await manager.decide_request(
-        request_id, decision, actor="aaron", source="console", note=note
+        request_id, decision, actor=OWNER_FIRST_NAME.lower(), source="console", note=note
     )
     if result.get("ok"):
         events.publish(
@@ -1308,18 +1309,16 @@ def _ask_for(scope_name: str) -> str:
     return SCOPES.get(scope_name, {}).get("description") or scope_name
 
 
+# Generic system labels that make sense with no club/org account configured.
+# A system the registry labels (systems.<key>.label) wins over this default --
+# see gate/scopes.py SYSTEM_LABELS, which is how a club/org-specific label
+# (a club workspace, an owner's school account, ...) is supplied without
+# naming it in code.
 _SYSTEM_SHORT_LABEL = {
     "second_brain": "Second brain",
-    "tamid_workspace": "TAMID workspace",
-    "tamid_calendar": "TAMID calendar",
-    "aaron_stern": "Your Stern account",
-    "blatbot_inkbox": "Blatbot's inbox and contacts",
     "club_websites": "Club websites",
     "public_web": "Public web",
     "server": "The server",
-    "tamid_social": "TAMID social media",
-    "tamid_analytics": "TAMID website analytics",
-    "nyu_brightspace": "NYU Brightspace",
     "coolify": "Coolify",
     "pension_filings": "Pension filings",
 }
@@ -1329,6 +1328,8 @@ def _system_label(system_name: str) -> str:
     """A short plain label for a system, never the long registry description
     (SCOPE_TREE_SYSTEMS values are full sentences meant for the Jev prompt, not
     a UI label)."""
+    if system_name in SYSTEM_LABELS:
+        return SYSTEM_LABELS[system_name]
     if system_name in _SYSTEM_SHORT_LABEL:
         return _SYSTEM_SHORT_LABEL[system_name]
     return system_name.replace("_", " ").strip().capitalize()
@@ -1348,7 +1349,7 @@ def _join_phrases(phrases: List[str]) -> str:
 def _system_scope_sets() -> Dict[str, Dict[str, set]]:
     """system -> {"read": {...}, "change": {...}, "send": {...}} of scope names,
     derived from each scope's registry `read` flag and `_scope_kind` (which also
-    distinguishes "send" scopes -- those that let Blatbot speak as itself --
+    distinguishes "send" scopes -- those that let the assistant speak as itself --
     from plain write scopes), grouped by SCOPE_SYSTEM (the system each scope was
     declared under in scopes.yaml). The vault system is excluded here: notes are
     modeled separately (see `_notes_view`), not as a tri-level system."""
@@ -1463,7 +1464,7 @@ def _roles_summary_sources(store: Store) -> List[Dict[str, Any]]:
         },
         {
             "label": "Abilities",
-            "detail": f"Blatbot's permission registry: {scope_count} " + _plural(scope_count, "ability", "abilities"),
+            "detail": f"{ASSISTANT_NAME}'s permission registry: {scope_count} " + _plural(scope_count, "ability", "abilities"),
         },
         {
             "label": "Note folders",

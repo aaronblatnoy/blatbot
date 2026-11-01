@@ -20,7 +20,9 @@ include = ["inkbox_claude*"]
 
 [tool.setuptools.package-data]
 # Ship the bundled Claude Code avatar attached to agents during setup.
-inkbox_claude = ["assets/*.png"]
+# gate/scopes.example.yaml is the packaged generic scope registry fallback
+# (see gate/scopes.py); the real/private registry lives outside the repo.
+inkbox_claude = ["assets/*.png", "gate/scopes.example.yaml"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

@@ -58,6 +58,7 @@ except ImportError:  # pragma: no cover
     INKBOX_TUNNEL_AVAILABLE = False
 
 try:
+    from .identity import ASSISTANT_NAME, OWNER_NAME
     from .a2a_delegations import find_by_task as find_a2a_delegation
     from .config import (
         DEFAULT_WEBHOOK_PATH,
@@ -91,6 +92,7 @@ try:
     from .gate import rooms
     from .gate import roommode
 except ImportError:  # pragma: no cover - direct local import/test fallback
+    from identity import ASSISTANT_NAME, OWNER_NAME
     from a2a_delegations import find_by_task as find_a2a_delegation
     from config import (
         DEFAULT_WEBHOOK_PATH,
@@ -476,8 +478,8 @@ def _outbound_failure_keys(
         if mode == "email":
             keys.append(f"{mode}:to:{raw}")
         else:
-            # Phones compare by digits so +1 (603) 494-5490 and
-            # +16034945490 land on the same counter.
+            # Phones compare by digits so +1 (555) 555-0123 and
+            # +15555550123 land on the same counter.
             digits = re.sub(r"\D", "", raw)
             keys.append(f"{mode}:to:{digits or raw}")
     chat = str(chat_id or "").strip()
@@ -1707,7 +1709,7 @@ class InkboxGateway:
         return os.getenv(f"INKBOX_WEBHOOK_SECRET_{provider_name.upper()}", "")
 
     def _telegram_known_name(self, u: Dict[str, Any]) -> Dict[str, Any]:
-        """The sender as Blatbot knows them. A Telegram display name is whatever the person
+        """The sender as the assistant knows them. A Telegram display name is whatever the person
         typed ("SP"); when their Telegram id is linked to a person, that person's name is who
         is talking, everywhere the message goes next."""
         store = getattr(self.sessions, "store", None) if self.sessions else None
@@ -1737,7 +1739,7 @@ class InkboxGateway:
             verdict = await picker.judge_group_reply(
                 message=u["text"], sender=u["name"] or u["from_id"],
                 group=u.get("group_title") or "group", recent=recent,
-                bot_name=os.getenv("TELEGRAM_BOT_NAME") or os.getenv("TELEGRAM_BOT_USERNAME") or "Blatbot",
+                bot_name=os.getenv("TELEGRAM_BOT_NAME") or os.getenv("TELEGRAM_BOT_USERNAME") or ASSISTANT_NAME,
                 from_principal=bool(owner and str(u["from_id"]) == owner))
         except Exception as exc:
             logger.warning("[bridge] telegram group judgment failed: %s", exc)
@@ -1776,7 +1778,7 @@ class InkboxGateway:
                     if not text:
                         continue
                     if row.get("kind") == "outbound":
-                        text = f"{os.getenv('TELEGRAM_BOT_NAME') or 'Blatbot'}: {text}"
+                        text = f"{os.getenv('TELEGRAM_BOT_NAME') or ASSISTANT_NAME}: {text}"
                     lines.append(text)
             except Exception as exc:
                 logger.warning("[bridge] could not read telegram history: %s", exc)
@@ -1824,7 +1826,7 @@ class InkboxGateway:
                 known.append(name)
         session.room = rooms.room_note(
             channel=channel, title=title,
-            me=os.getenv("TELEGRAM_BOT_NAME") or (self.cfg.agent_name if hasattr(self.cfg, "agent_name") else "") or "Blatbot",
+            me=os.getenv("TELEGRAM_BOT_NAME") or (self.cfg.agent_name if hasattr(self.cfg, "agent_name") else "") or ASSISTANT_NAME,
             members=known,
             principal=(self.cfg.approver_name if hasattr(self.cfg, "approver_name") else "") or "")
 
@@ -1841,7 +1843,7 @@ class InkboxGateway:
 
     def _group_mode_blocks_reply(self, chat_id: str, text: str) -> bool:
         """True when this chat's response mode means the message below must not reach
-        Jev or the model at all: silent always, or mention without Blatbot's name at
+        Jev or the model at all: silent always, or mention without the assistant's name at
         the message's start. Checked for every iMessage/SMS group message before any
         judgment runs, so a silent or mention-only room costs nothing beyond this
         lookup and, on a block, one stored line. Telegram has its own richer check
@@ -1858,7 +1860,7 @@ class InkboxGateway:
         return mode == "mention" and not roommode.addressed_by_name(text)
 
     def _overhear_group_text(self, chat_id: str, channel: str, sender: str, text: str) -> None:
-        """Record a group message Blatbot's mode kept it from answering, so later turns
+        """Record a group message the assistant's mode kept it from answering, so later turns
         and the morning digest still see it -- the iMessage/SMS twin of
         _telegram_overhear, which has its own name-resolution step Telegram alone needs."""
         store = getattr(self.sessions, "store", None) if self.sessions else None
@@ -1872,7 +1874,7 @@ class InkboxGateway:
     async def _maybe_handle_mode_command(self, text: str, *, channel: str, is_commander: bool,
                                           self_chat_id: str, self_label: str,
                                           reply: "Callable[[str], Awaitable[None]]") -> bool:
-        """"blatbot mode natural|mention|silent" (this chat) or "blatbot mode <chat
+        """"<assistant name> mode natural|mention|silent" (this chat) or "<assistant name> mode <chat
         name> natural|mention|silent" (from a DM, naming another chat). Runs before
         anything else touches Jev or the model -- a plain string match, never a
         judged turn -- so the commander can always change a chat's mode, even one
@@ -3932,7 +3934,7 @@ class InkboxGateway:
                     notify = getattr(self.sessions, "send_to_approver", None)
                     if callable(notify):
                         asyncio.create_task(notify(
-                            f"[Blatbot] Could not answer a call from {remote or 'an unknown number'}: "
+                            f"[{ASSISTANT_NAME}] Could not answer a call from {remote or 'an unknown number'}: "
                             f"the GPT-Live voice service did not connect ({last_exc})."))
                     return None
                 logger.warning("[bridge] falling back to Realtime for call %s (INKBOX_VOICE_FALLBACK=realtime)", call_id)
@@ -4181,7 +4183,7 @@ class InkboxGateway:
                     continue
                 event = payload.get("event")
                 if event == "start":
-                    await self._speak(ws, "Hi, this is Blatbot, Aaron Blatnoy's assistant. How can I help?", "greeting")
+                    await self._speak(ws, f"Hi, this is {ASSISTANT_NAME}, {OWNER_NAME}'s assistant. How can I help?", "greeting")
                 elif event == "transcript" and payload.get("is_final"):
                     text = str(payload.get("text") or "").strip()
                     if not text:

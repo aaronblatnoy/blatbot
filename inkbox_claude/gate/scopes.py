@@ -7,6 +7,8 @@ from __future__ import annotations
 import os
 from typing import Any, Dict, List, Optional
 
+from .. import identity as _identity
+
 # Which Google accounts the workspace tools act as. Set in the environment; the
 # defaults are placeholders so no real address lives in the source.
 ORG_ACCOUNT = os.getenv("GATE_ORG_GOOGLE_ACCOUNT") or "org@example.org"
@@ -27,7 +29,23 @@ from pathlib import Path
 import yaml
 
 _HERE = Path(__file__).resolve().parent
-REGISTRY_PATH = Path(os.getenv("GATE_SCOPES_FILE") or _HERE / "scopes.yaml")
+
+
+def _default_registry_path() -> Path:
+    """SCOPES_PATH if set, else the legacy GATE_SCOPES_FILE alias, else the
+    private registry at ~/blatbot/config/scopes.yaml if it exists, else the
+    packaged generic example. Never the real personal registry by default:
+    that file lives outside the repo and is named explicitly via env."""
+    env_path = os.getenv("SCOPES_PATH") or os.getenv("GATE_SCOPES_FILE")
+    if env_path:
+        return Path(env_path).expanduser()
+    home_registry = Path.home() / "blatbot" / "config" / "scopes.yaml"
+    if home_registry.exists():
+        return home_registry
+    return _HERE / "scopes.example.yaml"
+
+
+REGISTRY_PATH = _default_registry_path()
 RESOLVED_PATH = REGISTRY_PATH.with_name("scopes.resolved.json")
 
 
@@ -108,6 +126,70 @@ ASK: Dict[str, str] = {
 }
 WHERE_THINGS_LIVE: List[str] = list(_REGISTRY.get("where_things_live") or [])  # type: ignore[arg-type]
 
+# ---------------------------------------------------------------------------
+# Registry-driven personal content (servers, tool purposes, account rules,
+# judgment wordlists, speech hints, stopwords, system labels). Every key here
+# is optional: when the registry omits it, code falls back to a small
+# generic default so the package runs with no personal data baked in. The
+# real deployment's private registry fills these with the owner's content
+# verbatim, so the assembled strings stay byte-identical to what used to be
+# hardcoded.
+# ---------------------------------------------------------------------------
+
+_REGISTRY_SERVERS: Dict[str, Dict[str, object]] = dict(_REGISTRY.get("servers") or {})  # type: ignore[union-attr]
+SERVERS: Dict[str, Dict[str, object]] = {
+    name: {
+        "home": _expand(str(spec.get("home") or "")),
+        "label": str(spec.get("label") or ""),
+        "google_account": str(spec.get("google_account") or ""),
+    }
+    for name, spec in _REGISTRY_SERVERS.items()
+}
+
+
+def google_account_for(server: str) -> str:
+    """Which Google account a server's tools act as: ORG_ACCOUNT when the
+    registry marks that server's google_account "org", else OWNER_ACCOUNT.
+    Matches the old hardcoded behaviour: the org's workspace server (marked org) and every other
+    Google-Workspace-backed server (owner)."""
+    return ORG_ACCOUNT if SERVERS.get(server, {}).get("google_account") == "org" else OWNER_ACCOUNT
+
+
+# Generic default account sentence for executor.py's two prompts, used only
+# when the registry has no `account_rules` key.
+_DEFAULT_ACCOUNT_RULES = (
+    "every org-Google-Workspace tool takes user_google_email={ORG_ACCOUNT}; "
+    "every owner-Google-Workspace tool takes user_google_email={OWNER_ACCOUNT} (the owner's own calendar and mail)."
+)
+ACCOUNT_RULES: str = _expand(str(_REGISTRY.get("account_rules") or _DEFAULT_ACCOUNT_RULES))
+
+# Generic default capability list for taskpick.py's judge_action "the_assistant_can"
+# list, used only when the registry has no `capabilities` key.
+_DEFAULT_CAPABILITIES: List[str] = [
+    "read and send messages on the assistant's own inbox",
+    "look things up on the public web",
+    "read and write files in the owner's second brain (notes vault)",
+]
+CAPABILITIES: List[str] = list(_REGISTRY.get("capabilities") or _DEFAULT_CAPABILITIES)  # type: ignore[arg-type]
+
+# Generic default for taskpick.py's "count_as_yes" judgment wordlist.
+_DEFAULT_COUNT_AS_YES: List[str] = []
+COUNT_AS_YES: List[str] = list(_REGISTRY.get("count_as_yes") or _DEFAULT_COUNT_AS_YES)  # type: ignore[arg-type]
+
+# router.py speech-recognition proper-noun hints. Empty default: with no
+# registry, no personal proper-noun hints are assembled.
+SPEECH_HINTS: str = str(_REGISTRY.get("speech_hints") or "")
+
+# Personal stopwords (manager.py / jevagent.py), unioned into the code's own
+# generic stopword sets.
+STOPWORDS: List[str] = list(_REGISTRY.get("stopwords") or [])  # type: ignore[arg-type]
+
+# tool name short-prefixes stripped before matching a verb in purpose_for();
+# the generic ones (not tied to a club/org name) stay in code, the registry's
+# full tuple (its own order preserved) replaces this default when present.
+_DEFAULT_TOOL_PREFIXES = ("bs_", "ga_", "ig_", "li_", "inkbox_")
+TOOL_PREFIXES: tuple = tuple(_REGISTRY.get("tool_prefixes") or _DEFAULT_TOOL_PREFIXES)  # type: ignore[arg-type]
+
 # Scopes a registry entry marks `explicit_only: true`: never added by a blanket
 # "permission for everything" grant or any other automatic widening, no matter
 # how read-only their tools are (see wording.truly_read_only / manager's
@@ -127,29 +209,32 @@ SCOPE_TREE_LEAVES: Dict[str, Dict[str, object]] = {
     for k, v in (_REGISTRY.get("systems") or {}).items()  # type: ignore[union-attr]
 }
 
+# console/api.py's short console labels for a system (_SYSTEM_SHORT_LABEL).
+# A system entry's `label` key wins over whatever code defines for the same
+# system name; systems the registry doesn't label fall back to code's own
+# generic defaults there.
+SYSTEM_LABELS: Dict[str, str] = {
+    k: str(v["label"]) for k, v in (_REGISTRY.get("systems") or {}).items() if v.get("label")  # type: ignore[union-attr]
+}
+
 
 # ---------------------------------------------------------------------------
 # Purposes for tools without a hand-written line: a template that names WHERE the
 # tool acts (which account, site or system) before what it does, since telling
-# the website admin from the public web, or TAMID's calendar from Aaron's, is
-# the judgment that goes wrong when a tool is described only by its verb.
+# the website admin from the public web, or the org's calendar from the owner's,
+# is the judgment that goes wrong when a tool is described only by its verb.
+# The per-server home text for personal/org servers (club sites, the owner's
+# school/Google accounts, the owner's own PaaS) lives in the registry
+# (servers.<name>.home); only the domain-neutral entries that make sense with
+# no club/org at all stay here, built from the identity values.
 # ---------------------------------------------------------------------------
 
 _SERVER_HOME = {
-    "tamid-admin": "the TAMID at NYU WEBSITE ADMIN (the club's own site: its board list with positions and bios, events, members, settings, contact-form submissions, newsletter signups)",
-    "sjba-admin": "the SJBA WEBSITE ADMIN (the Stern Jewish Business Association's own site: board list with positions and bios, events, members, settings, contact-form submissions, newsletter signups)",
-    "tamid-drive": f"TAMID's GOOGLE WORKSPACE ({ORG_ACCOUNT}: the club's Drive, Sheets, Docs, Forms, Gmail, calendar)",
-    "stern-drive": f"AARON's OWN NYU STERN GOOGLE ACCOUNT ({OWNER_ACCOUNT}: his personal calendar, Gmail and Drive, not the club's)",
-    "tamid-instagram": "TAMID's INSTAGRAM account",
-    "tamid-linkedin": "TAMID's LINKEDIN page",
-    "analytics-admin": "TAMID's GOOGLE ANALYTICS property (website traffic configuration)",
-    "brightspace": "AARON's NYU BRIGHTSPACE (the university course site: his courses, assignments, grades, discussions)",
-    "coolify": "the BLACK-SKY COOLIFY (Aaron's self-hosted PaaS: deployed apps, services, databases, deployments, logs)",
-    "coolify-vox": "the VOX COOLIFY instance (a second self-hosted PaaS)",
-    "playwright": "the PUBLIC WEB in a headless browser (only for things outside Aaron's own systems)",
-    "inkbox": "BLATBOT's OWN INKBOX (its mailbox, phone line, iMessage and address book)",
-    "host": "the BLACK-SKY SERVER itself",
+    "playwright": f"the PUBLIC WEB in a headless browser (only for things outside {_identity.OWNER_FIRST_NAME}'s own systems)",
+    "inkbox": f"{_identity.ASSISTANT_NAME_UPPER_POSSESSIVE} OWN INKBOX (its mailbox, phone line, iMessage and address book)",
+    "host": f"the {_identity.SERVER_NAME_UPPER} SERVER itself",
 }
+_SERVER_HOME.update({name: str(spec.get("home") or "") for name, spec in SERVERS.items() if spec.get("home")})
 _VERBS = {
     "list": "LIST", "get": "READ ONE", "search": "SEARCH", "read": "READ", "create": "CREATE", "update": "CHANGE",
     "delete": "DELETE", "replace": "REPLACE", "modify": "CHANGE", "append": "ADD ROWS TO", "insert": "INSERT INTO",
@@ -159,7 +244,7 @@ _VERBS = {
     "diagnose": "DIAGNOSE", "find": "FIND", "validate": "VALIDATE", "archive": "ARCHIVE", "grant": "GRANT",
     "revoke": "REVOKE", "set": "SET", "import": "IMPORT", "copy": "COPY", "export": "EXPORT", "format": "FORMAT",
 }
-_PREFIXES = ("tamid_", "sjba_", "bs_", "ga_", "ig_", "li_", "inkbox_")
+_PREFIXES = TOOL_PREFIXES
 
 
 def purpose_for(name: str) -> str:
@@ -317,8 +402,8 @@ def sends_to_requester(tool_name: str, args: dict, protected: list) -> bool:
 
 def blocks_requester_send(req, tool_name: str, args: dict, protected: list) -> bool:
     """True when a send must be refused because the gateway already delivers the result
-    to that person. A scheduled run is exempt: Aaron approved the schedule, its prompt and
-    its send scopes, so a message it sends him is the job itself, not a duplicate answer."""
+    to that person. A scheduled run is exempt: the owner approved the schedule, its prompt
+    and its send scopes, so a message it sends him is the job itself, not a duplicate answer."""
     if getattr(req, "schedule_id", None):
         return False
     return sends_to_requester(tool_name, args, list(protected) + [req.sender, req.chat_id])
@@ -326,15 +411,21 @@ def blocks_requester_send(req, tool_name: str, args: dict, protected: list) -> b
 
 # What each tool is FOR, in the words a task uses. Shown to the judgment that picks
 # the next tool instead of the servers' own (often long, implementation-flavoured)
-# descriptions. Tools not listed fall back to the server's description.
-TOOL_PURPOSE: Dict[str, str] = {
+# descriptions. Tools not listed fall back to the server's description. Only the
+# domain-neutral entries (the owner's own vault/host/web tools, built from the
+# identity values; the assistant's own inbox tools, built from ASSISTANT_NAME)
+# stay in code. Entries that name a specific club/org account (a club's workspace,
+# the owner's school account, ...) live in the registry's `tool_purpose` key and are merged in below,
+# winning over anything code defines for the same tool name.
+_CODE_TOOL_PURPOSE: Dict[str, str] = {
     "mcp__host__rows_where": "COUNT OR FILTER ROWS of a result ALREADY GATHERED (a sheet read, a calendar list, search hits) by a text they contain, optionally within one column. Exact counts; the matching rows come back. Use it after a read, never instead of one.",
-    "mcp__host__vault_search": "SEARCH AARON'S SECOND BRAIN (his Obsidian vault of notes) for notes containing every word of a query: what he has written down about a project, a person, a decision, a preference. Read-only.",
+    "mcp__host__vault_search": f"SEARCH {_identity.OWNER_FIRST_UPPER}'S SECOND BRAIN (his Obsidian vault of notes) for notes containing every word of a query: what he has written down about a project, a person, a decision, a preference. Read-only.",
     "mcp__host__vault_read": "READ ONE VAULT NOTE IN FULL by the path vault_search or vault_list printed, or by title. Read-only.",
-    "mcp__host__vault_list": "LIST THE NOTES in Aaron's vault, all or under one folder (Projects, Areas, Daily, Reference, Inbox, Archive). Read-only.",
-    "mcp__host__host_status": "WHAT IS RUNNING ON BLACK-SKY (the server Blatbot runs on): containers, services, uptime, disk, memory, GPUs. Read-only.",
+    "mcp__host__vault_list": f"LIST THE NOTES in {_identity.OWNER_FIRST_NAME}'s vault, all or under one folder (Projects, Areas, Daily, Reference, Inbox, Archive). Read-only.",
+    "mcp__host__host_status": f"WHAT IS RUNNING ON {_identity.SERVER_NAME_UPPER} (the server {_identity.ASSISTANT_NAME} runs on): containers, services, uptime, disk, memory, GPUs. Read-only.",
     # web
-    "mcp__playwright__browser_search": "SEARCH THE PUBLIC WEB (last resort for facts that live OUTSIDE Aaron's own systems): a person's LinkedIn or employer, an outside organization's leadership, an article, a public page. Not for anything that lives in TAMID/SJBA sheets, forms, rosters, calendars or inboxes; use those tools first.",
+    # Generic default; the private registry's tool_purpose carries the owner's own wording.
+    "mcp__playwright__browser_search": f"SEARCH THE PUBLIC WEB (last resort for facts that live OUTSIDE {_identity.OWNER_FIRST_NAME}'s own systems): a person's LinkedIn or employer, an outside organization's leadership, an article, a public page. Not for anything that lives in the owner's own sheets, forms, rosters, calendars or inboxes; use those tools first.",
     "mcp__playwright__browser_navigate": "OPEN A PUBLIC WEB PAGE by URL in the browser (a search result, a profile, an article). Only for things online; follow with browser_snapshot or browser_find to read it.",
     "mcp__playwright__browser_snapshot": "READ THE CURRENT PAGE: the full text and links of the page that is open.",
     "mcp__playwright__browser_find": "FIND TEXT ON THE CURRENT PAGE: locate a name, number or phrase on the open page and read around it.",
@@ -343,48 +434,15 @@ TOOL_PURPOSE: Dict[str, str] = {
     "mcp__playwright__browser_click": "CLICK a button or link on the open page.",
     "mcp__playwright__browser_type": "TYPE into a field on the open page.",
     "mcp__playwright__browser_fill_form": "FILL a form's fields on the open page.",
-    # Google Drive / Sheets / Docs / Forms (TAMID account)
-    "mcp__tamid-drive__search_drive_files": "FIND A FILE in TAMID Drive by name or words: sheets, docs, forms, folders. Returns names and ids. Use before opening anything whose id is unknown.",
-    "mcp__tamid-drive__list_drive_items": "LIST the files inside one Drive folder by folder id.",
-    "mcp__tamid-drive__list_spreadsheets": "LIST recent spreadsheets in TAMID Drive with their ids.",
-    "mcp__tamid-drive__get_spreadsheet_info": "SHEET STRUCTURE: the tabs of a spreadsheet, their names and row/column counts, by spreadsheet id. Answers 'how many rows'.",
-    "mcp__tamid-drive__read_sheet_values": "READ A SHEET'S CELLS: the rows of a spreadsheet tab (a roster, responses, a tracker) by spreadsheet id and range.",
-    "mcp__tamid-drive__get_drive_file_content": "READ A WHOLE NON-SPREADSHEET FILE'S text by file id (a doc, a PDF). NEVER for a spreadsheet or a form: read_sheet_values and list_form_responses give those as rows; this would return an unreadable export.",
-    "mcp__tamid-drive__get_doc_content": "READ A GOOGLE DOC's text by document id.",
-    "mcp__tamid-drive__search_docs": "FIND A GOOGLE DOC by words in its name.",
-    "mcp__tamid-drive__get_form": "FORM DEFINITION: a Google Form's title, questions and settings, by form id.",
-    "mcp__tamid-drive__list_form_responses": "WHO ANSWERED A FORM: every response to a Google Form (respondent email, answers, time), by form id. Answers 'who filled it out', 'who has not responded'.",
-    "mcp__tamid-drive__get_form_response": "ONE FORM RESPONSE in full, by form id and response id.",
-    "mcp__tamid-drive__get_events": "TAMID CALENDAR EVENTS: list or search events on the TAMID calendar (a query word, a date range, or an event id). Returns titles, times, attendees, ids.",
-    "mcp__tamid-drive__list_calendars": "WHICH CALENDARS the TAMID account has and their ids (needed before get_events on a non-primary calendar).",
-    "mcp__tamid-drive__manage_event": "CREATE, UPDATE or DELETE an event on the TAMID calendar.",
-    "mcp__tamid-drive__search_gmail_messages": "SEARCH THE TAMID INBOX: find emails by sender, words, or date (Gmail search syntax). Returns message ids and headers. Use to find someone's email address or what they sent.",
-    "mcp__tamid-drive__get_gmail_message_content": "READ ONE EMAIL in the TAMID inbox in full, by message id.",
-    "mcp__tamid-drive__get_gmail_thread_content": "READ A WHOLE EMAIL THREAD in the TAMID inbox, by thread id.",
-    "mcp__tamid-drive__send_gmail_message": "SEND AN EMAIL from the TAMID account to someone else.",
-    # Stern account
-    "mcp__stern-drive__get_events": "AARON'S STERN CALENDAR: list or search his events (a query word, a date range). Returns titles, times, ids.",
-    "mcp__stern-drive__list_calendars": "WHICH CALENDARS Aaron's Stern account has and their ids.",
-    "mcp__stern-drive__manage_event": "CREATE, UPDATE or DELETE an event on Aaron's Stern calendar.",
-    "mcp__stern-drive__search_gmail_messages": "SEARCH AARON'S STERN INBOX: find emails by sender, words, or date. Returns message ids and headers.",
-    "mcp__stern-drive__get_gmail_message_content": "READ ONE EMAIL in Aaron's Stern inbox in full, by message id.",
-    "mcp__stern-drive__send_gmail_message": "SEND AN EMAIL from Aaron's Stern account to someone else.",
-    # Inkbox (Blatbot's own mailbox, phone, contacts)
-    "mcp__inkbox__inkbox_get_contact": "LOOK UP A CONTACT in Blatbot's address book by name, email or phone: returns their email, phone and notes. First stop for 'what is X's email / number'.",
-    "mcp__inkbox__inkbox_list_contacts": "LIST Blatbot's contacts (names, emails, phones).",
-    "mcp__inkbox__inkbox_list_emails": "LIST recent emails in Blatbot's own mailbox.",
-    "mcp__inkbox__inkbox_send_email": "SEND AN EMAIL from Blatbot's mailbox to someone else.",
-    "mcp__inkbox__inkbox_send_sms": "SEND A TEXT (SMS) from Blatbot's number to someone else.",
-    "mcp__inkbox__inkbox_send_imessage": "SEND AN IMESSAGE from Blatbot's line to someone else.",
-    # site admin
-    "mcp__tamid-admin__tamid_list_board_members": "TAMID BOARD ROSTER from the website: every board member with name, title, email, bio.",
-    "mcp__tamid-admin__tamid_list_members": "TAMID MEMBER ROSTER from the website: club members with names and emails.",
-    "mcp__tamid-admin__tamid_list_events": "TAMID EVENTS listed on the website.",
-    "mcp__tamid-admin__tamid_list_site_config": "TAMID WEBSITE SETTINGS: application open/closed, deadlines, labels.",
-    "mcp__sjba-admin__sjba_list_board_members": "SJBA BOARD ROSTER from the website: every board member with name, title, email, bio.",
-    "mcp__sjba-admin__sjba_list_events": "SJBA EVENTS listed on the website.",
-    "mcp__sjba-admin__sjba_list_upcoming_events": "SJBA UPCOMING EVENTS on the website.",
+    # Inkbox (the assistant's own mailbox, phone, contacts)
+    "mcp__inkbox__inkbox_get_contact": f"LOOK UP A CONTACT in {_identity.ASSISTANT_NAME}'s address book by name, email or phone: returns their email, phone and notes. First stop for 'what is X's email / number'.",
+    "mcp__inkbox__inkbox_list_contacts": f"LIST {_identity.ASSISTANT_NAME}'s contacts (names, emails, phones).",
+    "mcp__inkbox__inkbox_list_emails": f"LIST recent emails in {_identity.ASSISTANT_NAME}'s own mailbox.",
+    "mcp__inkbox__inkbox_send_email": f"SEND AN EMAIL from {_identity.ASSISTANT_NAME}'s mailbox to someone else.",
+    "mcp__inkbox__inkbox_send_sms": f"SEND A TEXT (SMS) from {_identity.ASSISTANT_NAME}'s number to someone else.",
+    "mcp__inkbox__inkbox_send_imessage": f"SEND AN IMESSAGE from {_identity.ASSISTANT_NAME}'s line to someone else.",
 }
+TOOL_PURPOSE: Dict[str, str] = {**_CODE_TOOL_PURPOSE, **{k: str(v) for k, v in (_REGISTRY.get("tool_purpose") or {}).items()}}  # type: ignore[union-attr]
 
 
 def scope_for_tool(tool: str) -> Optional[str]:
