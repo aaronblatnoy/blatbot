@@ -12,7 +12,7 @@ A surface is how a message arrived, not who it is with. Everything I send or am 
 
 Most assistant demos have one user. The interesting case is an assistant that lives at a public address. Candidates email it to book time with me. Colleagues text it. I call it while walking down the street. They are all talking to the same agent, and that agent can send email and edit my calendar.
 
-So the real question is not "can the model do the task." It is "who is allowed to make it act, and how do I know what it is about to do." A system prompt that says "only obey Aaron" is not an answer, because prompts can be argued with. Blatbot answers it in code.
+So the real question is not "can the model do the task." It is "who is allowed to make it act, and how do I know what it is about to do." A system prompt that says "only obey Dana" is not an answer, because prompts can be argued with. Blatbot answers it in code.
 
 ## How it works
 
@@ -85,7 +85,7 @@ So the real question is not "can the model do the task." It is "who is allowed t
  │                                  │   │                                              │
  │ in:  the decision ("a request    │   │ prompt  = sender's exact words               │
  │      was created and will run /  │   │           + the conversation so far          │
- │      will be shown to Aaron" or  │   │           + this task's record               │
+ │      will be shown to Dana" or   │   │           + this task's record               │
  │      "no action"), the ledger,   │   │ summary = the task's title                   │
  │      the conversation            │   │ scopes  = Jev over a tree of systems          │
  │ out: the words sent back, and a  │   │           (calendar, email send, Drive read, │
@@ -188,21 +188,21 @@ clock on the server.
 03:24:36  ledger search (DeepSeek planned the filter, code ran the SQL):
             {text: "coffee chat", states: [live], touched_within_days: 3} -> 0 new matches
 03:24:37  Jev #1 which task?   state = {message, last turns, candidates: [T62 "List
-            Aaron's coffee chats from last week", T65 "List TAMID board members", ...]}
+            Dana's intro calls from last week", T65 "List Riverside Chess Club board members", ...]}
             answer: T62 (0.96)
 03:24:37  Jev #2 needs a tool?  state = {message, turns, task: T62}   answer: yes (0.96)
 03:24:38  DeepSeek reply writer, told "a request was created on T62 and will run now":
             reply = "On it, pulling last week's coffee chats now."      -> sent
 03:24:38  code builds the request:
             prompt  = the message verbatim + last turns + T62's record
-            summary = "List Aaron's coffee chats from last week"
+            summary = "List Dana's intro calls from last week"
 03:24:38  Jev #6 scopes, one Noul each over that prompt:
-            stern_calendar 0.90  imessage_send 0.69  sms_send 0.62  inbox_read 0.20 ...
-            granted: stern_calendar (+ imessage_send, sms_send that night; since fixed:
+            work_calendar 0.90  imessage_send 0.69  sms_send 0.62  inbox_read 0.20 ...
+            granted: work_calendar (+ imessage_send, sms_send that night; since fixed:
             sending is only for messaging other people)
 03:24:39  Jev #3-5 event on T62: kind=asked, waits on=owner, resolved=0.1 -> ledger
 03:24:39  gate: OWNER -> approved, run now.  prompt hashed and stored as request #155
-03:24:39  AGENT starts. tools = the scope's list; stern-drive MCP server started (2 s cold)
+03:24:39  AGENT starts. tools = the scope's list; work-calendar MCP server started (2 s cold)
 03:24:41  Jev #8 next tool?  state = {goal, T62 record, now, steps: []}
             answer: get_events (0.66)
 03:24:42  Jev #9-12 arguments for get_events, one batched call:
@@ -311,7 +311,7 @@ These are the decisions the whole thing rests on.
 
 1. A candidate emails: "Could we do Tuesday at 6 for a coffee chat?"
 2. The gateway logs it to that candidate's ledger and sends me a one-line heads-up on iMessage.
-3. Jev assigns the message to that candidate's coffee-chat task and judges that it needs an action. The reply writer, told this, answers them "Let me confirm that with Aaron." Code builds the request from their words and the task record; Jev grants the calendar and send-email scopes.
+3. Jev assigns the message to that candidate's coffee-chat task and judges that it needs an action. The reply writer, told this, answers them "Let me confirm that with Dana." Code builds the request from their words and the task record; Jev grants the calendar and send-email scopes.
 4. I get a text with their message, the task, and the tools. I reply `#12 yes`.
 5. The agent lists the calendar, picks Tuesday's slot from a range computed off the clock, creates the event, asks the text model for a two-line confirmation, sends it, and reports `STATUS: OK`.
 6. The ledger marks it done. The candidate gets their confirmation. I get a one-line "done."
@@ -449,7 +449,7 @@ is intentionally not run by the test suite or by any Claude Code session in this
 2. The frontend (`blatbot-console`) runs as its own static file server (`serve.py`) under its
    own systemd user unit (`systemd/blatbot-console-frontend.service` in that repo), with
    `BIND_HOST` set to the same Tailscale address and its own port (8793 by convention, chosen
-   to avoid every other port already in use on black-sky). `static/config.js` in that repo
+   to avoid every other port already in use on the server). `static/config.js` in that repo
    points at this backend's `/console/api` and `/console/events` on its Tailscale address.
 3. There is a rerunnable end-to-end check in `blatbot-console/e2e/` that boots both sides
    against a throwaway store and the real backend code, and checks every page, the role/member
@@ -462,19 +462,19 @@ runtime on either side.
 
 ## Schedules and continuing work
 
-Aaron can ask Blatbot in his private thread to do something once at an absolute
+Dana can ask Blatbot in her private thread to do something once at an absolute
 time, on a recurring five-field cron cadence, or as continuing work. The same
 forms are available on the console's Schedules page. Creating a schedule does
 not run it. It enters the ordinary approval queue with the exact prompt, frozen
 scopes, report mode, cadence rendered from the stored specification, and the
-next three fire times computed in its IANA timezone. Only Aaron may create,
+next three fire times computed in its IANA timezone. Only Dana may create,
 edit, pause, resume, run, or delete a schedule. An edit to its prompt, scopes,
 cadence, or limits returns it to the approval queue.
 
 A due schedule creates a normal request on its task and sends that request
 through the existing executor, grounding, delivery, and ledger paths. Schedule
 approval covers later sends and writes inside the approved scopes, but a delete,
-cancel, replacement, or other destructive call still stops for Aaron's yes.
+cancel, replacement, or other destructive call still stops for Dana's yes.
 Scheduled requests do not receive the extra read scopes normally granted to an
 owner request, and a failed run cannot grant itself a missing scope.
 
@@ -564,7 +564,8 @@ What is in the database, by what it is for:
 - **Testing on Postgres.** `STORE_BACKEND=postgres BLATBOT_TEST_PG_DSN=<url of an empty test
   database> pytest` routes every store the tests open to its own schema in that database, so
   the code under test is the code that runs live.
-- **Still files.** The scope registry (`gate/scopes.yaml` and its resolved tool lists), the
+- **Still files.** The scope registry (at `SCOPES_PATH`, default `~/blatbot/config/scopes.yaml`, falling
+  back to the packaged `gate/scopes.example.yaml`, and its resolved tool lists next to it) and the
   standing instructions (`standing.md`), per-request findings and logs are files on the host.
 
 ## What is in this fork
@@ -582,7 +583,7 @@ The custom code spans the gate package, the console package, the Telegram and vo
 | `inkbox_claude/gate/taskpick.py` | The typed judgments (TypeSafe Jev): which task, whether action is needed, which scopes, what the message did to the task |
 | `inkbox_claude/gate/jevagent.py` | The alternative executor: a loop of typed judgments that picks tools and selects arguments, calls MCP tools directly, prose only on demand |
 | `inkbox_claude/gate/executor.py` | The Claude Code executor, the default: a hash-checked prompt, tools limited to the scopes, and the hook that holds an outbound send |
-| `inkbox_claude/gate/scopes.yaml`, `scopes.resolved.json` | The scope registry and the tool lists resolved from the live MCP servers; `scopes_cli.py` lists, checks and re-syncs them |
+| `inkbox_claude/gate/scopes.example.yaml` | The packaged generic scope registry (your private one lives outside the repo at `SCOPES_PATH`) and the tool lists resolved from the live MCP servers; `scopes_cli.py` lists, checks and re-syncs them |
 | `inkbox_claude/gate/hosttools.py` | In-process tools the executor always has: host status, and exact filtering and counting over a result it already gathered |
 | `inkbox_claude/gate/scopes.py` | Scope names mapped to tool lists, including a headless browser (Playwright over MCP) as read-only and interactive scopes, and the send-to-requester guard |
 | `inkbox_claude/gate/decidegraph.py` | The gateway turn as a LangGraph: the judgments in parallel, the reply writer, the request, and the join that keeps the words and the work agreeing |
@@ -644,6 +645,25 @@ GATE_ORG_GOOGLE_ACCOUNT=
 GATE_OWNER_GOOGLE_ACCOUNT=
 ```
 
+### Configure your owner and assistant
+
+Every prompt, label and judgment the gate writes is built from a small set of identity
+values (`inkbox_claude/identity.py`), read from the environment, so none of your own
+name or your assistant's persona is baked into the source:
+
+```
+OWNER_NAME=Dana Rivers
+OWNER_FIRST_NAME=Dana
+ASSISTANT_NAME=Nova
+ASSISTANT_EMAIL=nova@inkboxmail.com
+SERVER_NAME=my-server
+```
+
+Your own scopes, systems and tool descriptions go in a private registry file outside
+this repo -- set `SCOPES_PATH` to it (default `~/blatbot/config/scopes.yaml`), starting
+from the packaged example at `inkbox_claude/gate/scopes.example.yaml`. See "Where the
+data lives" below for what the registry can hold.
+
 Put your own standing instructions (tone, signature, house rules) in `standing.md` next to the `.env`. The router reads it fresh on every turn, so you can change the assistant's behavior by editing a text file.
 
 Open the console frontend (the separate `blatbot-console` repo's own static server, e.g.
@@ -663,9 +683,8 @@ Measured on the deployed box, executor time from approval to result. Claude Code
 
 ### Honest caveats
 
-- **Gate mode needs the source tree.** The scope registry is read from `gate/scopes.yaml` at import, and that file is not in the package manifest, so a built wheel will not start in gate mode.
-- **The scope map is wired to my setup.** `scopes.py` references the specific Google Workspace tool servers I run. To use this yourself, edit that file to point at your own tools. Making this configurable is the next piece of work.
-- **Some prompts still say "Blatbot" and "Aaron."** The persona and a few rules are written for me. They are being moved into config.
+- **Gate mode needs the source tree.** The scope registry is read from `SCOPES_PATH` (default `~/blatbot/config/scopes.yaml`) at import, falling back to the packaged `gate/scopes.example.yaml`.
+- **The scope map is wired to your setup.** `scopes.py` references whatever Google Workspace tool servers your own registry names. To use this yourself, write a `scopes.yaml` at `SCOPES_PATH` that points at your own tools, starting from `gate/scopes.example.yaml`.
 - **The safety classes are name-based.** Whether a tool is destructive, or sends to a person, is decided by its name and arguments against a maintained pattern, not by understanding what it does. A newly added tool with an unfamiliar name can slip past the hold until the pattern is updated.
 - **A contact is only as strong as its channel.** A person is recognised by email address, phone number or Telegram id. A Telegram id is stamped by Telegram; an email sender address and a caller ID can be forged. A display name is whatever its owner types, so it is never used to recognise anyone.
 - **Caller ID is not authentication.** Trusting a phone number on voice calls is a convenience with a known weakness, which is why it is a separate switch.

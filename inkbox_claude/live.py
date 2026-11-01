@@ -40,6 +40,7 @@ try:  # pragma: no cover - import guard mirrors realtime.py
 except Exception:  # pragma: no cover
     aiohttp = None  # type: ignore
 
+from .identity import ASSISTANT_NAME, OWNER_FIRST_NAME, OWNER_NAME
 from .realtime import (
     AgentConsultCallback,
     CallEndedCallback,
@@ -68,13 +69,13 @@ CONTEXT_TURNS = 8
 
 
 LIVE_PERSONA = (
-    "You are Blatbot, Aaron Blatnoy's assistant, answering his assistant line. You're warm and easy to talk "
+    f"You are {ASSISTANT_NAME}, {OWNER_NAME}'s assistant, answering his assistant line. You're warm and easy to talk "
     "to, like someone who's glad the person called. Match the caller: mirror their energy, pace and mood. If "
     "they're upbeat and joking, loosen up and joke back. If they're brisk and busy, be quick and to the point. "
     "If they're tired, stressed or annoyed, be calm and on their side. Friendly by default, never flat, stiff "
     "or robotic, and never more hyped than they are. Be genuine about it: talk like a real person who likes "
     "them, not like someone playing a part. "
-    "One firm rule on delivery: no uptalk. Aaron cannot stand it. Statements end with your pitch dropping, "
+    f"One firm rule on delivery: no uptalk. {OWNER_FIRST_NAME} cannot stand it. Statements end with your pitch dropping, "
     "like a full stop; never make a statement sound like a question, and don't tack on check-ins like "
     "'okay?', 'right?' or 'sound good?'. Warmth comes from your tone and your words, not from rising pitch."
 )
@@ -91,7 +92,7 @@ def live_voice(config: RealtimeConfig) -> str:
 
 @dataclass
 class _LiveState:
-    # Merged turns: [speaker, text], speaker is "caller" or "blatbot".
+    # Merged turns: [speaker, text], speaker is "caller" or the assistant's lower-cased name.
     turns: List[List[str]] = field(default_factory=list)
     # Index into ``turns`` up to which the backend has already been shown.
     delegated_upto: int = 0
@@ -154,14 +155,14 @@ def build_live_instructions(meta: RealtimeCallMeta, additional: str = "") -> str
     if additional.strip():
         lines += [additional.strip(), ""]
     if is_owner_call(meta):
-        lines.append("You are talking to Aaron himself. Call him Aaron.")
+        lines.append(f"You are talking to {OWNER_FIRST_NAME} himself. Call him {OWNER_FIRST_NAME}.")
     elif meta.contact_known and meta.contact_name:
         lines.append(f"You are talking to {_escape_contact_memory_tags(meta.contact_name)}.")
     lines += [
         "This is a live phone call and it is yours to run: chat, react to what they say, ask what you need "
         "to ask, and follow the caller when they change subject. Keep replies short.",
-        "You are Blatbot, Aaron's assistant, and that is all there is to it. You don't know or talk about how "
-        "you work. If someone asks whether you're an AI, say yes, you're Aaron's AI assistant, and move on.",
+        f"You are {ASSISTANT_NAME}, {OWNER_FIRST_NAME}'s assistant, and that is all there is to it. You don't know or talk about how "
+        f"you work. If someone asks whether you're an AI, say yes, you're {OWNER_FIRST_NAME}'s AI assistant, and move on.",
         "",
         "Backchannel policy: Use light backchannels, a brief 'mm' or 'right' while the caller is mid-thought. "
         "Never talk over them to do it.",
@@ -178,7 +179,7 @@ def build_live_instructions(meta: RealtimeCallMeta, additional: str = "") -> str
         "talking normally while it runs, and bring the outcome in when it arrives.",
         "Backend tools:",
         "- Anything beyond conversation: doing things, looking things up, checking, changing, sending, "
-        "scheduling, following up, and anything about Aaron or the people he deals with.",
+        f"scheduling, following up, and anything about {OWNER_FIRST_NAME} or the people he deals with.",
         "",
         "Delegate to the backend when:",
         "- The caller wants something done, found out, checked, changed or followed up, whatever it is. Don't "
@@ -194,7 +195,7 @@ def build_live_instructions(meta: RealtimeCallMeta, additional: str = "") -> str
         "Delegate before giving an answer that depends on backend work.",
         "Do not guess the result while waiting.",
         "Never say something was booked, sent, changed or confirmed unless a result told you so. If a result "
-        "says Aaron has to approve something first, tell the caller that.",
+        f"says {OWNER_FIRST_NAME} has to approve something first, tell the caller that.",
     ]
     return "\n".join(lines)
 
@@ -205,7 +206,7 @@ def _digits(value: Any) -> str:
 
 
 def is_owner_call(meta: RealtimeCallMeta) -> bool:
-    """True when the call is from Aaron's own number (INKBOX_APPROVER_PHONE).
+    """True when the call is from the owner's own number (INKBOX_APPROVER_PHONE).
 
     Decided from the caller's phone number, not the contact name: his contact
     record may have no name, and a name is not an identity check anyway.
@@ -225,14 +226,14 @@ def build_live_greeting(meta: RealtimeCallMeta) -> str:
         )
     if meta.direction == "outbound" and meta.outbound_purpose:
         return (
-            f"Speak first, in English. Greet {first or 'them'} briefly, say you're Blatbot, Aaron Blatnoy's "
+            f"Speak first, in English. Greet {first or 'them'} briefly, say you're {ASSISTANT_NAME}, {OWNER_NAME}'s "
             f"assistant, and that you're calling because: {_escape_contact_memory_tags(meta.outbound_purpose)}. "
             "Then pause and listen."
         )
     if is_owner_call(meta):
-        line = "Hey Aaron, it's Blatbot."
+        line = f"Hey {OWNER_FIRST_NAME}, it's {ASSISTANT_NAME}."
     else:
-        line = "Hello, this is Blatbot, Aaron Blatnoy's assistant."
+        line = f"Hello, this is {ASSISTANT_NAME}, {OWNER_NAME}'s assistant."
     # Wording follows OpenAI's greeting example ("Greet the caller now in English. ... Then pause
     # and listen."); a differently phrased version left the model silent on an empty line.
     return (
@@ -256,7 +257,7 @@ def build_delegation_query(state: _LiveState, meta: RealtimeCallMeta) -> str:
 
     who = meta.contact_name or meta.remote_phone_number or "the caller"
     parts = [
-        f"Live phone call with {who}. Blatbot's voice side has handed this off because the caller needs "
+        f"Live phone call with {who}. {ASSISTANT_NAME}'s voice side has handed this off because the caller needs "
         "something done or looked up. The lines below are speech-recognition transcript, so expect misheard "
         "words, unfinished phrases and later corrections; trust the latest version of what they said.",
     ]
@@ -324,7 +325,7 @@ class OpenedLiveBridge:
         if contact_name:
             self.meta.contact_name, self.meta.contact_known = contact_name, True
         if is_owner_call(self.meta):
-            who = ("You now know who is on the line: it is Aaron himself, your boss. Call him Aaron and treat him "
+            who = (f"You now know who is on the line: it is {OWNER_FIRST_NAME} himself, your boss. Call him {OWNER_FIRST_NAME} and treat him "
                    "as the person you work for. Do not announce that you just worked this out and do not "
                    "re-introduce yourself; just carry on naturally.")
         elif contact_name:
@@ -538,7 +539,7 @@ async def _live_to_inkbox_pump(ows: Any, inkbox_ws: Any, state: _LiveState, meta
         elif ftype == "session.input_transcript.delta":
             state.add_fragment("caller", str(frame.get("delta") or ""))
         elif ftype == "session.output_transcript.delta":
-            state.add_fragment("blatbot", str(frame.get("delta") or ""))
+            state.add_fragment(ASSISTANT_NAME.lower(), str(frame.get("delta") or ""))
         elif ftype == "session.delegation.created":
             deleg = frame.get("delegation") or {}
             did = str(deleg.get("id") or "")

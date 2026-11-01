@@ -19,3 +19,10 @@ standing.md
 .playwright-mcp/
 telegram-mcp*
 standing.md.*
+
+# Personal scope registry: lives outside the repo at SCOPES_PATH
+# (default ~/blatbot/config/scopes.yaml); see gate/scopes.example.yaml
+inkbox_claude/gate/scopes.yaml
+inkbox_claude/gate/scopes.resolved.json
+scopes.resolved.json
+config/

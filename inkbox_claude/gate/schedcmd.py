@@ -21,9 +21,10 @@ from zoneinfo import ZoneInfo
 from . import cadence as cadence_module
 from . import schedprop
 from . import overview as overview_mod
+from ..identity import OWNER_FIRST_NAME
 from .store import Schedule
 
-# A small fixed list, not a model: Aaron's own close variants of yes/no on a
+# A small fixed list, not a model: the owner's own close variants of yes/no on a
 # schedule proposal. Checked whole-message, case-insensitive, whitespace
 # collapsed -- "yes" inside a longer sentence is not a bare answer.
 YES_PHRASES = {"yes", "y", "yep", "yeah", "yup", "yes please", "yes do it"}
@@ -96,7 +97,7 @@ async def answer_proposal(manager: Any, session: Any, text: str) -> Optional[str
     explicitly ("yes, start it" / "no, drop it"), which schedcmd.resolve()
     then finds as the open proposal on the thread even with no target named.
 
-    Call this only AFTER checking that no pending request on Aaron's plate
+    Call this only AFTER checking that no pending request on the owner's plate
     already claims this reply; that precedence is the caller's job, not this
     function's."""
     yes, no = is_yes(text), is_no(text)
@@ -544,7 +545,7 @@ _FIXED_PHRASES = {
 
 def match_fixed_phrase(text: str) -> Optional[str]:
     """One of "status"/"stuck"/"today"/"repair" when `text` is (whole-message,
-    case-insensitive, question mark optional) one of Aaron's own common exact
+    case-insensitive, question mark optional) one of the owner's own common exact
     phrasings for these -- matched here, before the router ever sees the
     message, so the answer never depends on the model. Named forms ("repair
     the pledge one", "let the donor one do that") are not here: they carry a
@@ -742,7 +743,7 @@ async def handle(manager: Any, session: Any, command: Any) -> str:
     else gets the same refusal a request they are not allowed to make would
     get today."""
     if not session.is_approver():
-        return "Only Aaron can manage schedules."
+        return f"Only {OWNER_FIRST_NAME} can manage schedules."
     store = manager.store
     action = str(_field(command, "action") or "").strip().lower()
     if action == "list":

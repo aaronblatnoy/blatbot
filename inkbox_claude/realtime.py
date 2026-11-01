@@ -30,6 +30,8 @@ from dataclasses import dataclass, field
 from typing import Any, Awaitable, Callable, Dict, List, Optional, Set, Tuple
 from urllib.parse import urlencode
 
+from .identity import ASSISTANT_NAME, OWNER_FIRST_NAME, OWNER_NAME
+
 try:
     from .prompts import _escape_contact_memory_tags, contact_memories_block
 except ImportError:  # pragma: no cover - direct local import/test fallback
@@ -284,13 +286,13 @@ def build_realtime_instructions(meta: RealtimeCallMeta, additional: str = "", ga
             "Don't decide in advance whether it's possible; you'll be told. It takes a few seconds, like a "
             "person typing, so keep chatting and bring the outcome in when it lands.",
             "Everything else is just conversation, and that is yours. Don't use the tool for it.",
-            "You are Blatbot, Aaron's assistant, and that is all there is to it. You don't know or talk about "
+            f"You are {ASSISTANT_NAME}, {OWNER_FIRST_NAME}'s assistant, and that is all there is to it. You don't know or talk about "
             "how you work. When you check or do something, it's simply you doing it: 'let me look', 'give me "
-            "a sec', 'done'. If someone asks whether you're an AI, say yes, you're Aaron's AI assistant, and "
+            f"a sec', 'done'. If someone asks whether you're an AI, say yes, you're {OWNER_FIRST_NAME}'s AI assistant, and "
             "move on.",
             "One honest-assistant rule: don't say something was booked, sent, changed or confirmed unless "
-            "you were told so, and don't make up facts about Aaron's schedule or messages. If the tool "
-            "says Aaron has to approve something first, tell the caller that.",
+            f"you were told so, and don't make up facts about {OWNER_FIRST_NAME}'s schedule or messages. If the tool "
+            f"says {OWNER_FIRST_NAME} has to approve something first, tell the caller that.",
             f"When the caller is wrapping up, say goodbye and call {HANG_UP_CALL_TOOL_NAME}.",
         ])
     else:
@@ -358,8 +360,8 @@ def build_realtime_greeting(meta: RealtimeCallMeta, gate_mode: bool = False) -> 
         who = f"The person calling is {first_name}. " if first_name != "there" else ""
         return (
             f"{who}You speak first. The moment the call connects, introduce yourself: say hello, that this is "
-            "Blatbot, and that you're Aaron Blatnoy's assistant (if it's Aaron calling, just that it's "
-            "Blatbot), then ask what they need. Your own words, relaxed, one or two short sentences, like a "
+            f"{ASSISTANT_NAME}, and that you're {OWNER_NAME}'s assistant (if it's {OWNER_FIRST_NAME} calling, just that it's "
+            f"{ASSISTANT_NAME}), then ask what they need. Your own words, relaxed, one or two short sentences, like a "
             "person answering a phone. Then stop and let them talk."
         )
     return (
@@ -383,7 +385,7 @@ def _consult_tool_schema(gate_mode: bool = False) -> Dict[str, Any]:
                 "How you get anything done or found out. Anything beyond conversation goes here: whenever "
                 "the caller wants something done, looked up, checked, changed or followed up, or you need "
                 "something you don't already know. Don't judge whether it's possible; ask, and you'll get back "
-                "the outcome, including when it can't be done or needs Aaron's approval first. Takes a few "
+                f"the outcome, including when it can't be done or needs {OWNER_FIRST_NAME}'s approval first. Takes a few "
                 "seconds."
             ),
             "parameters": {

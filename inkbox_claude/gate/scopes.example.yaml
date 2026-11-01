@@ -1,0 +1,111 @@
+version: 1
+# This is the PACKAGED, GENERIC example registry. It is used only when no
+# private registry is found (no SCOPES_PATH/GATE_SCOPES_FILE env var, and no
+# file at ~/blatbot/config/scopes.yaml). Copy this file, fill in your own
+# systems/scopes, and point SCOPES_PATH at your copy -- see README.md
+# "Configure your owner and assistant".
+where_things_live:
+- "Club events, members and the club calendar: the club's own Google Workspace (the club_drive server) and
+  the club calendar. Never the public web."
+- "The owner's own schedule and mail: his own calendar account, not the club's."
+
+systems:
+  club_workspace:
+    description: "The Riverside Chess Club's Google Drive, Sheets, Docs or Gmail inbox ({ORG_ACCOUNT}):
+      rosters, schedules, trackers, applications, form responses, emails the club sent or received."
+    label: "Riverside Chess Club workspace"
+    always:
+    - club_drive_read
+    leaves:
+      club_write:
+        question: "Change something in the club's Drive: write cells, append rows, create a sheet, doc, form or folder."
+        grants:
+        - club_drive_write
+  owner_calendar:
+    description: "The owner's own calendar ({OWNER_ACCOUNT}): his events, free/busy, creating or changing his events."
+    always: []
+    leaves:
+      calendar_read:
+        question: "The owner's own calendar: his events, free/busy."
+        grants:
+        - owner_calendar_read
+
+scopes:
+  club_drive_read:
+    description: "Read the Riverside Chess Club's Drive: find files, read sheets and docs."
+    label: "read the club's Drive"
+    ask: "look at the Riverside Chess Club's Drive"
+    synonyms:
+    - club drive
+    - club files
+    server: club_drive
+    read: true
+    include:
+    - search_drive_files
+    - read_sheet_values
+    - get_doc_content
+    exclude: []
+  club_drive_write:
+    description: "Change the Riverside Chess Club's Drive: write cells, create sheets and docs."
+    label: "change the club's Drive"
+    ask: "change something in the Riverside Chess Club's Drive"
+    synonyms:
+    - edit club drive
+    server: club_drive
+    read: false
+    include:
+    - modify_sheet_values
+    - create_doc
+    exclude: []
+  owner_calendar_read:
+    description: "Read the owner's own calendar: events, free/busy."
+    label: "read your calendar"
+    ask: "look at your own calendar"
+    synonyms:
+    - my calendar
+    - owner calendar
+    server: owner_drive
+    read: true
+    include:
+    - get_events
+    - list_calendars
+    exclude: []
+
+# --- Optional personal-content keys (all default to a generic code default
+# when missing; see gate/scopes.py). Below is one example of each. ---
+
+servers:
+  club_drive:
+    home: "the RIVERSIDE CHESS CLUB'S GOOGLE WORKSPACE ({ORG_ACCOUNT}: the club's Drive, Sheets, Docs, Forms, Gmail, calendar)"
+    label: "the club's Google Workspace"
+    google_account: org
+  owner_drive:
+    home: "the OWNER'S OWN CALENDAR ACCOUNT ({OWNER_ACCOUNT}: his personal calendar and mail, not the club's)"
+    label: "your own calendar account"
+    google_account: owner
+
+tool_purpose:
+  mcp__club_drive__search_drive_files: "FIND A FILE in the club's Drive by name or words: sheets, docs, forms, folders."
+  mcp__owner_drive__get_events: "THE OWNER'S OWN CALENDAR: list or search his events."
+
+account_rules: "every club-workspace tool takes user_google_email={ORG_ACCOUNT}; every owner-calendar tool takes
+  user_google_email={OWNER_ACCOUNT} (the owner's own calendar and mail). Never any other address."
+
+capabilities:
+- "The Riverside Chess Club's calendar: list events for a day or range, free/busy, create, move, cancel events."
+- "The Riverside Chess Club's Drive: find sheets and docs, read rows, write cells."
+- "Public web: search, open a page, read and find text on it."
+
+count_as_yes:
+- "The sender asks for anything to be done, made, fetched, booked, moved, cancelled, sent, looked up, checked,
+  changed, added, closed, counted, computed, drafted or found out."
+
+speech_hints: "'chess club' misheard as 'chest club' still means the Riverside Chess Club; "
+
+stopwords:
+- riverside
+- chess
+
+tool_prefixes:
+- club_
+- owner_

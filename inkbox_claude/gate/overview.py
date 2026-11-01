@@ -119,7 +119,7 @@ def _request_who(request: Request, store: Store) -> str:
 
 def _request_title_and_plain(store: Store, request: Request) -> "tuple[str, str]":
     """(title, plain) for a request, from wording.plain_title: never the voice
-    hand-off's internal preamble, a "blatbot:"/"caller:" line, a phone number,
+    hand-off's internal preamble, an "<assistant>:"/"caller:" line, a phone number,
     or text cut by length (see gate/wording.py)."""
     plain = _redact_contacts(wording.plain_title(store, request), store)
     title = _first_sentence(plain) or plain or "A request"

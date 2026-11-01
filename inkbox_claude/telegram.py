@@ -1,16 +1,16 @@
-"""Telegram as a Blatbot channel.
+"""Telegram as an assistant channel.
 
-A Telegram **bot** (created with BotFather) is the counterpart here, not Aaron's
+A Telegram **bot** (created with BotFather) is the counterpart here, not the owner's
 own account: people message @<bot>, Telegram POSTs each update to this gateway's
 ``/telegram`` route, and replies go back through the Bot API. The same gate runs
-as for iMessage or email, so a stranger's request still waits for Aaron's yes.
+as for iMessage or email, so a stranger's request still waits for the owner's yes.
 
 Configuration (environment):
   TELEGRAM_BOT_TOKEN        from BotFather; absent means the channel is off
   TELEGRAM_WEBHOOK_SECRET   optional; generated and stored if unset. Telegram
                             echoes it in X-Telegram-Bot-Api-Secret-Token, which
                             is what proves an update really came from Telegram
-  GATE_APPROVER_TELEGRAM_ID Aaron's numeric Telegram user id (from @userinfobot)
+  GATE_APPROVER_TELEGRAM_ID the owner's numeric Telegram user id (from @userinfobot)
 """
 
 from __future__ import annotations
@@ -107,7 +107,7 @@ async def set_webhook(public_url: str) -> Dict[str, Any]:
 
 def _names_the_bot(text: str, msg: Dict[str, Any]) -> bool:
     """Was this group message aimed at the bot? Its @username, its plain name as a word
-    (people type "blatbot, do x", not the handle), a slash command, or a reply to something
+    (people type "<assistant name>, do x", not the handle), a slash command, or a reply to something
     the bot itself said."""
     low = text.lower()
     handle = (os.getenv("TELEGRAM_BOT_USERNAME") or "").lstrip("@").lower()

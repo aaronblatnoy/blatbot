@@ -4,6 +4,7 @@ from __future__ import annotations
 import json
 import re
 from datetime import datetime, timezone
+from ..identity import OWNER_FIRST_NAME
 from .scopes import SCOPE_TREE_SYSTEMS, SCOPE_TREE_LEAVES, SCOPE_TREE_ALWAYS
 
 
@@ -27,7 +28,7 @@ def index_entry(row):
         if len(systems) > 3:
             systems.clear()
     categories = sorted(systems) or ["general"]
-    waiting = ("Aaron" if row["state"] == "waiting_aaron" else
+    waiting = (OWNER_FIRST_NAME if row["state"] == "waiting_aaron" else
                "assistant" if row["state"] == "running" else row.get("waiting_on") or "unspecified")
     date = datetime.fromtimestamp(row["updated_at"], timezone.utc).date().isoformat()
     return {**row, "categories": categories, "waiting_on": waiting,

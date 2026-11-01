@@ -1,4 +1,4 @@
-"""Blatbot schedules, second version: the scheduler core.
+"""The assistant's schedules, second version: the scheduler core.
 
 A schedule is approved once, then fires itself on a cadence computed by code
 (no model ever picks its own next run). Scope names, cron strings and "S<id>"
@@ -18,6 +18,7 @@ from datetime import datetime, timedelta
 from typing import Any, Dict, List, Optional
 from zoneinfo import ZoneInfo
 
+from ..identity import OWNER_FIRST_NAME
 from . import cadence as cadence_module
 from .scopes import SCOPES, scope_for_tool, tools_for
 from .store import Request, Schedule, sha256
@@ -115,7 +116,7 @@ _I_REWRITES = [
 ]
 
 # First words common enough to be an ordinary sentence opener rather than a
-# capitalized name ("Telegram group", "Aaron's calendar"): only these get
+# capitalized name ("Telegram group", "the owner's calendar"): only these get
 # lower-cased when normalize_reason otherwise would read oddly mid-sentence.
 _LOWER_STARTERS = {
     "the", "a", "an", "this", "that", "these", "those", "it", "its", "there",
@@ -397,7 +398,7 @@ class ScheduleService:
                       scopes: List[str], start_now: bool = False, origin_mode: str = "",
                       origin_chat_id: str = "") -> Schedule:
         if not owner:
-            raise PermissionError("only Aaron can create or change schedules")
+            raise PermissionError(f"only {OWNER_FIRST_NAME} can create or change schedules")
         cadence_module.validate(cadence_kind, cadence)
         timezone_name = timezone or DEFAULT_TIMEZONE
         ZoneInfo(timezone_name)
@@ -636,7 +637,7 @@ class ScheduleService:
     async def edit(self, schedule_id: int, *, owner: bool, changes: Dict[str, Any],
                    extra_proposal_note: str = "") -> Dict[str, Any]:
         if not owner:
-            raise PermissionError("only Aaron can create or change schedules")
+            raise PermissionError(f"only {OWNER_FIRST_NAME} can create or change schedules")
         old = self.store.get_schedule(schedule_id)
         if old is None:
             raise ValueError(f"no such schedule: {schedule_id}")
@@ -703,7 +704,7 @@ class ScheduleService:
 
     async def action(self, schedule_id: int, action: str, *, owner: bool) -> Schedule:
         if not owner:
-            raise PermissionError("only Aaron can create or change schedules")
+            raise PermissionError(f"only {OWNER_FIRST_NAME} can create or change schedules")
         schedule = self.store.get_schedule(schedule_id)
         if schedule is None:
             raise ValueError(f"no such schedule: {schedule_id}")
@@ -798,7 +799,7 @@ class ScheduleService:
         touched. If only the timing was missing it applies at once and
         resumes; a prompt or capability change needs his yes, same as edit()."""
         if not owner:
-            raise PermissionError("only Aaron can create or change schedules")
+            raise PermissionError(f"only {OWNER_FIRST_NAME} can create or change schedules")
         plan = self.repair_plan(schedule_id)
         if not plan["needed"]:
             schedule = self.store.get_schedule(schedule_id)
@@ -862,7 +863,7 @@ class ScheduleService:
         owner_scopes = [scope for scope in SCOPES if not scope.startswith("vault:")]
         full_scopes = list(dict.fromkeys(list(schedule.scopes) + owner_scopes))
         req = self.store.create_request(
-            chat_id=schedule.chat_id, sender="Aaron", sender_name="Aaron", mode="schedule", subject="",
+            chat_id=schedule.chat_id, sender=OWNER_FIRST_NAME, sender_name=OWNER_FIRST_NAME, mode="schedule", subject="",
             original_message=schedule.prompt, summary=schedule.title, scopes=full_scopes,
             prompt=schedule.prompt, state="approved", task_id=schedule.task_id, schedule_id=schedule.id,
             schedule_kind=schedule.cadence_kind,

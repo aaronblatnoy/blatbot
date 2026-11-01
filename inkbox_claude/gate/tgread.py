@@ -1,4 +1,4 @@
-"""Read-only reads of Aaron's own Telegram account (his Telethon user session),
+"""Read-only reads of the owner's own Telegram account (his Telethon user session),
 for a gate run holding the `telegram_read` scope.
 
 This module never logs in, sends, edits, deletes or marks anything read. The
@@ -12,7 +12,7 @@ directly, the same way server.py's own functions do, just without the
 truncation. No send/edit/delete/mark-read call is ever made or even available
 through the three functions here.
 
-Session safety: Telethon's sqlite session file (`aaron.session`) must not be
+Session safety: Telethon's sqlite session file (`<owner>.session`) must not be
 opened by two processes at once. server.py's own `cli.py` already runs as a
 fresh subprocess per call -- connect, one read, exit -- so this transport does
 the same thing rather than holding a second long-lived client open next to a

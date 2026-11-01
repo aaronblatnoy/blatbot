@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
-"""Copy a live Blatbot gate.db (sqlite) into a Postgres database/schema with
+"""Copy a live assistant gate.db (sqlite) into a Postgres database/schema with
 the same ids, re-runnably and without ever writing to the sqlite file.
 
 Usage:
     .venv/bin/python inkbox_claude/gate/migrate_to_postgres.py \\
-        --sqlite /home/aaron/blatbot/gate.db \\
+        --sqlite /home/example/blatbot/gate.db \\
         --pg-dsn postgresql://blatbot:***@10.0.1.15:5432/blatbot_rehearsal
 
 Safety:

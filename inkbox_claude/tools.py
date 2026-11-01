@@ -20,6 +20,8 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 from urllib.parse import parse_qsl, urlencode, urlparse, urlunparse
 
+from .identity import ASSISTANT_EMAIL
+
 try:
     from .media import file_to_email_attachment
 except ImportError:  # pragma: no cover - direct local import/test fallback
@@ -664,7 +666,7 @@ def build_inkbox_mcp_server(
 
     @tool(
         "inkbox_list_emails",
-        "List recent emails in THIS agent's own Inkbox mailbox (blatbot@inkboxmail.com), "
+        f"List recent emails in THIS agent's own Inkbox mailbox ({ASSISTANT_EMAIL}), "
         "newest first: direction, from, to, subject, date, id, and a short snippet. "
         "Use this to answer 'who emailed you' or 'what is in your inbox'. Pass "
         "inbound_only=true to see only mail received. Use inkbox_get_email for a full body.",

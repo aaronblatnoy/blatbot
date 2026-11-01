@@ -1,4 +1,4 @@
-"""People sync: pull every counterpart Blatbot has ever talked to via Inkbox into the
+"""People sync: pull every counterpart the assistant has ever talked to via Inkbox into the
 console's people list, without ever touching trust or role assignment.
 
 There is no single "list every conversation" call in the Inkbox API; a sync pages
@@ -50,7 +50,7 @@ _CHANNEL_METHODS = (
 
 def _owner_and_bot_handles(settings: Dict[str, str]) -> set:
     """Trust-key-normalized handles to exclude: the owner's own numbers/addresses and
-    Blatbot's own mailbox/number/iMessage line, so the directory never lists the owner
+    the assistant's own mailbox/number/iMessage line, so the directory never lists the owner
     or the bot as someone the bot has "spoken to". Normalized the same way trust keys
     are, so "+1 555-123-0000" and "5551230000" exclude the same handle."""
     from ..gate.store import _trust_key

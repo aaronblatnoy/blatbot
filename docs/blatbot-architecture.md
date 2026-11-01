@@ -14,7 +14,7 @@ delegates. From the gateway down, the path is identical for all channels.
 ```
   PEOPLE                                   SURFACES
  ┌─────────────────┐
- │ Aaron           │──── iMessage ─────┐
+ │ Dana            │──── iMessage ─────┐
  │ trusted number  │──── phone call ───┼──────────────┐
  └─────────────────┘                   │              │
  ┌─────────────────┐                   │              │
@@ -81,7 +81,7 @@ delegates. From the gateway down, the path is identical for all channels.
  │                                  │   │                                              │
  │ in:  the decision ("a request    │   │ prompt  = sender's exact words               │
  │      was created and will run /  │   │           + the conversation so far          │
- │      will be shown to Aaron" or  │   │           + this task's record               │
+ │      will be shown to Dana" or   │   │           + this task's record               │
  │      "no action"), the ledger,   │   │ summary = the task's title                   │
  │      the conversation            │   │ scopes  = Jev, one yes/no per scope          │
  │ out: the words sent back, and a  │   │           (calendar, email send, Drive read, │
@@ -217,7 +217,7 @@ every missed slot, so downtime creates one run. An existing pending destructive
 confirmation, approved request, or running request counts as overlap; the firing
 is skipped and recorded. One schedule's exception is caught inside the loop.
 The `GATE_SCHEDULES_PAUSED` setting stops all new firings, and three consecutive
-failed runs pause the individual schedule and notify Aaron.
+failed runs pause the individual schedule and notify Dana.
 
 Schedule approval covers sends and writes in the stored scopes. It does not
 cover destructive calls. Scheduled owner work is deliberately passed to the
@@ -240,25 +240,25 @@ an interrupted scheduled request through the same failed-run completion path.
 | Who decides it is a task | Jev (task pick + action judgment) | Voice agent escalates, then Jev decides the same way |
 | Who writes the words delivered | Reply writer (DeepSeek), sent verbatim | Voice agent, paraphrasing the result |
 | Models involved | Jev, DeepSeek; Sonnet only as fallback | gpt-live-1, Jev, DeepSeek; Sonnet only as fallback |
-| Trust | Aaron's iMessage thread only | Aaron's phone number (`GATE_VOICE_TRUST_APPROVER=1`) |
-| Other people's requests | Held for Aaron's yes | Held for Aaron's yes, same approval text |
-| FYI to Aaron per message | Yes | No, and no transcripts |
+| Trust | Dana's iMessage thread only | Dana's phone number (`GATE_VOICE_TRUST_APPROVER=1`) |
+| Other people's requests | Held for Dana's yes | Held for Dana's yes, same approval text |
+| FYI to Dana per message | Yes | No, and no transcripts |
 | Wait for results | No limit | About 75 s on the line, then by text |
 | Record kept | Full thread, verbatim | Only what was escalated, plus results |
 
 ## Design rules
 
-- The voice agent is a surface. Its only reach into Aaron's systems is a delegation,
+- The voice agent is a surface. Its only reach into Dana's systems is a delegation,
   which the bridge turns into a transcript excerpt for the gateway. It does not judge feasibility; it escalates and the
-  gateway reports what happened, including "can't" and "needs Aaron's approval".
+  gateway reports what happened, including "can't" and "needs Dana's approval".
 - The tool description is deliberately general ("your escalation path"). Capabilities
   live in the Claude Code session config, not in a second list on the voice side.
 - Nothing behind the gateway is exposed to the voice agent except read-only context at
   pickup: date/time, who is calling (a courtesy hint; the real trust check is in the
   gate, from the actual caller number), vocabulary, and a short recent-task summary.
 - A phone call never changes a thread's stored text/email route.
-- An email from Aaron's address is not Aaron. Caller ID can be spoofed; removing
-  `GATE_VOICE_TRUST_APPROVER` puts Aaron's calls back behind the iMessage yes.
+- An email from Dana's address is not Dana. Caller ID can be spoofed; removing
+  `GATE_VOICE_TRUST_APPROVER` puts Dana's calls back behind the iMessage yes.
 
 ## Key files and settings
 
@@ -284,12 +284,12 @@ With the task picker on (`TYPESAFE_API_KEY` set), a message is decided in this o
 1. Jev picks the task (Choice over candidates, new, none). No router hint.
 2. Jev judges whether a tool action is needed (Noul; 0.5 is the line).
 3. DeepSeek runs once, told the decision ("a request has been created and will run /
-   be shown to Aaron" or "no action"), and writes only the reply plus, for a new task,
+   be shown to Dana" or "no action"), and writes only the reply plus, for a new task,
    the title and where-it-stands line. Any request it outputs is discarded.
 4. If action: code builds the request. Summary is the task title, prompt is the
    verbatim message plus conversation plus ledger, scopes are Jev's judgment over
    that prompt (no router list; undecided falls back to the two likeliest, else
-   `web`). Counterpart is an email in the message when Aaron is asking.
+   `web`). Counterpart is an email in the message when Dana is asking.
 5. Jev classifies the event on the task.
 
 `GATE_ROUTER_DEFINES_REQUEST=1` restores the older order (router proposes the
@@ -473,12 +473,12 @@ phrasing after it is the same for both.
 
 | request | Jev agent | Claude Code |
 |---|---|---|
-| TAMID board members and titles | 1.4 s | 14.1 s |
-| Is the TAMID application open | 1.6 s | 8.0 s |
-| SJBA upcoming events | 2.0 s | 9.5 s |
-| TAMID calendar this week | 4.9 s | 8.4 s |
-| Stern calendar today | 4.7 s | 12.5 s |
-| Latest Stern email from a sender | 5.3 s | 10.7 s |
+| Club board members and titles | 1.4 s | 14.1 s |
+| Is the club application open | 1.6 s | 8.0 s |
+| Second club's upcoming events | 2.0 s | 9.5 s |
+| Club calendar this week | 4.9 s | 8.4 s |
+| Dana's work calendar today | 4.7 s | 12.5 s |
+| Latest work-account email from a sender | 5.3 s | 10.7 s |
 | Coffee chats last week | 9.4 s | 47 s (with the old fallback) |
 
 Live request table, approval to result: Claude Code over 29 requests, median

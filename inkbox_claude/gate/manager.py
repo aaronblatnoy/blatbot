@@ -18,12 +18,13 @@ from datetime import datetime
 from typing import Any, Awaitable, Callable, Dict, List, Optional, Tuple
 from zoneinfo import ZoneInfo
 
+from ..identity import ASSISTANT_NAME, ASSISTANT_PRONUNCIATION, EA_SIGNATURE, OWNER_FIRST_NAME, OWNER_NAME
 from .executor import Executor
 from . import settings as _settings
 from .jevagent import JevAgent, enabled as jev_agent_enabled
 from .taskpick import TaskPicker, enabled as jev_enabled
 from .router import Router, RouterOutput, RouterRequest, ScheduleCommand
-from .scopes import SCOPES, READ_SCOPES, EXPLICIT_ONLY_SCOPES, BLATBOT_ADMIN_SCOPE
+from .scopes import SCOPES, READ_SCOPES, EXPLICIT_ONLY_SCOPES, BLATBOT_ADMIN_SCOPE, STOPWORDS
 from .store import Person, Request, Store, TaskRequired, task_key
 from .schedules import ScheduleService
 from . import schedprop
@@ -34,8 +35,8 @@ logger = logging.getLogger(__name__)
 SendFn = Callable[[str, str, str, Dict[str, Any]], Awaitable[Any]]
 
 HANDOFF_LINE = (
-    "Thanks! I'll confirm that with Aaron and get back to you shortly.\n\n"
-    "Blatbot\nExecutive Assistant to Aaron Blatnoy"
+    f"Thanks! I'll confirm that with {OWNER_FIRST_NAME} and get back to you shortly.\n\n"
+    f"{EA_SIGNATURE}"
 )
 _MODE_LABEL = {
     "imessage": "iMessage", "sms": "text", "email": "email",
@@ -65,8 +66,8 @@ _EMAIL = re.compile(r"[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}")
 _CANDIDATE_STOP = {"the", "and", "for", "with", "from", "that", "this", "what", "which", "who", "how", "many", "did",
                    "does", "check", "find", "look", "please", "his", "her", "their", "she", "him", "they", "are", "was",
                    "were", "you", "can", "get", "all", "out", "into", "about", "give", "show", "tell", "see", "have",
-                   "has", "had", "when", "where", "why", "yes", "okay", "sure", "thanks", "blatbot", "tamid", "sjba",
-                   "stern", "nyu", "today", "tomorrow", "tonight", "week", "any", "some", "there", "here", "just", "also"}
+                   "has", "had", "when", "where", "why", "yes", "okay", "sure", "thanks", ASSISTANT_NAME.lower(),
+                   "today", "tomorrow", "tonight", "week", "any", "some", "there", "here", "just", "also"} | set(STOPWORDS)
 _YES = {"yes", "y", "1", "ok", "approve", "run", "go"}
 _NO = {"no", "n", "3", "deny", "reject", "drop", "cancel"}
 
@@ -78,7 +79,7 @@ def _clean_result(text: str) -> str:
 
 
 DEFAULT_VOICE_VOCABULARY = (
-    "Blatbot (BLAT-bot, this assistant). Add the names, places and terms your callers use, with pronunciation "
+    f"{ASSISTANT_NAME} ({ASSISTANT_PRONUNCIATION}, this assistant). Add the names, places and terms your callers use, with pronunciation "
     "hints, by setting GATE_VOICE_VOCABULARY."
 )
 
@@ -169,7 +170,7 @@ class GateSession:
 
     # -- typing indicator (iMessage) --------------------------------------
     def typing_start(self) -> None:
-        """Show "Blatbot is typing" while a message is decided or its request runs.
+        """Show "the assistant is typing" while a message is decided or its request runs.
         iMessage only; the indicator expires on Apple's side, so it is re-sent every
         few seconds until typing_stop."""
         if self.m.typing_fn is None:
@@ -207,10 +208,10 @@ class GateSession:
         if self.mode == "imessage" and bool(conv) and conv == self.m.approver_conv:
             return True
         # Telegram: the numeric user id Telegram stamps on every message. It cannot be
-        # set by the sender, so it identifies Aaron as reliably as his iMessage thread.
+        # set by the sender, so it identifies the owner as reliably as his iMessage thread.
         if self.mode == "telegram" and self.m.approver_telegram_id:
             return str((self.reply_meta or {}).get("telegram_user_id") or "") == self.m.approver_telegram_id
-        # Phone: caller ID can be spoofed, so Aaron's number only counts as the
+        # Phone: caller ID can be spoofed, so the owner's number only counts as the
         # approver when GATE_VOICE_TRUST_APPROVER=1. Otherwise his spoken requests
         # go to his iMessage for a yes like anyone else's.
         return (self.mode == "voice" and self.m.voice_trust_approver
@@ -223,12 +224,12 @@ class GateSession:
     def _is_owner_person(self) -> bool:
         """Who this session is talking to, for WORDING ONLY -- never scopes, approval
         power, or anything is_approver() gates. True for the verified approver, for
-        Aaron calling from his own number even when GATE_VOICE_TRUST_APPROVER is off
+        the owner calling from his own number even when GATE_VOICE_TRUST_APPROVER is off
         (caller ID can be spoofed, which is exactly why that case is not is_approver()),
         and for a sender on any channel, including voice, whose contact resolves to the
         commander's person entry. Both caller ID and a contact record can be forged, so
         nothing here may ever stand in for is_approver() -- it only changes which of two
-        equally honest sentences gets said to someone who cannot be proven to be Aaron."""
+        equally honest sentences gets said to someone who cannot be proven to be the owner."""
         if self.is_approver() or self.is_aaron_on_phone():
             return True
         try:
@@ -245,11 +246,11 @@ class GateSession:
         return str((self.reply_meta or {}).get("sender") or self.chat_id)
 
     def _known_person(self) -> Dict[str, Any]:
-        """Who the sender is in Aaron's people records, matched on any handle the message
+        """Who the sender is in the owner's people records, matched on any handle the message
         carries (phone, email, Telegram id), the same match that decides their permissions.
         Empty when no record matches, or when the handles point at two different people."""
         if self.is_approver():
-            return {"person": "Aaron Blatnoy", "role": "owner"}
+            return {"person": OWNER_NAME, "role": "owner"}
         try:
             found = self.m.store.resolve_handles(self.handles())
         except Exception:
@@ -268,13 +269,13 @@ class GateSession:
     def _sender_label(self) -> str:
         """Who the sender is, said plainly enough that a run never has to guess."""
         if self.is_approver():
-            return "Aaron Blatnoy (the owner)"
+            return f"{OWNER_NAME} (the owner)"
         known = self._known_person()
         if known:
             return known["person"] + (f" ({known['role']})" if known.get("role") else "")
         name = self._channel_name()
         shown = f"{name}, " if name else ""
-        return f"{shown}someone who is not in Aaron's people records"
+        return f"{shown}someone who is not in {OWNER_FIRST_NAME}'s people records"
 
     def _channel_name(self) -> str:
         """The name the channel itself attached to the message."""
@@ -325,13 +326,13 @@ class GateSession:
         return [h for h in out if str(h or "").strip() and str(h) != tg]
 
     def trust(self) -> Dict[str, Any]:
-        """What this sender may have done without asking Aaron. Nothing, unless he has put
+        """What this sender may have done without asking the owner. Nothing, unless he has put
         them in the table: everyone starts at no permissions. `commander` is the formal
         name of what the approver already is; it changes only the label here, never the
         check above (is_approver()) or the scopes, and the person name stays the existing
         literal rather than a store lookup -- nothing about is_approver() reads the store."""
         if self.is_approver():
-            return {"role": "commander", "scopes": ["*"], "person": "Aaron"}
+            return {"role": "commander", "scopes": ["*"], "person": OWNER_FIRST_NAME}
         try:
             return self.m.store.trust_for(self.handles())
         except Exception:
@@ -369,11 +370,11 @@ class GateSession:
         approver = self.is_approver()
         res = await picker.judge_event(
             message=body, task=task, history=history,
-            sender_label="Aaron, the owner" if approver else (self._sender_name() or self._sender()))
+            sender_label=f"{OWNER_FIRST_NAME}, the owner" if approver else (self._sender_name() or self._sender()))
         kind = res.get("kind")
         if not kind or kind == "conversation_only":
             return
-        who = "Aaron" if approver else (self._sender_name() or self._sender())
+        who = OWNER_FIRST_NAME if approver else (self._sender_name() or self._sender())
         label = kind.replace("_", " ")
         line = f"{who} {label}: {body.strip()}"
         new_state: Optional[str] = None
@@ -388,11 +389,11 @@ class GateSession:
         if waiting in ("owner", "other", "nobody"):
             people = ", ".join(p.get("display") or p.get("key") or "" for p in task.get("participants") or [])
             self.m.store.set_task_waiting_on(task["id"], {
-                "owner": "Aaron", "other": people or "other participant", "nobody": "nobody"}[waiting])
+                "owner": OWNER_FIRST_NAME, "other": people or "other participant", "nobody": "nobody"}[waiting])
         if not out.task_summary:
             # The router gave no summary this turn: keep the ledger honest with a short one.
             wo = res.get("waiting_on")
-            tail = {"owner": "Waiting on Aaron.", "other": f"Waiting on {who}.", "nobody": "Nothing outstanding."}.get(wo or "", "")
+            tail = {"owner": f"Waiting on {OWNER_FIRST_NAME}.", "other": f"Waiting on {who}.", "nobody": "Nothing outstanding."}.get(wo or "", "")
             self.m.store.set_task_summary(task["id"], f"Latest: {who} {label}. {tail}".strip())
 
     async def lookup_tasks(self, history: List[Dict[str, Any]], message: str, in_view: str) -> str:
@@ -413,7 +414,7 @@ class GateSession:
                     if v and v not in spans:
                         spans.append(v)
             titles = [" ".join(ln[len("Task "):].split(" | ")[:2]) for ln in in_view.splitlines() if ln.startswith("Task T")]
-            label = "Aaron, the owner" if self.is_approver() else (self._sender_name() or self._sender())
+            label = f"{OWNER_FIRST_NAME}, the owner" if self.is_approver() else (self._sender_name() or self._sender())
             plan = await picker.plan_lookup(message=message, history=history, sender_label=label,
                                             in_view_titles=titles, candidates=spans)
             if plan.get("lookup") == "none":
@@ -557,7 +558,7 @@ class GateSession:
         approver = self.is_approver()
         res = await picker.pick(
             message=message, history=history, candidates=cands,
-            sender_label="Aaron, the owner" if approver else (self._sender_name() or self._sender()),
+            sender_label=f"{OWNER_FIRST_NAME}, the owner" if approver else (self._sender_name() or self._sender()),
             router_hint=out.task, proposed_title=out.task_title or (out.request.summary if out.request else ""))
         choice = res.get("choice")
         if choice is None:
@@ -636,7 +637,7 @@ class GateSession:
             from . import schedcmd
             fixed_action = schedcmd.match_fixed_phrase(message)
             if fixed_action is not None:
-                # One of Aaron's own common exact phrasings for status/stuck/today
+                # One of the owner's own common exact phrasings for status/stuck/today
                 # (schedcmd._FIXED_PHRASES): answered without the router or any
                 # model call at all, on either flow below.
                 out = RouterOutput(schedule_command=ScheduleCommand(action=fixed_action))
@@ -668,7 +669,7 @@ class GateSession:
             else:
                 return await decidegraph.decide(self, body=body, message=message, prior=prior, mode=mode,
                                                 memory=memory, found=found)
-        label = "Aaron, the owner" if approver else (self._sender_name() or self._sender())
+        label = f"{OWNER_FIRST_NAME}, the owner" if approver else (self._sender_name() or self._sender())
         fast_id = getattr(self, "_ledger_fast_id", None)
         pick = ({"choice": f"T{fast_id}"} if fast_id is not None else
                 await picker.pick(message=message, history=prior, candidates=self.candidate_tasks(),
@@ -750,7 +751,7 @@ class GateSession:
             return
         res = await picker.judge_action(
             message=message, history=history, task=task,
-            sender_label="Aaron, the owner" if self.is_approver() else (self._sender_name() or self._sender()),
+            sender_label=f"{OWNER_FIRST_NAME}, the owner" if self.is_approver() else (self._sender_name() or self._sender()),
             router_said_action=out.request is not None)
         na = res.get("needs_action")
         if na is None:
@@ -769,7 +770,7 @@ class GateSession:
         """Everything this sender may use without asking: every tool scope for the owner,
         their role's scopes for a member with one, nothing for anyone else (who still
         goes through the picker and the owner's approval). The owner's grant also
-        includes blatbot_admin -- Blatbot's own settings (gate/hosttools.py ADMIN_*
+        includes blatbot_admin -- the assistant's own settings (gate/hosttools.py ADMIN_*
         tools) -- which is never a key in SCOPES at all, so no role can ever pick it
         up: this line is the only place it is ever granted."""
         if self.is_approver():
@@ -961,7 +962,7 @@ class GateSession:
                 if self.mode != "voice" and await self.m.handle_followup_phrase(self, body):
                     return
                 if not self.is_approver() and self.mode != "voice":
-                    # Deterministic FYI to Aaron for every inbound from anyone else.
+                    # Deterministic FYI to the owner for every inbound from anyone else.
                     await self.m.notify_inbound(self, body)
                 await self._route_and_act(body)
             except Exception as exc:
@@ -977,14 +978,14 @@ class GateSession:
                 if k in ("to", "sender", "subject", "thread_id", "conversation_id", "conversation_kind",
                          "message_id", "in_reply_to", "references",
                          # A group's display name, so the console's group-chats list (and
-                         # find_group_chat_by_name for the "blatbot mode <chat name> ..."
+                         # find_group_chat_by_name for the "<assistant name> mode <chat name> ..."
                          # command) has a real name instead of the bare chat_id.
                          "group_title")}
         return keep
 
     async def run_consult(self, *args: Any, **kwargs: Any) -> str:
         """Gateway wake-ups. The only one the gate acts on is the end of a phone
-        call: it closes the call on the ledger. No transcript is texted to Aaron;
+        call: it closes the call on the ledger. No transcript is texted to the owner;
         anything a caller asked for already reached him as an approval request. Live call turns go through handle_inbound like any channel."""
         prompt = str(args[0]) if args else ""
         if "[voice call ended]" not in prompt and "[call_ended]" not in prompt:
@@ -1012,15 +1013,15 @@ class GateSession:
             sender, sender_name = self._sender(), self._sender_name()
         finally:
             self.mode, self.reply_meta = prev  # a call never changes the thread's text/email channel
-        who = ("You're talking to Aaron himself. He's your boss and you know him well; be yourself. Whatever he "
+        who = (f"You're talking to {OWNER_FIRST_NAME} himself. He's your boss and you know him well; be yourself. Whatever he "
                "asks for gets done right away. He usually calls while walking around New York City, so expect "
                "traffic, sirens, wind and other people's voices on the line. Ignore all of that: only respond to "
-               "Aaron. Don't react to stray words that clearly aren't meant for you, don't comment on the noise, "
+               f"{OWNER_FIRST_NAME}. Don't react to stray words that clearly aren't meant for you, don't comment on the noise, "
                "and if you only caught part of what he said, ask him to repeat that one part rather than guess. "
                "Keep answers short and front-load the important bit, since he may miss the end of a long sentence." if trusted else
-               f"The caller is NOT Aaron ({sender_name or 'unknown'}, {sender}). Be helpful and "
-               "discreet: share nothing about Aaron's schedule, tasks or other people beyond what concerns this "
-               "caller. Anything they ask to have done needs Aaron's confirmation first; consult handles that.")
+               f"The caller is NOT {OWNER_FIRST_NAME} ({sender_name or 'unknown'}, {sender}). Be helpful and "
+               f"discreet: share nothing about {OWNER_FIRST_NAME}'s schedule, tasks or other people beyond what concerns this "
+               f"caller. Anything they ask to have done needs {OWNER_FIRST_NAME}'s confirmation first; consult handles that.")
         notes = ""
         try:
             prev2 = (self.mode, self.reply_meta)
@@ -1037,11 +1038,11 @@ class GateSession:
                             continue  # a bare conversation, not a task
                         hrs = (now - r["updated_at"]) / 3600
                         age = f"{int(hrs * 60)} min ago" if hrs < 1 else (f"{int(hrs)} hours ago" if hrs < 48 else f"{int(hrs / 24)} days ago")
-                        state = {"open": "in progress", "waiting_aaron": "waiting on Aaron's okay",
+                        state = {"open": "in progress", "waiting_aaron": f"waiting on {OWNER_FIRST_NAME}'s okay",
                                  "running": "running now", "done": "done", "failed": "didn't work"}.get(r["state"], r["state"])
                         line = f"- {title} ({state}, {age})"
                         stands = " ".join(str(r.get("summary") or "").split())
-                        if stands and not stands.startswith("Latest: Aaron asked for something"):
+                        if stands and not stands.startswith(f"Latest: {OWNER_FIRST_NAME} asked for something"):
                             line += f"\n    where it stands: {stands[:280]}"
                         # The last result on the task, so facts already found can be said without a hand-off.
                         full = self.m.store.task_with_events(int(r["id"]), limit=8) or {}
@@ -1108,7 +1109,7 @@ class GateSession:
         own inbound, not the earlier failed request). So the moment that line is
         said, the failure message is also delivered once to a text channel -- the
         same single-channel choice _run_for_call uses after hang-up (owner's own
-        primary when this is Aaron, otherwise back to the number that called) --
+        primary when this is the owner, otherwise back to the number that called) --
         and the failed request is marked answered so that delivery never repeats,
         whether this fold fires again or the request is later handled at hang-up."""
         failed = self.m.store.last_failed_for_thread(self.chat_id, exclude_scheduled=True)
@@ -1148,8 +1149,8 @@ class GateSession:
 
         Same path as any inbound message (ledger, router, gate), except the
         answer is returned for the voice model to say instead of being sent.
-        Aaron's trusted number runs the request now and hears the result;
-        anyone else's request goes to Aaron for a yes and they are told so."""
+        The owner's trusted number runs the request now and hears the result;
+        anyone else's request goes to the owner for a yes and they are told so."""
         req = None
         call_meta = dict(meta or {})
         async with self._lock:
@@ -1223,7 +1224,7 @@ class GateSession:
                 if out.request is None:
                     return reply or "I don't have anything on that."
                 if self.m.store.pending_for_thread(self.chat_id, sender=self._sender()) and not approver:
-                    return reply or "I already have a request waiting on Aaron for you."
+                    return reply or f"I already have a request waiting on {OWNER_FIRST_NAME} for you."
                 assert task is not None
                 req, created = self.m.store.create_request_once(
                     chat_id=self.chat_id, sender=self._sender(), sender_name=self._sender_name(), mode="voice",
@@ -1247,7 +1248,7 @@ class GateSession:
                 if not approver:
                     self.m.store.set_thread(self.chat_id, "awaiting_aaron")
                     await self.m.send_approval_text(req)
-                    return reply or "I need to confirm that with Aaron first. I will follow up by text once he answers."
+                    return reply or f"I need to confirm that with {OWNER_FIRST_NAME} first. I will follow up by text once he answers."
             except Exception:
                 logger.exception("[gate %s] voice consult failed", self.chat_id)
                 return "Something went wrong on my end. Please try that again."
@@ -1334,7 +1335,7 @@ class GateSession:
         if not text:
             return ""
         # They hung up first: deliver on exactly one channel -- the owner's own primary
-        # (send_to_approver, iMessage) when it was Aaron, or back to the number that
+        # (send_to_approver, iMessage) when it was the owner, or back to the number that
         # called otherwise -- and let that one send record the one outbound row. Two
         # earlier bugs both traced here: this function used to store a "voice" row for
         # a result that was never spoken (above), then send() recorded a second row for
@@ -1359,7 +1360,7 @@ class GateSession:
         history = self.m.store.thread_history(self.thread_key(), exclude_chat=self.record_id) + \
             self.m.store.history(self.record_id, limit=20)
         if system_note:
-            prior, message = history, "(No new message from the sender. A system note with a task result was just added above. Write the reply the sender should receive: for Aaron, give him the answer or outcome clearly and naturally, in his voice preference (brief, no emojis); for anyone else, tell them only what concerns them, without internal details. Reply null only if there is truly nothing to say. Do not create a request.)"
+            prior, message = history, f"(No new message from the sender. A system note with a task result was just added above. Write the reply the sender should receive: for {OWNER_FIRST_NAME}, give him the answer or outcome clearly and naturally, in his voice preference (brief, no emojis); for anyone else, tell them only what concerns them, without internal details. Reply null only if there is truly nothing to say. Do not create a request.)"
         else:
             prior, message = history[:-1], body  # the new inbound is already stored last
         if system_note:
@@ -1427,7 +1428,7 @@ class GateSession:
             if not approver:
                 out.request = None
                 out.schedule = None
-                return await self.send_to_sender("Only Aaron can create or change a schedule.", role="answer")
+                return await self.send_to_sender(f"Only {OWNER_FIRST_NAME} can create or change a schedule.", role="answer")
             if task is None:
                 task = self.m.store.create_task(out.schedule.title)
                 self._ensure_inbound_on_task(task, body)
@@ -1477,7 +1478,7 @@ class GateSession:
             if not approver:
                 out.request = None
                 out.schedule_command = None
-                return await self.send_to_sender("Only Aaron can manage schedules.", role="answer")
+                return await self.send_to_sender(f"Only {OWNER_FIRST_NAME} can manage schedules.", role="answer")
             from . import schedcmd
             reply = await schedcmd.handle(self.m, self, out.schedule_command)
             return await self.send_to_sender(reply, role="answer")
@@ -1487,12 +1488,12 @@ class GateSession:
             return False
         # Validate scopes (pydantic already rejected unknown ones).
         if self.m.store.pending_for_thread(self.chat_id, sender=self._sender()) and not approver:
-            self.m.store.add_message(self.record_id, "system", "A request is already awaiting Aaron; new request not created.")
+            self.m.store.add_message(self.record_id, "system", f"A request is already awaiting {OWNER_FIRST_NAME}; new request not created.")
             if out.reply:
                 return await self.send_to_sender(out.reply, role="ack")
             return False
         assert task is not None
-        # Someone Aaron has trusted for exactly these scopes does not need him woken up.
+        # Someone the owner has trusted for exactly these scopes does not need him woken up.
         # Anyone else, and any scope outside what they were given, still waits for his yes.
         trusted = False
         if not approver:
@@ -1500,7 +1501,7 @@ class GateSession:
             allowed = set(t.get("scopes") or [])
             trusted = bool(allowed) and set(out.request.scopes or []) <= allowed
             if trusted:
-                logger.info("[gate %s] %s is trusted for %s; running without asking Aaron",
+                logger.info("[gate %s] %s is trusted for %s; running without asking the owner",
                             self.chat_id, t.get("person") or self._sender(), sorted(out.request.scopes))
         req, created = self.m.store.create_request_once(
             chat_id=self.chat_id, sender=self._sender(), sender_name=self._sender_name(), mode=self.mode,
@@ -1571,7 +1572,7 @@ class GateSession:
         if self.mode == "voice" and not self.m.call_active(self.chat_id):
             # The call ended before this was ready: deliver by text instead, on exactly
             # one channel -- the owner's own primary (send_to_approver) when it was
-            # Aaron, or back to the number that called otherwise -- and record exactly
+            # the owner, or back to the number that called otherwise -- and record exactly
             # one row for it. send_to_approver already records its own row (imessage);
             # recording a second one below under mode "voice" (never spoken) was the
             # voice+imessage double-row bug.
@@ -1630,7 +1631,7 @@ class GateSession:
         logger.warning("[gate %s] rewrite still not grounded (p=%.2f); refusing to pass it off",
                        self.chat_id, p2)
         if approver:
-            # For the verified Aaron: hand over what the run actually produced, and say
+            # For the verified owner: hand over what the run actually produced, and say
             # plainly that it did not answer the question.
             body = _result_bodies(results)
             if body.strip() and len(body) <= 1500:
@@ -1640,15 +1641,15 @@ class GateSession:
                     "guess at one. The full result is on the task. Tell me to try again and I will "
                     "run it fresh.")
         if self._is_owner_person():
-            # Looks like Aaron (his number, or a contact record that resolves to him)
+            # Looks like the owner (his number, or a contact record that resolves to him)
             # but not verified -- is_approver() stays False and no scope or power widens.
             # He still hears it in the first person, about himself, not a note that
             # someone else "let him know": there is no one else here to tell.
             return "I don't have an answer for that yet."
         # Someone else entirely never sees the run's own words: no mention of tools,
-        # scopes, approval or why it failed. Aaron gets the full result separately (the
+        # scopes, approval or why it failed. The owner gets the full result separately (the
         # note this call was given, in full, on his own thread).
-        return ("I do not have an answer ready for that right now. I have let Aaron "
+        return (f"I do not have an answer ready for that right now. I have let {OWNER_FIRST_NAME} "
                 "know, and he will follow up if there is more to share.")
 
     async def handle_followup(self, body: str, inbound_id: Optional[int] = None) -> bool:
@@ -1815,7 +1816,7 @@ class GateSessionManager:
         protected = [str(cfg.approver_imessage_conversation_id or ""), str(getattr(cfg, "approver_phone", "") or ""),
                      str(_tg.approver_id() or "")]
         # manager=self on all three: lets the executor/agent reach manager.store and
-        # manager.schedules for Blatbot's own ADMIN_* tools (gate/hosttools.py). Every
+        # manager.schedules for the assistant's own ADMIN_* tools (gate/hosttools.py). Every
         # one of those calls still checks is_commander itself before doing anything.
         self.executor = Executor(mcp_server=mcp_server, cwd=exec_cwd, model=cfg.claude_model or "sonnet",
                                  protected=protected, manager=self)
@@ -1963,7 +1964,7 @@ class GateSessionManager:
                         f"Nothing was reported back. Say the word and I will run it again.")
                 session = self.get(req.chat_id)
                 if not await session.notify_after_request(line, inbound_id=req.inbound_id):
-                    await self.send_to_approver(f"[Blatbot #{req.id}] {line}")
+                    await self.send_to_approver(f"[{ASSISTANT_NAME} #{req.id}] {line}")
                 logger.info("[gate] told %s about interrupted request #%s", req.chat_id, req.id)
             except Exception:
                 logger.exception("[gate] could not report interrupted request #%s", req.id)
@@ -2042,8 +2043,8 @@ class GateSessionManager:
         sender = session._sender()
         who = f"{who} ({sender})" if who else sender
         subj = str((session.reply_meta or {}).get("subject") or "").strip()
-        snippet = body.strip()  # the whole message; Aaron asked for no truncation
-        head = f"[Blatbot FYI] {who} via {session.mode}"
+        snippet = body.strip()  # the whole message; the owner asked for no truncation
+        head = f"[{ASSISTANT_NAME} FYI] {who} via {session.mode}"
         if subj:
             head += f" | {subj}"
         try:
@@ -2068,10 +2069,10 @@ class GateSessionManager:
         if req.original_message:
             parts.append(f'"{req.original_message.strip()}"')
         if req.scopes:
-            # Scope labels are already verb phrases ("look up and manage your Stern
+            # Scope labels are already verb phrases ("look up and manage your calendar
             # calendar"), so this reads as one sentence, not "It would use <verb phrase>."
             parts.append(f"It would {schedprop.short_labels(req.scopes)}.")
-        marker = "--- AARON'S INSTRUCTIONS ---"
+        marker = f"--- {OWNER_FIRST_NAME.upper()}'S INSTRUCTIONS ---"
         if marker in req.prompt:
             parts.append("Your instructions: " + req.prompt.split(marker, 1)[1].strip())
         parts.append(self._approval_reply_text(req))
@@ -2114,7 +2115,7 @@ class GateSessionManager:
                                    sender, cand["id"])
         if chosen is None and choice == "":
             # No explicit choice: continue the most recent open task of the person this
-            # concerns (the sender, or the named counterpart when Aaron is asking).
+            # concerns (the sender, or the named counterpart when the owner is asking).
             person = counterpart if (approver and counterpart) else ("" if approver else sender)
             found = self.store.tasks_for_person(person, open_only=True, limit=1) if person else []
             if found:
@@ -2128,7 +2129,7 @@ class GateSessionManager:
 
         if out.task_summary:
             self.store.set_task_summary(chosen["id"], out.task_summary)
-        # Participants: the sender (unless it is Aaron) and any named counterpart.
+        # Participants: the sender (unless it is the owner) and any named counterpart.
         if not approver:
             self.store.add_participant(chosen["id"], session.person())
         if counterpart:
@@ -2155,7 +2156,7 @@ class GateSessionManager:
         await self.send_to_approver(self.format_request(req, revised))
 
     async def handle_task_command(self, session: GateSession, text: str) -> bool:
-        """Aaron's task commands: "tasks" lists open work; "T12 done" / "T12 close" /
+        """The owner's task commands: "tasks" lists open work; "T12 done" / "T12 close" /
         "T12 reopen" change state; "T12 note: ..." adds a note. Returns True if consumed."""
         t = (text or "").strip()
         if t.lower() in ("tasks", "task list", "open tasks", "what's open", "whats open"):
@@ -2180,16 +2181,16 @@ class GateSessionManager:
             return True
         verb = m.group(2).lower()
         if verb.startswith("note"):
-            self.store.task_event(tid, "note", f"Aaron: {m.group(3).strip()}", chat_id=session.chat_id)
+            self.store.task_event(tid, "note", f"{OWNER_FIRST_NAME}: {m.group(3).strip()}", chat_id=session.chat_id)
             await self.send_to_approver(f"Noted on T{tid}.")
         elif verb in ("done",):
-            self.store.task_event(tid, "done", "Aaron marked this done.", chat_id=session.chat_id, state="done")
+            self.store.task_event(tid, "done", f"{OWNER_FIRST_NAME} marked this done.", chat_id=session.chat_id, state="done")
             await self.send_to_approver(f"T{tid} marked done: {task['title']}")
         elif verb in ("close", "closed"):
-            self.store.task_event(tid, "note", "Aaron closed this task.", chat_id=session.chat_id, state="closed")
+            self.store.task_event(tid, "note", f"{OWNER_FIRST_NAME} closed this task.", chat_id=session.chat_id, state="closed")
             await self.send_to_approver(f"T{tid} closed: {task['title']}")
         else:
-            self.store.task_event(tid, "note", "Aaron reopened this task.", chat_id=session.chat_id, state="open")
+            self.store.task_event(tid, "note", f"{OWNER_FIRST_NAME} reopened this task.", chat_id=session.chat_id, state="open")
             await self.send_to_approver(f"T{tid} reopened: {task['title']}")
         return True
 
@@ -2224,7 +2225,7 @@ class GateSessionManager:
         short = c["tool"].split("__")[-1]
         shown = {k: v for k, v in c["args"].items() if k != "user_google_email"}
         about = "\n".join(f"  {ln}" for ln in c.get("about") or []) or "  (no further detail found)"
-        self.task_note(req, "request", f"Waiting on Aaron to confirm: {short} {json.dumps(shown, ensure_ascii=False)}", state="waiting_aaron")
+        self.task_note(req, "request", f"Waiting on {OWNER_FIRST_NAME} to confirm: {short} {json.dumps(shown, ensure_ascii=False)}", state="waiting_aaron")
         if c.get("kind") == "send":
             # Not a summary of a message: the message. He approves the words that will go out.
             plain = f"Nothing has been sent. This is what would go out:\n\n{_draft_text(shown)}"
@@ -2247,7 +2248,7 @@ class GateSessionManager:
         """One or two plain sentences saying what the change would do, for the owner."""
         try:
             text = await self.router.phrase(
-                "Aaron's assistant is about to make a change and must ask him first. In one or two short plain "
+                f"{OWNER_FIRST_NAME}'s assistant is about to make a change and must ask him first. In one or two short plain "
                 "sentences, say exactly what would happen, naming the thing (title, date, time, person) in words, "
                 "no ids, no JSON, no links, no tool names. Start with 'Before I do this, I need your yes:' and end "
                 "with a full stop. Nothing has happened yet; say so only if it helps.",
@@ -2300,7 +2301,7 @@ class GateSessionManager:
         if not replied:
             await self.send_to_approver(f"{'Done' if ok else 'Failed'}: {req.summary}\n{result}")
 
-    async def decide_request(self, request_id: int, decision: str, *, actor: str = "aaron",
+    async def decide_request(self, request_id: int, decision: str, *, actor: str = OWNER_FIRST_NAME.lower(),
                             source: str = "imessage", note: str = "") -> Dict[str, Any]:
         """The one place a pending request is answered, whatever surface the answer came in
         on. A text reply and a click in the console both land here, so the rules about what
@@ -2344,20 +2345,20 @@ class GateSessionManager:
             else:
                 await self.send_to_approver(f"Dropped #{req.id}.")
                 asyncio.create_task(self.get(req.chat_id).notify_after_request(
-                    f"Aaron declined the task: {req.summary}. Nothing was done. "
+                    f"{OWNER_FIRST_NAME} declined the task: {req.summary}. Nothing was done. "
                     f"Reply to the sender briefly if appropriate."))
             return {"ok": True, "state": "rejected", "error": ""}
         if d == "edit":
             if not note.strip():
                 return {"ok": False, "error": "an edit needs instructions", "state": req.state}
-            base = req.prompt.split("\n\n--- AARON'S INSTRUCTIONS ---")[0]
-            new_req = self.store.revise_prompt(req.id, f"{base}\n\n--- AARON'S INSTRUCTIONS ---\n{note.strip()}")
+            base = req.prompt.split(f"\n\n--- {OWNER_FIRST_NAME.upper()}'S INSTRUCTIONS ---")[0]
+            new_req = self.store.revise_prompt(req.id, f"{base}\n\n--- {OWNER_FIRST_NAME.upper()}'S INSTRUCTIONS ---\n{note.strip()}")
             await self.send_approval_text(new_req, revised=True)
             return {"ok": True, "state": "pending", "error": ""}
         return {"ok": False, "error": f"unknown decision {decision!r}", "state": req.state}
 
     async def handle_approver_command(self, session: GateSession, text: str) -> bool:
-        """Parse Aaron's reply as a gate command. Returns True if consumed."""
+        """Parse the owner's reply as a gate command. Returns True if consumed."""
         if await self.handle_task_command(session, text):
             return True
         pending = self.store.pending()
@@ -2419,13 +2420,13 @@ class GateSessionManager:
             low = rest.lower()
             if low in _YES or low in _NO:
                 out = await self.decide_request(req.id, "yes" if low in _YES else "no",
-                                                actor="Aaron", source=session.mode or "imessage")
+                                                actor=OWNER_FIRST_NAME, source=session.mode or "imessage")
                 if not out.get("ok") and out.get("error"):
                     await self.send_to_approver(out["error"])
                 return True
             em = re.match(r"^edit\s*:\s*(.+)$", rest, re.S | re.I)
             if em:
-                await self.decide_request(req.id, "edit", actor="Aaron",
+                await self.decide_request(req.id, "edit", actor=OWNER_FIRST_NAME,
                                           source=session.mode or "imessage", note=em.group(1).strip())
                 return True
             return False
@@ -2608,7 +2609,7 @@ class GateSessionManager:
         `read` field scopes.yaml gives each scope (exposed as scopes.READ_SCOPES);
         where a scope carries no such field it is treated as not read-only.
 
-        vault_read (the WHOLE vault of Aaron's own notes) is excluded from the
+        vault_read (the WHOLE vault of the owner's own notes) is excluded from the
         auto-add: it is never granted on its own just for being read-only, only
         when the run was actually refused it -- the vault can hold anything he has
         ever written down, so a blanket "permission for everything" must not open
@@ -2780,7 +2781,7 @@ class GateSessionManager:
                 logger.exception("[gate] jev quota fallback failed for request #%s", req.id)
         reset_time = quota_status.get("reset_time")
         when = f" until {reset_time}" if reset_time else " until it resets"
-        message = f"Blatbot's model quota is exhausted{when}; try again after that."
+        message = f"{ASSISTANT_NAME}'s model quota is exhausted{when}; try again after that."
         return {
             **quota_status,
             "ok": False,
@@ -2866,7 +2867,7 @@ class GateSessionManager:
         as a delimited block for the run's context. Computed fresh from req.scopes
         at run time (never from req.prompt, which is hash-locked from approval), so
         it cannot be widened by anything that happened between approval and running:
-        the scopes it reads here are exactly the ones Aaron's approval (or his own
+        the scopes it reads here are exactly the ones the owner's approval (or his own
         trust) already covers. Holding the whole-vault vault_read scope as well changes
         only what the vault tools may open afterwards, not what is attached here.
 
@@ -3050,7 +3051,7 @@ class GateSessionManager:
         # the session for req.chat_id (the call's own chat_id) no longer reads as a live
         # call or as the owner (self.mode has long since reset). Its result still has to
         # reach him, once, on a channel that actually exists: his own text channel,
-        # first person, never the "[Blatbot #N ...]" framing a stranger's request gets,
+        # first person, never the "[assistant #N ...]" framing a stranger's request gets,
         # and never a send through this stale session (which has no voice channel open
         # any more and may hold a bare contact id instead of a real one).
         from_owner_call = (from_aaron and req.mode == "voice"
@@ -3061,7 +3062,7 @@ class GateSessionManager:
         if from_owner_call:
             # Delivered once, directly, in the first person (wording.py's own text
             # already reads that way), never through this stale session's
-            # mode-dependent send_to_sender and never with the "[Blatbot #N ...]"
+            # mode-dependent send_to_sender and never with the "[assistant #N ...]"
             # third-person framing a stranger's request gets.
             record_id = self.get(req.chat_id).record_id
             self.store.add_message(record_id, "system", note)
@@ -3092,7 +3093,7 @@ class GateSessionManager:
                     if not replied:
                         await self.send_to_approver(f"Failed: {title}\n{message}")
                 if meanwhile:
-                    # Aaron said more while it ran (a hint, a correction): the failure
+                    # the owner said more while it ran (a hint, a correction): the failure
                     # above is the answer to the request itself; this is a separate,
                     # later turn for whatever he said after that.
                     logger.info("[gate] #%s failed with %d message(s) received meanwhile; handling the latest",
@@ -3103,7 +3104,7 @@ class GateSessionManager:
                         logger.exception("[gate] follow-up after #%s failed", req.id)
                 session.typing_stop()
                 return ""
-            # Aaron asked for it himself: let the router phrase the answer.
+            # the owner asked for it himself: let the router phrase the answer.
             try:
                 replied = await session.notify_after_request(note, inbound_id=req.inbound_id)
                 if not replied:
@@ -3111,21 +3112,21 @@ class GateSessionManager:
             finally:
                 session.typing_stop()
             return ""
-        # Someone else's request: short status to Aaron, and the router may
+        # Someone else's request: short status to the owner, and the router may
         # tell the sender the outcome -- except on failure, which is always
         # wording.py's own text, never the router's rewrite of it.
         if not ok:
             if told_already:
                 same_limit = wording.same_limit_message(status)
-                await self.send_to_approver(f"[Blatbot #{req.id} FAILED, same limit] {title}")
+                await self.send_to_approver(f"[{ASSISTANT_NAME} #{req.id} FAILED, same limit] {title}")
                 await session.notify_failure(same_limit, note, inbound_id=req.inbound_id)
             else:
-                await self.send_to_approver(f"[Blatbot #{req.id} FAILED] {title}\n{message}")
+                await self.send_to_approver(f"[{ASSISTANT_NAME} #{req.id} FAILED] {title}\n{message}")
                 await session.notify_failure(message, note, inbound_id=req.inbound_id)
             session.typing_stop()
             return ""
         try:
-            await self.send_to_approver(f"[Blatbot #{req.id} {outcome}] {title}\n{message}")
+            await self.send_to_approver(f"[{ASSISTANT_NAME} #{req.id} {outcome}] {title}\n{message}")
             await session.notify_after_request(note, inbound_id=req.inbound_id)
         finally:
             session.typing_stop()
@@ -3148,14 +3149,14 @@ class GateSessionManager:
             if self.schedules.is_proposal_request(req):
                 self.schedules.proposal_expired(req)
                 await self.send_to_approver(
-                    f"[Blatbot #{req.id}] expired after 24h with no answer: {req.summary}")
+                    f"[{ASSISTANT_NAME} #{req.id}] expired after 24h with no answer: {req.summary}")
             elif req.schedule_id and (req.status or {}).get("confirm"):
                 await self.schedules.held_ended(req, "expired")
             else:
                 await self.send_to_approver(
-                    f"[Blatbot #{req.id}] expired after 24h with no answer: {req.summary}")
+                    f"[{ASSISTANT_NAME} #{req.id}] expired after 24h with no answer: {req.summary}")
             self.store.add_message(req.chat_id, "system", f"Task #{req.id} expired unanswered: {req.summary}")
-            self.task_note(req, "expired", f"Expired after 24h with no answer from Aaron: {req.summary}", state="open")
+            self.task_note(req, "expired", f"Expired after 24h with no answer from {OWNER_FIRST_NAME}: {req.summary}", state="open")
 
     async def _expiry_loop(self) -> None:
         while True:

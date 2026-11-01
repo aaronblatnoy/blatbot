@@ -86,7 +86,8 @@ def _last_request_outcome(task: Optional[Dict[str, Any]]) -> str:
     return "nothing has run on this task yet"
 
 
-from .scopes import SCOPES, SCOPE_TREE_ALWAYS, SCOPE_TREE_LEAVES, SCOPE_TREE_SYSTEMS, WHERE_THINGS_LIVE  # the registry
+from ..identity import ASSISTANT_NAME, OWNER_FIRST_NAME
+from .scopes import CAPABILITIES, COUNT_AS_YES, SCOPES, SCOPE_TREE_ALWAYS, SCOPE_TREE_LEAVES, SCOPE_TREE_SYSTEMS, WHERE_THINGS_LIVE  # the registry
 from . import settings as _settings
 
 
@@ -247,88 +248,18 @@ class TaskPicker:
             "type": "noul",
             "instructions": {
                 "question": "Should the assistant now go and DO something for this message, using its tools?",
-                "principle": "The assistant is a general-purpose executive assistant with a computer, a browser, "
-                             "Aaron's accounts, and a coding agent behind it. It is NOT limited to scheduling. Any "
+                "principle": f"The assistant is a general-purpose executive assistant with a computer, a browser, "
+                             f"{OWNER_FIRST_NAME}'s accounts, and a coding agent behind it. It is NOT limited to scheduling. Any "
                              "message that can only be satisfied by doing something or by fetching a fact from "
                              "outside this conversation is a yes. The lists below are illustrations, not the "
                              "boundary: if a capable human assistant at a laptop could act on it, count it as yes.",
-                "the_assistant_can": [
-                    "Anything a person can do at a computer: read and write files and documents, run scripts and "
-                    "commands, research, compute, compare, draft, format, convert, summarize a source it fetches.",
-                    "TAMID Google Calendar and Aaron's Stern calendar: list events for a day or range, free/busy, "
-                    "create, move, shorten, cancel events.",
-                    "TAMID Google Drive: find sheets, docs, forms and folders; read a sheet tab's rows (rosters, "
-                    "schedules, trackers, form responses); read docs; write cells, append rows, create sheets, "
-                    "docs and folders; read a form's questions and every response.",
-                    "TAMID Gmail and Aaron's Stern Gmail: search messages and threads, read one in full.",
-                    "Blatbot's own Inkbox mailbox, texts and iMessages: list and read threads, send email, "
-                    "SMS or iMessage to a third party; look up, create and update contacts and their notes.",
-                    "TAMID and SJBA website admin: list and read board members and bios, events, members, "
-                    "semesters, site settings, contact-form submissions, newsletter signups; create, update "
-                    "and delete any of those; replace headshots and flyers.",
-                    "Public web: search, open a page, read and find text on it, click, type and fill forms.",
-                    "The black-sky server: what is running (containers, services, uptime, disk, memory, GPUs).",
-                    "Aaron's second brain (his Obsidian vault of notes): search notes, read a note, list notes.",
-                    "TAMID's Instagram and LinkedIn: account, recent posts, insights, audience; stage and publish posts.",
-                    "TAMID's Google Analytics property: dimensions, metrics, key events, streams, access; change them.",
-                    "Aaron's NYU Brightspace: courses, assignments, due dates, grades, announcements, discussions, "
-                    "content; submit, post, mark complete.",
-                    "Coolify (black-sky and Vox): apps, services, databases, deployments, logs, env vars; deploy, "
-                    "restart, stop.",
-                    "The pension filings database (public Department of Labor Form 5500 data): search pension "
-                    "plans, read a plan's assets, managers and consultants, find a provider's client plans, "
-                    "find lookalike plans, search plan events.",
-                ],
-                "count_as_yes": [
-                    "The sender asks for anything to be done, made, fetched, booked, moved, cancelled, sent, "
-                    "looked up, checked, changed, added, closed, counted, computed, drafted or found out.",
-                    "Any task with a concrete deliverable that does not yet exist in the conversation: a document, "
-                    "a list, a summary of a source, a comparison, a file, a number, a status.",
-                    "Writing on request is a deliverable and a yes: draft an email, a bio, an announcement, a "
-                    "message to send, a post, a script, a report. The assistant produces it as a task result.",
-                    "A request outside the examples below but within reach of a computer and Aaron's accounts.",
-                    "The sender asks a question whose answer must be looked up (a calendar, an inbox, a sheet, "
-                    "a website), even if phrased casually or as a fragment.",
-                    "Calendar: 'when is X's interview', 'what's on Friday', 'is 2:30 free', 'move X to 9', "
-                    "'make it 30 minutes', 'cancel X's slot but keep the other one', 'add a room to the event'.",
-                    "Sheets and forms: 'how many people applied', 'who hasn't responded', 'what school is X in', "
-                    "'find X's email', 'which slots are open', 'mark X as interviewed', 'add a row for X', "
-                    "'what's the link to that sheet', 'what's the exact title of the form'.",
-                    "Mail: 'did we email X', 'what did X say', 'has X replied', 'forward me the thread', "
-                    "'find the invitation we sent'.",
-                    "Websites: 'who is on the board', 'update X's bio', 'add the event', 'who contacted us "
-                    "through the site', 'take X off the board page', 'swap the headshot'.",
-                    "Contacts and messaging: 'text X that ...', 'email X the list', 'what's X's number', "
-                    "'add a note to X's contact'.",
-                    "Pension filings: 'which pension plans use X as consultant', 'find plans like Y', "
-                    "'who manages the Z pension fund', 'union pension plans over 500 million in New York'.",
-                    "Public web: 'look up X', 'who is the president of Y', 'find Z's LinkedIn', 'confirm that "
-                    "roster on their site'.",
-                    "Server: 'what's running on black sky', 'is the gateway up', 'how much disk is left'.",
-                    "Notes: 'what do my notes say about X', 'check the vault for Y', 'what did I write about Z', "
-                    "'look it up in my second brain'.",
-                    "Social: 'what did we post last', 'how did the recruitment post do', 'how many followers', "
-                    "'post this to instagram', 'draft a linkedin post about X'.",
-                    "School: 'what's due this week', 'did I get a grade on X', 'any new announcements in Y', "
-                    "'submit the memo', 'when is the quiz'.",
-                    "Deployments: 'is the billing frontend up', 'redeploy the validator', 'show me the last "
-                    "deploy log', 'what env vars does X have', 'restart the gateway app'.",
-                    "The sender supplies information that `task_it_belongs_to` was waiting for, so its pending "
-                    "step can now be carried out (an application, availability, a confirmation, details).",
-                    "The sender wants to schedule or set up something (a chat, a meeting, a call).",
-                    "'yes', 'ok', 'sure', 'go ahead', 'do it', 'please' after `last_thing_the_assistant_said` offered "
-                    "to do or check something: the sender is accepting the offer, so do it.",
-                    "A correction, addition or 'try again' on a task whose `last_action_on_that_task` already "
-                    "ran (done or failed): the sender wants it done again with the change ('should be 30 minutes', "
-                    "'the other one', 'give it those scopes', 'no, Friday', 'yes, resubmit').",
-                    "A follow-up question whose answer is not in the conversation and must come from the same "
-                    "source again ('what was the document called', 'give me the link', 'and their emails?').",
-                ],
+                "the_assistant_can": CAPABILITIES,
+                "count_as_yes": COUNT_AS_YES,
                 "count_as_no": [
                     "Thanks, greetings, acknowledgements, small talk.",
                     "A question about the assistant itself or about what it will do, answerable in words.",
-                    "'Do you have access to X', 'can you get into Y', 'what can you reach/see', 'what do you "
-                    "have access to' about Aaron's own accounts, tools or data: a question about the "
+                    f"'Do you have access to X', 'can you get into Y', 'what can you reach/see', 'what do you "
+                    f"have access to' about {OWNER_FIRST_NAME}'s own accounts, tools or data: a question about the "
                     "assistant's own capabilities, not a request to go check, open or fetch anything. It is "
                     "answered by saying what the assistant will or will not share, in words, even when X "
                     "names a real system (his GitHub, his email, his calendar).",
@@ -508,7 +439,7 @@ class TaskPicker:
         return {"scopes": scopes, "probabilities": probs, "reason": "ok"}
 
     async def judge_vault_tree(self, *, prompt: str, summary: str) -> Dict[str, Any]:
-        """Which notes in Aaron's vault (his Obsidian second brain) does this task need,
+        """Which notes in the owner's vault (his Obsidian second brain) does this task need,
         chosen top-down, in at most two TypeSafe round trips:
 
         Round trip 1 judges every hub directly (never the section that contains
@@ -548,7 +479,7 @@ class TaskPicker:
             return {"type": "noul",
                     "instructions": {"topic": f"{name}: {description}",
                                      "question": "Does carrying out `task_prompt` need what `topic` covers: "
-                                                 "facts, decisions or preferences Aaron has written down about it? "
+                                                 f"facts, decisions or preferences {OWNER_FIRST_NAME} has written down about it? "
                                                  "If the topic's own name appears in `task_prompt` in any casing, "
                                                  "or as an obvious nickname or substring of a name mentioned there, "
                                                  "that alone is enough to answer true."},
@@ -822,7 +753,7 @@ class TaskPicker:
                  # Whether this came from the person the assistant works for. A room full of
                  # equals is one thing; the one whose assistant you are is not one of them.
                  "sender_is_the_person_you_work_for": bool(from_principal),
-                 "recent_messages": recent, "assistant_name": bot_name or "Blatbot",
+                 "recent_messages": recent, "assistant_name": bot_name or ASSISTANT_NAME,
                  # Who the assistant is in this room. Without it, "is this mine to answer?"
                  # has no referent and the judgment is guessing at its own job.
                  "assistant_role": role or (_settings.get("GATE_ASSISTANT_ROLE") or _DEFAULT_ROLE)}

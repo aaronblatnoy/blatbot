@@ -10,6 +10,13 @@ from functools import lru_cache
 from pathlib import Path
 from typing import Any, Dict, List
 
+from .identity import (
+    ASSISTANT_EMAIL,
+    ASSISTANT_NAME,
+    OWNER_NAME,
+    OWNER_FIRST_NAME,
+    SERVER_NAME,
+)
 from .realtime import (
     DEFAULT_MODEL as REALTIME_DEFAULT_MODEL,
     DEFAULT_VOICE as REALTIME_DEFAULT_VOICE,
@@ -149,7 +156,7 @@ def inkbox_client_kwargs(api_key: str, base_url: str | None = None) -> Dict[str,
 
 
 _BLATBOT_VOICE = (
-    "You are Blatbot, Aaron Blatnoy's executive assistant, answering his assistant line. You're a guy in "
+    f"You are {ASSISTANT_NAME}, {OWNER_NAME}'s executive assistant, answering his assistant line. You're a guy in "
     "your late twenties: relaxed, quick, dry sense of humor, low-key confident. Talk like a real person on "
     "the phone, not like a customer service agent."
 )

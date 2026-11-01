@@ -1176,9 +1176,9 @@ class Store:
         return _normalize_room_mode(r["response_mode"]) if r else ""
 
     def set_response_mode(self, chat_id: str, mode: str) -> None:
-        """Set how freely Blatbot may speak into this chat without being asked, for
+        """Set how freely the assistant may speak into this chat without being asked, for
         any chat on any channel -- the one write path both the console dropdown and
-        the "blatbot mode ..." chat command use. Upserts the thread row, so this
+        the "<assistant name> mode ..." chat command use. Upserts the thread row, so this
         works even for a chat that has never sent a message through the gate (set
         ahead of time from the console, or named from a DM)."""
         if not chat_id:
@@ -1219,7 +1219,7 @@ class Store:
         return names
 
     def known_group_chats(self) -> List[Dict[str, Any]]:
-        """Every group chat Blatbot has ever spoken in or read, across every channel,
+        """Every group chat the assistant has ever spoken in or read, across every channel,
         for the console's per-chat response-mode list: chat_id, channel, a display
         title, a best-effort member count, and the chat's effective mode (its explicit
         value, or the "mention" default when it was never set)."""
@@ -1256,7 +1256,7 @@ class Store:
         return out
 
     def find_group_chat_by_name(self, name: str) -> Optional[Dict[str, Any]]:
-        """A known group chat by display title, for the "blatbot mode <chat name>
+        """A known group chat by display title, for the "<assistant name> mode <chat name>
         <mode>" command sent from a DM. Exact match (case-insensitive) wins; failing
         that, the single chat whose title contains the name, if there is only one."""
         needle = " ".join(str(name or "").split()).lower()
@@ -2040,7 +2040,7 @@ class Store:
         # key, role and scope of that group onto the one person; a row with no display
         # name becomes its own person (nothing to group it by). This is reading the OLD
         # one-row-per-handle table, where a shared display name across two rows was
-        # Aaron's only way of recording "these are the same person" -- it is the one-time
+        # the owner's only way of recording "these are the same person" -- it is the one-time
         # migration's job to not throw that fact away. It is not the ongoing rule for the
         # new model: resolve_handles and the console's "link people" action never merge
         # by display name once persons/contacts exist, exactly as decided for this model.

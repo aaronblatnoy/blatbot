@@ -10,6 +10,7 @@ from typing import Any, Dict, List
 
 def _print_list() -> int:
     from .gate import scopes as sc
+    print(f"registry: {sc.REGISTRY_PATH}")
     for sysname, desc in sc.SCOPE_TREE_SYSTEMS.items():
         print(f"{sysname}: {desc[:90]}")
         for g in sc.SCOPE_TREE_ALWAYS.get(sysname, []):
@@ -26,6 +27,7 @@ def _print_list() -> int:
 
 def _print_check() -> int:
     from .gate import scopes as sc
+    print(f"registry: {sc.REGISTRY_PATH}")
     problems = sc.registry_problems()
     for p in problems:
         print("PROBLEM:", p)
@@ -57,6 +59,7 @@ async def _sync(servers: List[str]) -> Dict[str, Dict[str, str]]:
 
 def _do_sync() -> int:
     from .gate import scopes as sc
+    print(f"registry: {sc.REGISTRY_PATH}")
     reg = sc.load_registry()
     servers = sorted({str(v["server"]) for v in (reg.get("scopes") or {}).values() if v.get("server") and not v.get("tools")}
                      | {t.split("__")[1] for v in (reg.get("scopes") or {}).values() for t in (v.get("tools") or [])
