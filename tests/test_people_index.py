@@ -51,6 +51,7 @@ def test_the_same_person_again_is_the_same_record_and_nothing_new(store):
     assert len(store.list_people()) == 1
     # Where else they were met is kept, but is not a change worth a text.
     assert store.get_person(first)["met_in"] == [ROOM, "Aaron & Stanley, Blatbot"]
+    assert {c["source"] for c in store.get_person(first)["contacts"]} == {f"met in {ROOM}"}
 
 
 def test_a_new_handle_extends_the_record(store):

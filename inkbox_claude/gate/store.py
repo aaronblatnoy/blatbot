@@ -2051,7 +2051,9 @@ class Store:
                 self._db.execute("UPDATE persons SET told=? WHERE id=?", (told_json(before), pid))
             have = {(c["kind"], c["value"]) for c in before.get("contacts") or []}
             for kind, norm, raw in wanted:
-                res = self._upsert_contact_locked(kind, raw, person_id=pid, source=source, last_seen=seen)
+                # A handle already on the record keeps the place it was first met in.
+                res = self._upsert_contact_locked(kind, raw, person_id=pid, last_seen=seen,
+                                                  source="" if (kind, norm) in have else source)
                 if res.get("ok") and (kind, norm) not in have:
                     changed = True
             fields, values = [], []
