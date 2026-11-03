@@ -1823,7 +1823,7 @@ def test_a_room_request_whose_reply_the_router_dropped_is_answered_in_the_room(t
     m._is_owner_request = lambda req: True
     m.router.next_note = RouterOutput(reply=None, task=None)
     m.executor.result = {"ok": True, "summary": "Stanley, here is Aaron's repo: https://github.com/x/y",
-                         "tool_calls": [], "raw": "Stanley, here is Aaron's repo: https://github.com/x/y"}
+                         "tool_calls": ["mcp__inkbox__inkbox_lookup_contact"], "raw": "Stanley, here is Aaron's repo: https://github.com/x/y"}
     task = m.store.create_task("Send Stanley the repo", [])
     req = m.store.create_request(chat_id="tg:-1", sender="telegram:1", sender_name="Aaron", mode="telegram",
                                  subject="", original_message="blatbot, send stanley my repo",
