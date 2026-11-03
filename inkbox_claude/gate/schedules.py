@@ -19,7 +19,7 @@ from typing import Any, Dict, List, Optional
 from zoneinfo import ZoneInfo
 
 from . import cadence as cadence_module
-from .scopes import SCOPES, scope_for_tool, tools_for
+from .scopes import READ_SCOPES, SCOPES, scope_for_tool, tools_for
 from .store import Request, Schedule, sha256
 
 logger = logging.getLogger(__name__)
@@ -275,6 +275,26 @@ def _repair_known_tool_names() -> "set":
     return names
 
 
+# Scopes a schedule Aaron asked for himself can start with on the spot: reading,
+# and messaging (a scheduled run's send to anyone but Aaron is held for his yes
+# regardless, see executor.run). Anything that writes to a sheet, a site, a
+# calendar or a deployment is still proposed first.
+SELF_SERVE_SCOPES = frozenset({"imessage_send", "sms_send", "email_send"})
+
+
+def self_serve(scopes: List[str]) -> bool:
+    """Whether every capability in `scopes` is one a self-serve schedule may start
+    with unasked. An empty list is not self-serve: it is nothing at all."""
+    return bool(scopes) and all(s in READ_SCOPES or s in SELF_SERVE_SCOPES for s in scopes)
+
+
+def starts_unasked(cadence_kind: str, scopes: List[str]) -> bool:
+    """A one-time, self-serve ask ("remind me in 12 hours") starts without a proposal.
+    Recurring work keeps the proposal: its timing and reach are worth one look before
+    it runs unattended for weeks."""
+    return cadence_kind == "once" and self_serve(scopes)
+
+
 def _repair_recover_timing(prompt: str) -> Optional[Dict[str, Any]]:
     """A cadence recovered from the prompt's own old instructions: a
     `delay_minutes N` or "every N minutes/hours" phrase gives `every` N
@@ -395,7 +415,10 @@ class ScheduleService:
                       cadence_kind: str, cadence: Dict[str, Any], timezone: Optional[str] = None,
                       report_every_time: Optional[bool] = None, until: Optional[float] = None,
                       scopes: List[str], start_now: bool = False, origin_mode: str = "",
-                      origin_chat_id: str = "") -> Schedule:
+                      origin_chat_id: str = "", auto_start: bool = False) -> Schedule:
+        """Create a schedule. It is proposed to Aaron for his yes, unless `auto_start`:
+        then it is activated at once and he hears what was set up instead. The caller
+        decides `auto_start` (see self_serve); the service never widens it."""
         if not owner:
             raise PermissionError("only Aaron can create or change schedules")
         cadence_module.validate(cadence_kind, cadence)
@@ -417,9 +440,23 @@ class ScheduleService:
             cadence_kind=cadence_kind, cadence=stored_cadence, report_every_time=report_every,
             until=until, origin_mode=origin_mode, origin_chat_id=origin_chat_id or chat_id,
         )
+        if auto_start:
+            # His own reminder or check, in his own words, able to do nothing beyond
+            # reading and messaging him: it starts now. "Remind me in 12 hours" once
+            # sat as a "reply yes" he never saw until its time had passed.
+            logger.info("[schedules] %s self-serve: started without a proposal: %s", schedule.id, title)
+            return await self.decide(schedule.id, True)
         logger.info("[schedules] %s proposed: %s", schedule.id, title)
         await self._notice(schedule, self._proposal_text(schedule))
         return schedule
+
+    @staticmethod
+    def self_serve(scopes: List[str]) -> bool:
+        return self_serve(scopes)
+
+    @staticmethod
+    def starts_unasked(cadence_kind: str, scopes: List[str]) -> bool:
+        return starts_unasked(cadence_kind, scopes)
 
     async def decide(self, schedule_id: int, approve: bool) -> Schedule:
         schedule = self.store.get_schedule(schedule_id)
@@ -530,9 +567,19 @@ class ScheduleService:
         not (nothing to safely resume)."""
         now = time.time() if now is None else now
         for schedule in self.store.schedules(states=["proposed"]):
+            revert = self._edit_revert(schedule)
+            if (revert is None and schedule.cadence_kind == "once"
+                    and cadence_module.next_run("once", schedule.cadence, schedule.timezone, now) is None):
+                # A one-time proposal whose moment has gone by unanswered is over
+                # now, not 24 hours later: there is nothing left to approve.
+                updated = self.store.update_schedule(schedule.id, state="ended", next_run=None,
+                                                     last_outcome="its time passed before it was approved")
+                logger.info("[schedules] %s once-proposal expired: its time passed", schedule.id)
+                await self._notice(updated, f"{updated.title} was never approved and its time has passed, "
+                                            "so it did not run.")
+                continue
             if now - schedule.updated_at < max_age:
                 continue
-            revert = self._edit_revert(schedule)
             if revert is None:
                 updated = self.store.update_schedule(schedule.id, state="ended", next_run=None,
                                                      last_outcome="not approved in time")

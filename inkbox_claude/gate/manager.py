@@ -25,7 +25,7 @@ from .taskpick import TaskPicker, enabled as jev_enabled
 from .router import Router, RouterOutput, RouterRequest, ScheduleCommand
 from .scopes import SCOPES, READ_SCOPES, EXPLICIT_ONLY_SCOPES, BLATBOT_ADMIN_SCOPE
 from .store import Person, Request, Store, TaskRequired, task_key
-from .schedules import ScheduleService
+from .schedules import ScheduleService, starts_unasked
 from . import schedprop
 from . import wording
 
@@ -1473,6 +1473,7 @@ class GateSession:
                     cadence_kind=out.schedule.cadence_kind, cadence=out.schedule.cadence,
                     timezone=out.schedule.timezone, report_every_time=out.schedule.report_every_time,
                     until=until_epoch, scopes=scopes, start_now=out.schedule.start_now,
+                    auto_start=starts_unasked(out.schedule.cadence_kind, scopes),
                     origin_mode=self.mode,
                     origin_chat_id=json.dumps({"chat_id": self.chat_id, "meta": self.reply_meta or {}}),
                 )

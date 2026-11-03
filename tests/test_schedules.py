@@ -99,6 +99,53 @@ async def _propose(service, task_id, **over):
     return await service.propose(**kw)
 
 
+def test_self_serve_is_reading_and_messaging_only():
+    assert sched_mod.self_serve(["imessage_send"]) and sched_mod.self_serve(["web", "email_send"])
+    assert not sched_mod.self_serve(["tamid_drive_write"]) and not sched_mod.self_serve(["web", "coolify_control"])
+    assert not sched_mod.self_serve([])
+    assert sched_mod.starts_unasked("once", ["imessage_send"])
+    assert not sched_mod.starts_unasked("every", ["imessage_send"]), "recurring work is still proposed"
+    assert not sched_mod.starts_unasked("once", ["tamid_drive_write"])
+
+
+@pytest.mark.asyncio
+async def test_a_self_serve_reminder_starts_without_a_proposal(env):
+    """"Remind me in 12 hours": Aaron's own one-shot, able to do nothing beyond messaging
+    him. With auto_start it is active at once and he hears when, instead of a "reply yes"
+    that sat unanswered until its time had passed."""
+    from datetime import datetime, timedelta
+    from zoneinfo import ZoneInfo
+    store, manager, service, task_id = env
+    at = (datetime.now(ZoneInfo("America/New_York")) + timedelta(hours=12)).strftime("%Y-%m-%dT%H:%M")
+    schedule = await _propose(service, task_id, title="Lunch with Abhinash reminder",
+                              prompt="Send Aaron an iMessage reminding him to have lunch with Abhinash.",
+                              cadence_kind="once", cadence={"at": at}, scopes=["imessage_send"], auto_start=True)
+    assert schedule.state == "active" and schedule.next_run is not None
+    assert manager.notices[-1][1].startswith("Scheduled for"), manager.notices[-1][1]
+    # Without auto_start the same ask is still a proposal, as before.
+    plain = await _propose(service, task_id, title="Another reminder", cadence_kind="once",
+                           cadence={"at": at}, scopes=["imessage_send"])
+    assert plain.state == "proposed"
+
+
+@pytest.mark.asyncio
+async def test_a_once_proposal_whose_time_passed_ends_at_once(env):
+    """Unanswered past its moment, a one-time proposal is over then, not after the
+    24-hour rule has also run out."""
+    import time as _time
+    from datetime import datetime, timedelta
+    from zoneinfo import ZoneInfo
+    store, manager, service, task_id = env
+    at = (datetime.now(ZoneInfo("America/New_York")) + timedelta(minutes=10)).strftime("%Y-%m-%dT%H:%M")
+    schedule = await _propose(service, task_id, cadence_kind="once", cadence={"at": at}, scopes=["imessage_send"])
+    assert schedule.state == "proposed"
+    await service.expire_stale_proposals(24 * 3600, now=_time.time() + 5 * 60)
+    assert store.get_schedule(schedule.id).state == "proposed", "its moment has not come yet"
+    await service.expire_stale_proposals(24 * 3600, now=_time.time() + 60 * 60)
+    assert store.get_schedule(schedule.id).state == "ended"
+    assert "time has passed" in manager.notices[-1][1]
+
+
 @pytest.mark.asyncio
 async def test_propose_refuses_prompt_naming_tool_outside_scopes(env):
     store, manager, service, task_id = env

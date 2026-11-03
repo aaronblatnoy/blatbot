@@ -254,8 +254,11 @@ async def test_one_time_schedule_ends_after_its_single_run(tmp_path):
     at = _dt.datetime.now() + _dt.timedelta(minutes=5)
     await _propose_via_manager(m, said="remind me once tomorrow", scopes=["web"],
                                cadence_kind="once", cadence={"at": at.isoformat()})
-    schedule = m.store.schedules(states=["proposed"])[0]
-    activated = await m.schedules.decide(schedule.id, True)
+    # A one-time, read-only ask of his own starts unasked (schedules.starts_unasked):
+    # there is no proposal to approve, it is already active.
+    assert m.store.schedules(states=["proposed"]) == []
+    schedule = m.store.schedules(states=["active"])[0]
+    activated = schedule
     assert activated.cadence_kind == "once"
 
     m.executor.results.append({"ok": True, "result_line": "done once", "final_status": "done once",
