@@ -248,6 +248,9 @@ def _person_model(store: Store, row: Dict[str, Any]) -> Dict[str, Any]:
         "effective_scopes": effective,
         "note": row.get("note") or "",
         "contacts": row.get("contacts") or [],
+        # Auto-indexing: where Blatbot met them and when (0 = a record made by hand).
+        "met_in": row.get("met_in") or [],
+        "first_seen": row.get("first_seen") or 0,
         "created_at": row.get("created_at"),
         "updated_at": row.get("updated_at"),
         # The front end acts only on this flag, never on a role name: it is this

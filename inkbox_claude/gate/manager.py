@@ -28,6 +28,7 @@ from .store import Person, Request, Store, TaskRequired, task_key
 from .schedules import ScheduleService, starts_unasked
 from . import schedprop
 from . import wording
+from . import peopleindex
 
 logger = logging.getLogger(__name__)
 
@@ -953,6 +954,7 @@ class GateSession:
                 self.m.store.mark_owner_thread(self.chat_id, mode)
             body = _strip_quoted(text) if mode == "email" else text.strip()
             self.inbound_id = self.m.store.add_message(self.record_id, "inbound", body, mode)
+            self._index_sender()
             self.deferred_ack = None
             self.typing_start()
             if self.thread_key():
@@ -979,6 +981,30 @@ class GateSession:
                 self.typing_stop()
                 if self.m.store.thread_state(self.chat_id) == "routing":
                     self.m.store.set_thread(self.chat_id, "idle")
+
+    _INDEX_PLACES = {"email": "email", "sms": "SMS", "imessage": "iMessage"}
+
+    def _index_sender(self) -> None:
+        """Someone writing on email, SMS or iMessage gets a People record if they have
+        none (peopleindex.py). Telegram is indexed in gateway.py, where group members
+        who never reach a session are seen too. Calls, the owner and mail from a
+        mailbox no person writes from (noreply@ ...) are not indexed."""
+        label = self._INDEX_PLACES.get(self.mode)
+        if label is None or self.is_approver() or self._is_owner_person():
+            return
+        meta = self.reply_meta or {}
+        sender = str(meta.get("sender") or "").strip()
+        if not sender or (self.mode == "email" and peopleindex.is_automated_email(sender)):
+            return
+        kind = Store.guess_contact_kind(sender)
+        if kind not in ("email", "phone"):
+            return
+        contact = meta.get("contact") if isinstance(meta.get("contact"), dict) else {}
+        name = str((contact or {}).get("name") or "").strip()
+        group = str(meta.get("group_title") or "").strip()
+        place = (f"{group} ({label})" if group else f"a {label} group") if (
+            meta.get("conversation_kind") == "group") else label
+        self.m.index_person_seen(display=name, handles=[(kind, sender)], met_in=place)
 
     def reply_meta_for_store(self) -> Dict[str, Any]:
         keep = {k: v for k, v in (self.reply_meta or {}).items()
@@ -1911,6 +1937,11 @@ class GateSessionManager:
         # judgments here (_knowledge_notes, _voice_trust_override).
         self._blanket_pending: set = set()
         self.schedules = ScheduleService(self)
+        # People auto-indexing: one pending notice at a time, so everyone met within
+        # PEOPLE_NOTICE_DELAY goes to Aaron in one text. What he was told lives on
+        # disk (persons.told); this task is only the timer.
+        self._people_notice_task: Optional[asyncio.Task] = None
+        self._people_notice_lock = asyncio.Lock()
         self._expiry_task: Optional[asyncio.Task] = None
         self._schedule_task: Optional[asyncio.Task] = None
         try:
@@ -2085,6 +2116,71 @@ class GateSessionManager:
                                         f"Your last message was not answered.")
         except Exception:
             logger.exception("[gate] could not deliver the outage notice")
+
+    # -- people auto-indexing (peopleindex.py) -----------------------------
+    PEOPLE_NOTICE_DELAY = 20.0
+
+    def index_person_seen(self, *, display: str = "", handles: Optional[List[Tuple[str, str]]] = None,
+                          met_in: str = "", note: str = "") -> Dict[str, Any]:
+        """Record someone Blatbot met (store.index_person: a directory entry, never a
+        role or a scope) and, when that made or materially changed a record, queue
+        the one notice to Aaron. Never raises: a failed index is logged and the
+        message it came with is handled exactly as before."""
+        try:
+            res = self.store.index_person(display=display, handles=handles or [], met_in=met_in, note=note)
+        except Exception:
+            logger.exception("[gate] people index failed for %s", display or "a sender")
+            return {"action": "error", "person": None}
+        if res.get("action") in ("added", "updated"):
+            logger.info("[gate] people index: %s %s (met in %s)", res["action"],
+                        (res.get("person") or {}).get("display") or "?", met_in or "?")
+            self._queue_people_notice()
+        return res
+
+    def index_introduction(self, text: str, *, addressed: bool, met_in: str) -> Optional[Dict[str, Any]]:
+        """Aaron introducing someone in words ("blatbot, this is Stanley Rabkin, he runs
+        X"): their name, and the rest of his sentence as the note. None when the
+        message is not an introduction (peopleindex.parse_introduction decides)."""
+        parsed = peopleindex.parse_introduction(text, addressed=addressed)
+        if parsed is None:
+            return None
+        name, note = parsed
+        return self.index_person_seen(display=name, met_in=met_in, note=note)
+
+    def _queue_people_notice(self) -> None:
+        if self._people_notice_task is not None and not self._people_notice_task.done():
+            return
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            return      # no loop yet: the expiry loop's flush picks it up
+        self._people_notice_task = loop.create_task(self._people_notice_after_delay())
+
+    async def _people_notice_after_delay(self) -> None:
+        await asyncio.sleep(self.PEOPLE_NOTICE_DELAY)
+        try:
+            await self.flush_people_notices()
+        except Exception:
+            logger.exception("[gate] people notice failed; the next flush retries it")
+
+    async def flush_people_notices(self) -> int:
+        """Tell Aaron, in one text, about every indexed record that differs from what
+        he was last told: one line each, stating the record as it stands. A record is
+        marked told only after the text went out, so a failed send is retried and a
+        sent one is never repeated, across restarts too. Returns the lines sent."""
+        async with self._people_notice_lock:
+            lines: List[str] = []
+            seen: List[Dict[str, Any]] = []
+            for person, told in self.store.people_to_announce():
+                line = peopleindex.notice_line(person, told)
+                if line:
+                    lines.append(line)
+                seen.append(person)
+            if lines:
+                await self.send_to_approver("\n".join(lines))
+            for person in seen:
+                self.store.mark_person_told(person["id"], person)
+            return len(lines)
 
     async def notify_inbound(self, session: GateSession, body: str) -> None:
         who = session._sender_name()
@@ -3219,6 +3315,11 @@ class GateSessionManager:
                 await self._expire_pending()
             except Exception:
                 logger.exception("expiry loop error")
+            try:
+                # Catches up a notice whose timer a restart cut off.
+                await self.flush_people_notices()
+            except Exception:
+                logger.exception("people notice flush error")
 
     async def _schedule_loop(self) -> None:
         while True:

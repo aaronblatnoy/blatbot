@@ -1828,6 +1828,43 @@ class InkboxGateway:
             members=known,
             principal=(self.cfg.approver_name if hasattr(self.cfg, "approver_name") else "") or "")
 
+    def _index_telegram_people(self, u: Dict[str, Any], *, is_commander: bool) -> None:
+        """Telegram's part of auto-indexing (gate/peopleindex.py). A sender with no People
+        record gets one, with their Telegram id and @username; Aaron introducing someone
+        in words records them. Every message counts, answered or overheard: meeting
+        someone does not depend on whether Blatbot spoke."""
+        index = getattr(self.sessions, "index_person_seen", None) if self.sessions else None
+        if index is None:
+            return
+        place = (u.get("group_title") or "a Telegram group") if u.get("is_group") else "Telegram DM"
+        if is_commander:
+            introduce = getattr(self.sessions, "index_introduction", None)
+            if introduce is not None:
+                introduce(u.get("text") or "", addressed=bool(u.get("addressed")), met_in=place)
+            return
+        if u.get("is_bot") or not u.get("from_id"):
+            return
+        handles = [("telegram", str(u["from_id"]))]
+        if u.get("username"):
+            handles.append(("telegram_username", "@" + str(u["username"])))
+        index(display=u.get("name") or "", handles=handles, met_in=place)
+
+    def _index_telegram_members(self, joined: Dict[str, Any]) -> None:
+        """New members of a group Blatbot is in: each gets a People record. All of them
+        arrive at once, so Aaron hears about them in one text."""
+        index = getattr(self.sessions, "index_person_seen", None) if self.sessions else None
+        if index is None:
+            return
+        owner = (telegram.approver_id() or "").strip()
+        place = joined.get("group_title") or "a Telegram group"
+        for m in joined.get("members") or []:
+            if m.get("is_bot") or not m.get("id") or m["id"] == owner:
+                continue
+            handles = [("telegram", m["id"])]
+            if m.get("username"):
+                handles.append(("telegram_username", "@" + m["username"]))
+            index(display=m.get("name") or "", handles=handles, met_in=place)
+
     def _telegram_overhear(self, u: Dict[str, Any]) -> None:
         """Record a group message the assistant chose not to answer, so later turns can see it."""
         store = getattr(self.sessions, "store", None) if self.sessions else None
@@ -1940,6 +1977,10 @@ class InkboxGateway:
             update = await request.json()
         except Exception:
             return web.Response(status=400, text="invalid json")
+        joined = telegram.parse_new_members(update if isinstance(update, dict) else {})
+        if joined is not None:
+            self._index_telegram_members(joined)
+            return web.json_response({"ok": True, "members": len(joined["members"])})
         u = telegram.parse_update(update if isinstance(update, dict) else {})
         if u is None:
             return web.json_response({"ok": True, "ignored": True})
@@ -1959,6 +2000,7 @@ class InkboxGateway:
             recent.append(f"{name or from_id}: {text}")
             del recent[:-8]
         is_commander = str(from_id) == (telegram.approver_id() or "").strip()
+        self._index_telegram_people(u, is_commander=is_commander)
         handled = await self._maybe_handle_mode_command(
             text, channel="telegram", is_commander=is_commander,
             self_chat_id=f"tg:{chat_id}", self_label=u.get("group_title") or chat_id,

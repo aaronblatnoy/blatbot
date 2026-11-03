@@ -14,6 +14,7 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
 from .pgdb import PGConnection, is_postgres_target
+from .peopleindex import same_name as same_name_tokens
 from .roommode import MODES as ROOM_MODES, DEFAULT_GROUP_MODE, normalize_mode as _normalize_room_mode
 
 SCHEMA = """
@@ -171,6 +172,9 @@ CREATE TABLE IF NOT EXISTS persons (
   scopes TEXT NOT NULL DEFAULT '[]',
   note TEXT NOT NULL DEFAULT '',
   merged_into TEXT,               -- set when this person was linked (merged) into another
+  met_in TEXT NOT NULL DEFAULT '[]',  -- auto-indexing: every group or channel they were met in
+  first_seen REAL NOT NULL DEFAULT 0, -- auto-indexing: when Blatbot first met them; 0 = made by hand
+  told TEXT NOT NULL DEFAULT '',      -- auto-indexing: the record as Aaron was last told it ('' = never)
   created_at REAL NOT NULL DEFAULT 0,
   updated_at REAL NOT NULL DEFAULT 0
 );
@@ -390,6 +394,9 @@ CREATE TABLE IF NOT EXISTS persons (
   scopes TEXT NOT NULL DEFAULT '[]',
   note TEXT NOT NULL DEFAULT '',
   merged_into TEXT,
+  met_in TEXT NOT NULL DEFAULT '[]',
+  first_seen DOUBLE PRECISION NOT NULL DEFAULT 0,
+  told TEXT NOT NULL DEFAULT '',
   created_at DOUBLE PRECISION NOT NULL DEFAULT 0,
   updated_at DOUBLE PRECISION NOT NULL DEFAULT 0
 );
@@ -440,6 +447,7 @@ _CONTACT_KINDS_SEED = [
     ("email", "Email", "name@example.com", True, 0),
     ("phone", "Phone", "+1 555 010 0001", True, 1),
     ("telegram", "Telegram", "Telegram user id (digits)", True, 2),
+    ("telegram_username", "Telegram username", "@username", True, 2),
     ("imessage", "iMessage", "phone or Apple ID email", True, 3),
     ("other", "Other", "handle", True, 4),
     ("name", "Name", "", False, 5),
@@ -845,6 +853,11 @@ class Store:
                 "schedule_runs": {"failure_class": "TEXT NOT NULL DEFAULT ''",
                                   "failure_reason": "TEXT NOT NULL DEFAULT ''",
                                   "reset_at": "DOUBLE PRECISION"},
+                # Auto-indexing (peopleindex.py): where someone was met, when, and what
+                # Aaron was last told about their record.
+                "persons": {"met_in": "TEXT NOT NULL DEFAULT '[]'",
+                            "first_seen": "DOUBLE PRECISION NOT NULL DEFAULT 0",
+                            "told": "TEXT NOT NULL DEFAULT ''"},
             }.items():
                 if self._is_pg:
                     have = {r["column_name"] for r in self._db.execute(
@@ -1071,12 +1084,13 @@ class Store:
                 "comes only from verified channels, never from the roles/scopes table")
 
     def _seed_contact_kinds_locked(self) -> None:
-        """Idempotent: insert the fixed contact-kind rows if the table is
-        empty. Assumes self._lock is already held and contact_kinds exists."""
-        row = self._db.execute("SELECT COUNT(*) AS n FROM contact_kinds").fetchone()
-        if int(row["n"]) > 0:
-            return
+        """Idempotent: insert each fixed contact-kind row the table does not have yet,
+        so a kind added to the seed later (telegram_username) reaches an existing
+        database too. Assumes self._lock is already held and contact_kinds exists."""
+        have = {r["kind"] for r in self._db.execute("SELECT kind FROM contact_kinds").fetchall()}
         for kind, label, hint, addable, order in _CONTACT_KINDS_SEED:
+            if kind in have:
+                continue
             self._db.execute(
                 "INSERT INTO contact_kinds(kind,label,hint,addable,sort_order) VALUES(?,?,?,?,?)",
                 (kind, label, hint, addable, order),
@@ -1670,6 +1684,7 @@ class Store:
             "scopes": json.loads(r["scopes"] or "[]"), "note": r["note"],
             "merged_into": r["merged_into"], "created_at": r["created_at"],
             "updated_at": r["updated_at"],
+            "met_in": json.loads(r["met_in"] or "[]"), "first_seen": r["first_seen"] or 0,
         }
 
     def _contact_rows(self, person_id: str) -> List[Dict[str, Any]]:
@@ -1940,6 +1955,171 @@ class Store:
             )
             self._db.commit()
         return {"ok": True, "kept": self.get_person(keep_live), "merged_person_was": before}
+
+    # -- auto-indexing (peopleindex.py) -----------------------------------
+    # A person Blatbot meets gets a record of their own: name, every handle seen,
+    # where they were met, first-seen time, the introduction as a note. Never a role
+    # or a scope -- index_person has no parameter for either, and an approver handle
+    # or the commander's own person is never indexed at all. persons.told holds what
+    # Aaron was last told about the record, so the notice is sent once per material
+    # change, never again for the same state, and survives a restart.
+
+    def _indexed_person_locked(self, pid: str) -> Optional[Dict[str, Any]]:
+        row = self._person_row(pid)
+        if row is None:
+            return None
+        row["contacts"] = self._contact_rows(pid)
+        return row
+
+    def index_person(self, *, display: str = "", handles: Optional[List[Tuple[str, str]]] = None,
+                     met_in: str = "", note: str = "", seen_at: Optional[float] = None) -> Dict[str, Any]:
+        """Record someone Blatbot met. `handles` is every (kind, raw value) seen on them
+        (telegram id, telegram_username, phone, email, imessage). Returns
+        {"action": ..., "person": ...}, where action is
+
+          "added"     no record held any of these handles (or the name, see below): one
+                      was created;
+          "updated"   an existing record gained a handle, a fuller name or a note;
+          "unchanged" an existing record already held all of it (where they were met
+                      may still have been added -- not a material change);
+          "owner"     a handle is the commander's: nothing is written;
+          "conflict"  the handles belong to two different people: nothing is written,
+                      people are never merged by inference.
+
+        One record per person. Without a handle match, a record is reused by name: a
+        seen sender joins a same-named record met in the same place that holds no
+        handle of the same kind yet (an introduction made before they spoke); an
+        introduction with no handle joins the only record with that name, or the only
+        one met in this place. "Same name" is one being the other with words added
+        ("Stanley" / "Stanley Rabkin"); the fuller one is kept."""
+        display = " ".join(str(display or "").split())
+        place = " ".join(str(met_in or "").split())
+        note = str(note or "").strip()
+        now = time.time()
+        seen = float(seen_at) if seen_at is not None else now
+        wanted: List[Tuple[str, str, str]] = []
+        for kind, raw in handles or []:
+            kind = str(kind or "").strip().lower()
+            raw = str(raw or "").strip()
+            if not kind or not raw:
+                continue
+            norm = self.normalize_contact_value(raw)
+            if norm and (kind, norm) not in {(k, v) for k, v, _ in wanted}:
+                wanted.append((kind, norm, raw))
+        if not display and not wanted:
+            return {"action": "unchanged", "person": None}
+        source = f"met in {place}" if place else "met"
+        with self._lock:
+            cmdr = self._commander_person_id_locked()
+            owners = set()
+            for kind, norm, _ in wanted:
+                if self._is_approver_handle(kind, norm):
+                    return {"action": "owner", "person": None}
+                r = self._db.execute("SELECT person_id FROM contacts WHERE kind=? AND value=?",
+                                     (kind, norm)).fetchone()
+                if r is not None and r["person_id"]:
+                    live = self._resolve_person(r["person_id"])
+                    if live:
+                        owners.add(live)
+            if cmdr and cmdr in owners:
+                return {"action": "owner", "person": None}
+            if len(owners) > 1:
+                return {"action": "conflict", "person": None}
+            pid = next(iter(owners), None)
+            if pid is None and display:
+                pid = self._index_name_match_locked(display, place, {k for k, _, _ in wanted}, cmdr)
+            if pid is None:
+                pid = self._new_id("p")
+                self._db.execute(
+                    "INSERT INTO persons(id,display,role,scopes,note,met_in,first_seen,told,"
+                    "created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?)",
+                    (pid, display or wanted[0][2], "", "[]", note,
+                     json.dumps([place] if place else []), seen, "", now, now),
+                )
+                for kind, _, raw in wanted:
+                    self._upsert_contact_locked(kind, raw, person_id=pid, source=source, last_seen=seen)
+                self._db.commit()
+                return {"action": "added", "person": self._indexed_person_locked(pid)}
+            before = self._indexed_person_locked(pid) or {}
+            changed = False
+            # A record made by hand (never indexed, never told) starts its notice
+            # history here, at what it was before Blatbot extended it, so the one
+            # text Aaron gets names only what is new.
+            told = self._db.execute("SELECT told, first_seen FROM persons WHERE id=?", (pid,)).fetchone()
+            if not (told["told"] or "") and not float(told["first_seen"] or 0):
+                from .peopleindex import told_json
+                self._db.execute("UPDATE persons SET told=? WHERE id=?", (told_json(before), pid))
+            have = {(c["kind"], c["value"]) for c in before.get("contacts") or []}
+            for kind, norm, raw in wanted:
+                res = self._upsert_contact_locked(kind, raw, person_id=pid, source=source, last_seen=seen)
+                if res.get("ok") and (kind, norm) not in have:
+                    changed = True
+            fields, values = [], []
+            old_display = before.get("display") or ""
+            if display and display != old_display and (not old_display or (
+                    same_name_tokens(old_display, display) and len(display) > len(old_display))):
+                fields.append("display=?"); values.append(display); changed = True
+            old_note = (before.get("note") or "").strip()
+            if note and note.casefold() not in old_note.casefold():
+                fields.append("note=?"); values.append(f"{old_note}\n{note}".strip()); changed = True
+            places = list(before.get("met_in") or [])
+            if place and place not in places:
+                fields.append("met_in=?"); values.append(json.dumps(places + [place]))
+            if not float(before.get("first_seen") or 0):
+                fields.append("first_seen=?"); values.append(seen)
+            if fields:
+                fields.append("updated_at=?"); values.append(now)
+                self._db.execute(f"UPDATE persons SET {', '.join(fields)} WHERE id=?", (*values, pid))
+            self._db.commit()
+            return {"action": "updated" if changed else "unchanged",
+                    "person": self._indexed_person_locked(pid)}
+
+    def _index_name_match_locked(self, display: str, place: str, kinds: set,
+                                 cmdr: Optional[str]) -> Optional[str]:
+        """The one record index_person may reuse by name, or None (see its docstring)."""
+        rows = self._db.execute(
+            "SELECT id FROM persons WHERE merged_into IS NULL AND display<>''").fetchall()
+        found = []
+        for r in rows:
+            if r["id"] == cmdr:
+                continue
+            p = self._indexed_person_locked(r["id"])
+            if p and same_name_tokens(p["display"], display):
+                found.append(p)
+        here = [p for p in found if place and place in (p.get("met_in") or [])]
+        if kinds:
+            free = [p for p in here
+                    if not ({c["kind"] for c in p["contacts"] if c["kind"] != "name"} & kinds)]
+            return free[0]["id"] if len(free) == 1 else None
+        if len(found) == 1:
+            return found[0]["id"]
+        return here[0]["id"] if len(here) == 1 else None
+
+    def people_to_announce(self) -> List[Tuple[Dict[str, Any], Optional[Dict[str, Any]]]]:
+        """Every record auto-indexing touched whose current state differs from what
+        Aaron was last told, as (person, told) with told None when he never was. A
+        record made by hand and never touched by indexing is never listed."""
+        from .peopleindex import state_of
+        out = []
+        with self._lock:
+            rows = self._db.execute(
+                "SELECT id, told FROM persons WHERE merged_into IS NULL AND "
+                "(first_seen > 0 OR told <> '') ORDER BY first_seen, id").fetchall()
+            for r in rows:
+                p = self._indexed_person_locked(r["id"])
+                if p is None:
+                    continue
+                told = json.loads(r["told"]) if r["told"] else None
+                if told != state_of(p):
+                    out.append((p, told))
+        return out
+
+    def mark_person_told(self, person_id: str, person: Dict[str, Any]) -> None:
+        """Store what Aaron has now been told about this record (peopleindex.told_json)."""
+        from .peopleindex import told_json
+        with self._lock:
+            self._db.execute("UPDATE persons SET told=? WHERE id=?", (told_json(person), person_id))
+            self._db.commit()
 
     def resolve_handles(self, handles: List[str]) -> Dict[str, Any]:
         """What role/scopes a message on ANY of these handles should get. Zero matching

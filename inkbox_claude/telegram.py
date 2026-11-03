@@ -145,4 +145,25 @@ def parse_update(update: Dict[str, Any]) -> Optional[Dict[str, Any]]:
     return {"update_id": str(update.get("update_id") or ""),
             "message_id": str(msg.get("message_id") or ""),
             "chat_id": chat_id, "from_id": str(frm.get("id") or ""), "name": name, "text": text,
-            "is_group": is_group, "group_title": str(chat.get("title") or ""), "addressed": addressed}
+            "is_group": is_group, "group_title": str(chat.get("title") or ""), "addressed": addressed,
+            "username": str(frm.get("username") or ""), "is_bot": bool(frm.get("is_bot"))}
+
+
+def parse_new_members(update: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    """The people just added to a group (Telegram's new_chat_members service message,
+    which carries no text and so is not a parse_update message), or None when this
+    update is not that."""
+    msg = update.get("message") or {}
+    joined = msg.get("new_chat_members") or []
+    chat = msg.get("chat") or {}
+    if not joined or not chat.get("id"):
+        return None
+    members = []
+    for m in joined:
+        if not isinstance(m, dict) or not m.get("id"):
+            continue
+        name = " ".join(str(m.get(k) or "").strip() for k in ("first_name", "last_name")).strip()
+        members.append({"id": str(m["id"]), "name": name or str(m.get("username") or ""),
+                        "username": str(m.get("username") or ""), "is_bot": bool(m.get("is_bot"))})
+    return {"chat_id": str(chat["id"]), "group_title": str(chat.get("title") or ""),
+            "members": members}
