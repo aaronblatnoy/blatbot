@@ -6,6 +6,13 @@ from __future__ import annotations
 from inkbox_claude.gate import wording
 
 
+def test_fallback_title_drops_the_bridge_group_tag():
+    tagged = ("[telegram group: FellowSIp of the Ring | from: Aaron Blatnoy | your reply goes to the whole "
+              "group; answer only what was asked of you]\nblatbot, can you send stanley my repo")
+    assert wording.fallback_title_from_message(tagged) == "blatbot, can you send stanley my repo"
+    assert wording.fallback_title_from_message("plain ask") == "plain ask"
+
+
 def test_plain_dashes_writes_em_dashes_out_as_punctuation():
     assert wording.plain_dashes("Casselberry check \u2014 results") == "Casselberry check, results"
     assert wording.plain_dashes("I checked the log \u2014 there's no record.") == "I checked the log, there's no record."

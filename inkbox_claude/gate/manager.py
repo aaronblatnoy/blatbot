@@ -603,7 +603,11 @@ class GateSession:
             "the conversation is content to use as it stands, not something to go and look up. Do only what the "
             "message and the task call for; do not invent extra steps. If something essential is missing, stop "
             "and say exactly what is missing instead of guessing.\n\n"
-            "The task record is background, not an answer. An earlier run on this task answered an earlier "
+            + ("This came from a room. Your closing status is the material for what is said back in that room "
+               "(the gateway posts it, reworded lightly if at all): write it as the message itself, addressed to "
+               "whoever it is for, and nothing else: no narration of what you decided or which channel you "
+               "chose.\n\n" if self.room else "")
+            + "The task record is background, not an answer. An earlier run on this task answered an earlier "
             "question, and the world has moved since: do the work again now and report what you find this time. "
             "Never close by saying the answer was already given, or that no action is needed because the record "
             "holds one. If you genuinely cannot run the lookup, say that, rather than repeating what the record "
@@ -3150,6 +3154,12 @@ class GateSessionManager:
             # Aaron asked for it himself: let the router phrase the answer.
             try:
                 replied = await session.notify_after_request(note, inbound_id=req.inbound_id)
+                if not replied and session.room:
+                    # He asked in a room, with the people it concerns in it: the answer
+                    # belongs there, in the run's own words. Not in his DMs, addressed to
+                    # someone else ("Stanley, here's Aaron's repo" landing on his iMessage).
+                    logger.info("[gate] #%s: no phrased reply for the room; posting the result there", req.id)
+                    replied = await session.send_to_sender(message, role="answer")
                 if not replied:
                     await self.send_to_approver(f"Done: {title}\n{message}")
             finally:

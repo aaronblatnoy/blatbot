@@ -1800,6 +1800,41 @@ def test_a_group_thread_tells_the_executor_where_it_is(tmp_path):
     assert prompt.index("WHERE YOU ARE") < prompt.index("THEIR MESSAGE")
 
 
+def test_a_room_request_tells_the_run_its_status_is_the_room_reply(tmp_path):
+    """In a room the closing status becomes what is said there, so it is written as that
+    message and not as a note about which channel the run picked."""
+    m, sent = make_manager(tmp_path)
+    s = m.get("tg:-1")
+    s.room = "--- WHERE YOU ARE ---\nThis is a group chat and you are one of its members."
+    task = m.store.create_task("x", [])
+    assert "no narration of what you decided" in s.build_task_prompt("send stanley my repo", [], task)
+    assert "no narration of what you decided" not in m.get("c1").build_task_prompt("send stanley my repo", [], task)
+
+
+def test_a_room_request_whose_reply_the_router_dropped_is_answered_in_the_room(tmp_path):
+    """"Send Stanley my repo", asked in a group. The router phrased nothing, and the old
+    fallback DM'd Aaron the run's words, addressed to Stanley ("I am not Stanley"). The
+    ask was made in the room with Stanley in it; the result goes there."""
+    m, sent = make_manager(tmp_path)
+    s = m.get("tg:-1")
+    s.room = "--- WHERE YOU ARE ---\nThis is a group chat and you are one of its members."
+    s.mode = "telegram"
+    s.reply_meta = {"sender": "telegram:1", "to": "-1", "telegram_chat_id": "-1", "conversation_kind": "group"}
+    m._is_owner_request = lambda req: True
+    m.router.next_note = RouterOutput(reply=None, task=None)
+    m.executor.result = {"ok": True, "summary": "Stanley, here is Aaron's repo: https://github.com/x/y",
+                         "tool_calls": [], "raw": "Stanley, here is Aaron's repo: https://github.com/x/y"}
+    task = m.store.create_task("Send Stanley the repo", [])
+    req = m.store.create_request(chat_id="tg:-1", sender="telegram:1", sender_name="Aaron", mode="telegram",
+                                 subject="", original_message="blatbot, send stanley my repo",
+                                 summary="Send Stanley the repo", scopes=["web"], prompt="p", state="approved",
+                                 task_id=task["id"])
+    asyncio.run(m.execute(req))
+    room = [txt for target, txt, *_ in sent if target == "tg:-1"]
+    assert any("github.com/x/y" in txt for txt in room), "the answer belongs in the room the ask was made in"
+    assert not [x for x in sent if x[2] == "imessage"], "nothing addressed to Stanley lands in Aaron's DMs"
+
+
 def test_the_executor_sees_whole_messages(tmp_path):
     """No clipping: a long line reaches the executor intact."""
     m, sent = make_manager(tmp_path)
