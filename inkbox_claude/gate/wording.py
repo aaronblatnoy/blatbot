@@ -602,6 +602,32 @@ def plain_title(store: Any, req: Any) -> str:
 _CHANGING_TOOL_RE = re.compile(r"(^|_)(create|update|delete|manage|remove|write)(_|$)")
 
 
+# Aaron's standing rule for anything Blatbot writes to a person: no em dashes.
+# The writers are told so; this is the floor under them, applied once at the
+# send boundary (manager.send and the three send tools) so a dash that slips
+# through a model never reaches a subject line or a text.
+_DASH_LEAD_RE = re.compile(r"(?m)^([ \t]*)[\u2014\u2015][ \t]*")      # "— Blatbot" sign-off
+_DASH_TAIL_RE = re.compile(r"(?m)[ \t]*[\u2014\u2015][ \t]*$")        # a dangling dash at line end
+_DASH_MID_RE = re.compile(r"[ \t]*[\u2014\u2015][ \t]*")               # "check — results"
+_EN_DASH_SPACED_RE = re.compile(r"[ \t]+\u2013[ \t]+")                  # " – " used as an em dash
+_DOUBLE_PUNCT_RE = re.compile(r", ([,.;:!?])")
+
+
+def plain_dashes(text: str) -> str:
+    """The same text with every em dash written out as ordinary punctuation:
+    a comma mid-sentence, a hyphen at the start of a line (a sign-off),
+    nothing at the end of one. An en dash between words with spaces round it
+    is the same mark in disguise and gets the same treatment; one inside a
+    range (9–5, 2024–25) is left alone."""
+    if not text or not any(ch in text for ch in "\u2014\u2015\u2013"):
+        return text
+    out = _DASH_LEAD_RE.sub(r"\1- ", text)
+    out = _DASH_TAIL_RE.sub("", out)
+    out = _DASH_MID_RE.sub(", ", out)
+    out = _EN_DASH_SPACED_RE.sub(", ", out)
+    return _DOUBLE_PUNCT_RE.sub(r"\1", out)
+
+
 def truly_read_only(scope: str) -> bool:
     """A scope the registry marks `read` whose tools also cannot change anything.
     Some `read` scopes carry a create/update/manage tool (contacts, the calendars);

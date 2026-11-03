@@ -592,13 +592,17 @@ class GateSession:
             + (f"Subject: {subject}\n" if subject else "")
             + f"\n--- THEIR MESSAGE (verbatim) ---\n{body.strip()}\n"
             + _what_it_answers(body, history)
+            + _what_it_supplies(body, _last_failed_run(self.m.store, task))
             + "\n"
             f"--- RECENT CONVERSATION WITH THEM ---\n{convo}\n\n"
             f"--- THE TASK THIS BELONGS TO ---\n{ledger}\n\n"
             "Work out what they are asking for, or what this message makes possible on the task (for example, "
-            "information the task was waiting for), and do it with your tools. Do only what the message and the "
-            "task call for; do not invent extra steps. If something essential is missing, stop and say exactly "
-            "what is missing instead of guessing.\n\n"
+            "information the task was waiting for), and do it with your tools. A bare reference in the message "
+            "(this, that, it, the list, the report) points at the nearest earlier message in the conversation "
+            "above that fits, most often the one just before it, from either side; a block of text pasted into "
+            "the conversation is content to use as it stands, not something to go and look up. Do only what the "
+            "message and the task call for; do not invent extra steps. If something essential is missing, stop "
+            "and say exactly what is missing instead of guessing.\n\n"
             "The task record is background, not an answer. An earlier run on this task answered an earlier "
             "question, and the world has moved since: do the work again now and report what you find this time. "
             "Never close by saying the answer was already given, or that no action is needed because the record "
@@ -1741,6 +1745,45 @@ def _what_it_answers(body: str, history: List[Dict[str, Any]]) -> str:
     return ""
 
 
+def _last_failed_run(store: Any, task: Optional[Dict[str, Any]]) -> str:
+    """What the task's most recent run said when it failed, or "" when its last run
+    succeeded or nothing has run. Read from the store, since the task dict a turn
+    carries does not always come with its events."""
+    tid = int((task or {}).get("id") or 0)
+    if not tid:
+        return ""
+    try:
+        full = store.task_with_events(tid, limit=12) or {}
+    except Exception:
+        return ""
+    for e in reversed(full.get("events") or []):
+        kind = e.get("kind")
+        if kind == "failed":
+            return " ".join(str(e.get("text") or "").split())
+        if kind == "done":
+            return ""
+    return ""
+
+
+def _what_it_supplies(body: str, last_failed: str) -> str:
+    """The last run on this task stopped short, and here is a new message that is not a
+    bare yes or no. Most often it is the sender handing over what that run said was
+    missing: the report pasted in, the address, the name. Said so beside the message,
+    so the run reads it as the answer to its own failure rather than as a fresh
+    remark to acknowledge. (A short reply is _what_it_answers' case, not this one.)"""
+    if not last_failed:
+        return ""
+    if _SHORT_REPLY.match(" ".join((body or "").split())):
+        return ""
+    said = last_failed if len(last_failed) <= 500 else last_failed[:500] + "..."
+    return ("\nThe last run on this task stopped short. It said:\n"
+            f"  {said}\n"
+            "If this message supplies what that run lacked (content pasted in, a document, a name, an "
+            "address, a date, a choice), it is the answer to that failure: carry out the original request "
+            "with it now rather than acknowledging it. If it only asks whether the work was done, answer "
+            "that plainly and say what is now in hand.\n")
+
+
 def _owner_request(manager: Any, req: Request) -> bool:
     """Whether a request came from the person the assistant works for. Read through the
     manager when it can answer, so a stand-in without the machinery simply says no."""
@@ -1908,6 +1951,7 @@ class GateSessionManager:
         """Every outbound message goes through here, and every one of them is written to a
         thread. What was said is what can be referred to later, so a message that was sent
         but never recorded leaves the next turn reading a conversation that did not happen."""
+        text = wording.plain_dashes(text)
         await self.send_fn(target, text, mode, meta)
         if not record:
             return      # the caller writes its own line, with the turn's reply_to and role

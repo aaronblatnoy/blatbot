@@ -1681,6 +1681,37 @@ def test_a_bare_confirmation_carries_the_question_it_answers(tmp_path):
     assert _what_it_answers("book me a flight", h) == ""
 
 
+def test_content_pasted_after_a_failed_run_is_read_as_its_answer(tmp_path):
+    """"Email this" failed for want of the thing; the report pasted next is that thing.
+    The prompt says so, so the run sends it rather than saying thanks."""
+    from inkbox_claude.gate.manager import _what_it_supplies
+    failed = "Email this to viktor@example.com -> Missing: what content should be in the email."
+    report = "Casselberry check is done. 137 checked, 118 matched, 3 with a future appointment."
+    out = _what_it_supplies(report, failed)
+    assert "stopped short" in out and "Missing: what content" in out
+    assert "carry out the original request" in out
+    assert _what_it_supplies(report, "") == "", "nothing failed, nothing to answer"
+    assert _what_it_supplies("yes", failed) == "", "a bare yes is _what_it_answers' case"
+
+
+def test_last_failed_run_reads_the_newest_outcome(tmp_path):
+    from inkbox_claude.gate.manager import _last_failed_run
+
+    class _Store:
+        def __init__(self, events):
+            self.events = events
+
+        def task_with_events(self, tid, limit=8):
+            return {"id": tid, "events": self.events}
+
+    failed_then_nothing = [{"kind": "inbound", "text": "Email this"},
+                           {"kind": "failed", "text": "Email this -> Missing: the content"}]
+    assert "Missing: the content" in _last_failed_run(_Store(failed_then_nothing), {"id": 7})
+    done_since = failed_then_nothing + [{"kind": "done", "text": "sent"}]
+    assert _last_failed_run(_Store(done_since), {"id": 7}) == ""
+    assert _last_failed_run(_Store([]), None) == ""
+
+
 def test_a_trusted_person_runs_their_own_scopes_and_nothing_more(tmp_path):
     """Everyone starts with nothing. A person Aaron has trusted for certain scopes runs
     those without waking him; the same person asking for anything else still waits."""

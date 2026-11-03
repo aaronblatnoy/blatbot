@@ -321,6 +321,11 @@ class TaskPicker:
                     "A correction, addition or 'try again' on a task whose `last_action_on_that_task` already "
                     "ran (done or failed): the sender wants it done again with the change ('should be 30 minutes', "
                     "'the other one', 'give it those scopes', 'no, Friday', 'yes, resubmit').",
+                    "`last_action_on_that_task` or `last_thing_the_assistant_said` says the last run stopped for "
+                    "want of content or a detail, and the new message supplies it: a pasted document, report or "
+                    "list, a block of text, a name, an address, a date, a choice. That is the sender answering "
+                    "the failure, not an acknowledgement or small talk, however long the paste; the request runs "
+                    "again with it.",
                     "A follow-up question whose answer is not in the conversation and must come from the same "
                     "source again ('what was the document called', 'give me the link', 'and their emails?').",
                 ],

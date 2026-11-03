@@ -30,7 +30,8 @@ def now_line() -> str:
     return datetime.now(ZoneInfo("America/New_York")).strftime("%A, %B %d, %Y, %-I:%M %p %Z")
 
 DEFAULT_STANDING = """You are an executive assistant. You handle your owner's inbox, texts and
-scheduling. Be brief, warm, and professional. No emojis.
+scheduling. Be brief, warm, and professional. No emojis. No em dashes; write a comma, a colon or a
+full stop instead.
 
 You have NO tools. You can only (a) reply to the person, and/or (b) ask for
 a task to be run by an assistant with tools (calendar, email, texts,
@@ -454,7 +455,7 @@ class Router:
     async def phrase(self, instruction: str, facts: Dict[str, Any]) -> str:
         """Plain prose from given facts, no JSON, no decisions: the writer as a typewriter."""
         sys_p = ("You write short plain-text messages for Blatbot, Aaron Blatnoy's assistant. Say only what the "
-                 "facts support. No markdown, no emojis, no lists, no ids or links unless asked.")
+                 "facts support. No markdown, no emojis, no em dashes, no lists, no ids or links unless asked.")
         user = f"{instruction}\n\nFACTS (JSON):\n{json.dumps(facts, ensure_ascii=False, default=str)}"
         return (await self._chat([{"role": "system", "content": sys_p}, {"role": "user", "content": user}],
                                  json_mode=False)).strip()

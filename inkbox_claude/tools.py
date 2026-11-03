@@ -20,6 +20,8 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 from urllib.parse import parse_qsl, urlencode, urlparse, urlunparse
 
+from .gate.wording import plain_dashes as _plain_dashes
+
 try:
     from .media import file_to_email_attachment
 except ImportError:  # pragma: no cover - direct local import/test fallback
@@ -391,8 +393,8 @@ def build_inkbox_mcp_server(
             attachments = [file_to_email_attachment(str(p)) for p in paths] or None
             msg = _identity().send_email(
                 to=[target],
-                subject=str(args.get("subject") or ""),
-                body_text=str(args.get("body") or ""),
+                subject=_plain_dashes(str(args.get("subject") or "")),
+                body_text=_plain_dashes(str(args.get("body") or "")),
                 attachments=attachments,
             )
             return {"sent": True, "id": str(getattr(msg, "id", "")), "attachments": len(paths)}
@@ -414,7 +416,7 @@ def build_inkbox_mcp_server(
         {"to": str, "text": str, "media_paths": list, "media_urls": list},
     )
     async def inkbox_send_sms(args: Dict[str, Any]) -> Dict[str, Any]:
-        text = str(args.get("text") or "")
+        text = _plain_dashes(str(args.get("text") or ""))
         target = str(args.get("to") or "").strip()
         blocked = _hosted_sms_preflight(target)
         if blocked:
@@ -473,7 +475,7 @@ def build_inkbox_mcp_server(
         {"conversation_id": str, "to": list, "text": str, "media_path": str},
     )
     async def inkbox_send_imessage(args: Dict[str, Any]) -> Dict[str, Any]:
-        text = str(args.get("text") or "")
+        text = _plain_dashes(str(args.get("text") or ""))
         conversation_id = str(args.get("conversation_id") or "").strip()
         to_list = _normalize_imessage_recipients(args.get("to"))
         if bool(to_list) == bool(conversation_id):

@@ -6,6 +6,20 @@ from __future__ import annotations
 from inkbox_claude.gate import wording
 
 
+def test_plain_dashes_writes_em_dashes_out_as_punctuation():
+    assert wording.plain_dashes("Casselberry check \u2014 results") == "Casselberry check, results"
+    assert wording.plain_dashes("I checked the log \u2014 there's no record.") == "I checked the log, there's no record."
+    assert wording.plain_dashes("sent \u2014 Blatbot") == "sent, Blatbot"
+    assert wording.plain_dashes("Thanks for today.\n\u2014 Blatbot") == "Thanks for today.\n- Blatbot"
+    assert wording.plain_dashes("and then \u2014") == "and then"
+    assert wording.plain_dashes("done \u2014 , really") == "done, really"
+    assert wording.plain_dashes("open 9\u20135, 2024\u201325") == "open 9\u20135, 2024\u201325", "ranges keep their en dash"
+    assert wording.plain_dashes("the list \u2013 all eight") == "the list, all eight", "a spaced en dash is an em dash in disguise"
+    plain = "No dashes here, just a comma."
+    assert wording.plain_dashes(plain) is plain
+    assert wording.plain_dashes("") == ""
+
+
 BUFFER_ERROR = (
     "Failed to decode JSON: JSON message exceeded maximum buffer size of "
     "1048576 bytes while reading from the executor's stdout pipe."
