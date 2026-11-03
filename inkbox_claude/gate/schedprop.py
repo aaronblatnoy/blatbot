@@ -270,6 +270,13 @@ def capability_match(text: str) -> Optional[str]:
     return found[0] if found else None
 
 
+def scopes_named(text: str) -> List[str]:
+    """Every known scope whose label or a synonym appears in `text`, whole-phrase,
+    in the order found -- capability_match() without stopping at the first. Used by
+    accesscmd.py to read "let Stanley read the TAMID calendar"."""
+    return _said_scopes(text or "")
+
+
 # ---------------------------------------------------------------------------
 # Report-every-time default (item 4): a digest hears every time by default, a
 # watch only on change, unless the router states a value explicitly (that

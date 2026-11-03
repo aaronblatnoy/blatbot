@@ -428,3 +428,59 @@ def test_an_exception_still_gets_the_plain_failure_wording():
               "final_status": "partial notes"}
     assert wording.run_own_explanation(status) == ""
     assert "ran out of room" in wording.failure_message("the task", status)
+
+
+
+# ---------------------------------------------------------------------------
+# Access, room-mode and setting lines: the state, never the action
+# ---------------------------------------------------------------------------
+
+def test_access_line_states_the_state_and_only_says_was_when_it_changed():
+    from inkbox_claude.gate import wording as w
+    changed = w.access_line("Stanley Rabkin", ["corgi teammate"], ["calendar"],
+                            old_roles=["general"], old_scopes=[])
+    assert changed == "Stanley Rabkin: corgi teammate (was general); can look up and manage the TAMID calendar."
+    same = w.access_line("Stanley Rabkin", ["corgi teammate"], ["calendar"],
+                         old_roles=["corgi teammate"], old_scopes=["calendar"])
+    read_back = w.access_line("Stanley Rabkin", ["corgi teammate"], ["calendar"])
+    assert same == read_back == "Stanley Rabkin: corgi teammate; can look up and manage the TAMID calendar."
+
+
+def test_access_line_names_a_grant_by_label_never_by_scope_id():
+    from inkbox_claude.gate import wording as w
+    line = w.access_line("Stanley Rabkin", ["general"], ["calendar"], old_roles=["general"], old_scopes=[])
+    assert line == ("Stanley Rabkin: general; can look up and manage the TAMID calendar "
+                    "(was nothing without asking).")
+    line = w.access_line("Stanley Rabkin", ["general"], [], old_roles=["general"], old_scopes=["calendar"])
+    assert line == ("Stanley Rabkin: general; asks you before doing anything "
+                    "(removed: look up and manage the TAMID calendar).")
+    for text in (line, w.mode_line("Room", "mention", old_mode="natural")):
+        assert "\u2014" not in text and "calendar" not in text.split(":")[0] and "*" not in text
+
+
+def test_mode_line_change_repeat_and_read_back():
+    from inkbox_claude.gate import wording as w
+    assert w.mode_line("FellowSIp of the Ring", "silent", old_mode="mention") == \
+        "FellowSIp of the Ring: silent, never speaks (was mention)."
+    assert w.mode_line("FellowSIp of the Ring", "silent", old_mode="silent") == \
+        w.mode_line("FellowSIp of the Ring", "silent") == "FellowSIp of the Ring: silent, never speaks."
+    assert w.mode_line("Room", "mention", default=True) == "Room: mention, speaks only when named (the default)."
+
+
+def test_setting_line_change_and_unchanged():
+    from inkbox_claude.gate import wording as w
+    assert w.setting_line("Bar for speaking in a group unprompted", 0.6, "number", old_value=0.45,
+                          changed=True) == "Bar for speaking in a group unprompted: 0.6 (was 0.45)."
+    assert w.setting_line("Bar for speaking in a group unprompted", 0.6, "number", old_value=0.6,
+                          changed=True) == "Bar for speaking in a group unprompted: 0.6."
+    assert w.setting_line("Show me anything it would send", False, "bool", old_value=True, changed=True) == \
+        "Show me anything it would send: off (was on)."
+    assert w.setting_line("Which engine does the work", "jev", "choice", old_value="claude", changed=True,
+                          restart=True) == "Which engine does the work: jev (was claude); takes effect after a restart."
+
+
+def test_who_has_line():
+    from inkbox_claude.gate import wording as w
+    assert w.who_has_line("look up and manage the TAMID calendar", ["Stanley Rabkin", "Sean Parnell"]) == \
+        "Look up and manage the TAMID calendar: Sean Parnell and Stanley Rabkin."
+    assert w.who_has_line("corgi teammate", []) == "Corgi teammate: nobody but you."

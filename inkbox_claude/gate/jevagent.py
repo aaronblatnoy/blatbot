@@ -110,6 +110,8 @@ VIRTUAL_TOOLS: Dict[str, Dict[str, Any]] = {
     "mcp__host__admin_set_person_role": {"description": hosttools.ADMIN_SET_PERSON_ROLE_DESCRIPTION, "schema": hosttools.ADMIN_SET_PERSON_ROLE_SCHEMA},
     "mcp__host__admin_schedule": {"description": hosttools.ADMIN_SCHEDULE_DESCRIPTION, "schema": hosttools.ADMIN_SCHEDULE_SCHEMA},
     "mcp__host__admin_set_chat_mode": {"description": hosttools.ADMIN_SET_CHAT_MODE_DESCRIPTION, "schema": hosttools.ADMIN_SET_CHAT_MODE_SCHEMA},
+    "mcp__host__admin_set_person_access": {"description": hosttools.ADMIN_SET_PERSON_ACCESS_DESCRIPTION, "schema": hosttools.ADMIN_SET_PERSON_ACCESS_SCHEMA},
+    "mcp__host__admin_show_access": {"description": hosttools.ADMIN_SHOW_ACCESS_DESCRIPTION, "schema": hosttools.ADMIN_SHOW_ACCESS_SCHEMA},
     # A web search done THROUGH the browser: the Playwright server opens the local
     # SearXNG results page (which queries Google/Bing server-side, so no bot walls)
     # and reads it. Two browser calls, one tool from the agent's point of view.
@@ -324,6 +326,8 @@ class ToolBox:
                 "mcp__host__admin_set_person_role": hosttools.admin_set_person_role,
                 "mcp__host__admin_schedule": hosttools.admin_schedule,
                 "mcp__host__admin_set_chat_mode": hosttools.admin_set_chat_mode,
+                "mcp__host__admin_set_person_access": hosttools.admin_set_person_access,
+                "mcp__host__admin_show_access": hosttools.admin_show_access,
             }.get(name)
             if fn is None:
                 raise ValueError(f"unknown admin tool: {name}")

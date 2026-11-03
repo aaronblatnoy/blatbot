@@ -419,6 +419,8 @@ BLATBOT_ADMIN_TOOLS: List[str] = [
     "mcp__host__admin_set_person_role",
     "mcp__host__admin_schedule",
     "mcp__host__admin_set_chat_mode",
+    "mcp__host__admin_set_person_access",
+    "mcp__host__admin_show_access",
 ]
 
 _generated_tools_for = tools_for

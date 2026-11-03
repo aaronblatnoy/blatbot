@@ -643,3 +643,162 @@ def truly_read_only(scope: str) -> bool:
         return False
     tools = [t.rsplit("__", 1)[-1] for t in (SCOPES.get(scope) or {}).get("tools") or []]
     return not any(_CHANGING_TOOL_RE.search(t) for t in tools)
+
+
+# ---------------------------------------------------------------------------
+# Access and room-mode lines (accesscmd.py, the admin_* host tools, the "blatbot
+# mode ..." command, and the console's person panel). Each states the resulting
+# state, never the action, so a change, a repeat of it, and a read-back all read
+# the same; "(was ...)" appears only when this very message changed something.
+# Scopes are always named by their registry label, never their id.
+# ---------------------------------------------------------------------------
+
+NO_ROLE = "no role"
+ASKS_FIRST = "asks you before doing anything"
+COMMANDER_NOT_FROM_CHAT = "Commander stays with you alone; that does not change from chat."
+ABILITY_UNKNOWN = ('I can\'t tell which access that is. Say it in plain words, like "read the TAMID '
+                   'calendar" or "Corgi access".')
+MODE_UNKNOWN = "The modes are natural, mention and silent."
+
+MODE_MEANING = {
+    "natural": "speaks when it judges a message is for it",
+    "mention": "speaks only when named",
+    "silent": "never speaks",
+}
+
+
+def _and_list(items: List[str], joiner: str = "and") -> str:
+    items = [i for i in items if i]
+    if len(items) <= 1:
+        return "".join(items)
+    if len(items) == 2:
+        return f"{items[0]} {joiner} {items[1]}"
+    return ", ".join(items[:-1]) + f", {joiner} " + items[-1]
+
+
+def _registry_order(scopes: Any) -> List[str]:
+    held = set(scopes or [])
+    return [s for s in _scopes.SCOPES if s in held] + sorted(s for s in held if s not in _scopes.SCOPES)
+
+
+def access_can_text(scopes: Any) -> str:
+    """What a person may do without asking Aaron, by label: "can look up and manage
+    the TAMID calendar", or ASKS_FIRST when that is nothing."""
+    ordered = _registry_order(scopes)
+    return ("can " + schedprop.labels(ordered)) if ordered else ASKS_FIRST
+
+
+def access_line(name: str, roles: List[str], scopes: Any, *, old_roles: Optional[List[str]] = None,
+                old_scopes: Any = None) -> str:
+    """"Stanley Rabkin: corgi teammate (was general); can look up Corgi Command."
+    old_roles/old_scopes are what held before this message; equal (or None) means
+    nothing changed and no "(was ...)" is added, so asking again reads the same."""
+    role_text = _and_list(list(roles)) or NO_ROLE
+    line = f"{name}: {role_text}"
+    roles_changed = old_roles is not None and list(old_roles) != list(roles)
+    if roles_changed:
+        line += f" (was {_and_list(list(old_roles)) or NO_ROLE})"
+    line += "; " + access_can_text(scopes)
+    if not roles_changed and old_scopes is not None:
+        before, after = set(old_scopes or []), set(scopes or [])
+        added, removed = _registry_order(after - before), _registry_order(before - after)
+        if not before and added:
+            line += " (was nothing without asking)"
+        elif added or removed:
+            parts = (["new: " + schedprop.labels(added)] if added else []) + \
+                    (["removed: " + schedprop.labels(removed)] if removed else [])
+            line += " (" + "; ".join(parts) + ")"
+    return line + "."
+
+
+def commander_line(name: str) -> str:
+    return f"{name}: commander; full control."
+
+
+def commander_fixed(name: str) -> str:
+    return f"{name}: commander; full control. That does not change from chat."
+
+
+def person_not_found(text: str) -> str:
+    return f"No one called {' '.join(str(text or '').split())} is in People yet."
+
+
+def person_ambiguous(text: str, names: List[str]) -> str:
+    return f"{' '.join(str(text or '').split())} could be {_and_list(sorted(names), 'or')}. Say the full name."
+
+
+def role_unknown(text: str, roles: List[str]) -> str:
+    return (f"There is no role called {' '.join(str(text or '').split())}. "
+            f"The roles are {_and_list(sorted(roles))}.")
+
+
+def who_has_line(subject: str, holders: List[str]) -> str:
+    """"Look up and manage the TAMID calendar: Sean Parnell and Stanley Rabkin." --
+    everyone but Aaron himself, who always has full control."""
+    subject = " ".join(str(subject or "").split())
+    subject = subject[:1].upper() + subject[1:]
+    names = sorted({h for h in holders if h})
+    return f"{subject}: {_and_list(names) if names else 'nobody but you'}."
+
+
+def chat_not_found(text: str) -> str:
+    return f"I could not find a group chat called {' '.join(str(text or '').split())}."
+
+
+def mode_line(title: str, mode: str, *, old_mode: Optional[str] = None, default: bool = False) -> str:
+    """"FellowSIp of the Ring: mention, speaks only when named (was natural)." """
+    line = f"{' '.join(str(title or 'This chat').split())}: {mode}, {MODE_MEANING.get(mode, mode)}"
+    if default:
+        line += " (the default)"
+    if old_mode is not None and old_mode != mode:
+        line += f" (was {old_mode})"
+    return line + "."
+
+
+def setting_value_text(value: Any, kind: str = "") -> str:
+    """A setting's value the way a person says it: on/off, 0.6 (never 0.60 or 1.0
+    for 1), or the text itself, "blank" when empty."""
+    if kind == "bool" or isinstance(value, bool):
+        return "on" if value in (True, "1", "true", "on", 1) else "off"
+    if kind == "number" or isinstance(value, (int, float)):
+        try:
+            f = float(value)
+        except (TypeError, ValueError):
+            return str(value)
+        return str(int(f)) if f == int(f) else f"{f:g}"
+    text = " ".join(str(value if value is not None else "").split())
+    return text or "blank"
+
+
+def setting_line(label: str, value: Any, kind: str = "", *, old_value: Any = None, changed: bool = False,
+                 restart: bool = False) -> str:
+    """"Bar for speaking in a group unprompted: 0.6 (was 0.45)." on a change, the same
+    line without "(was ...)" when asked or already so. A knob the service reads only at
+    start says so, on the change only."""
+    now = setting_value_text(value, kind)
+    line = f"{label}: {now}"
+    if changed:
+        before = setting_value_text(old_value, kind)
+        if before != now:
+            line += f" (was {before})"
+            if restart:
+                line += "; takes effect after a restart"
+    return line + "."
+
+
+def setting_unknown(text: str) -> str:
+    return f"I don't have a setting called {' '.join(str(text or '').split())}. Ask for my settings to see them all."
+
+
+def setting_refused(label: str, why: str) -> str:
+    return f"{label}: unchanged; {why}."
+
+
+def schedule_line(title: str, state_text: str, *, was: Optional[str] = None) -> str:
+    """"GiveSmart monitor: every 4 hours, next 4:24 AM." or "GiveSmart monitor:
+    paused (was running)." -- the schedule's state, the same line whether it was
+    just changed or merely asked about; "(was ...)" only on a real change."""
+    line = f"{' '.join(str(title or '').split())}: {state_text}"
+    if was and was != state_text:
+        line += f" (was {was})"
+    return line + "."

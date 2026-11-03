@@ -50,6 +50,7 @@ class DecideState(TypedDict, total=False):
     task_summary: Optional[str]
     schedule: Any
     schedule_command: Any
+    access_command: Any
     # the request path's outputs (code + Jev)
     task: Optional[Dict[str, Any]]
     request: Any                    # RouterRequest or None
@@ -166,7 +167,8 @@ async def write_reply(state: DecideState, config: RunnableConfig) -> Dict[str, A
     verdict = (await picker.judge_reply(reply=out.reply, message=state["message"])
                if out.reply and hasattr(picker, "judge_reply") else {})
     return {"reply_verdict": verdict, "reply": out.reply, "task_title": out.task_title, "task_summary": out.task_summary,
-            "schedule": out.schedule, "schedule_command": out.schedule_command}
+            "schedule": out.schedule, "schedule_command": out.schedule_command,
+            "access_command": out.access_command}
 
 
 # ----------------------------------------------------------------------------- the request (code + Jev)
@@ -256,13 +258,15 @@ async def finalize(state: DecideState, config: RunnableConfig) -> Dict[str, Any]
     out = RouterOutput(reply=state.get("reply"), task=state["task_choice"], task_title=state.get("task_title"),
                        task_summary=state.get("task_summary"), schedule=state.get("schedule"),
                        schedule_command=state.get("schedule_command"),
+                       access_command=state.get("access_command"),
                        # A schedule proposal or a schedule command is its own path through
                        # the session (manager.py routes on out.schedule / out.schedule_command
                        # before ever looking at out.request); an ordinary request built
                        # alongside one by the parallel request branch must not also fire.
                        request=(state.get("request")
                                 if state["needs_action"] and not state.get("schedule")
-                                and not state.get("schedule_command") else None))
+                                and not state.get("schedule_command")
+                                and not state.get("access_command") else None))
     asking = bool(state["needs_action"] and not state["actionable"])
     picker = s.m.task_picker
     verdict = state.get("reply_verdict", {})
@@ -367,7 +371,7 @@ async def decide(session: Any, *, body: str, message: str, prior: List[Dict[str,
     initial: DecideState = {"body": body, "message": message, "prior": prior, "mode": mode, "memory": memory,
                             "found": found, "task_choice": None, "pick": "", "needs_action": False, "p_action": 0.0,
                             "reply": None, "task_title": None, "task_summary": None, "schedule": None,
-                            "schedule_command": None,
+                            "schedule_command": None, "access_command": None,
                             "task": None, "request": None,
                             "out": None}
     final = await graph().ainvoke(initial, config={"configurable": {"session": session}})

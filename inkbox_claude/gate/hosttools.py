@@ -211,11 +211,19 @@ def sdk_server(*, vault_prefixes: Optional[List[str]] = None, manager: Any = Non
     async def _admin_set_chat_mode(args: Dict[str, Any]) -> Dict[str, Any]:
         return {"content": [{"type": "text", "text": await admin_set_chat_mode(args, manager, is_commander)}]}
 
+    @tool("admin_set_person_access", ADMIN_SET_PERSON_ACCESS_DESCRIPTION, ADMIN_SET_PERSON_ACCESS_SCHEMA)
+    async def _admin_set_person_access(args: Dict[str, Any]) -> Dict[str, Any]:
+        return {"content": [{"type": "text", "text": await admin_set_person_access(args, manager, is_commander)}]}
+
+    @tool("admin_show_access", ADMIN_SHOW_ACCESS_DESCRIPTION, ADMIN_SHOW_ACCESS_SCHEMA)
+    async def _admin_show_access(args: Dict[str, Any]) -> Dict[str, Any]:
+        return {"content": [{"type": "text", "text": await admin_show_access(args, manager, is_commander)}]}
+
     tools = [_host_status, _vault_search, _vault_read, _vault_list,
              _telegram_find_chats, _telegram_list_chats, _telegram_read_chat,
              _admin_list_settings, _admin_get_setting, _admin_set_setting,
              _admin_list_roles, _admin_set_role_scopes, _admin_set_person_role,
-             _admin_schedule, _admin_set_chat_mode]
+             _admin_schedule, _admin_set_chat_mode, _admin_set_person_access, _admin_show_access]
     return create_sdk_mcp_server(name="host", version="1.0.0", tools=tools)
 
 
@@ -535,7 +543,30 @@ ADMIN_SET_PERSON_ROLE_DESCRIPTION = (
 )
 ADMIN_SET_PERSON_ROLE_SCHEMA = {"type": "object", "required": ["person", "role"], "properties": {
     "person": {"type": "string", "description": "a person's display name, or a contact value (email, phone, Telegram id)"},
-    "role": {"type": "string", "description": "the role name to set them to, e.g. corgi teammate, general"}}}
+    "role": {"type": "string", "description": "the role name, e.g. corgi teammate, general"},
+    "how": {"type": "string", "enum": ["set", "add", "remove"],
+            "description": "set: that role and no other (default); add: join it, keeping their other roles; "
+                           "remove: leave it"}}}
+
+ADMIN_SET_PERSON_ACCESS_DESCRIPTION = (
+    "GRANT OR REVOKE ONE PERSON'S ACCESS (what they may do without asking Aaron), by display name or contact "
+    "value, and the access in plain words (\"read the TAMID calendar\", \"Corgi access\") or exact scope names. "
+    "A revoke also takes off any role of theirs that gives that access. Returns the person's resulting state in "
+    "one line; repeat it to Aaron exactly. Commander-only."
+)
+ADMIN_SET_PERSON_ACCESS_SCHEMA = {"type": "object", "required": ["person", "grant"], "properties": {
+    "person": {"type": "string", "description": "a person's display name, or a contact value"},
+    "grant": {"type": "boolean", "description": "true to grant, false to revoke"},
+    "abilities": {"type": "string", "description": "the access in Aaron's own words"},
+    "scopes": {"type": "array", "items": {"type": "string"}, "description": "exact scope names, if known"}}}
+
+ADMIN_SHOW_ACCESS_DESCRIPTION = (
+    "READ BACK WHO MAY DO WHAT: one person's role and access (give person), or everyone who holds an access or "
+    "a role (give access, in plain words). One line; repeat it to Aaron exactly. Commander-only. Read-only."
+)
+ADMIN_SHOW_ACCESS_SCHEMA = {"type": "object", "properties": {
+    "person": {"type": "string", "description": "a person's display name or contact value"},
+    "access": {"type": "string", "description": "an access or role in plain words, e.g. calendar, corgi teammate"}}}
 
 ADMIN_SCHEDULE_DESCRIPTION = (
     "PAUSE, RESUME, OR RUN NOW one Blatbot schedule (console Schedules page), by its title or numeric id. "
@@ -571,42 +602,39 @@ async def admin_list_settings(args: Dict[str, Any], manager: Any, is_commander: 
     refusal = _commander_only(is_commander)
     if refusal:
         return refusal
+    from . import accesscmd
     rows = _settings_rows(manager)
     if not rows:
         return "(no settings registered)"
-    return "\n".join(f"{r['name']} = {r['value']!r} ({r['source']}) -- {r['label']}" for r in rows)
+    # The console name rides in front so a later admin_set_setting call can name it
+    # exactly; the line after it is the one Aaron is shown.
+    return "\n".join(f"{r['name']}: {accesscmd.setting_line_for(r)}" for r in rows)
 
 
 async def admin_get_setting(args: Dict[str, Any], manager: Any, is_commander: bool = False) -> str:
     refusal = _commander_only(is_commander)
     if refusal:
         return refusal
+    from . import accesscmd
     key = str(args.get("key") or "").strip()
-    row = _find_setting(manager, key)
+    row = _find_setting(manager, key) or accesscmd.resolve_setting(key)
     if row is None:
         names = ", ".join(r["name"] for r in _settings_rows(manager))
         return f"ERROR: no setting named {key!r}. Known settings: {names}"
-    return f"{row['name']} = {row['value']!r} ({row['source']}) -- {row['label']}"
+    return accesscmd.setting_line_for(row)
 
 
 async def admin_set_setting(args: Dict[str, Any], manager: Any, is_commander: bool = False) -> str:
     refusal = _commander_only(is_commander)
     if refusal:
         return refusal
-    from ..console import api as console_api
+    from . import accesscmd
     key = str(args.get("key") or "").strip()
-    row = _find_setting(manager, key)
+    row = _find_setting(manager, key) or accesscmd.resolve_setting(key)
     if row is None:
         names = ", ".join(r["name"] for r in _settings_rows(manager))
         return f"ERROR: no setting named {key!r}. Known settings: {names}"
-    old_value = row["value"]
-    try:
-        console_api.settings_set(manager.store, {"name": row["name"], "value": args.get("value")})
-    except console_api.ValidationError as exc:
-        return f"ERROR: {exc}"
-    new_row = _find_setting(manager, row["name"])
-    new_value = new_row["value"] if new_row else args.get("value")
-    return f"Changed {row['label']}: {old_value!r} -> {new_value!r}."
+    return accesscmd.set_setting(manager.store, row["name"], args.get("value"))
 
 
 async def admin_list_roles(args: Dict[str, Any], manager: Any, is_commander: bool = False) -> str:
@@ -672,29 +700,15 @@ async def admin_set_person_role(args: Dict[str, Any], manager: Any, is_commander
     refusal = _commander_only(is_commander)
     if refusal:
         return refusal
-    from ..console import api as console_api
+    from . import accesscmd
     person_text = str(args.get("person") or "").strip()
     role_name = str(args.get("role") or "").strip().lower()
     if not person_text:
         return "ERROR: a person is required"
     if not role_name:
         return "ERROR: a role is required"
-    matches = _match_people(manager, person_text)
-    if not matches:
-        return f"ERROR: no person matches {person_text!r}. Check the exact name on the console People page."
-    if len(matches) > 1:
-        names = "; ".join(
-            f"{m.get('display')} ({', '.join(str(c.get('value')) for c in (m.get('contacts') or []))})"
-            for m in matches)
-        return (f"ERROR: {person_text!r} matches more than one person: {names}. "
-                f"Say which one by their email, phone, or Telegram id.")
-    person = matches[0]
-    old_role = person.get("role") or "(none)"
-    try:
-        console_api.update_person_endpoint(manager.store, {"id": person["id"], "role": role_name})
-    except console_api.ValidationError as exc:
-        return f"ERROR: {exc}"
-    return f"Changed {person.get('display') or person_text}'s role: {old_role} -> {role_name}."
+    how = str(args.get("how") or "set").strip().lower()
+    return accesscmd.change_roles(manager.store, person_text, role_name, how if how in ("add", "remove") else "set")
 
 
 def _match_schedule(manager: Any, text: str) -> Any:
@@ -735,32 +749,43 @@ async def admin_set_chat_mode(args: Dict[str, Any], manager: Any, is_commander: 
     refusal = _commander_only(is_commander)
     if refusal:
         return refusal
+    from . import accesscmd
     chat_text = str(args.get("chat") or "").strip()
-    mode = str(args.get("mode") or "").strip().lower()
     if not chat_text:
         return "ERROR: a chat is required"
     store = getattr(manager, "store", None)
-    set_fn = getattr(store, "set_response_mode", None)
-    if not callable(set_fn):
+    if not callable(getattr(store, "set_response_mode", None)):
         return "Per-chat response modes are not available in the console yet; nothing changed."
-    chat_id, title = chat_text, chat_text
+    # A known group by its title; anything else is taken as the chat's own id, as before.
     find_fn = getattr(store, "find_group_chat_by_name", None)
-    if callable(find_fn):
-        group = find_fn(chat_text)
-        if group:
-            chat_id, title = group["chat_id"], group["title"]
-    get_fn = getattr(store, "get_response_mode", None)
-    old_mode = (get_fn(chat_id) if callable(get_fn) else "") or "(default)"
-    # The same console/api.py function the console's dropdown POSTs to
-    # (console/api.py groups_set_mode), when it exists; falls back to the
-    # store method directly for a build where that endpoint has not landed yet.
-    from ..console import api as console_api
-    set_mode_endpoint = getattr(console_api, "groups_set_mode", None)
-    try:
-        if callable(set_mode_endpoint):
-            set_mode_endpoint(store, {"chat_id": chat_id, "response_mode": mode})
-        else:
-            set_fn(chat_id, mode)
-    except (ValueError, getattr(console_api, "ValidationError", ValueError)) as exc:
-        return f"ERROR: {exc}"
-    return f"Changed {title}'s response mode: {old_mode} -> {mode}."
+    known = find_fn(chat_text) if callable(find_fn) else None
+    return accesscmd.set_mode(store, chat_text if known else "", str(args.get("mode") or ""),
+                              (chat_text, chat_text))
+
+
+async def admin_set_person_access(args: Dict[str, Any], manager: Any, is_commander: bool = False) -> str:
+    refusal = _commander_only(is_commander)
+    if refusal:
+        return refusal
+    from . import accesscmd
+    person_text = str(args.get("person") or "").strip()
+    if not person_text:
+        return "ERROR: a person is required"
+    grant = bool(args.get("grant", True))
+    scopes = [str(s) for s in (args.get("scopes") or []) if s]
+    return accesscmd.change_abilities(manager.store, person_text, str(args.get("abilities") or ""), grant,
+                                      scopes=scopes)
+
+
+async def admin_show_access(args: Dict[str, Any], manager: Any, is_commander: bool = False) -> str:
+    refusal = _commander_only(is_commander)
+    if refusal:
+        return refusal
+    from . import accesscmd
+    person_text = str(args.get("person") or "").strip()
+    if person_text:
+        return accesscmd.show_person(manager.store, person_text)
+    words = str(args.get("access") or "").strip()
+    if not words:
+        return "ERROR: a person or an access is required"
+    return accesscmd.who_has(manager.store, words)

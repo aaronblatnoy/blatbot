@@ -20,6 +20,7 @@ from zoneinfo import ZoneInfo
 
 from . import cadence as cadence_module
 from . import schedprop
+from . import wording
 from . import overview as overview_mod
 from .store import Schedule
 
@@ -350,6 +351,15 @@ def _last_sentence(store: Any, schedule: Schedule) -> str:
 # handle(): the router's schedule_command -> a plain reply
 # ---------------------------------------------------------------------------
 
+def _state_text(schedule: Schedule) -> str:
+    """What a schedule is doing now, as the second half of wording.schedule_line:
+    its timing and next run while active, else "paused" or "ended"."""
+    if schedule.state == "active":
+        cadence_text = cadence_module.describe(schedule.cadence_kind, schedule.cadence, schedule.timezone)
+        return f"{cadence_text}, next {_clock_text(schedule.next_run, schedule.timezone)}"
+    return {"paused": "paused", "ended": "ended"}.get(schedule.state, schedule.state)
+
+
 def _state_error_reply(schedule: Schedule, action: str) -> str:
     """A plain sentence for an action the schedule's current state refuses --
     never the raw "<action> is not valid for a schedule that is <state>
@@ -357,9 +367,9 @@ def _state_error_reply(schedule: Schedule, action: str) -> str:
     if schedule.state == "proposed":
         return f"{schedule.title} has not started yet; say yes or no first."
     if schedule.state == "paused" and action == "pause":
-        return f"{schedule.title} is already paused."
+        return wording.schedule_line(schedule.title, _state_text(schedule))
     if schedule.state == "active" and action == "resume":
-        return f"{schedule.title} is already running."
+        return wording.schedule_line(schedule.title, _state_text(schedule))
     if schedule.state == "ended":
         return f'{schedule.title} has ended. Say "start it again" to bring it back.'
     return f"{schedule.title} can't do that right now."
@@ -401,10 +411,10 @@ async def _handle_simple_action(manager: Any, schedule: Schedule, action: str) -
     except ValueError as exc:
         return _friendly_action_error(schedule, exc)
     if action == "pause":
-        return f"Paused {updated.title}."
+        return wording.schedule_line(updated.title, _state_text(updated), was="running")
     if action == "resume":
-        when = _clock_text(updated.next_run, updated.timezone)
-        return f"{updated.title} is running again, next check {when}."
+        return wording.schedule_line(updated.title, _state_text(updated),
+                                     was="ended" if schedule.state == "ended" else "paused")
     if action == "run_now":
         return f"Running {updated.title} now."
     if action == "stop":
@@ -451,9 +461,11 @@ async def _handle_change(manager: Any, schedule: Schedule, changes: Dict[str, An
         # Revising a proposal that has not started yet resends the whole thing
         # for a fresh yes, rather than announcing an "applied" change.
         return schedprop.format_proposal(updated)
-    cadence_text = cadence_module.describe(updated.cadence_kind, updated.cadence, updated.timezone)
-    when = _clock_text(updated.next_run, updated.timezone)
-    return f"Changed. {updated.title} now runs {cadence_text}, next {when}."
+    old_cadence = cadence_module.describe(schedule.cadence_kind, schedule.cadence, schedule.timezone) \
+        if schedule.cadence_kind else ""
+    new_cadence = cadence_module.describe(updated.cadence_kind, updated.cadence, updated.timezone)
+    return wording.schedule_line(updated.title, _state_text(updated),
+                                 was=old_cadence if old_cadence and old_cadence != new_cadence else None)
 
 
 async def _handle_add_capability(manager: Any, schedule: Schedule, changes: Dict[str, Any],

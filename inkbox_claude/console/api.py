@@ -19,6 +19,7 @@ from ..gate.overview import (
     overview, stuck_rows, running_rows, done_today_rows, next_scheduled_row,
 )
 from . import events
+from ..gate import wording
 
 REQUEST_STATES = frozenset(
     {"pending", "approved", "running", "done", "rejected", "expired", "failed"}
@@ -261,6 +262,9 @@ def _person_model(store: Store, row: Dict[str, Any]) -> Dict[str, Any]:
         # the person panel, built from the same ask phrases as the Roles page --
         # never the role's stored scope names.
         "can_text": _person_can_text(role_scopes),
+        # The same one line chat answers "what can X do?" with (gate/wording.py).
+        "access_text": (wording.commander_line(row.get("display") or "") if is_commander else
+                        wording.access_line(row.get("display") or "", role_names(row.get("role")), effective)),
         "role_badges": [
             {"name": rn, "locked": rn in LOCKED_ROLES} for rn in role_names(row.get("role"))
         ],

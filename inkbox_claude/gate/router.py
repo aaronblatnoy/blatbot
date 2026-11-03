@@ -162,6 +162,33 @@ class ScheduleCommand(BaseModel):
         return value
 
 
+ACCESS_COMMAND_ACTIONS = {"add_role", "remove_role", "set_role", "grant", "revoke", "show_person", "who_has",
+                          "set_mode", "show_mode", "show_settings", "show_setting", "set_setting"}
+
+
+class AccessCommand(BaseModel):
+    """Who may do what, how freely Blatbot speaks in a room, and Blatbot's own
+    settings, changed or read back by Aaron in plain words (accesscmd.py acts on
+    it). Every field is his own words, exactly as said -- matching them to a
+    person, role, scope, chat or setting is done by code, never this model."""
+    model_config = {"extra": "forbid"}
+    action: str
+    person: Optional[str] = None
+    role: Optional[str] = None
+    abilities: Optional[str] = None
+    chat: Optional[str] = None
+    mode: Optional[str] = None
+    setting: Optional[str] = None
+    value: Optional[str] = None
+
+    @field_validator("action")
+    @classmethod
+    def _action_ok(cls, value: str) -> str:
+        if value not in ACCESS_COMMAND_ACTIONS:
+            raise ValueError(f"action must be one of {sorted(ACCESS_COMMAND_ACTIONS)}")
+        return value
+
+
 class RouterOutput(BaseModel):
     # Written FIRST when phrasing a result: what the results establish, what follows
     # from them, what stays unknown. Never sent; it makes the reply a conclusion
@@ -180,6 +207,9 @@ class RouterOutput(BaseModel):
     # Managing an EXISTING schedule in plain language (schedcmd.py acts on this);
     # never used for creating one -- that stays `schedule` above.
     schedule_command: Optional[ScheduleCommand] = None
+    # Who may do what, a group chat's mode, or one of Blatbot's own settings,
+    # changed or asked about by Aaron (accesscmd.py acts on this).
+    access_command: Optional[AccessCommand] = None
 
 
 class Router:
@@ -218,7 +248,7 @@ class Router:
             "Available task scopes (choose the minimal set):\n"
             f"{scope_lines}\n\n"
             "Respond with ONLY a JSON object, no prose, of the form:\n"
-            '{"reasoning": string or null, "reply": string or null, "request": null or {"prompt": string, "scopes": [string], "summary": string, "counterpart": string or null}, "schedule": null or {"title": string, "prompt": string, "cadence_kind": "once"|"every"|"daily"|"weekdays"|"weekly"|"cron", "cadence": object, "timezone": IANA timezone or null, "report_every_time": true|false|null, "until": ISO date or null, "scopes": [string], "start_now": true|false}, "schedule_command": null or {"action": "list"|"last"|"change"|"pause"|"resume"|"run_now"|"stop"|"add_capability"|"approve"|"reject", "target": string or null, "changes": object}}\n'
+            '{"reasoning": string or null, "reply": string or null, "request": null or {"prompt": string, "scopes": [string], "summary": string, "counterpart": string or null}, "schedule": null or {"title": string, "prompt": string, "cadence_kind": "once"|"every"|"daily"|"weekdays"|"weekly"|"cron", "cadence": object, "timezone": IANA timezone or null, "report_every_time": true|false|null, "until": ISO date or null, "scopes": [string], "start_now": true|false}, "schedule_command": null or {"action": "list"|"last"|"change"|"pause"|"resume"|"run_now"|"stop"|"add_capability"|"approve"|"reject", "target": string or null, "changes": object}, "access_command": null or {"action": string, "person": string or null, "role": string or null, "abilities": string or null, "chat": string or null, "mode": string or null, "setting": string or null, "value": string or null}}\n'
             "- reply: what to send back to the sender now, or null to send nothing.\n"
             "- request.counterpart: the email (preferred), phone, or full name of the person the task is\n"
             "  about, when it concerns someone other than the sender; null otherwise.\n"
@@ -327,6 +357,18 @@ class Router:
             "naming that proposal's title. Anything else he says about that open proposal (a different "
             "cadence, an added capability) is schedule_command action \"change\" with target naming that "
             "proposal's title.\n"
+            "- ACCESS COMMANDS: only when Aaron himself is changing or asking who may do what, how freely you "
+            "speak in a group chat, or one of your own settings, fill access_command instead of request or "
+            "reply. Never a request and never small talk for these: code answers them in one line.\n"
+            "  - action: \"add_role\" (make someone a member of a role), \"remove_role\", \"set_role\" (that "
+            "role and no other), \"grant\" (someone may now do something without asking him), \"revoke\" "
+            "(take an access away from someone), \"show_person\" (what can someone do / what is their "
+            "role), \"who_has\" (who holds an access or a role), \"set_mode\"/\"show_mode\" (a group "
+            "chat's mode: natural, mention or silent), \"show_settings\" (all your settings), "
+            "\"show_setting\" or \"set_setting\" (one of them).\n"
+            "  - person, role, abilities (the access in his words, e.g. \"read the TAMID calendar\", "
+            "\"Corgi access\"), chat (null or \"this chat\" for the one he wrote in), mode, setting (its "
+            "name in his words), value: his own words, exactly as said, never ids, never invented.\n"
             "- You have no memory of what tools can or cannot do. NEVER tell anyone a capability is missing, "
             "broken, or unavailable, and never rely on past failure notes in the history; tools get fixed. "
             "If information is needed (who emailed, what is on a calendar, a phone number, a file), "

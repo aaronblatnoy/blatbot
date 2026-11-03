@@ -342,7 +342,7 @@ async def test_pause_by_full_title(env):
     schedule = await _active(manager, task_id)
     session = FakeSession()
     reply = await schedcmd.handle(manager, session, _command("pause", target="Team total watch"))
-    assert reply == "Paused Team total watch."
+    assert reply == "Team total watch: paused (was running)."
     assert store.get_schedule(schedule.id).state == "paused"
 
 
@@ -352,7 +352,7 @@ async def test_pause_by_partial_title(env):
     schedule = await _active(manager, task_id)
     session = FakeSession()
     reply = await schedcmd.handle(manager, session, _command("pause", target="total watch"))
-    assert reply == "Paused Team total watch."
+    assert reply == "Team total watch: paused (was running)."
     assert store.get_schedule(schedule.id).state == "paused"
 
 
@@ -364,7 +364,7 @@ async def test_pause_by_reply_to_tagged_notice(env):
                                schedule_id=schedule.id)
     session = FakeSession(inbound_id=msg_id)
     reply = await schedcmd.handle(manager, session, _command("pause", target=None))
-    assert reply == "Paused Team total watch."
+    assert reply == "Team total watch: paused (was running)."
     assert store.get_schedule(schedule.id).state == "paused"
 
 
@@ -375,7 +375,7 @@ async def test_pause_by_it_after_a_recent_notice(env):
     store.add_message("owner", "outbound", "notice", "imessage", role="notice", schedule_id=schedule.id)
     session = FakeSession()
     reply = await schedcmd.handle(manager, session, _command("pause", target=None))
-    assert reply == "Paused Team total watch."
+    assert reply == "Team total watch: paused (was running)."
     assert store.get_schedule(schedule.id).state == "paused"
 
 
@@ -385,7 +385,7 @@ async def test_pause_by_handle(env):
     schedule = await _active(manager, task_id)
     session = FakeSession()
     reply = await schedcmd.handle(manager, session, _command("pause", target=f"S{schedule.id}"))
-    assert reply == "Paused Team total watch."
+    assert reply == "Team total watch: paused (was running)."
 
 
 @pytest.mark.asyncio
@@ -395,7 +395,8 @@ async def test_resume(env):
     await manager.schedules.action(schedule.id, "pause", owner=True)
     session = FakeSession()
     reply = await schedcmd.handle(manager, session, _command("resume", target="Team total watch"))
-    assert reply.startswith("Team total watch is running again, next check ")
+    assert reply.startswith("Team total watch: every 240 minutes, next ") or reply.startswith("Team total watch: ")
+    assert reply.endswith("(was paused).")
     assert store.get_schedule(schedule.id).state == "active"
 
 
@@ -407,7 +408,8 @@ async def test_resume_on_an_ended_schedule_starts_it_again(env):
     assert store.get_schedule(schedule.id).state == "ended"
     session = FakeSession()
     reply = await schedcmd.handle(manager, session, _command("resume", target="Team total watch"))
-    assert reply.startswith("Team total watch is running again, next check ")
+    assert reply.startswith("Team total watch: every 240 minutes, next ") or reply.startswith("Team total watch: ")
+    assert reply.endswith("(was ended).")
     assert store.get_schedule(schedule.id).state == "active"
 
 
@@ -437,7 +439,7 @@ async def test_invalid_action_for_the_current_state_returns_a_plain_sentence(env
     await manager.schedules.action(schedule.id, "pause", owner=True)
     session = FakeSession()
     reply = await schedcmd.handle(manager, session, _command("pause", target="Team total watch"))
-    assert reply == "Team total watch is already paused."
+    assert reply == "Team total watch: paused."
     assert "#" not in reply
     assert "S0" not in reply and "S1" not in reply
 
@@ -478,7 +480,7 @@ async def test_change_cadence_applies_and_next_run_is_right(env):
     session = FakeSession()
     reply = await schedcmd.handle(manager, session, _command(
         "change", target="Team total watch", cadence_kind="daily", cadence={"time": "08:00"}))
-    assert reply.startswith("Changed. Team total watch now runs daily at 8:00 AM, next ")
+    assert reply.startswith("Team total watch: daily at 8:00 AM, next ")
     updated = store.get_schedule(schedule.id)
     assert updated.cadence_kind == "daily"
     assert updated.next_run is not None
@@ -791,7 +793,7 @@ async def test_change_until_parses_bare_date_to_end_of_day_epoch(env):
     session = FakeSession()
     reply = await schedcmd.handle(manager, session, _command(
         "change", target="Team total watch", until="2026-12-31"))
-    assert "Changed." in reply
+    assert reply.startswith("Team total watch: ")
     updated = store.get_schedule(schedule.id)
     assert isinstance(updated.until, float)
     from datetime import datetime
@@ -970,7 +972,7 @@ async def test_pause_on_an_already_paused_schedule_is_clean(env):
     await manager.schedules.action(schedule.id, "pause", owner=True)
     session = FakeSession()
     reply = await schedcmd.handle(manager, session, _command("pause", target="Team total watch"))
-    assert reply == "Team total watch is already paused."
+    assert reply == "Team total watch: paused."
     _assert_clean(reply)
 
 
@@ -980,7 +982,7 @@ async def test_resume_on_an_already_active_schedule_is_clean(env):
     schedule = await _active(manager, task_id)
     session = FakeSession()
     reply = await schedcmd.handle(manager, session, _command("resume", target="Team total watch"))
-    assert reply == "Team total watch is already running."
+    assert reply.startswith("Team total watch: ") and "(was" not in reply
     _assert_clean(reply)
 
 

@@ -250,7 +250,7 @@ async def test_command_sets_this_chat_mode_and_confirms(gw):
         self_chat_id="tg:-9", self_label="Test Group", reply=reply)
     assert handled is True
     assert gw.sessions.store.get_response_mode("tg:-9") == "silent"
-    assert replies == ["Set this chat's mode to silent."]
+    assert replies == ["Test Group: silent, never speaks (was mention)."]
     assert "--" not in replies[0]
 
 
@@ -283,7 +283,7 @@ async def test_command_sets_a_named_chat_from_a_dm(gw):
         self_chat_id="tg:555", self_label="DM", reply=reply)
     assert handled is True
     assert gw.sessions.store.get_response_mode("tg:-5179779107") == "mention"
-    assert replies == ["Set Corgi NYC Team Chat's mode to mention."]
+    assert replies == ["Corgi NYC Team Chat: mention, speaks only when named."]
 
 
 @pytest.mark.asyncio

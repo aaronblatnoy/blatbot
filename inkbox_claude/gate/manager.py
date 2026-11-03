@@ -29,6 +29,7 @@ from .schedules import ScheduleService, starts_unasked
 from . import schedprop
 from . import wording
 from . import peopleindex
+from . import accesscmd
 
 logger = logging.getLogger(__name__)
 
@@ -1388,8 +1389,24 @@ class GateSession:
         return None
 
     # -- core ----------------------------------------------------------------
+    def _here(self) -> Tuple[str, str]:
+        """(chat_id, title) of the chat this session is: what "this chat" means in an
+        access command."""
+        title = " ".join(str((self.reply_meta or {}).get("group_title") or "").split())
+        return self.chat_id, title or "This chat"
+
     async def _route_and_act(self, body: str, system_note: Optional[str] = None) -> bool:
         approver = self.is_approver()
+        if not system_note and approver:
+            # Aaron changing or asking who may do what, a room's mode, or a setting, in
+            # one of his own common phrasings: answered by code in one state line, before
+            # any lookup, model or running request can turn it into something else.
+            access = accesscmd.match(body, self.m.store)
+            if access is not None:
+                from types import SimpleNamespace
+                logger.info("[gate %s] access command: %s", self.chat_id, access["action"])
+                reply = accesscmd.handle(self.m.store, SimpleNamespace(**access), here=self._here())
+                return await self.send_to_sender(reply, role="answer")
         history = self.m.store.thread_history(self.thread_key(), exclude_chat=self.record_id) + \
             self.m.store.history(self.record_id, limit=20)
         if system_note:
@@ -1515,6 +1532,13 @@ class GateSession:
                 return await self.send_to_sender("Only Aaron can manage schedules.", role="answer")
             from . import schedcmd
             reply = await schedcmd.handle(self.m, self, out.schedule_command)
+            return await self.send_to_sender(reply, role="answer")
+        if not system_note and getattr(out, "access_command", None) is not None:
+            out.request = None
+            if not approver:
+                out.access_command = None
+                return await self.send_to_sender("Only Aaron can change who can do what.", role="answer")
+            reply = accesscmd.handle(self.m.store, out.access_command, here=self._here())
             return await self.send_to_sender(reply, role="answer")
         if out.request is None:
             if out.reply:

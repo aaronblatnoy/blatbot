@@ -1918,7 +1918,19 @@ class InkboxGateway:
         normal processing for it."""
         parsed = roommode.parse_mode_command(text)
         if parsed is None:
-            return False
+            # Any other way of saying it ("set this chat to silent", "what mode is the
+            # Corgi chat in"), read the same way the gate reads it, so a room on silent
+            # can still be woken by its commander in his own words.
+            if not is_commander or self.sessions is None:
+                return False
+            store = getattr(self.sessions, "store", None)
+            from .gate import accesscmd
+            access = accesscmd.match(text, store) if store is not None else None
+            if access is None or access["action"] not in ("set_mode", "show_mode"):
+                return False
+            from types import SimpleNamespace
+            await reply(accesscmd.handle(store, SimpleNamespace(**access), here=(self_chat_id, self_label)))
+            return True
         if not is_commander:
             # Not a security boundary we need to explain to a stranger: say nothing
             # different than for any other message they sent, just do not act on it.
@@ -1935,14 +1947,14 @@ class InkboxGateway:
             target_chat_id, target_label = match["chat_id"], match["title"]
         else:
             target_chat_id, target_label = self_chat_id, self_label
-        store.set_response_mode(target_chat_id, mode)
-        from .console import events
-        events.publish("groups.changed", {"chat_id": target_chat_id, "response_mode": mode,
-                                           "channel": channel})
-        if chat_name:
-            await reply(f"Set {target_label}'s mode to {mode}.")
-        else:
-            await reply(f"Set this chat's mode to {mode}.")
+        stored = store.get_response_mode(target_chat_id)
+        if stored != mode:
+            store.set_response_mode(target_chat_id, mode)
+            from .console import events
+            events.publish("groups.changed", {"chat_id": target_chat_id, "response_mode": mode,
+                                               "channel": channel})
+        from .gate import wording
+        await reply(wording.mode_line(target_label, mode, old_mode=roommode.effective_mode(stored)))
         return True
 
     async def _telegram_dispatch(self, u: Dict[str, Any]) -> None:

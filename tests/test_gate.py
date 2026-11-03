@@ -2247,3 +2247,65 @@ def test_send_confirmation_drops_internal_arguments_and_numbers_multiple(tmp_pat
     assert gm._draft_text({"internal_option": True}) == (
         "There's a message to send, but I couldn't lay out its parts plainly."
     )
+
+
+
+# ---------------------------------------------------------------------------
+# Access commands from Aaron's own chat: one state line, no router, no request
+# ---------------------------------------------------------------------------
+
+def _access_people(m):
+    m.store.set_role("corgi teammate", ["corgi_read"], "")
+    m.store.set_role("general", [], "")
+    m.store.set_trust("telegram:111", person="Stanley Rabkin", role="general")
+
+
+def test_aaron_sets_a_role_in_one_message_and_a_repeat_sends_the_same_state(tmp_path):
+    m, sent = make_manager(tmp_path)
+    _access_people(m)
+    s = m.get("aaron")
+    asyncio.run(s.handle_inbound("make Stanley a corgi teammate", "imessage", approver_meta()))
+    asyncio.run(s.handle_inbound("make Stanley a corgi teammate", "imessage", approver_meta()))
+    asyncio.run(s.handle_inbound("what can Stanley do?", "imessage", approver_meta()))
+    texts = [t for _, t, *_ in sent]
+    assert texts == [
+        "Stanley Rabkin: corgi teammate (was general); can look up Corgi Command (the pension CRM).",
+        "Stanley Rabkin: corgi teammate; can look up Corgi Command (the pension CRM).",
+        "Stanley Rabkin: corgi teammate; can look up Corgi Command (the pension CRM).",
+    ]
+    assert m.router.calls == [], "an access command is answered by code, never routed"
+    assert m.store.get_request(1) is None, "no request, no hold: reversible config Aaron asked for runs at once"
+
+
+def test_aaron_grants_access_from_a_group_tagged_message(tmp_path):
+    m, sent = make_manager(tmp_path)
+    _access_people(m)
+    msg = ("[telegram group: FellowSIp of the Ring | from: Aaron Blatnoy | your reply goes to the whole group]\n"
+           "blatbot, let Stanley read the TAMID calendar")
+    asyncio.run(m.get("aaron").handle_inbound(msg, "imessage", approver_meta()))
+    assert [t for _, t, *_ in sent] == [
+        "Stanley Rabkin: general; can look up and manage the TAMID calendar (was nothing without asking)."]
+    person = next(p for p in m.store.list_people() if p["display"] == "Stanley Rabkin")
+    assert person["scopes"] == ["calendar"]
+
+
+def test_someone_else_saying_the_same_words_changes_nothing(tmp_path):
+    m, sent = make_manager(tmp_path)
+    _access_people(m)
+    m.router.next = RouterOutput(reply="I will check with Aaron.", request=None)
+    asyncio.run(m.get("c1").handle_inbound("make Stanley a corgi teammate", "email", stranger_meta()))
+    person = next(p for p in m.store.list_people() if p["display"] == "Stanley Rabkin")
+    assert person["role"] == "general"
+    assert not any(t.startswith("Stanley Rabkin:") for _, t, *_ in sent), "no access line for a stranger"
+
+
+def test_a_router_access_command_is_answered_by_code(tmp_path):
+    from inkbox_claude.gate.router import AccessCommand
+    m, sent = make_manager(tmp_path)
+    _access_people(m)
+    m.router.next = RouterOutput(access_command=AccessCommand(action="who_has", abilities="corgi teammates"),
+                                 reply="Let me look.", task="new", task_title="x")
+    asyncio.run(m.get("aaron").handle_inbound("which of my contacts are on the corgi team?", "imessage",
+                                              approver_meta()))
+    assert [t for _, t, *_ in sent] == ["Corgi teammate: nobody but you."]
+    assert m.store.get_request(1) is None

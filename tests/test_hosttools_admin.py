@@ -105,15 +105,18 @@ def test_admin_list_and_get_setting_happy_path(tmp_path):
     out = run(hosttools.admin_list_settings({}, m, True))
     assert "GATE_CONFIRM_SENDS" in out
     out2 = run(hosttools.admin_get_setting({"key": "GATE_CONFIRM_SENDS"}, m, True))
-    assert "GATE_CONFIRM_SENDS" in out2
+    assert out2 == "Show me anything it would send: on."
+    assert "GATE_CONFIRM_SENDS: Show me anything it would send: on." in out.splitlines()
 
 
 def test_admin_set_setting_changes_value_and_reports_old_and_new(tmp_path):
     m = make_manager(tmp_path)
     out = run(hosttools.admin_set_setting({"key": "GATE_CONFIRM_SENDS", "value": "false"}, m, True))
-    assert "->" in out
+    assert out == "Show me anything it would send: off (was on)."
     confirm = run(hosttools.admin_get_setting({"key": "GATE_CONFIRM_SENDS"}, m, True))
-    assert "False" in confirm
+    assert confirm == "Show me anything it would send: off."
+    again = run(hosttools.admin_set_setting({"key": "GATE_CONFIRM_SENDS", "value": "false"}, m, True))
+    assert again == confirm
 
 
 def test_admin_set_setting_refuses_unknown_name(tmp_path):
@@ -198,7 +201,7 @@ def test_admin_set_person_role_happy_path(tmp_path):
     m.store.add_contact(person["id"], "email", "mark@example.com")
     out = run(hosttools.admin_set_person_role(
         {"person": "Mark Morrison", "role": "corgi teammate"}, m, True))
-    assert "->" in out
+    assert out == "Mark Morrison: corgi teammate (was no role); asks you before doing anything."
     row = next(p for p in console_api.people_directory(m.store)["people"] if p["id"] == person["id"])
     assert "corgi teammate" in row["role"]
 
@@ -211,7 +214,8 @@ def test_admin_set_person_role_refuses_commander_change(tmp_path):
     m.store.add_contact(person["id"], "phone", "5550100111")
     assert m.store.commander_person_id() == person["id"]
     out = run(hosttools.admin_set_person_role({"person": "Sam Parker", "role": "general"}, m, True))
-    assert out.startswith("ERROR")
+    assert out == "Sam Parker: commander; full control. That does not change from chat."
+    assert "commander" in m.store.get_person(person["id"])["role"]
 
 
 def test_admin_set_person_role_refuses_ambiguous_match(tmp_path):
@@ -222,15 +226,14 @@ def test_admin_set_person_role_refuses_ambiguous_match(tmp_path):
     p2 = m.store.create_person(display="Alex Kim")
     m.store.add_contact(p2["id"], "email", "alex.kim@example.com")
     out = run(hosttools.admin_set_person_role({"person": "alex", "role": "general"}, m, True))
-    assert out.startswith("ERROR")
-    assert "more than one person" in out
+    assert out == "alex could be Alex Kim or Alex Lee. Say the full name."
 
 
 def test_admin_set_person_role_refuses_unknown_person(tmp_path):
     m = make_manager(tmp_path)
     m.store.set_role("general", [], note="")
     out = run(hosttools.admin_set_person_role({"person": "Nobody Here", "role": "general"}, m, True))
-    assert out.startswith("ERROR")
+    assert out == "No one called Nobody Here is in People yet."
 
 
 def test_admin_set_person_role_refused_for_non_commander(tmp_path):
@@ -284,8 +287,10 @@ def test_admin_set_chat_mode_happy_path_when_store_supports_it(tmp_path):
     m = make_manager(tmp_path)
     if not hasattr(m.store, "set_response_mode"):
         pytest.skip("per-chat response modes not in this store build")
-    out = run(hosttools.admin_set_chat_mode({"chat": "chat-123", "mode": "mention"}, m, True))
-    assert "->" in out
+    out = run(hosttools.admin_set_chat_mode({"chat": "chat-123", "mode": "silent"}, m, True))
+    assert out == "chat-123: silent, never speaks (was mention)."
+    assert run(hosttools.admin_set_chat_mode({"chat": "chat-123", "mode": "mention"}, m, True)) == \
+        "chat-123: mention, speaks only when named (was silent)."
     assert m.store.get_response_mode("chat-123") == "mention"
 
 
@@ -323,3 +328,59 @@ def test_executor_system_prompt_has_commander_exception():
 def test_admin_tool_names_match_the_host_prefix_executor_gates_on():
     for name in BLATBOT_ADMIN_TOOLS:
         assert name.startswith("mcp__host__admin_")
+
+
+
+# ---------------------------------------------------------------------------
+# Who may do what, from chat: grant, revoke, read back (same lines as accesscmd)
+# ---------------------------------------------------------------------------
+
+def _people(m):
+    m.store.set_role("corgi teammate", ["corgi_read"], "")
+    m.store.set_role("general", [], "")
+    m.store.set_trust("telegram:111", person="Stanley Rabkin", role="general")
+
+
+def test_admin_set_person_access_grants_by_plain_words_and_repeats_the_same_line(tmp_path):
+    m = make_manager(tmp_path)
+    _people(m)
+    args = {"person": "Stanley", "grant": True, "abilities": "read the TAMID calendar"}
+    first = run(hosttools.admin_set_person_access(args, m, is_commander=True))
+    assert first == ("Stanley Rabkin: general; can look up and manage the TAMID calendar "
+                     "(was nothing without asking).")
+    again = run(hosttools.admin_set_person_access(args, m, is_commander=True))
+    assert again == "Stanley Rabkin: general; can look up and manage the TAMID calendar."
+    shown = run(hosttools.admin_show_access({"person": "Stanley Rabkin"}, m, is_commander=True))
+    assert shown == again
+
+
+def test_admin_set_person_access_revoke_takes_the_role_that_gives_it(tmp_path):
+    m = make_manager(tmp_path)
+    _people(m)
+    run(hosttools.admin_set_person_role({"person": "Stanley", "role": "corgi teammate"}, m, is_commander=True))
+    line = run(hosttools.admin_set_person_access({"person": "Stanley", "grant": False, "abilities": "Corgi access"},
+                                                 m, is_commander=True))
+    assert line == "Stanley Rabkin: general (was corgi teammate); asks you before doing anything."
+
+
+def test_admin_show_access_lists_who_holds_it(tmp_path):
+    m = make_manager(tmp_path)
+    _people(m)
+    run(hosttools.admin_set_person_role({"person": "Stanley", "role": "corgi teammate"}, m, is_commander=True))
+    assert run(hosttools.admin_show_access({"access": "corgi teammates"}, m, is_commander=True)) == \
+        "Corgi teammate: Stanley Rabkin."
+
+
+def test_admin_access_tools_refused_for_non_commander(tmp_path):
+    m = make_manager(tmp_path)
+    _people(m)
+    assert run(hosttools.admin_set_person_access({"person": "Stanley", "grant": True, "abilities": "calendar"},
+                                                 m, is_commander=False)) == hosttools._ADMIN_REFUSAL
+    assert run(hosttools.admin_show_access({"person": "Stanley"}, m, is_commander=False)) == hosttools._ADMIN_REFUSAL
+    assert m.store.list_people()[0]["scopes"] == []
+
+
+def test_new_access_tools_are_registered_everywhere_the_admin_tools_are():
+    from inkbox_claude.gate import jevagent
+    for name in ("mcp__host__admin_set_person_access", "mcp__host__admin_show_access"):
+        assert name in BLATBOT_ADMIN_TOOLS and name in jevagent.VIRTUAL_TOOLS
