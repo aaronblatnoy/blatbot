@@ -63,7 +63,7 @@ STARTED_TIMEOUT_S = 10.0
 CLOSE_TIMEOUT_S = 5.0
 # Input transcript fragments trail the audio slightly. Give the last words of
 # the request a moment to arrive before building the backend request.
-TRANSCRIPT_SETTLE_S = 0.9
+TRANSCRIPT_SETTLE_S = 0.4
 CONTEXT_TURNS = 8
 
 
@@ -563,7 +563,7 @@ async def _run_delegation(ows: Any, state: _LiveState, meta: RealtimeCallMeta, d
                           on_agent_consult: AgentConsultCallback) -> None:
     """Build the request from the transcript, run it through the gateway, return the outcome."""
     # Let the tail of the caller's sentence finish transcribing.
-    deadline = time.monotonic() + 2.5
+    deadline = time.monotonic() + 1.0
     while time.monotonic() < deadline and time.monotonic() - state.last_transcript_at < TRANSCRIPT_SETTLE_S:
         await asyncio.sleep(0.1)
     query = build_delegation_query(state, meta)
