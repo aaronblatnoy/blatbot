@@ -32,6 +32,7 @@ from . import peopleindex
 from . import accesscmd
 
 logger = logging.getLogger(__name__)
+_MISSING = object()
 
 SendFn = Callable[[str, str, str, Dict[str, Any]], Awaitable[Any]]
 
@@ -362,14 +363,14 @@ class GateSession:
             self._turn_task_id = task["id"]
 
     async def jev_event(self, task: Dict[str, Any], body: str, history: List[Dict[str, Any]],
-                        out: RouterOutput) -> None:
+                        out: RouterOutput, result: Optional[Dict[str, Any]] = None) -> None:
         """Second judgment: what this message did to the task it was assigned to.
         Writes a typed event line, updates the summary and, when confident, the state."""
         picker = self.m.task_picker
         if picker is None:
             return
         approver = self.is_approver()
-        res = await picker.judge_event(
+        res = result if result is not None else await picker.judge_event(
             message=body, task=task, history=history,
             sender_label="Aaron, the owner" if approver else (self._sender_name() or self._sender()))
         kind = res.get("kind")
@@ -397,7 +398,35 @@ class GateSession:
             tail = {"owner": "Waiting on Aaron.", "other": f"Waiting on {who}.", "nobody": "Nothing outstanding."}.get(wo or "", "")
             self.m.store.set_task_summary(task["id"], f"Latest: {who} {label}. {tail}".strip())
 
-    async def lookup_tasks(self, history: List[Dict[str, Any]], message: str, in_view: str) -> str:
+    def prepare_lookup_inputs(self, message: str, in_view: str) -> Dict[str, Any]:
+        from .jevagent import _span_candidates
+        emails = _EMAIL.findall(message)
+        spans = list(emails)
+        for c in _span_candidates(message, [], limit=40):
+            for v in (re.sub(r"['\u2019]s\b", "", c), c):
+                if v and v not in spans:
+                    spans.append(v)
+        titles: List[str] = []
+        for line in in_view.splitlines():
+            if line.startswith("Task T"):
+                titles.append(" ".join(line[len("Task "):].split(" | ")[:2]))
+            elif re.match(r"^T\d+\s*\|", line):
+                titles.append(" ".join(part.strip() for part in line.split("|")[:2]))
+        label = "Aaron, the owner" if self.is_approver() else (self._sender_name() or self._sender())
+        return {"emails": emails, "spans": spans, "titles": titles, "label": label}
+
+    async def _plan_query_safely(self, history: List[Dict[str, Any]], message: str,
+                                 in_view: str) -> Any:
+        try:
+            return await self.m.router.plan_query(history=history, message=message, in_view=in_view,
+                                                  is_approver=self.is_approver())
+        except Exception:
+            logger.exception("[gate %s] task query planning failed", self.chat_id)
+            return None
+
+    async def lookup_tasks(self, history: List[Dict[str, Any]], message: str, in_view: str,
+                           plan: Any = _MISSING, fallback_query: Any = _MISSING,
+                           lookup_inputs: Optional[Dict[str, Any]] = None) -> str:
         """Query pass: the router emits a structured filter, code runs it. Non-owners
         are confined to tasks they are on; the owner can query everything."""
         q: Any = None
@@ -406,18 +435,15 @@ class GateSession:
         if picker is not None and hasattr(picker, "plan_lookup"):
             # Jev decides whether the ledger is searched and for which phrase (taken from
             # words in the message). The chat model plans only when Jev is undecided.
-            from .jevagent import _span_candidates
             from .router import TaskQuery
-            emails = _EMAIL.findall(message)
-            spans = list(emails)
-            for c in _span_candidates(message, [], limit=40):
-                for v in (re.sub(r"['\u2019]s\b", "", c), c):     # "Sam Rivera's" also offers "Sam Rivera"
-                    if v and v not in spans:
-                        spans.append(v)
-            titles = [" ".join(ln[len("Task "):].split(" | ")[:2]) for ln in in_view.splitlines() if ln.startswith("Task T")]
-            label = "Aaron, the owner" if self.is_approver() else (self._sender_name() or self._sender())
-            plan = await picker.plan_lookup(message=message, history=history, sender_label=label,
-                                            in_view_titles=titles, candidates=spans)
+            lookup_inputs = lookup_inputs or self.prepare_lookup_inputs(message, in_view)
+            emails = lookup_inputs["emails"]
+            if plan is _MISSING:
+                plan = await picker.plan_lookup(
+                    message=message, history=history, sender_label=lookup_inputs["label"],
+                    in_view_titles=lookup_inputs["titles"], candidates=lookup_inputs["spans"])
+            if isinstance(plan, BaseException):
+                plan = {"lookup": None, "text": "", "confidence": 0.0, "reason": f"error: {plan}"}
             if plan.get("lookup") == "none":
                 return ""
             if plan.get("lookup") in ("live", "any"):
@@ -427,12 +453,10 @@ class GateSession:
                 q = TaskQuery(text=None if participant else (text or None), participant=participant,
                               states=["live"] if plan["lookup"] == "live" else None, limit=10)
         if not planned:
-            try:
-                q = await self.m.router.plan_query(history=history, message=message, in_view=in_view,
-                                                   is_approver=self.is_approver())
-            except Exception:
-                logger.exception("[gate %s] task query planning failed", self.chat_id)
-                return ""
+            q = (await self._plan_query_safely(history, message, in_view)
+                 if fallback_query is _MISSING else fallback_query)
+            if isinstance(q, BaseException):
+                q = None
         self._found_task_ids = []
         if q is None and in_view.strip() in ("", "(no tasks on record)") and not self.is_approver():
             # Nobody on record for this sender: that is exactly when to search for them by name.
@@ -630,7 +654,8 @@ class GateSession:
         return "\n".join(f"{s.title}: {s.state}" for s in rows)
 
     async def decide(self, *, body: str, message: str, prior: List[Dict[str, Any]], mode: str,
-                     memory: str, found: str) -> "Tuple[RouterOutput, Optional[Dict[str, Any]]]":
+                     memory: str, found: str,
+                     preflight: Optional[Dict[str, Any]] = None) -> "Tuple[RouterOutput, Optional[Dict[str, Any]]]":
         """One turn's decisions: which task, whether to act, the reply, the request.
 
         Jev-first flow (default when the picker is on): Jev picks the task and judges
@@ -677,7 +702,7 @@ class GateSession:
                 logger.warning("[gate %s] langgraph unavailable (%s); deciding in sequence", self.chat_id, exc)
             else:
                 return await decidegraph.decide(self, body=body, message=message, prior=prior, mode=mode,
-                                                memory=memory, found=found)
+                                                memory=memory, found=found, preflight=preflight)
         label = "Aaron, the owner" if approver else (self._sender_name() or self._sender())
         fast_id = getattr(self, "_ledger_fast_id", None)
         pick = ({"choice": f"T{fast_id}"} if fast_id is not None else
@@ -792,7 +817,8 @@ class GateSession:
         return [sc for sc in SCOPES if sc in role_scopes]
 
     async def jev_scopes(self, out: RouterOutput, strict: bool = False,
-                         owner_generous: bool = True) -> None:
+                         owner_generous: bool = True,
+                         result: Optional[Dict[str, Any]] = None) -> None:
         """Replace the router's scope list with Jev's judgment when it yields a
         non-empty set. Empty or unavailable: the router's list stands. Code never
         lets this widen beyond the fixed scope map, since pydantic already
@@ -811,8 +837,8 @@ class GateSession:
             if standing:
                 out.request.scopes = list(dict.fromkeys(list(out.request.scopes) + standing))
             return
-        res = {"scopes": None}
-        if strict and hasattr(picker, "judge_scopes_tree"):
+        res = result if result is not None else {"scopes": None}
+        if result is None and strict and hasattr(picker, "judge_scopes_tree"):
             # Systems first, then read/write and channel within each: a few options per question.
             res = await picker.judge_scopes_tree(
                 prompt=out.request.prompt, summary=out.request.summary,
@@ -852,7 +878,8 @@ class GateSession:
             logger.info("[gate %s] scopes: router %s -> jev %s", self.chat_id, out.request.scopes, chosen)
         out.request.scopes = chosen
 
-    async def jev_knowledge(self, out: RouterOutput) -> None:
+    async def jev_knowledge(self, out: RouterOutput,
+                            result: Optional[Dict[str, Any]] = None) -> None:
         """Which notes in the vault this request needs, chosen by the same top-down
         traversal as the tool scope tree (TaskPicker.judge_vault_tree): fast, run in
         the decision step rather than inside the executor. The chosen knowledge
@@ -866,7 +893,8 @@ class GateSession:
         picker = self.m.task_picker
         if picker is None or out.request is None or not hasattr(picker, "judge_vault_tree"):
             return
-        res = await picker.judge_vault_tree(prompt=out.request.prompt, summary=out.request.summary)
+        res = result if result is not None else await picker.judge_vault_tree(
+            prompt=out.request.prompt, summary=out.request.summary)
         chosen = res.get("scopes")
         if chosen is None:
             logger.info("[gate %s] vault tree unavailable (%s); leaving vault scopes to the tool tree",
@@ -887,7 +915,7 @@ class GateSession:
             out.request.scopes = merged
             out.request.knowledge_notes = list(res.get("notes") or [])
 
-    async def indexed_task_memory(self, history: List[Dict[str, Any]], message: str) -> str:
+    def prepare_task_index(self, history: List[Dict[str, Any]], message: str) -> Dict[str, Any]:
         from .ledger import render_index, continuation_id
         start = time.monotonic()
         result = self.m.store.ledger_index(
@@ -898,12 +926,102 @@ class GateSession:
         self._ledger_fast_id = continuation_id(
             message, entries, self.m.store.task_ids_for_chat(self.record_id), history)
         timings = {"index": round(time.monotonic() - start, 3)}
+        return {"start": start, "result": result, "entries": entries, "index": index, "timings": timings}
+
+    async def run_preflight(self, body: str, message: str, history: List[Dict[str, Any]],
+                            prepared: Dict[str, Any]) -> Dict[str, Any]:
+        """Launch every source-only judgment together and return inert results.
+
+        Nothing here mutates the ledger, request, or task. The ordinary consumers below
+        apply the winning results after the fan-out, and ignore speculative fallbacks.
+        """
+        picker = self.m.task_picker
+        entries = list(prepared["entries"])
+        lookup_inputs = self.prepare_lookup_inputs(message, prepared["index"])
+        label = lookup_inputs["label"]
+        likely_task = entries[0] if entries else None
+        summary = wording.fallback_title_from_message(message)
+        convo = "\n".join(f"[{m.get('kind')}] {str(m.get('text') or '')}" for m in history[-20:])
+        source_prompt = message if not convo else f"{message}\n\nRecent conversation:\n{convo}"
+
+        calls: List[Tuple[str, Awaitable[Any]]] = []
+        if self._ledger_fast_id is None and picker is not None and hasattr(picker, "judge_ledger_tree"):
+            calls.append(("ledger", picker.judge_ledger_tree(
+                message=message, history=history, entries=entries)))
+        if picker is not None and hasattr(picker, "plan_lookup"):
+            calls.append(("lookup", picker.plan_lookup(
+                message=message, history=history, sender_label=label,
+                in_view_titles=lookup_inputs["titles"], candidates=lookup_inputs["spans"])))
+        calls.append(("query", self._plan_query_safely(history, message, prepared["index"])))
+        if self._ledger_fast_id is None and picker is not None and hasattr(picker, "pick"):
+            calls.append(("pick", picker.pick(
+                message=message, history=history, candidates=entries, sender_label=label,
+                router_hint=None, proposed_title="")))
+        if picker is not None and hasattr(picker, "judge_action"):
+            calls.append(("action", picker.judge_action(
+                message=message, history=history, task=likely_task, sender_label=label,
+                router_said_action=None)))
+        if picker is not None and hasattr(picker, "judge_actionable"):
+            calls.append(("actionable", picker.judge_actionable(
+                message=message, history=history, task=likely_task)))
+        if picker is not None and hasattr(picker, "judge_vault_tree"):
+            calls.append(("vault", picker.judge_vault_tree(prompt=source_prompt, summary=summary)))
+        if picker is not None and hasattr(picker, "judge_event") and likely_task is not None:
+            calls.append(("event", picker.judge_event(
+                message=body, task=likely_task, history=history, sender_label=label)))
+        if picker is not None and hasattr(picker, "judge_complexity"):
+            calls.append(("complexity", picker.judge_complexity(
+                prompt=source_prompt, summary=summary, scopes=["web"])))
+        if (not self.is_approver() and picker is not None
+                and hasattr(picker, "judge_scopes_tree")):
+            calls.append(("scopes", picker.judge_scopes_tree(
+                prompt=source_prompt, summary=summary, generous=False)))
+
+        started = time.monotonic()
+        values = await asyncio.gather(*(call for _, call in calls), return_exceptions=True)
+        elapsed = time.monotonic() - started
+        defaults: Dict[str, Any] = {
+            "ledger": {"ids": None, "timings": {}, "reason": "unavailable"},
+            "lookup": {"lookup": None, "text": "", "confidence": 0.0, "reason": "unavailable"},
+            "query": None,
+            "pick": {"choice": None, "confidence": 0.0, "probabilities": {}, "reason": "unavailable"},
+            "action": {"needs_action": None, "p": 0.0, "reason": "unavailable"},
+            "actionable": {"actionable": None, "p": 0.0, "reason": "unavailable"},
+            "vault": {"scopes": None, "notes": [], "probabilities": {}, "reason": "unavailable", "timings": {}},
+            "event": {"kind": None, "kind_conf": 0.0, "waiting_on": None,
+                      "resolves_task": 0.0, "reason": "unavailable"},
+            "complexity": {"complex": None, "p": 0.0, "reason": "unavailable"},
+            "scopes": {"scopes": None, "probabilities": {}, "reason": "unavailable"},
+        }
+        results: Dict[str, Any] = {}
+        for (name, _), value in zip(calls, values):
+            if isinstance(value, BaseException):
+                logger.warning("[gate %s] preflight %s failed: %s", self.chat_id, name, value)
+                value = defaults[name]
+            results[name] = value
+        results["lookup_inputs"] = lookup_inputs
+        results["event_task_id"] = likely_task.get("id") if likely_task else None
+        logger.info("[gate %s] preflight_total: %.3fs (n=%d calls)", self.chat_id, elapsed, len(calls))
+        return results
+
+    async def indexed_task_memory(self, history: List[Dict[str, Any]], message: str,
+                                  prepared: Optional[Dict[str, Any]] = None,
+                                  pick: Any = _MISSING) -> str:
+        prepared = prepared or self.prepare_task_index(history, message)
+        start = prepared["start"]
+        result = prepared["result"]
+        entries = prepared["entries"]
+        index = prepared["index"]
+        timings = dict(prepared["timings"])
         picker = self.m.task_picker
         if self._ledger_fast_id is not None:
             ids = [self._ledger_fast_id]
             timings["fast_path"] = True
         elif picker is not None and hasattr(picker, "judge_ledger_tree"):
-            pick = await picker.judge_ledger_tree(message=message, history=history, entries=entries)
+            if pick is _MISSING:
+                pick = await picker.judge_ledger_tree(message=message, history=history, entries=entries)
+            if isinstance(pick, BaseException):
+                pick = {"ids": None, "timings": {}, "reason": f"error: {pick}"}
             ids = pick.get("ids")
             timings.update(pick.get("timings") or {})
             if ids is None:
@@ -1413,13 +1531,27 @@ class GateSession:
             prior, message = history, "(No new message from the sender. A system note with a task result was just added above. Write the reply the sender should receive: for Aaron, give him the answer or outcome clearly and naturally, in his voice preference (brief, no emojis); for anyone else, tell them only what concerns them, without internal details. Reply null only if there is truly nothing to say. Do not create a request.)"
         else:
             prior, message = history[:-1], body  # the new inbound is already stored last
+        preflight: Optional[Dict[str, Any]] = None
         if system_note:
             # A result belongs to the task just completed, even when it has left the live index.
             ids = self.m.store.task_ids_for_chat(self.record_id, limit=3)
             memory = "\n\n".join(self.m.store.task_memory_for_task(tid) for tid in ids) or "(no tasks on record)"
         else:
-            memory = await self.indexed_task_memory(prior, message)
-        found = "" if system_note else await self.lookup_tasks(prior, message, memory)
+            prepared = self.prepare_task_index(prior, message)
+            graph_on = (os.getenv("GATE_DECIDE_GRAPH") or "1").strip().lower() not in ("0", "false", "no")
+            if self.m.task_picker is not None and not self.m.router_defines_requests and graph_on:
+                preflight = await self.run_preflight(body, message, prior, prepared)
+                memory = await self.indexed_task_memory(
+                    prior, message, prepared=prepared, pick=preflight.get("ledger", _MISSING))
+                found = await self.lookup_tasks(
+                    prior, message, memory,
+                    plan=preflight.get("lookup", _MISSING),
+                    fallback_query=preflight.get("query", _MISSING),
+                    lookup_inputs=preflight["lookup_inputs"])
+            else:
+                memory = await self.indexed_task_memory(prior, message, prepared=prepared)
+                found = await self.lookup_tasks(prior, message, memory)
+        found = "" if system_note else found
         if not system_note:
             memory = self._ledger_memory
             self.log_ledger_selection(memory, found)
@@ -1473,7 +1605,7 @@ class GateSession:
             out.reply = await self.ground_reply(out.reply, system_note, prior, memory, found, approver)
         else:
             out, task = await self.decide(body=body, message=message, prior=prior, mode=self.mode,
-                                          memory=memory, found=found)
+                                          memory=memory, found=found, preflight=preflight)
         if not system_note and out.schedule is not None:
             if not approver:
                 out.request = None
@@ -1580,6 +1712,8 @@ class GateSession:
         # this turn is known to own a genuinely new request.
         sent_reply = await self.send_to_sender(out.reply, role="ack") if out.reply else False
         self.m.remember_knowledge_notes(req.id, getattr(out.request, "knowledge_notes", None))
+        if preflight is not None:
+            self.m.remember_complexity(req.id, preflight.get("complexity"))
         self.m.record_request_on_task(req, task, self)
         if approver or trusted:
             # Run after this turn releases the session lock; execute() will
@@ -1954,6 +2088,9 @@ class GateSessionManager:
         # request id -> the notes the vault traversal chose, most relevant first. Held in
         # memory only: after a restart a run falls back to its knowledge scopes' own notes.
         self._knowledge_notes: Dict[int, List[str]] = {}
+        # request id -> the source-only model-complexity judgment made in the turn's
+        # preflight. Scheduled/restarted work has no entry and judges at execution time.
+        self._complexity_results: Dict[int, Dict[str, Any]] = {}
         # Request ids a blanket "you have my permission for everything" (item 4) was
         # said about while still running: applied to that request's own retry, once,
         # the moment it actually fails and shows what it was refused. Held in memory
@@ -2995,7 +3132,9 @@ class GateSessionManager:
         picker = self.task_picker
         if picker is None or not hasattr(picker, "judge_complexity"):
             return _settings.get("GATE_FAST_MODEL") or self.FAST_MODEL
-        res = await picker.judge_complexity(prompt=req.prompt, summary=req.summary, scopes=list(req.scopes))
+        res = self._complexity_results.pop(int(req.id), None)
+        if res is None:
+            res = await picker.judge_complexity(prompt=req.prompt, summary=req.summary, scopes=list(req.scopes))
         model = (_settings.get("GATE_STRONG_MODEL") or self.STRONG_MODEL) if res.get("complex") \
             else (_settings.get("GATE_FAST_MODEL") or self.FAST_MODEL)
         logger.info("[gate] #%s model: %s (p(complex)=%.2f)", req.id, model, float(res.get("p") or 0.0))
@@ -3029,6 +3168,12 @@ class GateSessionManager:
             self._knowledge_notes[int(request_id)] = list(notes)
             while len(self._knowledge_notes) > 500:
                 self._knowledge_notes.pop(next(iter(self._knowledge_notes)))
+
+    def remember_complexity(self, request_id: int, result: Any) -> None:
+        if isinstance(result, dict):
+            self._complexity_results[int(request_id)] = dict(result)
+            while len(self._complexity_results) > 500:
+                self._complexity_results.pop(next(iter(self._complexity_results)))
 
     def vault_attachment_for(self, req: Request, *, ledger_chars: int = 0) -> str:
         """The owner's vault notes this approved request's knowledge scopes cover,

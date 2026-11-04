@@ -203,6 +203,42 @@ def test_vault_tree_picks_nothing_below_the_bar(tmp_path, monkeypatch, patched_a
     assert res["reason"] == "ok"
 
 
+def test_vault_tree_launches_level1_and_all_level2_notes_together(tmp_path, monkeypatch):
+    root = make_vault(tmp_path / "vault")
+    monkeypatch.setenv("BLATBOT_VAULT_DIR", str(root))
+    vaultscopes._cache = vaultscopes._Cache()
+    started = []
+
+    class Response:
+        def __init__(self, questions):
+            self.questions = questions
+        def raise_for_status(self): pass
+        def json(self):
+            return {"answers": {key: {"noul": 0.9 if key == "vault:areas/garden-shed" else 0.0}
+                                for key in self.questions}}
+
+    class Client:
+        def __init__(self, *a, **kw): pass
+        async def __aenter__(self): return self
+        async def __aexit__(self, *a): pass
+        async def post(self, url, headers=None, json=None):
+            started.append(set(json["questions"]))
+            for _ in range(100):
+                if len(started) == 2:
+                    break
+                await asyncio.sleep(0)
+            assert len(started) == 2, "vault levels were serialized"
+            return Response(json["questions"])
+
+    monkeypatch.setattr("inkbox_claude.gate.taskpick.httpx.AsyncClient", Client)
+    res = asyncio.run(TaskPicker(api_key="fake-key").judge_vault_tree(
+        prompt="garden shed", summary="garden shed"))
+    assert len(started) == 2
+    assert any("vault:areas/garden-shed" in keys for keys in started)
+    assert any(any(key.startswith("vault:areas/greenhouse::") for key in keys) for keys in started)
+    assert res["scopes"] == ["vault:areas/garden-shed"]
+
+
 def test_vault_tree_catchall_not_chosen_by_default(tmp_path, monkeypatch, patched_ask):
     """The home note is a catch-all: it must not be asked about (and so never
     picked) unless the question names it. The script would answer 'yes' for it

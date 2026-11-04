@@ -36,6 +36,7 @@ class DecideState(TypedDict, total=False):
     mode: str
     memory: str                     # the ledger in view
     found: str                      # tasks surfaced by the lookup
+    preflight: Dict[str, Any]       # source-only judgments launched before ledger/query consumption
     # judgments
     task_choice: Optional[str]      # "T12" | None (Jev picked new or abstained)
     pick: str                       # raw pick: "T12" | "new" | "none" | ""
@@ -74,9 +75,13 @@ async def pick_task(state: DecideState, config: RunnableConfig) -> Dict[str, Any
     fast_id = getattr(s, "_ledger_fast_id", None)
     if fast_id is not None:
         return {"pick": f"T{fast_id}", "task_choice": f"T{fast_id}"}
-    pick = await s.m.task_picker.pick(message=state["message"], history=state["prior"],
-                                      candidates=s.candidate_tasks(state["message"]), sender_label=_label(s),
-                                      router_hint=None, proposed_title="")
+    pick = state.get("preflight", {}).get("pick")
+    if pick is None:
+        pick = await s.m.task_picker.pick(message=state["message"], history=state["prior"],
+                                          candidates=s.candidate_tasks(state["message"]), sender_label=_label(s),
+                                          router_hint=None, proposed_title="")
+    elif isinstance(pick, BaseException):
+        pick = {}
     choice = pick.get("choice")
     return {"pick": choice or "", "task_choice": None if choice in (None, "none", "new") else choice}
 
@@ -86,9 +91,13 @@ async def judge_action(state: DecideState, config: RunnableConfig) -> Dict[str, 
     likely one rather than the pick, which is not known yet."""
     s = _s(config)
     recent = s.candidate_tasks(state["message"])[:1]
-    act = await s.m.task_picker.judge_action(message=state["message"], history=state["prior"],
-                                             task=recent[0] if recent else None, sender_label=_label(s),
-                                             router_said_action=None)
+    act = state.get("preflight", {}).get("action")
+    if act is None:
+        act = await s.m.task_picker.judge_action(message=state["message"], history=state["prior"],
+                                                 task=recent[0] if recent else None, sender_label=_label(s),
+                                                 router_said_action=None)
+    elif isinstance(act, BaseException):
+        act = {}
     needs = act.get("needs_action")
     p = float(act.get("p") or 0.0)
     if needs is None:
@@ -110,8 +119,12 @@ async def judge_actionable(state: DecideState, config: RunnableConfig) -> Dict[s
     if judge is None:
         return {"actionable": True, "p_actionable": 0.0}
     recent = s.candidate_tasks(state["message"])[:1]
-    out = await judge(message=state["message"], history=state["prior"],
-                      task=recent[0] if recent else None)
+    out = state.get("preflight", {}).get("actionable")
+    if out is None:
+        out = await judge(message=state["message"], history=state["prior"],
+                          task=recent[0] if recent else None)
+    elif isinstance(out, BaseException):
+        out = {}
     clear = out.get("actionable")
     return {"actionable": True if clear is None else bool(clear), "p_actionable": float(out.get("p") or 0.0)}
 
@@ -212,9 +225,27 @@ async def judge_request(state: DecideState, config: RunnableConfig) -> Dict[str,
     from .router import RouterOutput
     scope_out = RouterOutput(request=state["request"].model_copy(deep=True))
     vault_out = RouterOutput(request=state["request"].model_copy(deep=True))
-    await asyncio.gather(s.jev_scopes(scope_out, strict=True), s.jev_knowledge(vault_out),
-                         s.jev_event(state["task"], state["body"], state["prior"],
-                                     RouterOutput(request=state["request"])))
+    preflight = state.get("preflight", {})
+    scope_result = preflight.get("scopes")
+    if isinstance(scope_result, BaseException):
+        scope_result = None
+    vault_result = preflight.get("vault")
+    if isinstance(vault_result, BaseException):
+        vault_result = None
+    event_result = preflight.get("event")
+    if (isinstance(event_result, BaseException)
+            or preflight.get("event_task_id") != state["task"].get("id")):
+        event_result = None
+    scope_call = (s.jev_scopes(scope_out, strict=True, result=scope_result)
+                  if scope_result is not None else s.jev_scopes(scope_out, strict=True))
+    vault_call = (s.jev_knowledge(vault_out, result=vault_result)
+                  if vault_result is not None else s.jev_knowledge(vault_out))
+    event_out = RouterOutput(request=state["request"])
+    event_call = (s.jev_event(state["task"], state["body"], state["prior"], event_out,
+                              result=event_result)
+                  if event_result is not None else
+                  s.jev_event(state["task"], state["body"], state["prior"], event_out))
+    await asyncio.gather(scope_call, vault_call, event_call)
     req = scope_out.request
     # Vault selection contributes only vault scopes; the seed request's web scope is not a verdict.
     req.scopes = list(dict.fromkeys(list(req.scopes) +
@@ -243,7 +274,15 @@ async def record_event(state: DecideState, config: RunnableConfig) -> Dict[str, 
     from .router import RouterOutput
     # jev_event only reads whether a request exists and the writer's summary (applied later).
     out = RouterOutput(request=state.get("request"), task_summary=None)
-    await s.jev_event(state["task"], state["body"], state["prior"], out)
+    preflight = state.get("preflight", {})
+    event_result = preflight.get("event")
+    if (isinstance(event_result, BaseException)
+            or preflight.get("event_task_id") != state["task"].get("id")):
+        event_result = None
+    if event_result is not None:
+        await s.jev_event(state["task"], state["body"], state["prior"], out, result=event_result)
+    else:
+        await s.jev_event(state["task"], state["body"], state["prior"], out)
     return {}
 
 
@@ -366,9 +405,10 @@ def graph():
 
 
 async def decide(session: Any, *, body: str, message: str, prior: List[Dict[str, Any]], mode: str,
-                 memory: str, found: str):
+                 memory: str, found: str, preflight: Optional[Dict[str, Any]] = None):
     """Run one message through the graph. Returns (RouterOutput, task or None)."""
     initial: DecideState = {"body": body, "message": message, "prior": prior, "mode": mode, "memory": memory,
+                            "preflight": preflight or {},
                             "found": found, "task_choice": None, "pick": "", "needs_action": False, "p_action": 0.0,
                             "reply": None, "task_title": None, "task_summary": None, "schedule": None,
                             "schedule_command": None, "access_command": None,

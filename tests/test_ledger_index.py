@@ -52,14 +52,40 @@ def test_tree_two_levels_and_confident_overflow(monkeypatch):
                 answers['T4'] = {'noul': 0.95}
             return SimpleNamespace(raise_for_status=lambda: None, json=lambda: {'answers': answers})
     monkeypatch.setattr('inkbox_claude.gate.taskpick.httpx.AsyncClient', Client)
-    entries = [{'id': i, 'categories': ['tamid_workspace'], 'line': f'T{i} | title'} for i in range(1, 6)]
-    entries.append({'id': 6, 'categories': ['server'], 'line': 'T6 | secret'})
+    entries = [{'id': i, 'categories': ['tamid_workspace'], 'line': f'T{i} | title'} for i in range(1, 42)]
+    entries.append({'id': 99, 'categories': ['server'], 'line': 'T99 | secret'})
     result = asyncio.run(TaskPicker(api_key='test').judge_ledger_tree(message='interviews', history=[], entries=entries))
     assert len(calls) == 2
-    assert 'T6' not in calls[1]['questions']
+    assert 'T99' not in calls[1]['questions']
     assert set(result['ids']) == {1, 2, 3} | {4}
     assert set(calls[0]['questions']) == {'tamid_workspace', 'server'}
-    assert calls[0]['state']['ledger_index_by_category']['server'] == ['T6 | secret']
+    assert calls[0]['state']['ledger_index_by_category']['server'] == ['T99 | secret']
+
+
+def test_small_ledger_scores_every_task_in_one_call(monkeypatch):
+    calls = []
+
+    class Client:
+        def __init__(self, **kw): pass
+        async def __aenter__(self): return self
+        async def __aexit__(self, *a): pass
+        async def post(self, url, headers, json):
+            calls.append(json)
+            answers = {key: {'noul': 0.95 if key == 'T2' else 0.1} for key in json['questions']}
+            return SimpleNamespace(raise_for_status=lambda: None, json=lambda: {'answers': answers})
+
+    monkeypatch.setattr('inkbox_claude.gate.taskpick.httpx.AsyncClient', Client)
+    entries = [
+        {'id': 1, 'categories': ['tamid_workspace'], 'line': 'T1 | interviews'},
+        {'id': 2, 'categories': ['server'], 'line': 'T2 | deploy'},
+    ]
+    result = asyncio.run(TaskPicker(api_key='test').judge_ledger_tree(
+        message='deploy it', history=[], entries=entries))
+    assert len(calls) == 1
+    assert set(calls[0]['questions']) == {'T1', 'T2'}
+    assert 'ledger_index_by_category' not in calls[0]['state']
+    assert result['ids'] == [2]
+    assert 'tasks' in result['timings'] and result['timings']['categories'] == 0.0
 
 
 def test_continuation_is_conservative():
@@ -90,6 +116,91 @@ def test_session_fast_path_loads_only_complete_chosen_body(tmp_path):
     assert body in text
     assert f"Task T{other['id']} " not in text
     assert [t['id'] for t in session.candidate_tasks()] == [chosen['id']]
+
+
+def test_preflight_launches_all_source_only_judgments_together(tmp_path):
+    from test_gate import make_manager, approver_meta, APPROVER_CONV
+    m, _ = make_manager(tmp_path)
+    session = m.get(APPROVER_CONV)
+    session.mode = 'imessage'
+    session.reply_meta = approver_meta()
+    m.store.create_task('Parallel preflight task')
+    started = set()
+    expected = {'ledger', 'lookup', 'query', 'pick', 'action', 'actionable', 'vault', 'event', 'complexity'}
+
+    async def barrier(name, result):
+        started.add(name)
+        for _ in range(200):
+            if started == expected:
+                return result
+            await asyncio.sleep(0)
+        raise AssertionError(f'preflight serialized or omitted calls: {expected - started}')
+
+    class Picker:
+        async def judge_ledger_tree(self, **kw):
+            return await barrier('ledger', {'ids': [], 'timings': {}, 'reason': 'ok'})
+        async def plan_lookup(self, **kw):
+            return await barrier('lookup', {'lookup': 'none', 'text': '', 'confidence': .9})
+        async def pick(self, **kw):
+            return await barrier('pick', {'choice': 'none'})
+        async def judge_action(self, **kw):
+            return await barrier('action', {'needs_action': False, 'p': .1})
+        async def judge_actionable(self, **kw):
+            return await barrier('actionable', {'actionable': True, 'p': .9})
+        async def judge_vault_tree(self, **kw):
+            return await barrier('vault', {'scopes': [], 'notes': [], 'reason': 'ok'})
+        async def judge_event(self, **kw):
+            return await barrier('event', {'kind': None})
+        async def judge_complexity(self, **kw):
+            return await barrier('complexity', {'complex': False, 'p': .1})
+
+    async def plan_query(**kw):
+        return await barrier('query', None)
+
+    m.task_picker = Picker()
+    m.router.plan_query = plan_query
+    prepared = session.prepare_task_index([], 'handle the parallel preflight task')
+    result = asyncio.run(session.run_preflight(
+        'handle the parallel preflight task', 'handle the parallel preflight task', [], prepared))
+    assert started == expected
+    assert result['lookup']['lookup'] == 'none'
+
+
+def test_preflight_fast_continuation_skips_ledger_scoring(tmp_path):
+    from test_gate import make_manager, approver_meta, APPROVER_CONV
+    m, _ = make_manager(tmp_path)
+    session = m.get(APPROVER_CONV)
+    session.mode = 'imessage'
+    session.reply_meta = approver_meta()
+    task = m.store.create_task('Continuation task')
+
+    class Picker:
+        async def judge_ledger_tree(self, **kw):
+            raise AssertionError('fast path must not score the ledger')
+
+    m.task_picker = Picker()
+    prepared = session.prepare_task_index([], f'T{task["id"]} please')
+    result = asyncio.run(session.run_preflight(f'T{task["id"]} please', f'T{task["id"]} please', [], prepared))
+    assert session._ledger_fast_id == task['id']
+    assert 'ledger' not in result
+
+
+def test_executor_model_choice_consumes_preflight_complexity_once(tmp_path):
+    from test_gate import make_manager
+    m, _ = make_manager(tmp_path)
+    task = m.store.create_task('Complex task')
+    req = m.store.create_request(
+        chat_id='c', sender='s', sender_name='', mode='imessage', subject='', original_message='do it',
+        summary='Complex task', scopes=['web'], prompt='do it', state='approved', task_id=task['id'])
+
+    class Picker:
+        async def judge_complexity(self, **kw):
+            raise AssertionError('complexity must not be judged twice')
+
+    m.task_picker = Picker()
+    m.remember_complexity(req.id, {'complex': True, 'p': .9, 'reason': 'ok'})
+    assert asyncio.run(m._pick_model(req)) == 'opus'
+    assert req.id not in m._complexity_results
 
 
 def test_request_judgments_overlap_and_merge_without_overwrite():

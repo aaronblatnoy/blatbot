@@ -1910,9 +1910,10 @@ def test_jev_plans_the_lookup_and_the_chat_model_does_not(tmp_path):
     m.store._db.execute("UPDATE tasks SET updated_at=updated_at-40*86400 WHERE id=?", (hidden["id"],)); m.store._db.commit()
     m.task_picker = LookupPicker({"lookup": "any", "text": "Sam Rivera", "confidence": 0.9, "reason": "ok"},
                                  choice="none")
+    m.router_defines_requests = False
     m.router.next = RouterOutput(reply="checking", request=None)
     asyncio.run(m.get(APPROVER_CONV).handle_inbound("what happened with Sam Rivera's errand?", "imessage", approver_meta()))
-    assert m.router.query_calls == []                       # the chat model never planned the lookup
+    assert len(m.router.query_calls) == 1                   # speculative fallback ran, then Jev's answer won
     call = m.task_picker.lookup_calls[-1]
     assert "Sam Rivera" in call["candidates"]
     assert any("Update Jared's SJBA bio" in t for t in call["in_view_titles"])
@@ -1923,14 +1924,16 @@ def test_jev_plans_the_lookup_and_the_chat_model_does_not(tmp_path):
 def test_jev_no_lookup_skips_the_search(tmp_path):
     m, sent = make_manager(tmp_path)
     m.task_picker = LookupPicker({"lookup": "none", "text": "", "confidence": 0.9, "reason": "ok"}, choice="none")
+    m.router_defines_requests = False
     asyncio.run(m.get(APPROVER_CONV).handle_inbound("thank you blatbot", "imessage", approver_meta()))
-    assert m.router.query_calls == []
+    assert len(m.router.query_calls) == 1                   # speculative fallback is ignored for no_lookup
     assert m.router.calls[-1]["found_tasks"] == ""
 
 
 def test_jev_undecided_lookup_falls_back_to_the_chat_planner(tmp_path):
     m, sent = make_manager(tmp_path)
     m.task_picker = LookupPicker({"lookup": None, "text": "", "confidence": 0.2, "reason": "low confidence"}, choice="none")
+    m.router_defines_requests = False
     asyncio.run(m.get(APPROVER_CONV).handle_inbound("hm", "imessage", approver_meta()))
     assert len(m.router.query_calls) == 1
 
