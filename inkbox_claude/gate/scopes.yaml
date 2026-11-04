@@ -222,6 +222,11 @@ systems:
     always:
     - corgi_read
     leaves:
+      corgi_people:
+        question: 'Corgi Command''s people directory: look up a person, their role, desk, contact details, stage,
+          or whether they may be contacted.'
+        grants:
+        - corgi_people_read
       corgi_write:
         question: 'Change something in Corgi Command: log or edit outreach, add or update a user, ingest lead-gen,
           update or import prospects, work a poaching/recruiting record, post or action a task, or touch the
@@ -1087,6 +1092,31 @@ scopes:
     - mcp__corgi-crm__crm_tm_call_list_approve
     - mcp__corgi-crm__crm_tm_call_list_remove
     - mcp__corgi-crm__crm_tm_call_list_unapprove
+    - mcp__corgi-crm__crm_people_add
+    - mcp__corgi-crm__crm_people_update
+    - mcp__corgi-crm__crm_people_log_contact
+    - mcp__corgi-crm__crm_people_record_verdict
+    - mcp__corgi-crm__crm_people_set_stage
+    - mcp__corgi-crm__crm_people_remove
+    - mcp__corgi-crm__crm_people_restore
+    - mcp__corgi-crm__crm_people_import_rows
+    - mcp__corgi-crm__crm_people_import_file
+  corgi_people_read:
+    description: 'Corgi Command''s people directory: look up a person, their role, desk, contact details, stage,
+      or whether they may be contacted. Confidential; gated by the token''s own view-people permission. Not
+      the fund, target or signal data (that is corgi_read), and not a write (corgi_write).'
+    label: look up a person in Corgi Command's people directory
+    ask: 'look up a person in Corgi Command'
+    synonyms:
+    - corgi people
+    - corgi contacts
+    - who is in corgi
+    read: true
+    tools:
+    - mcp__corgi-crm__crm_people_list
+    - mcp__corgi-crm__crm_people_get
+    - mcp__corgi-crm__crm_people_get_contacts
+    - mcp__corgi-crm__crm_people_options
   coolify_corgi_read:
     description: 'read the Corgi NYC Coolify (ANOS/Corgi deployments, separate from black-sky''s own Coolify):
       infrastructure overview, apps, services, databases, deployments, logs, env var names, health, docs'
