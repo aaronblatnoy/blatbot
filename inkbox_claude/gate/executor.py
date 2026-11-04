@@ -14,6 +14,7 @@ import logging
 import os
 import re
 import time
+from dataclasses import replace
 from typing import Any, Dict, List, Optional
 
 from claude_agent_sdk import (
@@ -30,7 +31,7 @@ from claude_agent_sdk import (
 )
 
 from .router import now_line
-from .scopes import ORG_ACCOUNT, OWNER_ACCOUNT, SCOPES, blocks_requester_send, tools_for
+from .scopes import BLATBOT_ADMIN_SCOPE, ORG_ACCOUNT, OWNER_ACCOUNT, SCOPES, blocks_requester_send, tools_for
 from . import hosttools
 from . import schedrun
 from . import wording
@@ -304,7 +305,7 @@ class Executor:
 
     async def run(self, req: Request, context: str = "", prior_work: str = "", model: Optional[str] = None,
                   from_owner: bool = False, timezone: str = "America/New_York",
-                  note: Optional[str] = None) -> Dict[str, Any]:
+                  note: Optional[str] = None, *, _retried: bool = False) -> Dict[str, Any]:
         """Run an approved request. Returns a status dict; never raises.
 
         `context` is the task ledger for the person this request concerns. It is
@@ -604,4 +605,20 @@ class Executor:
         except Exception as exc:  # noqa: BLE001
             return _finalize_exception(exc)
 
-        return _finalize(result)
+        out = _finalize(result)
+        refused_for_scope = any(d.get("denied") == "scope" for d in denied_steps)
+        no_real_answer = (not out.get("final_status")
+                          or out.get("final_status") == "(no status text)")
+        if (from_owner and not req.schedule_id and refused_for_scope and not _retried
+                and (not out["ok"] or no_real_answer)):
+            widened = [sc for sc in SCOPES if not sc.startswith("vault:")] + [BLATBOT_ADMIN_SCOPE]
+            if not set(widened).issubset(set(req.scopes)):
+                refused = sorted({d["tool"] for d in denied_steps if d.get("denied") == "scope"})
+                logger.info("[gate] #%s widened to all scopes after refusal of %s; re-running",
+                            req.id, ", ".join(refused))
+                req2 = replace(req, scopes=widened)
+                prior_work_text = out.get("raw") or out.get("summary") or ""
+                return await self.run(
+                    req2, context=context, prior_work=prior_work_text, model=model,
+                    from_owner=from_owner, timezone=timezone, note=note, _retried=True)
+        return out
