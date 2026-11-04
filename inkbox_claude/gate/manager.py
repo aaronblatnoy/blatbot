@@ -826,13 +826,24 @@ class GateSession:
         if out.request is None:
             return
         standing = self._standing_scopes()
-        if self.is_approver():
-            # The owner may have anything, never guessed from the wording of the ask: a
-            # guess that leaves out the one system the work needed is a failed run for nothing.
-            out.request.scopes = standing
-            logger.info("[gate %s] scopes granted (owner, everything): %s", self.chat_id, standing)
-            return
         picker = self.m.task_picker
+        if self.is_approver():
+            if picker is None or not hasattr(picker, "judge_scopes_tree"):
+                out.request.scopes = standing
+                logger.info("[gate %s] scopes granted (owner, everything): %s", self.chat_id, standing)
+                return
+            res = result if result is not None else await picker.judge_scopes_tree(
+                prompt=out.request.prompt, summary=out.request.summary, generous=True)
+            chosen = res.get("scopes")
+            if chosen is None:
+                out.request.scopes = standing
+                logger.info("[gate %s] scopes granted (owner, everything): %s", self.chat_id, standing)
+                return
+            probs = res.get("probabilities") or {}
+            chosen = list(dict.fromkeys(chosen + [k for k, v in probs.items() if v >= 0.5]))
+            out.request.scopes = chosen
+            logger.info("[gate %s] scopes granted (owner, tree): %s", self.chat_id, chosen)
+            return
         if picker is None:
             if standing:
                 out.request.scopes = list(dict.fromkeys(list(out.request.scopes) + standing))
