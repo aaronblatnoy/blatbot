@@ -9,6 +9,7 @@ Code underneath.
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import os
 import re
@@ -35,6 +36,26 @@ from . import schedrun
 from .store import Request, sha256
 
 logger = logging.getLogger(__name__)
+
+
+def _load_user_mcp_servers() -> Dict[str, Any]:
+    """Load Claude's user-level MCP registry once without making import fragile."""
+    path = "~/.claude.json"
+    try:
+        path = os.path.expanduser(path)
+        with open(path, encoding="utf-8") as fh:
+            config = json.load(fh)
+        servers = config.get("mcpServers", {})
+        if not isinstance(servers, dict):
+            raise ValueError("mcpServers is not an object")
+        return servers
+    except Exception as exc:  # noqa: BLE001 - malformed user config must not break the gate
+        logger.warning("[gate] could not load user MCP servers from %s: %s", path, exc)
+        return {}
+
+
+_USER_MCP_SERVERS: Dict[str, Any] = _load_user_mcp_servers()
+_WARNED_MISSING_MCP_SERVERS: set[str] = set()
 
 QUOTA_COOLDOWN_SECONDS = 30 * 60
 _QUOTA_RESET_RE = re.compile(
@@ -226,6 +247,26 @@ class Executor:
         self._quota_until: Optional[float] = None
         self._quota_reset_text: Optional[str] = None
 
+    def _mcp_servers_for(self, allowed_tools: List[str], host_server: Any) -> Dict[str, Any]:
+        """Return the built-in servers plus user servers required by scoped tools."""
+        servers: Dict[str, Any] = {"inkbox": self.mcp_server, "host": host_server}
+        names = {
+            parts[1]
+            for name in allowed_tools
+            if name.startswith("mcp__")
+            for parts in [name.split("__")]
+            if len(parts) >= 3 and parts[1]
+        }
+        for name in sorted(names):
+            if name in servers:
+                continue
+            if name in _USER_MCP_SERVERS:
+                servers[name] = _USER_MCP_SERVERS[name]
+            elif name not in _WARNED_MISSING_MCP_SERVERS:
+                logger.warning("[gate] scoped MCP server %s is missing from ~/.claude.json", name)
+                _WARNED_MISSING_MCP_SERVERS.add(name)
+        return servers
+
     def quota_state(self) -> Dict[str, Any]:
         """Current in-process Claude Code quota cooldown, for health reporting."""
         if self._quota_until is not None and self._quota_until > time.time():
@@ -269,7 +310,8 @@ class Executor:
             }
         started_at = time.time()
         vault_prefixes = vault_prefixes_for_scopes(req.scopes)
-        allowed = tools_for(req.scopes)
+        scoped_allowed = tools_for(req.scopes)
+        allowed = list(scoped_allowed)
         allowed_set = set(allowed)   # what this task may touch at all, send tools included
         if req.schedule_id:
             # Every scheduled write reaches the hook. The schedule pre-approves ordinary
@@ -379,16 +421,19 @@ class Executor:
                 f"results; it stopped because it could not decide the next step). The complete record is in {path}; "
                 "Read it before calling any tool. Do not repeat those calls. Continue from them. Head of the record:\n" + head
             )
+        host_server = hosttools.sdk_server(vault_prefixes=vault_prefixes, manager=self.manager,
+                                           is_commander=bool(from_owner))
+        mcp_servers = self._mcp_servers_for(scoped_allowed, host_server)
+        logger.info("[gate] #%s mcp servers: %s", req.id, sorted(mcp_servers.keys()))
         options = ClaudeAgentOptions(
             cwd=self.cwd,
             model=model or self.model,
             system_prompt={"type": "preset", "preset": "claude_code", "append": system_append},
             setting_sources=["user", "project"],
+            strict_mcp_config=True,
             permission_mode="default",
             allowed_tools=allowed,
-            mcp_servers={"inkbox": self.mcp_server,
-                        "host": hosttools.sdk_server(vault_prefixes=vault_prefixes, manager=self.manager,
-                                                     is_commander=bool(from_owner))},
+            mcp_servers=mcp_servers,
             # One conversation per thread, continued rather than restarted, for an ordinary
             # request: what was looked up an hour ago is still in view and a follow-up does
             # not arrive as a stranger's first sentence. A scheduled run never resumes:
