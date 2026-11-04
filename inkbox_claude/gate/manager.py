@@ -51,6 +51,7 @@ EXPIRE_SECONDS = 24 * 3600
 # other test of _is_same_ask_as_failed, caller-words continuation) is the one doing
 # the real work past this window.
 CALL_ASK_FOLD_WINDOW_S = 45
+VOICE_FAST_PATH_MAX_CHARS = 600
 
 
 def _normalize_caller_words(text: str) -> str:
@@ -78,6 +79,17 @@ def _clean_result(text: str) -> str:
     """Drop the STATUS line and trailing whitespace from an executor result."""
     lines = [ln for ln in text.strip().splitlines() if not ln.strip().upper().startswith("STATUS:")]
     return "\n".join(lines).strip()
+
+
+def _request_id_from_note(note: str) -> Optional[int]:
+    match = re.match(r"Task #(\d+)\b", note or "")
+    return int(match.group(1)) if match else None
+
+
+def _log_answer_path(request_id: Optional[int], path: str, started: float) -> None:
+    if request_id is not None:
+        logger.info("[gate] #%s answer path: %s in %.1fs",
+                    request_id, path, time.monotonic() - started)
 
 
 DEFAULT_VOICE_VOCABULARY = (
@@ -1432,12 +1444,17 @@ class GateSession:
         """Turn a finished request's result into what the voice model says. A failure is
         already the whole message wording.py built for it (`execute()` returns it as-is
         with notify=False); it is spoken exactly as written, never handed to a model that
-        can rewrite it into something the grounding check then rejects. Only a real
-        success result -- the run's own narration -- goes through the reply writer and
-        grounding check. `ok` comes from the request's own status, never from sniffing
-        the text for a leading "Done"."""
+        can rewrite it into something the grounding check then rejects. A short success
+        is spoken directly from the run's own narration; only a long success goes through
+        the reply writer and grounding check. `ok` comes from the request's own status,
+        never from sniffing the text for a leading "Done"."""
         if not ok:
             return text
+        direct_started = time.monotonic()
+        cleaned = _result_bodies(text)
+        if cleaned and len(cleaned) <= VOICE_FAST_PATH_MAX_CHARS:
+            _log_answer_path(req.id, "voice-direct", direct_started)
+            return " ".join(cleaned.split())
         note = f"Task #{req.id} done: {wording.plain_title(self.m.store, req)}\nResult:\n{text}"
         async with self._lock:
             prev = (self.mode, self.reply_meta)
@@ -1446,6 +1463,7 @@ class GateSession:
                 approver = self.is_approver()
                 history = self.m.store.history(self.record_id, limit=20)
                 memory = self.task_memory()
+                answer_started = time.monotonic()
                 out = await self.m.router.route(
                     history=history, mode="voice", sender=self._sender(), contact_notes=self._contact_notes(),
                     is_approver=approver, task_memory=memory, found_tasks="", action=False,
@@ -1456,7 +1474,9 @@ class GateSession:
                              "found. Do not create a request.)"),
                     action_task=wording.plain_title(self.m.store, req))
                 out.request = None
-                reply = await self.ground_reply(out.reply, note, history, memory, "", approver)
+                reply = await self.ground_reply(
+                    out.reply, note, history, memory, "", approver,
+                    answer_started=answer_started, answer_request_id=req.id)
             except Exception:
                 logger.exception("[gate %s] phrasing a call result failed", self.chat_id)
                 reply = None
@@ -1607,13 +1627,25 @@ class GateSession:
                     await self.send_to_sender(reply, role="ack")
                 return bool(reply)
         if system_note:
-            out: RouterOutput = await self.m.router.route(
-                history=prior, message=message, mode=self.mode, sender=self._sender(),
-                contact_notes=self._contact_notes(), is_approver=approver,
-                task_memory=memory, found_tasks=found, action=False,
-            )
-            out.request = None
-            out.reply = await self.ground_reply(out.reply, system_note, prior, memory, found, approver)
+            answer_started = time.monotonic()
+            answer_request_id = _request_id_from_note(system_note)
+            rewrite_task = asyncio.create_task(
+                self._grounding_rewrite(prior, memory, found, approver))
+            try:
+                out: RouterOutput = await self.m.router.route(
+                    history=prior, message=message, mode=self.mode, sender=self._sender(),
+                    contact_notes=self._contact_notes(), is_approver=approver,
+                    task_memory=memory, found_tasks=found, action=False,
+                )
+                out.request = None
+                out.reply = await self.ground_reply(
+                    out.reply, system_note, prior, memory, found, approver,
+                    rewrite_task=rewrite_task, answer_started=answer_started,
+                    answer_request_id=answer_request_id)
+            finally:
+                if not rewrite_task.done():
+                    rewrite_task.cancel()
+                await asyncio.gather(rewrite_task, return_exceptions=True)
         else:
             out, task = await self.decide(body=body, message=message, prior=prior, mode=self.mode,
                                           memory=memory, found=found, preflight=preflight)
@@ -1794,15 +1826,34 @@ class GateSession:
             self.m.store.task_event(t["id"], "outbound", text, chat_id=self.record_id)
         return True
 
+    async def _grounding_rewrite(self, prior: List[Dict[str, Any]], memory: str,
+                                 found: str, approver: bool) -> RouterOutput:
+        strict = ("(GROUNDING: your previous draft stated something the task result does not support. Fill "
+                  "\"reasoning\" first: what the result establishes, what follows from it by ordinary inference, "
+                  "what stays unknown. Then write the reply as a conclusion from that: answer the question directly, "
+                  "name only what the result contains or what plainly follows from it, mark inferences as inferences, "
+                  "and say what stays unknown. Do not create a request.)")
+        return await self.m.router.route(
+            history=prior + [{"kind": "system", "text": strict}], message=strict, mode=self.mode, sender=self._sender(),
+            contact_notes=self._contact_notes(), is_approver=approver, task_memory=memory, found_tasks=found, action=False)
+
     async def ground_reply(self, reply: Optional[str], note: str, prior: List[Dict[str, Any]], memory: str,
-                           found: str, approver: bool) -> Optional[str]:
+                           found: str, approver: bool, *, rewrite_task: Optional[asyncio.Task] = None,
+                           answer_started: Optional[float] = None,
+                           answer_request_id: Optional[int] = None) -> Optional[str]:
         """A result reply may only state what the results support. Jev checks the
         draft against the tool output; an unsupported draft is rewritten once with
         the results as the only source, and if still unsupported, replaced by a
         plain statement of what was and was not found. Never a confident guess."""
         picker = self.m.task_picker
         if not reply or picker is None or "Result:" not in note:
+            if rewrite_task is not None:
+                if not rewrite_task.done():
+                    rewrite_task.cancel()
+                await asyncio.gather(rewrite_task, return_exceptions=True)
             return reply
+        started = answer_started if answer_started is not None else time.monotonic()
+        request_id = answer_request_id if answer_request_id is not None else _request_id_from_note(note)
         results = note.split("Result:", 1)[1].strip()
         question = ""
         for m in reversed(prior):
@@ -1811,16 +1862,15 @@ class GateSession:
                 break
         res = await picker.judge_grounded(reply=reply, results=results, question=question)
         if res.get("grounded") is not False:
+            if rewrite_task is not None:
+                if not rewrite_task.done():
+                    rewrite_task.cancel()
+                await asyncio.gather(rewrite_task, return_exceptions=True)
+            _log_answer_path(request_id, "grounded", started)
             return reply
         logger.info("[gate %s] reply not grounded (p=%.2f); rewriting from the results only", self.chat_id, res["p"])
-        strict = ("(GROUNDING: your previous draft stated something the task result does not support. Fill "
-                  "\"reasoning\" first: what the result establishes, what follows from it by ordinary inference, "
-                  "what stays unknown. Then write the reply as a conclusion from that: answer the question directly, "
-                  "name only what the result contains or what plainly follows from it, mark inferences as inferences, "
-                  "and say what stays unknown. Do not create a request.)")
-        out2 = await self.m.router.route(
-            history=prior + [{"kind": "system", "text": strict}], message=strict, mode=self.mode, sender=self._sender(),
-            contact_notes=self._contact_notes(), is_approver=approver, task_memory=memory, found_tasks=found, action=False)
+        out2 = await rewrite_task if rewrite_task is not None else await self._grounding_rewrite(
+            prior, memory, found, approver)
         reply2 = out2.reply or reply
         res2 = await picker.judge_grounded(reply=reply2, results=results, question=question)
         p2 = float(res2.get("p") or 0.0)
@@ -1828,11 +1878,13 @@ class GateSession:
             # A rewrite from the results only, near or over the line: send it. Derived
             # answers (free slots from a list of events, a count from rows) score low
             # on literal support even when they are right.
+            _log_answer_path(request_id, "rewritten", started)
             return reply2
         # Twice unsupported. Sending it anyway is the one thing worse than saying nothing:
         # it is a confident answer the check already judged to be unbacked.
         logger.warning("[gate %s] rewrite still not grounded (p=%.2f); refusing to pass it off",
                        self.chat_id, p2)
+        _log_answer_path(request_id, "refused", started)
         if approver:
             # For the verified Aaron: hand over what the run actually produced, and say
             # plainly that it did not answer the question.
@@ -3224,6 +3276,8 @@ class GateSessionManager:
         # decision) every note the scopes cover is offered, in the vault's own order.
         chosen = [n for n in self._knowledge_notes.get(int(req.id), []) if n in covered]
         notes = chosen or covered
+        if req.mode == "voice":
+            notes = notes[:2]
         total_budget = int(_settings.get("GATE_CONTEXT_BUDGET_CHARS") or 8000)
         ceiling = int(_settings.get("GATE_VAULT_ATTACH_BUDGET_CHARS") or 60000)
         budget = max(500, min(ceiling, total_budget - max(0, ledger_chars)))

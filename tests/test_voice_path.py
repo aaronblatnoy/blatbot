@@ -13,9 +13,11 @@ import time
 
 import pytest
 
-from inkbox_claude.gate.manager import OWNER_THREAD
+from inkbox_claude.gate.manager import OWNER_THREAD, VOICE_FAST_PATH_MAX_CHARS
 from inkbox_claude.gate.router import RouterOutput, RouterRequest
+from inkbox_claude.gate import vaultscopes
 from tests.test_gate import make_manager, phone_manager, voice_meta, AARON_PHONE
+from tests.test_vault_knowledge import _approved, _manager_with_vault
 
 STRANGER_PHONE = "+15559990000"
 
@@ -34,6 +36,80 @@ FORBIDDEN_SUBSTRINGS = (
 
 def _voice_meta(sender=AARON_PHONE):
     return {"call_id": "call-1", "sender": sender, "contact": {"id": "p1", "name": "Caller"}}
+
+
+def _voice_request(m):
+    task = m.store.create_task("Check the calendar")
+    return m.store.create_request(
+        chat_id="p1", sender=AARON_PHONE, sender_name="Caller", mode="voice",
+        subject="", original_message="what is on my calendar?", summary="check the calendar",
+        scopes=["web"], prompt="check the calendar", state="approved", task_id=task["id"])
+
+
+def test_short_voice_result_is_spoken_directly_without_draft_or_grounding(tmp_path):
+    m, _sent = phone_manager(tmp_path, trust=True, active=True)
+    req = _voice_request(m)
+
+    class Picker:
+        def __init__(self):
+            self.calls = []
+
+        async def judge_grounded(self, **kw):
+            self.calls.append(kw)
+            return {"grounded": True, "p": 0.99, "reason": "ok"}
+
+    m.task_picker = Picker()
+    text = ("Done via Jev agent in 7.0s (1 tool call(s)).\n"
+            "- get_events:\nChecked Aaron's calendar for today.\n\nNo events found.\nSTATUS: OK")
+    out = asyncio.run(m.get("p1").phrase_result_for_call(req, text, _voice_meta(), True))
+
+    assert out == "Checked Aaron's calendar for today. No events found."
+    assert m.router.calls == []
+    assert m.task_picker.calls == []
+
+
+def test_long_voice_result_keeps_existing_draft_and_grounding_path(tmp_path):
+    m, _sent = phone_manager(tmp_path, trust=True, active=True)
+    req = _voice_request(m)
+
+    class Picker:
+        def __init__(self):
+            self.calls = []
+
+        async def judge_grounded(self, **kw):
+            self.calls.append(kw)
+            return {"grounded": True, "p": 0.99, "reason": "ok"}
+
+    m.task_picker = Picker()
+    m.router.next_note = RouterOutput(reply="Here is the concise spoken summary.", request=None)
+    text = "A" * (VOICE_FAST_PATH_MAX_CHARS + 1)
+    out = asyncio.run(m.get("p1").phrase_result_for_call(req, text, _voice_meta(), True))
+
+    assert out == "Here is the concise spoken summary."
+    assert len(m.router.calls) == 1
+    assert len(m.task_picker.calls) == 1
+
+
+def test_voice_vault_attachment_caps_notes_without_changing_text_modes(tmp_path, monkeypatch):
+    m, _sent, _root = _manager_with_vault(tmp_path, monkeypatch)
+    real_build = vaultscopes.build_relevant_attachment
+    seen = []
+
+    def record_notes(root, notes, **kwargs):
+        seen.append(list(notes))
+        return real_build(root, notes, **kwargs)
+
+    monkeypatch.setattr(vaultscopes, "build_relevant_attachment", record_notes)
+    voice_req = _approved(["vault:areas/garden-shed"], request_id=71)
+    voice_req.mode = "voice"
+    text_req = _approved(["vault:areas/garden-shed"], request_id=72)
+
+    m.vault_attachment_for(voice_req)
+    m.vault_attachment_for(text_req)
+
+    assert len(seen[0]) == 2
+    assert len(seen[1]) > 2
+    assert seen[0] == seen[1][:2]
 
 
 def test_owner_on_a_call_hears_the_usage_limit_sentence_not_the_stranger_line(tmp_path):
