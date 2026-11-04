@@ -1323,6 +1323,57 @@ def test_ungrounded_result_reply_is_rewritten_or_replaced(tmp_path):
     assert len(p.ground_calls) == 2 and "GROUNDING" in m.router.calls[-1]["message"]
 
 
+def test_result_rewrite_starts_while_first_grounding_judge_is_running(tmp_path):
+    m, sent = make_manager(tmp_path)
+    p = _jev_first(m, choice="new")
+    p.action, p.scopes = True, ["web"]
+    rewrite_started = asyncio.Event()
+    release_rewrite = asyncio.Event()
+    judge_saw_rewrite = []
+
+    async def judge_grounded(**kw):
+        p.ground_calls = getattr(p, "ground_calls", []) + [kw]
+        if len(p.ground_calls) == 1:
+            await asyncio.wait_for(rewrite_started.wait(), timeout=0.5)
+            judge_saw_rewrite.append(rewrite_started.is_set())
+            release_rewrite.set()
+            return {"grounded": False, "p": 0.1, "reason": "unsupported"}
+        return {"grounded": True, "p": 0.9, "reason": "ok"}
+
+    p.judge_grounded = judge_grounded
+    m.executor.result = {
+        "ok": True,
+        "summary": "Web search results list Cand Idate and Sam Rivera as co-presidents.",
+        "tool_calls": ["WebSearch"],
+        "raw": "x",
+    }
+    m.router.next = RouterOutput(reply="On it.", task="new", task_title="Find the SREG president")
+
+    async def route(**kw):
+        m.router.calls.append(kw)
+        if kw.get("action") is False and "GROUNDING" in kw["message"]:
+            rewrite_started.set()
+            await release_rewrite.wait()
+            return RouterOutput(
+                reply="The search lists Cand Idate and Sam Rivera as co-presidents.", task="T1")
+        if kw.get("action") is False:
+            return RouterOutput(reply="Jamie Rivera is the president.", task="T1")
+        return m.router.next.model_copy(deep=True)
+
+    m.router.route = route
+
+    async def go():
+        await m.get("aaron").handle_inbound("who is the SREG president?", "imessage", approver_meta())
+        await asyncio.sleep(0.2)
+
+    asyncio.run(go())
+
+    assert judge_saw_rewrite == [True]
+    assert [t for _, t, *_ in sent][-1].startswith(
+        "The search lists Cand Idate and Sam Rivera")
+    assert len(p.ground_calls) == 2
+
+
 def test_still_ungrounded_reply_falls_back_to_the_raw_result(tmp_path):
     m, sent = make_manager(tmp_path)
     p = _jev_first(m, choice="new")
@@ -1972,7 +2023,13 @@ def test_decide_graph_runs_the_jev_first_flow(tmp_path, monkeypatch):
 
 def test_voice_result_is_phrased_for_speech_not_raw(tmp_path):
     m, sent = phone_manager(tmp_path, trust=True)
-    m.executor.result = {"ok": True, "summary": "Done via Jev agent in 9.1s (3 tool call(s)).\n- get_events:\nSuccessfully retrieved 2 events", "tool_calls": ["mcp__google-workspace__get_events"], "raw": "x"}
+    m.executor.result = {
+        "ok": True,
+        "summary": ("Done via Jev agent in 9.1s (3 tool call(s)).\n- get_events:\n"
+                    "Successfully retrieved 2 events. " + "Additional event detail. " * 30),
+        "tool_calls": ["mcp__google-workspace__get_events"],
+        "raw": "x",
+    }
     m.router.next = RouterOutput(reply=None, task="new", task_title="Tomorrow's chats",
                                  request=RouterRequest(prompt="List tomorrow", scopes=["stern_calendar"], summary="Tomorrow's chats"))
     m.router.next_note = RouterOutput(reply="Two chats tomorrow: Owen at five and Philip at six.", request=None)
