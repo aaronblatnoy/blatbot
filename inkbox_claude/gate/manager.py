@@ -3263,6 +3263,36 @@ class GateSessionManager:
             task_id=task_id, inbound_id=inbound_id or req.inbound_id, bypass_dedupe=True)
         return new_req
 
+    async def deliver_late_result(self, req: Request, status: Dict[str, Any]) -> None:
+        """A run that outran its live timeout has now actually finished. Deliver the
+        real result the same way execute() would have, once, on whatever channel is
+        still owed an answer -- notify_after_request/notify_failure already refuse to
+        send a second answer to an inbound that already has one, so this is safe even
+        if the fast timeout path already told the person something in the meantime."""
+        fresh = self.store.get_request(req.id)
+        req = fresh or req
+        ok = bool(status.get("ok"))
+        self.store.set_state(req.id, "done" if ok else "failed", status=status, raw_output=status.get("raw"))
+        self.store.set_thread(req.chat_id, "idle")
+        title = wording.plain_title(self.store, req)
+        result = (status.get("summary") or status.get("error") or "").strip()
+        message = wording.success_message(result) if ok else wording.failure_message(title, status)
+        outcome = "done" if ok else "FAILED"
+        note = (f"Task #{req.id} {outcome} (after running past the live-call budget in the background): "
+                f"{req.summary}\nResult:\n{result}")
+        self.task_note(req, "done" if ok else "failed", f"{req.summary} -> {result}",
+                       state="done" if ok else "failed")
+        session = self.get(req.chat_id)
+        try:
+            if ok:
+                delivered = await session.notify_after_request(note, inbound_id=req.inbound_id)
+            else:
+                delivered = await session.notify_failure(message, note, inbound_id=req.inbound_id)
+            if not delivered:
+                await self.send_to_approver(f"[Blatbot #{req.id} {outcome}, finished late] {title}\n{message}")
+        except Exception:
+            logger.exception("[gate] #%s late delivery failed", req.id)
+
     async def execute(self, req: Request, notify: bool = True) -> str:
         """Run an approved request. With notify=False the caller delivers the
         result itself (a live phone call reads it aloud) and gets it back."""

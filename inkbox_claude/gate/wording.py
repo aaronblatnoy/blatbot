@@ -239,6 +239,13 @@ def run_own_explanation(status: Dict[str, Any]) -> str:
 def failure_message(summary: str, status: Dict[str, Any]) -> str:
     """The whole message a person receives for a failed request: never
     'That failed.', never an exception or SDK string, never markdown."""
+    if status.get("timed_out"):
+        # The run itself has not failed -- it outran the live-call budget and is
+        # still going in the background (see executor.py's _continue_after_timeout
+        # and manager.deliver_late_result). "it took too long, try again" would be
+        # wrong here: a retry would start a second run of the same ask while the
+        # first is still working. Say so instead; the real answer follows by text.
+        return still_working_message()
     if _classify(status) == "usage_limit":
         # Its own case, entirely: no "I couldn't finish <summary>" framing, no
         # partial-findings offer, and never "try again" as an immediate fix (the
@@ -284,6 +291,11 @@ def success_message(result: str) -> str:
         return text
     return f"Done. {text}"
 
+
+def still_working_message() -> str:
+    """Said (never texted) when a run is taking longer than the live-call budget:
+    the real answer still follows by text once the run actually finishes."""
+    return "Still working on that one. I'll text you the answer."
 
 
 # ---------------------------------------------------------------------------

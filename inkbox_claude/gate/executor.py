@@ -33,6 +33,7 @@ from .router import now_line
 from .scopes import ORG_ACCOUNT, OWNER_ACCOUNT, SCOPES, blocks_requester_send, tools_for
 from . import hosttools
 from . import schedrun
+from . import wording
 from .store import Request, sha256
 
 logger = logging.getLogger(__name__)
@@ -58,6 +59,8 @@ _USER_MCP_SERVERS: Dict[str, Any] = _load_user_mcp_servers()
 _WARNED_MISSING_MCP_SERVERS: set[str] = set()
 
 QUOTA_COOLDOWN_SECONDS = 30 * 60
+DEFAULT_TIMEOUT_S = 120.0
+VOICE_TIMEOUT_S = 25.0
 _QUOTA_RESET_RE = re.compile(
     r"resets?\s+(\d{1,2}(?::\d{2})?\s*(?:am|pm)?(?:\s*\([^)]*\))?)", re.I)
 
@@ -231,12 +234,14 @@ def destructive_policy(req: Request, tool_name: str, input_data: Dict[str, Any])
 
 
 class Executor:
-    def __init__(self, *, mcp_server: Any, cwd: str, model: str = "sonnet", timeout_s: float = 600.0,
+    def __init__(self, *, mcp_server: Any, cwd: str, model: str = "sonnet",
+                 timeout_s: float = DEFAULT_TIMEOUT_S, voice_timeout_s: float = VOICE_TIMEOUT_S,
                  protected: Optional[List[str]] = None, manager: Any = None):
         self.mcp_server = mcp_server
         self.cwd = cwd
         self.model = model
         self.timeout_s = timeout_s
+        self.voice_timeout_s = voice_timeout_s
         # Addresses/conversations the gateway itself replies to (the owner's).
         self.protected = list(protected or [])
         # The live GateSessionManager, so the "host" MCP server's ADMIN_* tools
@@ -274,6 +279,23 @@ class Executor:
         self._quota_until = None
         self._quota_reset_text = None
         return {"state": "ok"}
+
+    async def _continue_after_timeout(self, req: Request, go_task: asyncio.Future,
+                                      finalize: Any, finalize_exception: Any) -> None:
+        try:
+            try:
+                late_result = await go_task
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:  # noqa: BLE001
+                status = finalize_exception(exc)
+            else:
+                status = finalize(late_result)
+            await self.manager.deliver_late_result(req, status)
+        except asyncio.CancelledError:
+            raise
+        except Exception:  # noqa: BLE001 - orphaned delivery must never escape
+            logger.exception("[gate] #%s background delivery failed", req.id)
 
     allow_send = False        # set for one run, after the owner has read the draft and said yes
     held_send: Optional[Dict[str, Any]] = None   # the call that was stopped, for the gate to show him
@@ -486,17 +508,7 @@ class Executor:
                     final = msg
             return final
 
-        try:
-            result = await asyncio.wait_for(_go(), timeout=self.timeout_s)
-        except asyncio.TimeoutError:
-            finished_at = time.time()
-            return {"ok": False, "error": f"timed out after {int(self.timeout_s)}s", "tool_calls": tool_calls,
-                    "raw": "\n".join(texts), "stop": False, "result_line": "", "final_status": "",
-                    "note": "", "denied": [{"tool": d["tool"], "reason": d.get("denied", "scope")}
-                                           for d in denied_steps],
-                    "held": bool(self.held_send or held_destructive), "tool_results": tool_results,
-                    "started_at": started_at, "finished_at": finished_at, "cost_usd": None}
-        except Exception as exc:  # noqa: BLE001
+        def _finalize_exception(exc: Exception) -> Dict[str, Any]:
             logger.exception("executor failed for request %s", req.id)
             finished_at = time.time()
             error = str(exc)
@@ -512,57 +524,84 @@ class Executor:
                     "started_at": started_at, "finished_at": finished_at, "cost_usd": None,
                     **({"quota_error": True, "reset_time": reset_time} if quota_error else {})}
 
-        finished_at = time.time()
-        raw = "\n".join(texts).strip()
-        is_error = bool(getattr(result, "is_error", False)) if result is not None else False
-        closing_full = "\n".join(closing_texts).strip()
-        parsed = schedrun.parse_closing(closing_full)
-        if parsed["status"] is not None:
-            ok = parsed["status"] in ("OK", "STOP")
-            is_error = is_error or parsed["status"] in ("FAILED", "BLOCKED")
-        else:
-            # No RESULT/NOTE/STATUS contract matched (the ordinary, non-schedule system
-            # prompt just asks for a last line of STATUS: OK or STATUS: FAILED): fall
-            # back to the legacy check on the raw closing text.
-            last = raw.strip().splitlines()[-1].strip().upper() if raw.strip() else ""
-            if last.startswith("STATUS:"):
-                is_error = is_error or ("FAILED" in last)
-            elif raw.lower().startswith("task failed") or "STATUS: FAILED" in raw.upper():
-                is_error = True
-            ok = not is_error
-        # final_status is the run's own closing status -- the text that arrived after
-        # the last tool call, with the RESULT:/NOTE:/STATUS: lines stripped. raw (the
-        # full step-by-step narration) stays available for the console and the record,
-        # but a notice to the owner is built from final_status, never raw.
-        final_status = parsed["final_status"] if closing_full else (raw if raw else "(no status text)")
-        out = {
-            "ok": ok,
-            "stop": bool(parsed["stop"]),
-            "result_line": parsed["result_line"],
-            "note": parsed["note"],
-            "changed": parsed.get("changed"),
-            "blocked": bool(parsed.get("blocked")),
-            "needs": parsed.get("needs") or "",
-            "engine": f"claude:{model or self.model}",
-            "summary": raw if raw else "(no status text)",
-            "final_status": final_status,
-            "tool_calls": tool_calls,
-            "tool_results": tool_results,
-            "denied": [{"tool": d["tool"], "reason": d.get("denied", "scope")} for d in denied_steps],
-            "held": bool(self.held_send or held_destructive),
-            "raw": raw,
-            "steps": denied_steps,
-            "started_at": started_at,
-            "finished_at": finished_at,
-            "cost_usd": getattr(result, "total_cost_usd", None) if result is not None else None,
-        }
-        if self.held_send is not None:
-            # Something was going to be said to someone else. It is not sent, it is shown.
-            out["confirm"] = {"tool": self.held_send["tool"], "args": self.held_send["args"],
-                              "about": [self.held_send["to"]], "kind": "send"}
-            out["ok"] = False
-        elif held_destructive is not None:
-            out["confirm"] = {"tool": held_destructive["tool"], "args": held_destructive["args"],
-                              "about": [raw or req.original_message], "kind": "destructive"}
-            out["ok"] = False
-        return out
+        def _finalize(result: Any) -> Dict[str, Any]:
+            finished_at = time.time()
+            raw = "\n".join(texts).strip()
+            is_error = bool(getattr(result, "is_error", False)) if result is not None else False
+            closing_full = "\n".join(closing_texts).strip()
+            parsed = schedrun.parse_closing(closing_full)
+            if parsed["status"] is not None:
+                ok = parsed["status"] in ("OK", "STOP")
+                is_error = is_error or parsed["status"] in ("FAILED", "BLOCKED")
+            else:
+                # No RESULT/NOTE/STATUS contract matched (the ordinary, non-schedule system
+                # prompt just asks for a last line of STATUS: OK or STATUS: FAILED): fall
+                # back to the legacy check on the raw closing text.
+                last = raw.strip().splitlines()[-1].strip().upper() if raw.strip() else ""
+                if last.startswith("STATUS:"):
+                    is_error = is_error or ("FAILED" in last)
+                elif raw.lower().startswith("task failed") or "STATUS: FAILED" in raw.upper():
+                    is_error = True
+                ok = not is_error
+            # final_status is the run's own closing status -- the text that arrived after
+            # the last tool call, with the RESULT:/NOTE:/STATUS: lines stripped. raw (the
+            # full step-by-step narration) stays available for the console and the record,
+            # but a notice to the owner is built from final_status, never raw.
+            final_status = parsed["final_status"] if closing_full else (raw if raw else "(no status text)")
+            out = {
+                "ok": ok,
+                "stop": bool(parsed["stop"]),
+                "result_line": parsed["result_line"],
+                "note": parsed["note"],
+                "changed": parsed.get("changed"),
+                "blocked": bool(parsed.get("blocked")),
+                "needs": parsed.get("needs") or "",
+                "engine": f"claude:{model or self.model}",
+                "summary": raw if raw else "(no status text)",
+                "final_status": final_status,
+                "tool_calls": tool_calls,
+                "tool_results": tool_results,
+                "denied": [{"tool": d["tool"], "reason": d.get("denied", "scope")} for d in denied_steps],
+                "held": bool(self.held_send or held_destructive),
+                "raw": raw,
+                "steps": denied_steps,
+                "started_at": started_at,
+                "finished_at": finished_at,
+                "cost_usd": getattr(result, "total_cost_usd", None) if result is not None else None,
+            }
+            if self.held_send is not None:
+                # Something was going to be said to someone else. It is not sent, it is shown.
+                out["confirm"] = {"tool": self.held_send["tool"], "args": self.held_send["args"],
+                                  "about": [self.held_send["to"]], "kind": "send"}
+                out["ok"] = False
+            elif held_destructive is not None:
+                out["confirm"] = {"tool": held_destructive["tool"], "args": held_destructive["args"],
+                                  "about": [raw or req.original_message], "kind": "destructive"}
+                out["ok"] = False
+            return out
+
+        eff_timeout_s = self.voice_timeout_s if req.mode == "voice" else self.timeout_s
+        go_task = asyncio.ensure_future(_go())
+        try:
+            result = await asyncio.wait_for(asyncio.shield(go_task), timeout=eff_timeout_s)
+        except asyncio.TimeoutError:
+            logger.info("[gate] #%s timed out after %ss", req.id, int(eff_timeout_s))
+            if self.manager is not None:
+                asyncio.create_task(self._continue_after_timeout(
+                    req, go_task, _finalize, _finalize_exception))
+            else:
+                go_task.cancel()
+            finished_at = time.time()
+            still_working = wording.still_working_message()
+            return {"ok": False, "error": f"timed out after {int(eff_timeout_s)}s", "tool_calls": tool_calls,
+                    "raw": "\n".join(texts), "stop": False, "result_line": "",
+                    "final_status": still_working, "summary": still_working,
+                    "note": "", "denied": [{"tool": d["tool"], "reason": d.get("denied", "scope")}
+                                           for d in denied_steps],
+                    "held": bool(self.held_send or held_destructive), "tool_results": tool_results,
+                    "started_at": started_at, "finished_at": finished_at, "cost_usd": None,
+                    "timed_out": True}
+        except Exception as exc:  # noqa: BLE001
+            return _finalize_exception(exc)
+
+        return _finalize(result)
