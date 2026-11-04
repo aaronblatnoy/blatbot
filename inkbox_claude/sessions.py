@@ -1105,6 +1105,7 @@ class ContactSession:
                 "append": prompt_append,
             },
             setting_sources=["user", "project"],
+            strict_mcp_config=True,
             permission_mode="default",
             # Auto-allowed tools run without a text; everything else lands in
             # _can_use_tool. The approver's own session gets the configured
