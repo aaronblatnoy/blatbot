@@ -29,6 +29,7 @@ logger = logging.getLogger(__name__)
 TYPESAFE_URL = "https://api.typesafe.ai/v1/systemone"
 NEW = "new_task"
 NO_TASK = "no_task"
+LEDGER_FLAT_SCORE_MAX = 40
 
 
 def enabled() -> bool:
@@ -156,6 +157,16 @@ class TaskPicker:
                 return {key: float((value or {}).get("noul") or 0) for key, value in response.json()["answers"].items()}
         state = {"new_message": message, "conversation": _history_text(history, 6)}
         try:
+            if len(entries) <= LEDGER_FLAT_SCORE_MAX:
+                timings["categories"] = 0.0
+                start = time.monotonic()
+                candidates = {f"T{t['id']}": t for t in entries}
+                scores = await ask({key: t["line"] for key, t in candidates.items()}, state)
+                timings["tasks"] = round(time.monotonic() - start, 3)
+                ranked = sorted((key for key in candidates if scores.get(key, 0) >= self.min_confidence),
+                                key=lambda key: -scores[key])
+                selected = [key for i, key in enumerate(ranked) if i < 3 or scores[key] >= 0.9]
+                return {"ids": [candidates[key]["id"] for key in selected], "timings": timings, "reason": "ok"}
             start = time.monotonic()
             category_state = dict(state, ledger_index_by_category={
                 key: [entry["line"] for entry in value] for key, value in groups.items()})
@@ -610,51 +621,25 @@ class TaskPicker:
 
         chosen_top: List[str] = []
         per_hub: Dict[str, List[tuple]] = {}
-        if level1 or people_notes:
-            questions = {name: noul(info.title, info.description or info.title) for name, info in level1.items()}
-            people_keyed: List[tuple] = []
-            for i, p in enumerate(people_notes):
-                key = f"{people_scope}::{i}"
-                people_keyed.append((key, p))
-                title = p.stem
-                try:
-                    opening = p.read_text(encoding="utf-8", errors="replace")[:vaultscopes.DESCRIPTION_CHARS]
-                except OSError:
-                    opening = ""
-                questions[key] = noul(title, opening)
-            t0 = time.monotonic()
+        questions = {name: noul(info.title, info.description or info.title) for name, info in level1.items()}
+        people_keyed: List[tuple] = []
+        for i, p in enumerate(people_notes):
+            key = f"{people_scope}::{i}"
+            people_keyed.append((key, p))
+            title = p.stem
             try:
-                answers = await ask(questions)
-            except Exception as exc:
-                logger.warning("vault tree via TypeSafe failed: %s", exc)
-                if not chosen_scopes:
-                    return {"scopes": None, "notes": [], "probabilities": {}, "reason": f"error: {exc}", "timings": timings}
-            else:
-                timings["level1"] = time.monotonic() - t0
-                hub_answers = {name: p for name, p in answers.items() if name in level1}
-                probs.update(hub_answers)
-                chosen_top = [name for name, p in hub_answers.items() if p >= VAULT_SCOPE_MIN_YES]
-                logger.info("vault tree: level 1 %s | top=%s", chosen_top,
-                            sorted(hub_answers.items(), key=lambda kv: -kv[1])[:5])
-                for name in chosen_top:
-                    if name not in chosen_scopes:
-                        chosen_scopes.append(name)
-                if people_scope:
-                    bucket: List[tuple] = []
-                    for key, p in people_keyed:
-                        rel = str(p.relative_to(root))
-                        pr = answers.get(key, 0.0)
-                        probs[rel] = pr
-                        bucket.append((rel, pr))
-                    per_hub[people_scope] = bucket
+                opening = p.read_text(encoding="utf-8", errors="replace")[:vaultscopes.DESCRIPTION_CHARS]
+            except OSError:
+                opening = ""
+            questions[key] = noul(title, opening)
 
-        # ---- round trip 2: notes under every OTHER chosen hub (People is already resolved
-        # above, whether or not it was itself chosen). Skipped entirely when the task needs
-        # no hub besides People -- the common case now costs one round trip, not two. ----
-        hubs_to_expand = [h for h in chosen_top if h != people_scope]
-
+        # Level 2 no longer waits for level 1. Build every possible branch cheaply from
+        # the cached vault tree, score all of their notes in one speculative call, and
+        # retain only the branches level 1 selects after both calls finish.
         hub_notes: Dict[str, List] = {}
-        for name in hubs_to_expand:
+        for name in level1:
+            if name == people_scope:
+                continue
             info = discovered.get(name)
             if info is None:
                 continue
@@ -676,17 +661,54 @@ class TaskPicker:
                     opening = ""
                 questions2[key] = noul(title, opening)
 
-        for name in hubs_to_expand:
+        for name in hub_notes:
             per_hub.setdefault(name, [])
-        if questions2:
-            t0 = time.monotonic()
-            try:
-                answers2 = await ask(questions2)
-            except Exception as exc:
-                logger.warning("vault level-2 judgment failed: %s", exc)
-                answers2 = {}
+
+        async def timed_ask(batch: Dict[str, Any]) -> tuple:
+            started = time.monotonic()
+            return await ask(batch), time.monotonic() - started
+
+        level1_task = asyncio.create_task(timed_ask(questions)) if questions else None
+        level2_task = asyncio.create_task(timed_ask(questions2)) if questions2 else None
+        pending = [task for task in (level1_task, level2_task) if task is not None]
+        results = await asyncio.gather(*pending, return_exceptions=True) if pending else []
+        by_task = dict(zip(pending, results))
+
+        if level1_task is not None:
+            level1_result = by_task[level1_task]
+            if isinstance(level1_result, BaseException):
+                logger.warning("vault tree via TypeSafe failed: %s", level1_result)
+                if not chosen_scopes:
+                    return {"scopes": None, "notes": [], "probabilities": {},
+                            "reason": f"error: {level1_result}", "timings": timings}
+                answers: Dict[str, float] = {}
             else:
-                timings["level2"] = time.monotonic() - t0
+                answers, timings["level1"] = level1_result
+                hub_answers = {name: p for name, p in answers.items() if name in level1}
+                probs.update(hub_answers)
+                chosen_top = [name for name, p in hub_answers.items() if p >= VAULT_SCOPE_MIN_YES]
+                logger.info("vault tree: level 1 %s | top=%s", chosen_top,
+                            sorted(hub_answers.items(), key=lambda kv: -kv[1])[:5])
+                for name in chosen_top:
+                    if name not in chosen_scopes:
+                        chosen_scopes.append(name)
+                if people_scope:
+                    bucket: List[tuple] = []
+                    for key, p in people_keyed:
+                        rel = str(p.relative_to(root))
+                        pr = answers.get(key, 0.0)
+                        probs[rel] = pr
+                        bucket.append((rel, pr))
+                    per_hub[people_scope] = bucket
+
+        answers2: Dict[str, float] = {}
+        if level2_task is not None:
+            level2_result = by_task[level2_task]
+            if isinstance(level2_result, BaseException):
+                logger.warning("vault level-2 judgment failed: %s", level2_result)
+            else:
+                answers2, timings["level2"] = level2_result
+        if answers2:
             for hub_name, key, p in keyed2:
                 rel = str(p.relative_to(root))
                 pr = answers2.get(key, 0.0)
