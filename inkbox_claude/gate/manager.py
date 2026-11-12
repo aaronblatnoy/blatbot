@@ -30,6 +30,7 @@ from . import schedprop
 from . import wording
 from . import peopleindex
 from . import accesscmd
+from . import graphmem
 
 logger = logging.getLogger(__name__)
 _MISSING = object()
@@ -623,6 +624,8 @@ class GateSession:
         # and the window matches what the judgments upstream were given.
         convo = "\n".join(f"[{m.get('kind')}] {str(m.get('text') or '')}" for m in history[-20:]) or "(none)"
         ledger = self.m.store.task_memory_for_task(int(task["id"])) or "(new task, no events yet)"
+        recalled = str(getattr(self, "_graph_memory", "") or "")
+        recalled = f"--- {recalled}\n\n" if recalled else ""
         subject = str((self.reply_meta or {}).get("subject") or "").strip()
         return (
             (f"{self.room}\n\n" if self.room else "")
@@ -633,7 +636,7 @@ class GateSession:
             + _what_it_supplies(body, _last_failed_run(self.m.store, task))
             + "\n"
             f"--- RECENT CONVERSATION WITH THEM ---\n{convo}\n\n"
-            f"--- THE TASK THIS BELONGS TO ---\n{ledger}\n\n"
+            f"--- THE TASK THIS BELONGS TO ---\n{ledger}\n\n{recalled}"
             "Work out what they are asking for, or what this message makes possible on the task (for example, "
             "information the task was waiting for), and do it with your tools. A bare reference in the message "
             "(this, that, it, the list, the report) points at the nearest earlier message in the conversation "
@@ -1341,8 +1344,13 @@ class GateSession:
             try:
                 approver = self.is_approver()
                 history = self.m.store.history(self.record_id, limit=20)
+                # Long-term memory for a spoken turn too; runs alongside the ledger pick.
+                recall = asyncio.ensure_future(graphmem.recall(body, self.record_id, approver))
                 memory = await self.indexed_task_memory(history[:-1], body)
                 found = await self.lookup_tasks(history[:-1], body, memory)
+                self._graph_memory = await recall
+                if self._graph_memory:
+                    memory = f"{memory}\n\n{self._graph_memory}"
                 memory = self._ledger_memory
                 self.log_ledger_selection(memory, found)
                 # One request per ask, including from the trusted caller: the realtime
@@ -1562,6 +1570,11 @@ class GateSession:
             prior, message = history, "(No new message from the sender. A system note with a task result was just added above. Write the reply the sender should receive: for Aaron, give him the answer or outcome clearly and naturally, in his voice preference (brief, no emojis); for anyone else, tell them only what concerns them, without internal details. Reply null only if there is truly nothing to say. Do not create a request.)"
         else:
             prior, message = history[:-1], body  # the new inbound is already stored last
+        # Long-term memory: facts from the graph that match this message, however old.
+        # Started now so it runs alongside the ledger work below; "" when off or slow.
+        self._graph_memory = ""
+        recall = None if system_note else asyncio.ensure_future(
+            graphmem.recall(body, self.record_id, approver))
         preflight: Optional[Dict[str, Any]] = None
         if system_note:
             # A result belongs to the task just completed, even when it has left the live index.
@@ -1586,6 +1599,10 @@ class GateSession:
         if not system_note:
             memory = self._ledger_memory
             self.log_ledger_selection(memory, found)
+        if recall is not None:
+            self._graph_memory = await recall
+            if self._graph_memory:
+                memory = f"{memory}\n\n{self._graph_memory}"
         task: Optional[Dict[str, Any]] = None
         running = None if system_note else self.m.store.running_for_thread(self.chat_id)
         if running is not None:

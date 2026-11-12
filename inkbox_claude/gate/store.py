@@ -483,6 +483,8 @@ class Person:
         return cls(person_id=str(contact.get("id") or ""), display=display, keys=keys)
 
 
+from . import graphmem
+
 logger = logging.getLogger(__name__)
 
 
@@ -1298,7 +1300,21 @@ class Store:
                 (chat_id, kind, mode, text, time.time(), reply_to, role, schedule_id),
             )
             self._db.commit()
-            return int(cur.lastrowid)
+            message_id = int(cur.lastrowid)
+        # Long-term memory (gate/graphmem.py): queued, never blocks, never raises.
+        if graphmem.enabled():
+            graphmem.record(chat_id, kind, text, mode, message_id=message_id,
+                            speaker=self.memory_speaker(chat_id) if kind == "inbound" else "")
+        return message_id
+
+    def memory_speaker(self, chat_id: str) -> str:
+        """Who writes this chat's inbound messages, for the memory graph. "" if unknown."""
+        try:
+            with self._lock:
+                row = self._db.execute("SELECT meta_json FROM threads WHERE chat_id=?", (chat_id,)).fetchone()
+            return graphmem.speaker_from_meta(chat_id, row["meta_json"]) if row else ""
+        except Exception:  # noqa: BLE001 - memory must never break storing a message
+            return ""
 
     def responses_to(self, inbound_id: int) -> List[str]:
         """Roles of the outbound messages already sent for one inbound message."""
