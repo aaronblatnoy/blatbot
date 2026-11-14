@@ -44,7 +44,7 @@ logger = logging.getLogger(__name__)
 
 MAX_EPISODE_CHARS = 6000      # a long task result is clipped; the head carries the outcome
 MAX_FACTS = 12
-RECALL_TIMEOUT = 2.0          # seconds a turn will wait for memory before going on without it
+RECALL_TIMEOUT = 4.0          # seconds a turn will wait for memory before going on without it (owner search spans every group: ~1.3 s cold, seen over 2 s)
 WRITE_TIMEOUT = 20.0
 QUEUE_LIMIT = 5000
 
