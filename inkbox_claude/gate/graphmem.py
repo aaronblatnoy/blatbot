@@ -184,18 +184,39 @@ def render(facts: List[Dict[str, Any]]) -> str:
     return "\n".join(lines)
 
 
-async def recall(query: str, chat_id: str, is_approver: bool) -> str:
-    """The memory block for one turn: a header and fact lines, or "" when there is
-    nothing, memory is off, or the graph did not answer in time."""
+async def recall_facts(query: str, chat_id: str, is_approver: bool) -> List[Dict[str, Any]]:
+    """The facts for one turn; [] when memory is off or the graph did not answer in time."""
     if not enabled():
-        return ""
+        return []
     start = time.monotonic()
     try:
         facts = await asyncio.wait_for(asyncio.to_thread(search, query, chat_id, is_approver),
                                        timeout=RECALL_TIMEOUT + 0.5)
     except Exception as exc:  # noqa: BLE001
         _log_error("recall", exc)
-        return ""
-    text = render(facts)
+        return []
     logger.info("[graphmem] recall for %s: %d fact(s) in %.2fs", chat_id, len(facts), time.monotonic() - start)
+    return facts
+
+
+def block(facts: List[Dict[str, Any]]) -> str:
+    """The memory block for the prompt: a header and fact lines, or "" for no facts."""
+    text = render(facts)
     return f"{HEADER}\n{text}" if text else ""
+
+
+def message_ids(facts: List[Dict[str, Any]]) -> List[int]:
+    """Ids of the stored messages the facts were learned from, best fact first."""
+    out: List[int] = []
+    for f in facts:
+        for name in f.get("episodes") or []:
+            m = re.fullmatch(r"msg-(\d+)", str(name))
+            # Ids written without a message id are millisecond timestamps, not row ids.
+            if m and len(m.group(1)) < 12 and int(m.group(1)) not in out:
+                out.append(int(m.group(1)))
+    return out
+
+
+async def recall(query: str, chat_id: str, is_approver: bool) -> str:
+    """The memory block for one turn, or "" when there is nothing to add."""
+    return block(await recall_facts(query, chat_id, is_approver))

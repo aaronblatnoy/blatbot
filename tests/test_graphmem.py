@@ -86,3 +86,23 @@ def test_speaker_from_thread_meta():
     assert graphmem.speaker_from_meta("abc", "not json") == ""
     e = graphmem.episode("abc", "inbound", "hi", speaker="sam@example.com")
     assert e["messages"][0]["role"] == "sam@example.com"
+
+
+def test_message_ids_come_from_episode_names():
+    facts = [{"fact": "a", "episodes": ["msg-12", "msg-7"]}, {"fact": "b", "episodes": ["msg-7", "msg-1794523875000", "x"]},
+             {"fact": "c"}]
+    assert graphmem.message_ids(facts) == [12, 7]
+
+
+def test_tasks_for_messages_ranked_by_hits(tmp_path):
+    from inkbox_claude.gate.store import Store
+    store = Store(str(tmp_path / "gate.db"))
+    with store._lock:
+        for rid, inbound, task in ((1, 10, 5), (2, 11, 6), (3, 12, 6), (4, 13, None)):
+            store._db.execute(
+                "INSERT INTO requests(id, chat_id, sender, mode, original_message, summary, scopes_json, prompt, prompt_sha256, state, "
+                "created_at, updated_at, task_id, inbound_id) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                (rid, "c", "s", "imessage", "m", "s", "[]", "p", "x", "done", 0, 0, task, inbound))
+        store._db.commit()
+    assert store.task_ids_for_messages([10, 11, 12, 13, 99]) == [6, 5]
+    assert store.task_ids_for_messages([]) == []

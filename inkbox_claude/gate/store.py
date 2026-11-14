@@ -3581,6 +3581,22 @@ class Store:
                     out.append(sc)
         return out
 
+    def task_ids_for_messages(self, message_ids: List[int]) -> List[int]:
+        """Tasks the given inbound messages belong to, most-referenced first."""
+        ids = [int(m) for m in message_ids][:200]
+        if not ids:
+            return []
+        with self._lock:
+            rows = self._db.execute(
+                f"SELECT inbound_id, task_id FROM requests WHERE task_id IS NOT NULL "
+                f"AND inbound_id IN ({','.join('?' for _ in ids)})", tuple(ids)).fetchall()
+        by_message = {int(r["inbound_id"]): int(r["task_id"]) for r in rows}
+        hits: Dict[int, int] = {}
+        for m in ids:
+            if m in by_message:
+                hits[by_message[m]] = hits.get(by_message[m], 0) + 1
+        return sorted(hits, key=lambda tid: -hits[tid])
+
     def task_ids_for_chat(self, chat_id: str, limit: int = 3) -> List[int]:
         """Tasks this thread has touched, most recent first."""
         with self._lock:
