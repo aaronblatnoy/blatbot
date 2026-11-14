@@ -302,6 +302,15 @@ class GateSession:
             return name
         return ""
 
+    def memory_groups(self) -> Optional[List[str]]:
+        """The long-term memory groups this turn's reader may search (None = all, owner only).
+        The rule lives in graphmem.readable_groups; this only hands it who is asking."""
+        meta = self.reply_meta or {}
+        return graphmem.readable_groups(
+            self.m.store, self.record_id, is_approver=self.is_approver(),
+            is_group=meta.get("conversation_kind") == "group" or bool(meta.get("group_title")),
+            handles=self.handles())
+
     def thread_key(self) -> str:
         """The email thread this message belongs to. Prefers the RFC reply chain
         (Message-ID / In-Reply-To / References), which survives across mailboxes;
@@ -1358,7 +1367,7 @@ class GateSession:
                 approver = self.is_approver()
                 history = self.m.store.history(self.record_id, limit=20)
                 # Long-term memory for a spoken turn too; runs alongside the ledger pick.
-                recall = asyncio.ensure_future(graphmem.recall_facts(body, self.record_id, approver))
+                recall = asyncio.ensure_future(graphmem.recall_facts(body, self.record_id, approver, self.memory_groups()))
                 self._recall = recall if graphmem.enabled() else None
                 memory = await self.indexed_task_memory(history[:-1], body)
                 found = await self.lookup_tasks(history[:-1], body, memory)
@@ -1589,7 +1598,7 @@ class GateSession:
         # Started now so it runs alongside the ledger work below; "" when off or slow.
         self._graph_memory = ""
         recall = None if system_note or not graphmem.enabled() else asyncio.ensure_future(
-            graphmem.recall_facts(body, self.record_id, approver))
+            graphmem.recall_facts(body, self.record_id, approver, self.memory_groups()))
         self._recall = recall
         preflight: Optional[Dict[str, Any]] = None
         if system_note:
