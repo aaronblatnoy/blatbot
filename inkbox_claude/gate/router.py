@@ -494,6 +494,37 @@ class Router:
         logger.error("router failed twice: %s", last_err)
         return RouterOutput(reply=None, request=None)
 
+    ACTION_SYSTEM = (
+        "You decide one thing for Blatbot, Aaron Blatnoy's assistant. Behind it are a computer, a web "
+        "browser, Aaron's accounts (mail, calendars, drives, notes, websites, school site, servers) and a "
+        "coding agent. Read the conversation and the new message and answer: should the assistant now go "
+        "and DO something with those tools (look up, fetch, check, find out, search the web or a website, "
+        "change, send, book, draft)?\n"
+        "true when the message asks for a fact or result that is not already stated in the conversation or "
+        "the task memory, however casually it is put ('who is X', 'do you know Y', 'check for me', 'look it "
+        "up'), or tells the assistant to do something.\n"
+        "false for thanks, greetings, small talk, opinions, a question about the assistant itself, or a "
+        "question the conversation or task memory already answers.\n"
+        'Return ONLY the JSON object {"needs_action": true} or {"needs_action": false}.')
+
+    async def judge_needs_action(self, *, history: List[Dict[str, Any]], message: str,
+                                 task_memory: str = "") -> Optional[bool]:
+        """The writer model's yes/no on whether this message needs tools. Used only when the
+        typed action judgment is unavailable (its service is failing), so that a plain
+        factual question is still looked up rather than answered with an offer. None on
+        any failure, which leaves the decision as it was."""
+        user = (f"Task memory:\n{(task_memory or '(none)')[:4000]}\n\n"
+                f"Conversation so far:\n{self.render_history(history[-8:])}\n\n"
+                f"New message:\n{message}")
+        try:
+            raw = await self._chat([{"role": "system", "content": self.ACTION_SYSTEM},
+                                    {"role": "user", "content": user}])
+            value = json.loads(raw).get("needs_action")
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("router action fallback failed: %s", exc)
+            return None
+        return value if isinstance(value, bool) else None
+
     async def phrase(self, instruction: str, facts: Dict[str, Any]) -> str:
         """Plain prose from given facts, no JSON, no decisions: the writer as a typewriter."""
         sys_p = ("You write short plain-text messages for Blatbot, Aaron Blatnoy's assistant. Say only what the "
