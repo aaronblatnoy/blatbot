@@ -864,6 +864,8 @@ class InkboxGateway:
             self._public_host = self._public_url.split("://", 1)[-1]
         else:
             await self._open_tunnel()
+        from .gate import pages as _pages
+        _pages.set_public_base(self._public_url)
 
         await asyncio.to_thread(self._patch_identity_objects)
 
@@ -920,6 +922,8 @@ class InkboxGateway:
     async def _start_http_server(self) -> None:
         app = web.Application()
         app.router.add_get("/health", self._handle_health)
+        from .gate import pages as _pages
+        _pages.register(app)
         try:
             from .console import register as register_console
             register_console(app, self)

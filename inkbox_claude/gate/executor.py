@@ -33,6 +33,7 @@ from claude_agent_sdk import (
 from .router import now_line
 from .scopes import BLATBOT_ADMIN_SCOPE, ORG_ACCOUNT, OWNER_ACCOUNT, SCOPES, blocks_requester_send, tools_for
 from . import hosttools
+from . import pages
 from . import schedrun
 from . import wording
 from .store import Request, sha256
@@ -334,6 +335,9 @@ class Executor:
         started_at = time.time()
         vault_prefixes = vault_prefixes_for_scopes(req.scopes)
         scoped_allowed = tools_for(req.scopes)
+        pages_ok = bool(scoped_allowed) and not req.schedule_id and pages.allowed_for(bool(from_owner))
+        if pages_ok:
+            scoped_allowed = list(scoped_allowed) + ["mcp__host__make_page"]
         allowed = list(scoped_allowed)
         allowed_set = set(allowed)   # what this task may touch at all, send tools included
         if req.schedule_id:
@@ -342,6 +346,7 @@ class Executor:
             from .jevagent import is_write_tool as _is_write
             allowed = [tool for tool in allowed if not _is_write(tool)]
         tool_calls: List[str] = []
+        page_urls: List[str] = []
         tool_use_names: Dict[str, str] = {}
         tool_results: List[Dict[str, Any]] = []
         texts: List[str] = []
@@ -424,6 +429,8 @@ class Executor:
         else:
             system_append = EXECUTOR_SYSTEM + f"\nNow: {now_line()}. Resolve 'today', 'tomorrow', weekday names and relative dates from this.\n"
             prompt_text = req.prompt
+        if pages_ok:
+            system_append += "\n" + pages.PAGE_GUIDANCE
         if context.strip():
             system_append += (
                 "\n\nTASK LEDGER (read-only background on this person; the task text below is what to do):\n"
@@ -502,6 +509,8 @@ class Executor:
                             name = tool_use_names.get(block.tool_use_id)
                             if name:
                                 tool_results.append({"tool": name, "ok": not bool(block.is_error)})
+                                if name == "mcp__host__make_page" and not block.is_error:
+                                    page_urls.extend(pages.urls_in(block.content))
                 elif isinstance(msg, ResultMessage):
                     sid = getattr(msg, "session_id", None)
                     if sid and session_key is not None:
@@ -549,6 +558,11 @@ class Executor:
             # full step-by-step narration) stays available for the console and the record,
             # but a notice to the owner is built from final_status, never raw.
             final_status = parsed["final_status"] if closing_full else (raw if raw else "(no status text)")
+            # A page was made, so its link must reach the person even if the closing text left it out.
+            missing = [u for u in dict.fromkeys(page_urls) if u not in final_status]
+            if missing and final_status != "(no status text)":
+                final_status = (final_status.rstrip() + "\n" + "\n".join(missing)).strip()
+                raw = (raw.rstrip() + "\n" + "\n".join(missing)).strip() if raw else raw
             out = {
                 "ok": ok,
                 "stop": bool(parsed["stop"]),
