@@ -664,7 +664,8 @@ async def admin_set_role_scopes(args: Dict[str, Any], manager: Any, is_commander
     scopes_in = args.get("scopes")
     if not isinstance(scopes_in, list):
         return "ERROR: scopes must be a list of scope names"
-    unknown = [s for s in scopes_in if s not in _ALL_SCOPES]
+    from . import graphmem
+    unknown = [s for s in scopes_in if s not in _ALL_SCOPES and not graphmem.valid_memory_grant(s)]
     if unknown:
         return f"ERROR: unknown scope(s): {', '.join(unknown)}"
     roles_now = console_api.roles(manager.store)

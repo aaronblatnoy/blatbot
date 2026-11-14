@@ -11,7 +11,7 @@ from typing import Any, Dict, List, Optional
 
 from ..gate.scopes import SCOPES, SCOPE_SYSTEM
 from ..gate.store import Request, Store, TaskRequired, role_names
-from ..gate import cadence as cadence_mod, schedprop, wording
+from ..gate import cadence as cadence_mod, graphmem, schedprop, wording
 from ..gate import schedules as sched_mod
 from ..gate.schedules import DEFAULT_TIMEZONE
 from ..gate.overview import (
@@ -96,7 +96,7 @@ def _scopes(value: Any) -> List[str]:
     if not isinstance(value, list) or any(not isinstance(item, str) for item in value):
         raise ValidationError("scopes must be an array of strings")
     scopes = list(dict.fromkeys(item.strip() for item in value if item.strip()))
-    unknown = sorted(set(scopes) - set(SCOPES))
+    unknown = sorted(s for s in scopes if s not in SCOPES and not graphmem.valid_memory_grant(s))
     if unknown:
         raise ValidationError(f"unknown scope(s): {', '.join(unknown)}")
     return scopes
@@ -547,7 +547,7 @@ def add_role_scope(store: Store, payload: Dict[str, Any]) -> Dict[str, Any]:
     role = next((r for r in store.roles() if r["name"] == name), None)
     if role is None:
         raise ValidationError(f"no such role: {name}")
-    if scope_name not in SCOPES:
+    if scope_name not in SCOPES and not graphmem.valid_memory_grant(scope_name):
         raise ValidationError(f"unknown scope: {scope_name}")
     scopes = sorted(set(role.get("scopes") or []) | {scope_name})
     store.set_role(name, scopes, role.get("note") or "")
