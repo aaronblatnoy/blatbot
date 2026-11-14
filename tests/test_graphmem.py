@@ -232,3 +232,18 @@ def test_search_sends_groups_and_drops_facts_from_other_groups(monkeypatch):
     assert [f["fact"] for f in out] == ["mine"]
     # The owner (all groups) keeps every fact.
     assert len(graphmem.search("q", "owner", True, groups=None)) == 3
+
+
+def test_roles_accept_only_well_formed_memory_entries(tmp_path):
+    from inkbox_claude.console import api as console_api
+    from inkbox_claude.gate.store import Store
+    assert graphmem.valid_memory_grant("memory:all") and graphmem.valid_memory_grant("memory:groups")
+    assert graphmem.valid_memory_grant("memory:chat:tg:-77")
+    assert not graphmem.valid_memory_grant("memory:chat:") and not graphmem.valid_memory_grant("memory:everything")
+    store = Store(str(tmp_path / "gate.db"))
+    store.set_role("friend", [])
+    console_api.upsert_role(store, {"name": "friend", "scopes": ["memory:groups"], "note": ""})
+    assert next(r for r in store.roles() if r["name"] == "friend")["scopes"] == ["memory:groups"]
+    import pytest
+    with pytest.raises(console_api.ValidationError):
+        console_api.upsert_role(store, {"name": "friend", "scopes": ["memory:everything"], "note": ""})

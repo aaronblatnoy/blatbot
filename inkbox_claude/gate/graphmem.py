@@ -78,6 +78,13 @@ def is_memory_scope(name: Any) -> bool:
     return str(name or "").strip().lower().startswith(MEMORY_PREFIX)
 
 
+def valid_memory_grant(name: Any) -> bool:
+    """True for the three forms a role may hold: memory:all, memory:groups, memory:chat:<chat id>."""
+    low = str(name or "").strip().lower()
+    return low in (MEMORY_PREFIX + "all", MEMORY_PREFIX + "groups") or (
+        low.startswith(MEMORY_PREFIX + "chat:") and bool(str(name).strip()[len(MEMORY_PREFIX) + 5:].strip()))
+
+
 def groups_from_grants(grants: List[str], group_chats: List[str]) -> Optional[List[str]]:
     """The groups a list of `memory:` entries opens. None means every group."""
     out: List[str] = []
