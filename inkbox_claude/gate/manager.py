@@ -971,7 +971,10 @@ class GateSession:
         source_prompt = message if not convo else f"{message}\n\nRecent conversation:\n{convo}"
 
         calls: List[Tuple[str, Awaitable[Any]]] = []
-        if self._ledger_fast_id is None and picker is not None and hasattr(picker, "judge_ledger_tree"):
+        # With graph memory on, the task records are picked from what the graph recalls;
+        # the scored picker only runs later if the graph matched no task.
+        if (self._ledger_fast_id is None and picker is not None and hasattr(picker, "judge_ledger_tree")
+                and not graphmem.enabled()):
             calls.append(("ledger", picker.judge_ledger_tree(
                 message=message, history=history, entries=entries)))
         if picker is not None and hasattr(picker, "plan_lookup"):
@@ -1040,9 +1043,19 @@ class GateSession:
         index = prepared["index"]
         timings = dict(prepared["timings"])
         picker = self.m.task_picker
+        graph_ids: List[int] = []
+        if self._ledger_fast_id is None and getattr(self, "_recall", None) is not None:
+            # Tasks the recalled facts were learned in, limited to tasks this reader may see.
+            self._graph_facts = await self._recall
+            open_ids = {t["id"] for t in entries}
+            graph_ids = [tid for tid in self.m.store.task_ids_for_messages(
+                graphmem.message_ids(self._graph_facts)) if tid in open_ids][:3]
         if self._ledger_fast_id is not None:
             ids = [self._ledger_fast_id]
             timings["fast_path"] = True
+        elif graph_ids:
+            ids = graph_ids
+            timings["graph"] = True
         elif picker is not None and hasattr(picker, "judge_ledger_tree"):
             if pick is _MISSING:
                 pick = await picker.judge_ledger_tree(message=message, history=history, entries=entries)
@@ -1345,10 +1358,12 @@ class GateSession:
                 approver = self.is_approver()
                 history = self.m.store.history(self.record_id, limit=20)
                 # Long-term memory for a spoken turn too; runs alongside the ledger pick.
-                recall = asyncio.ensure_future(graphmem.recall(body, self.record_id, approver))
+                recall = asyncio.ensure_future(graphmem.recall_facts(body, self.record_id, approver))
+                self._recall = recall if graphmem.enabled() else None
                 memory = await self.indexed_task_memory(history[:-1], body)
                 found = await self.lookup_tasks(history[:-1], body, memory)
-                self._graph_memory = await recall
+                self._graph_memory = graphmem.block(await recall)
+                self._recall = None
                 if self._graph_memory:
                     memory = f"{memory}\n\n{self._graph_memory}"
                 memory = self._ledger_memory
@@ -1573,8 +1588,9 @@ class GateSession:
         # Long-term memory: facts from the graph that match this message, however old.
         # Started now so it runs alongside the ledger work below; "" when off or slow.
         self._graph_memory = ""
-        recall = None if system_note else asyncio.ensure_future(
-            graphmem.recall(body, self.record_id, approver))
+        recall = None if system_note or not graphmem.enabled() else asyncio.ensure_future(
+            graphmem.recall_facts(body, self.record_id, approver))
+        self._recall = recall
         preflight: Optional[Dict[str, Any]] = None
         if system_note:
             # A result belongs to the task just completed, even when it has left the live index.
@@ -1600,7 +1616,8 @@ class GateSession:
             memory = self._ledger_memory
             self.log_ledger_selection(memory, found)
         if recall is not None:
-            self._graph_memory = await recall
+            self._graph_memory = graphmem.block(await recall)
+            self._recall = None
             if self._graph_memory:
                 memory = f"{memory}\n\n{self._graph_memory}"
         task: Optional[Dict[str, Any]] = None

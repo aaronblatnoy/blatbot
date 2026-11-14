@@ -3581,6 +3581,26 @@ class Store:
                     out.append(sc)
         return out
 
+    def task_ids_for_messages(self, message_ids: List[int]) -> List[int]:
+        """Tasks the given stored messages belong to, most-referenced first. An inbound
+        message is tied to its task through its request; any other message through the
+        task activity recorded in the same chat within two minutes of it."""
+        ids = [int(m) for m in message_ids][:60]
+        hits: Dict[int, int] = {}
+        with self._lock:
+            for m in ids:
+                row = self._db.execute(
+                    "SELECT task_id FROM requests WHERE inbound_id=? AND task_id IS NOT NULL LIMIT 1", (m,)).fetchone()
+                if row is None:
+                    row = self._db.execute(
+                        "SELECT e.task_id FROM messages m JOIN task_events e ON e.chat_id=m.chat_id "
+                        "WHERE m.id=? AND ABS(e.created_at-m.created_at)<=120 "
+                        "ORDER BY ABS(e.created_at-m.created_at) LIMIT 1", (m,)).fetchone()
+                if row is not None:
+                    tid = int(row["task_id"])
+                    hits[tid] = hits.get(tid, 0) + 1
+        return sorted(hits, key=lambda tid: -hits[tid])
+
     def task_ids_for_chat(self, chat_id: str, limit: int = 3) -> List[int]:
         """Tasks this thread has touched, most recent first."""
         with self._lock:
