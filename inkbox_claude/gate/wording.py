@@ -914,3 +914,116 @@ def schedules_global_line(paused: bool, *, was: Optional[bool] = None) -> str:
     if was is not None and was != paused:
         line += "\n" + undo_line("resume every schedule" if paused else "pause every schedule")
     return line
+
+
+# ---------------------------------------------------------------------------
+# Holds and the people / roles / requests replies (admincmd.py, second slice)
+# ---------------------------------------------------------------------------
+
+def hold_line(ask: str, request_id: int) -> str:
+    """The question and its numbered handle: "Delete the interns role? ... Reply "#417 yes" ..."."""
+    return f'{ask}\nReply "#{request_id} yes" to do it or "#{request_id} no" to leave it alone.'
+
+
+def _names(names: List[str]) -> str:
+    return _and_list([n for n in names if n])
+
+
+def hold_role_delete(name: str, members: List[str]) -> str:
+    if not members:
+        return f"Delete the {name} role? Nobody holds it."
+    return f"Delete the {name} role? It is held by {_names(members)}. They keep their other roles."
+
+
+def role_gone_line(name: str, members: List[str]) -> str:
+    tail = f"; {_names(members)} keep their other roles" if members else ""
+    return f"The {name} role is deleted{tail}.\n" + undo_line(f"create a role called {name}")
+
+
+def hold_role_grant(name: str, words: str, members: int) -> str:
+    who = "nobody holds it yet" if members == 0 else (f"{members} person holds it" if members == 1
+                                                      else f"{members} people hold it")
+    return f"Let the {name} role {words}? That widens access ({who})."
+
+
+def hold_person_remove(display: str, contacts: int) -> str:
+    what = "" if contacts == 0 else (f" and its {contacts} contact" + ("" if contacts == 1 else "s"))
+    return f"Remove {display} from People{what}?"
+
+
+def person_removed_line(display: str) -> str:
+    return f"{display} is no longer in People."
+
+
+def hold_people_merge(a: str, b: str) -> str:
+    return f"Merge {a} into {b}? Every contact of {a} moves to {b}, and {b}'s role stays as it is."
+
+
+def people_merged_line(keep: str, merged: str) -> str:
+    return f"{merged} is merged into {keep}."
+
+
+def hold_schedule_stop(title: str) -> str:
+    return f"End the {title} schedule for good?"
+
+
+def change_refused(why: str) -> str:
+    why = " ".join(str(why or "").split()).rstrip(".")
+    return f"Nothing changed: {why}."
+
+
+def person_name_missing() -> str:
+    return "Say the name, like: add Sean Parnell to people"
+
+
+def person_line_plain(display: str, *, new: bool, was: Optional[str] = None) -> str:
+    line = f"{display}: in People"
+    if new:
+        line += " (new)"
+    if was and was != display:
+        line += f" (was {was})"
+    return line + "."
+
+
+def person_note_line(display: str, note: str, *, was: Optional[str] = None) -> str:
+    line = f"{display}: note is {note!r}".replace("'", "\"") if note else f"{display}: no note"
+    if was is not None and was != note:
+        line += f" (was {was!r})".replace("'", "\"") if was else " (was no note)"
+    return line + "."
+
+
+def contact_line(display: str, kind: str, value: str) -> str:
+    return f"{display}: reachable on {kind} {value}."
+
+
+def contact_gone_line(display: str, kind: str, value: str) -> str:
+    return f"{display}: no longer reachable on {kind} {value}."
+
+
+def contact_absent(display: str, value: str) -> str:
+    return f"{display} has no contact {value} on file."
+
+
+def contact_conflict(value: str, other: str) -> str:
+    return f"{value} already belongs to {other}. Say merge {other} into the person it should be, or pick another."
+
+
+def people_synced_line(total: int, added: int, result: Dict[str, Any]) -> str:
+    line = f"People is in step with Inkbox: {total} people"
+    if added:
+        line += f" ({added} new)"
+    return line + "."
+
+
+def health_line(data: Dict[str, Any], *, pending: int) -> str:
+    secs = int(data.get("uptime_seconds") or 0)
+    up = (f"{secs // 86400} days" if secs >= 172800 else f"{secs // 3600} hours" if secs >= 7200
+          else f"{max(1, secs // 60)} minutes")
+    tunnel = "connected" if (data.get("tunnel") or {}).get("connected") else "not connected"
+    errors = len(data.get("recent_errors") or [])
+    interrupted = int(data.get("interrupted_runs") or 0)
+    parts = [f"Up for {up}", f"my public link is {tunnel}",
+             f"{interrupted} interrupted run" + ("" if interrupted == 1 else "s"),
+             f"{errors} recent error" + ("" if errors == 1 else "s"),
+             f"{pending} waiting on you"]
+    return "; ".join(parts) + "."

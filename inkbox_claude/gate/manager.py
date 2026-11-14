@@ -2736,6 +2736,25 @@ class GateSessionManager:
         if req.state not in ("pending",):
             # Someone already answered this one. Say so rather than acting again.
             return {"ok": False, "error": f"#{req.id} is already {req.state}", "state": req.state}
+        hold = (req.status or {}).get("admin_hold")
+        if hold:
+            # A change parked by the chat admin commands (admincmd.py): his yes does exactly
+            # that change, once; his no leaves everything as it was. Same answer from the
+            # console's Requests page and from a text, since both land here.
+            d0 = (decision or "").strip().lower()
+            if d0 in ("yes", "y", "ok", "approve", "run", "go"):
+                from . import admincmd
+                reply = await admincmd.apply_hold(self, hold)
+                self.store.set_state(req.id, "done", status={**(req.status or {}), "result": reply})
+                self.task_note(req, "done", reply, state="done")
+                await self.send_to_approver(reply)
+                return {"ok": True, "state": "done", "error": ""}
+            if d0 in ("no", "n", "stop", "drop", "reject", "decline"):
+                self.store.set_state(req.id, "rejected")
+                self.task_note(req, "rejected", f"Left alone: {hold.get('ask')}", state="done")
+                await self.send_to_approver(f"Left alone. Nothing was changed for #{req.id}.")
+                return {"ok": True, "state": "rejected", "error": ""}
+            return {"ok": False, "error": f"#{req.id} needs a yes or a no", "state": req.state}
         if self.schedules.is_proposal_request(req):
             return await self.schedules.decide_proposal(req, decision, note)
         d = (decision or "").strip().lower()
