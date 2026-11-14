@@ -146,7 +146,16 @@ def parse_update(update: Dict[str, Any]) -> Optional[Dict[str, Any]]:
             "message_id": str(msg.get("message_id") or ""),
             "chat_id": chat_id, "from_id": str(frm.get("id") or ""), "name": name, "text": text,
             "is_group": is_group, "group_title": str(chat.get("title") or ""), "addressed": addressed,
-            "username": str(frm.get("username") or ""), "is_bot": bool(frm.get("is_bot"))}
+            "username": str(frm.get("username") or ""), "is_bot": bool(frm.get("is_bot")),
+            # Unix seconds the message was sent (or last edited); 0 when Telegram gave none.
+            "date": _unix(msg.get("edit_date") or msg.get("date"))}
+
+
+def _unix(v: Any) -> int:
+    try:
+        return int(v or 0)
+    except (TypeError, ValueError):
+        return 0
 
 
 def parse_new_members(update: Dict[str, Any]) -> Optional[Dict[str, Any]]:
