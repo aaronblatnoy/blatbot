@@ -247,3 +247,18 @@ def test_roles_accept_only_well_formed_memory_entries(tmp_path):
     import pytest
     with pytest.raises(console_api.ValidationError):
         console_api.upsert_role(store, {"name": "friend", "scopes": ["memory:everything"], "note": ""})
+
+
+def test_recall_waits_out_a_slow_owner_search(monkeypatch):
+    # The owner's search spans every memory group and has been seen past 2 s; a search
+    # that answers in 2.3 s must still reach the turn.
+    import time
+    assert graphmem.RECALL_TIMEOUT >= 4.0
+    monkeypatch.setenv("GRAPHITI_URL", "http://graph.test")
+
+    def slow(*a, **k):
+        time.sleep(2.3)
+        return {"facts": [{"fact": "Sam prefers email", "valid_at": "2026-09-20T00:00:00Z"}]}
+
+    monkeypatch.setattr(graphmem, "_post", slow)
+    assert "Sam prefers email" in asyncio.run(graphmem.recall("Sam", "owner", True))
