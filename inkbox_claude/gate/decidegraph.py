@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import re
 from typing import Any, Dict, List, Optional, TypedDict
 
 from langchain_core.runnables import RunnableConfig
@@ -97,9 +98,19 @@ async def judge_action(state: DecideState, config: RunnableConfig) -> Dict[str, 
                                                  task=recent[0] if recent else None, sender_label=_label(s),
                                                  router_said_action=None)
     elif isinstance(act, BaseException):
-        act = {}
+        act = {"reason": f"error: {act}"}
     needs = act.get("needs_action")
     p = float(act.get("p") or 0.0)
+    if needs is None and _judgment_unavailable(act):
+        # The typed judgment did not answer (its service failed), so p is not a reading and
+        # must not count as "no". The writer model gives the yes/no instead. Who may act is
+        # unchanged: for anyone but the owner a request still goes to Aaron for approval.
+        fallback = getattr(s.m.router, "judge_needs_action", None)
+        if fallback is not None:
+            needs = await fallback(history=state["prior"], message=state["message"],
+                                   task_memory=state.get("memory") or "")
+            logger.info("[gate %s] action judgment unavailable (%s); writer model says needs_action=%s",
+                        s.chat_id, str(act.get("reason") or "")[:80], needs)
     if needs is None:
         # Grey band. For the owner, acting costs seconds and not acting costs a re-ask,
         # so lean to action; for anyone else a request means an approval text to Aaron,
@@ -109,6 +120,24 @@ async def judge_action(state: DecideState, config: RunnableConfig) -> Dict[str, 
         # again: the exact midpoint stays "no" for anyone but the owner.
         needs = p >= 0.4 if s.is_approver() else p > 0.5
     return {"needs_action": bool(needs), "p_action": p}
+
+
+def _judgment_unavailable(act: Dict[str, Any]) -> bool:
+    """True when the judgment returned no reading at all (service error, no key), as
+    opposed to a real but undecided one."""
+    reason = str(act.get("reason") or "")
+    return reason.startswith("error") or reason == "disabled"
+
+
+# A reply that offers to go and find something out instead of doing it: "say the word and
+# I'll look it up", "I can look it up and report back", "want me to check?".
+_OFFERS_LOOKUP = re.compile(
+    r"\b(say the word|want me to|shall i|should i|i can|i could|happy to|i'?ll|i will|let me)"
+    r"\s+(go\s+)?(look|check|find|search|dig|pull|research)", re.I)
+
+
+def offers_lookup(text: str) -> bool:
+    return bool(_OFFERS_LOOKUP.search(text or ""))
 
 
 async def judge_actionable(state: DecideState, config: RunnableConfig) -> Dict[str, Any]:
@@ -294,6 +323,14 @@ async def finalize(state: DecideState, config: RunnableConfig) -> Dict[str, Any]
     s = _s(config)
     from . import manager as gm
     from .router import RouterOutput
+    if (not state["needs_action"] and state.get("reply") and offers_lookup(state["reply"])
+            and s.is_approver() and state["mode"] != "voice" and not state.get("schedule")
+            and not state.get("schedule_command") and not state.get("access_command")):
+        # The owner asked something the writer could not answer and it offered to look it up.
+        # He has every tool, so the offer is taken up at once: the request is built and runs,
+        # and the offer is not sent (the typing indicator shows the work).
+        logger.info("[gate %s] reply offered to look it up; doing it instead", s.chat_id)
+        state = await _act_instead(state, config)
     out = RouterOutput(reply=state.get("reply"), task=state["task_choice"], task_title=state.get("task_title"),
                        task_summary=state.get("task_summary"), schedule=state.get("schedule"),
                        schedule_command=state.get("schedule_command"),
@@ -363,6 +400,20 @@ async def finalize(state: DecideState, config: RunnableConfig) -> Dict[str, Any]
     elif state["pick"] == "none" and not state["needs_action"]:
         out.task = None
     return {"out": out}
+
+
+async def _act_instead(state: DecideState, config: RunnableConfig) -> DecideState:
+    """The request path (attach, build, scopes, inheritance) run after the fact, for a turn
+    first decided as words only."""
+    state = dict(state)  # type: ignore[assignment]
+    state["needs_action"] = True
+    state["actionable"] = True
+    if state.get("task") is None:
+        state.update(await attach_task(state, config))
+    state.update(await build_request(state, config))
+    state.update(await judge_request(state, config))
+    state.update(await inherit_scopes(state, config))
+    return state
 
 
 # ----------------------------------------------------------------------------- graph
