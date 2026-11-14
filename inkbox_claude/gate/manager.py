@@ -1149,6 +1149,24 @@ class GateSession:
                 if self.m.store.thread_state(self.chat_id) == "routing":
                     self.m.store.set_thread(self.chat_id, "idle")
 
+    async def file_inbound(self, text: str, mode: str, meta: Dict[str, Any]) -> Optional[int]:
+        """Keep a message in this conversation's history, and so in long-term memory,
+        without acting on it: no task, no request, no reply. For messages that arrive
+        too late to answer (a backlog delivered after an outage). The meta is used only
+        to find where the conversation is written down; the session's own routing is
+        left as it was, so a reply already on its way still goes where it was going."""
+        async with self._lock:
+            saved = (self.mode, self.reply_meta)
+            try:
+                self.mode = mode
+                self.reply_meta = dict(meta or {})
+                body = _strip_quoted(text) if mode == "email" else (text or "").strip()
+                if not body:
+                    return None
+                return self.m.store.add_message(self.record_id, "inbound", body, mode)
+            finally:
+                self.mode, self.reply_meta = saved
+
     _INDEX_PLACES = {"email": "email", "sms": "SMS", "imessage": "iMessage"}
 
     def _index_sender(self) -> None:

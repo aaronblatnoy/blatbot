@@ -1965,14 +1965,51 @@ class InkboxGateway:
         await reply(wording.mode_line(target_label, mode, old_mode=roommode.effective_mode(stored)))
         return True
 
+    @staticmethod
+    def _telegram_meta(u: Dict[str, Any]) -> Dict[str, Any]:
+        chat_id, from_id, name = u["chat_id"], u["from_id"], u["name"]
+        return {"sender": f"telegram:{from_id}", "to": chat_id, "telegram_chat_id": chat_id,
+                "telegram_user_id": from_id, "contact": {"name": name} if name else {},
+                "conversation_kind": "group" if u["is_group"] else "direct",
+                "group_title": u.get("group_title") or ""}
+
+    @staticmethod
+    def _telegram_stale_age(u: Dict[str, Any]) -> Optional[float]:
+        """Seconds since the message was sent, when that is past GATE_TELEGRAM_STALE_MIN;
+        None when it is fresh, carries no date, or the check is off (0)."""
+        from .gate import settings as gate_settings
+        try:
+            limit_min = float(gate_settings.get("GATE_TELEGRAM_STALE_MIN") or 0)
+        except (TypeError, ValueError):
+            limit_min = 10.0
+        sent = int(u.get("date") or 0)
+        if limit_min <= 0 or sent <= 0:
+            return None
+        age = time.time() - sent
+        return age if age > limit_min * 60 else None
+
+    async def _telegram_file_stale(self, u: Dict[str, Any], age: float) -> None:
+        """Keep a late message without acting on it: no judgment, task, run or reply."""
+        u = self._telegram_known_name(u)
+        logger.info("[bridge] telegram message from %s in chat %s is %.0f min old; filed, not acted on",
+                    u["name"] or u["from_id"], u["chat_id"], age / 60)
+        if u["is_group"]:
+            # Stored the way an unanswered group message is, in the group's own record.
+            self._telegram_overhear(u)
+            return
+        if self.sessions is None:
+            return
+        try:
+            session = self.sessions.get(f"tg:{u['chat_id']}")
+            await session.file_inbound(u["text"], "telegram", self._telegram_meta(u))
+        except Exception as exc:
+            logger.warning("[bridge] could not file late telegram message: %s", exc)
+
     async def _telegram_dispatch(self, u: Dict[str, Any]) -> None:
         """Hand one Telegram message to its session, with the group framing applied."""
         u = self._telegram_known_name(u)
         chat_id, from_id, name, text = u["chat_id"], u["from_id"], u["name"], u["text"]
-        meta = {"sender": f"telegram:{from_id}", "to": chat_id, "telegram_chat_id": chat_id,
-                "telegram_user_id": from_id, "contact": {"name": name} if name else {},
-                "conversation_kind": "group" if u["is_group"] else "direct",
-                "group_title": u.get("group_title") or ""}
+        meta = self._telegram_meta(u)
         if u["is_group"]:
             where = u.get("group_title") or "group"
             text = ("[telegram group: " + where + " | from: " + (name or from_id)
@@ -2021,6 +2058,12 @@ class InkboxGateway:
             del recent[:-8]
         is_commander = str(from_id) == (telegram.approver_id() or "").strip()
         self._index_telegram_people(u, is_commander=is_commander)
+        # A message Telegram held through an outage is history, not a request: it is kept
+        # (history and long-term memory) but runs nothing, chat commands included.
+        age = self._telegram_stale_age(u)
+        if age is not None:
+            await self._telegram_file_stale(u, age)
+            return web.json_response({"ok": True, "stale": True})
         handled = await self._maybe_handle_mode_command(
             text, channel="telegram", is_commander=is_commander,
             self_chat_id=f"tg:{chat_id}", self_label=u.get("group_title") or chat_id,

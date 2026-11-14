@@ -35,6 +35,12 @@ KNOBS: List[Dict[str, Any]] = [
      "label": "Seconds before it says it is working",
      "help": "How long a run may take in silence before it sends a short line so you know it "
              "heard you."},
+    {"name": "GATE_TELEGRAM_STALE_MIN", "kind": "number", "default": 10, "min": 0, "max": 1440,
+     "step": 1, "group": "Speaking",
+     "label": "Minutes after which a late Telegram message is only filed",
+     "help": "After an outage Telegram delivers every message it held. One sent longer ago than "
+             "this is kept in the history and memory but starts nothing and gets no reply. "
+             "0 turns the check off."},
     {"name": "GATE_ASSISTANT_ROLE", "kind": "text", "default": "", "group": "Speaking",
      "label": "Who it is in a room",
      "help": "One or two sentences describing its standing, used when it judges whether a "
