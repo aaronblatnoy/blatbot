@@ -525,6 +525,32 @@ class Router:
             return None
         return value if isinstance(value, bool) else None
 
+    GROUP_SYSTEM = (
+        "You are Blatbot, Aaron Blatnoy's assistant, sitting in a group chat. The newest message did not "
+        "name you. Decide whether you should answer it. Answer yes when it is a follow-up to something you "
+        "just said or did, or a request or question that the assistant is plainly meant to pick up (for "
+        "example Aaron telling you to look something up). Answer no for chatter between the people in the "
+        "room, thanks or sign-offs, jokes, and anything meant for someone else.\n"
+        'Return ONLY the JSON object {"should_reply": true} or {"should_reply": false}.')
+
+    async def judge_group_reply_fallback(self, *, message: str, sender: str, group: str, recent: str = "",
+                                         bot_name: str = "", from_principal: bool = False) -> Optional[bool]:
+        """The writer model's yes/no on whether to speak into a group, used only when the typed
+        group judgment gave no answer (its service is failing). None on any failure, which
+        keeps the old behaviour: stay quiet."""
+        who = f"{sender} (the person you work for)" if from_principal else sender
+        user = (f"Your name here: {bot_name or 'Blatbot'}\nGroup: {group}\n\n"
+                f"Conversation so far:\n{(recent or '(none)')[-4000:]}\n\n"
+                f"New message from {who}:\n{message}")
+        try:
+            raw = await self._chat([{"role": "system", "content": self.GROUP_SYSTEM},
+                                    {"role": "user", "content": user}])
+            value = json.loads(raw).get("should_reply")
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("router group-reply fallback failed: %s", exc)
+            return None
+        return value if isinstance(value, bool) else None
+
     async def phrase(self, instruction: str, facts: Dict[str, Any]) -> str:
         """Plain prose from given facts, no JSON, no decisions: the writer as a typewriter."""
         sys_p = ("You write short plain-text messages for Blatbot, Aaron Blatnoy's assistant. Say only what the "

@@ -1740,6 +1740,7 @@ class InkboxGateway:
             logger.debug("[bridge] telegram group: no judge available, staying quiet")
             return
         recent = self._telegram_history(chat_id)
+        owner = ""
         try:
             owner = (telegram.approver_id() or "").strip()
             verdict = await picker.judge_group_reply(
@@ -1749,7 +1750,27 @@ class InkboxGateway:
                 from_principal=bool(owner and str(u["from_id"]) == owner))
         except Exception as exc:
             logger.warning("[bridge] telegram group judgment failed: %s", exc)
-            return
+            verdict = {"should_reply": None, "p": 0.0, "reason": f"error: {exc}"}
+        if verdict.get("should_reply") is None:
+            # The typed judgment gave no answer (its service failed). Ask the writer model the
+            # same question rather than treating a failure as "stay quiet". If that fails too,
+            # silence stands.
+            router = getattr(self.sessions, "router", None)
+            fallback = getattr(router, "judge_group_reply_fallback", None)
+            if fallback is not None:
+                try:
+                    said = await fallback(
+                        message=u["text"], sender=u["name"] or u["from_id"],
+                        group=u.get("group_title") or "group", recent=recent,
+                        bot_name=os.getenv("TELEGRAM_BOT_NAME") or os.getenv("TELEGRAM_BOT_USERNAME") or "Blatbot",
+                        from_principal=bool(owner and str(u["from_id"]) == owner))
+                except Exception as exc:
+                    logger.warning("[bridge] telegram group fallback failed: %s", exc)
+                    said = None
+                logger.info("[bridge] telegram group: judgment unavailable (%s); writer model says should_reply=%s",
+                            str(verdict.get("reason") or "")[:60], said)
+                if said is not None:
+                    verdict = {"should_reply": said, "p": 1.0 if said else 0.0, "reason": "fallback"}
         if not verdict.get("should_reply"):
             # Heard but not answered. It still goes in the record: a member of a group knows
             # what was said while they were quiet, and the next message often refers back to it.
