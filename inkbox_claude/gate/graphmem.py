@@ -10,9 +10,20 @@ Everything here fails open. With GRAPHITI_URL unset, or the service down or slow
 writes are dropped with one log line and reads return "", and the gate behaves
 exactly as it did before this module existed.
 
-Who may read what: each chat's messages are stored under that chat's own group.
-The owner's turns search every group; anyone else's search only their own chat's
-group, the same rule the task ledger follows.
+Who may read what: each chat's messages are stored under that chat's own group, and
+readable_groups() decides which groups one reader's turn may search, from the same
+people, roles and contacts records that gate everything else:
+
+  owner (the approver)      every group;
+  in a group chat           that group only, whoever is talking: other people are present;
+  a person on record        their current chat, plus every direct chat that resolves to the
+                            same person (iMessage, Telegram, email, voice), plus what their
+                            role or their own record grants with `memory:` entries
+                            (`memory:all`, `memory:groups`, `memory:chat:<chat id>`);
+  anyone else, or any error the current chat's group only (fails closed).
+
+The groups are sent to Graphiti as `group_ids`, and every returned fact is checked against
+them again by its own `group_id`.
 """
 
 from __future__ import annotations
@@ -57,6 +68,54 @@ def enabled() -> bool:
 def group_for(chat_id: str) -> str:
     """Graphiti group ids allow letters, digits, dashes and underscores only."""
     return "blatbot_" + (re.sub(r"[^A-Za-z0-9_-]", "_", str(chat_id or "")) or "unknown")
+
+
+MEMORY_PREFIX = "memory:"
+_ALL = object()    # "not given": fall back to the two-level rule (owner all, others own chat)
+
+
+def is_memory_scope(name: Any) -> bool:
+    return str(name or "").strip().lower().startswith(MEMORY_PREFIX)
+
+
+def groups_from_grants(grants: List[str], group_chats: List[str]) -> Optional[List[str]]:
+    """The groups a list of `memory:` entries opens. None means every group."""
+    out: List[str] = []
+    for g in grants:
+        g = str(g or "").strip()
+        low = g.lower()
+        if low == MEMORY_PREFIX + "all":
+            return None
+        if low == MEMORY_PREFIX + "groups":
+            out += [group_for(c) for c in group_chats]
+        elif low.startswith(MEMORY_PREFIX + "chat:") and g[len(MEMORY_PREFIX) + 5:].strip():
+            out.append(group_for(g[len(MEMORY_PREFIX) + 5:].strip()))
+    return out
+
+
+def readable_groups(store: Any, chat_id: str, *, is_approver: bool, is_group: bool,
+                    handles: List[str]) -> Optional[List[str]]:
+    """Which memory groups this reader's turn may search; None means all of them (owner only).
+    Any failure to resolve the reader returns the current chat's own group."""
+    own = group_for(chat_id)
+    if is_approver:
+        return None
+    if is_group:
+        return [own]
+    try:
+        who = store.resolve_handles(handles)
+        pid = who.get("person_id") or ""
+        if who.get("conflict") or not pid or pid == store.commander_person_id():
+            return [own]
+        groups = [own] + [group_for(c) for c in store.memory_chats_for_person(pid)]
+        extra = groups_from_grants(list(who.get("memory") or []), store.memory_group_chats())
+        if extra is None:
+            return None
+        groups += extra
+        return list(dict.fromkeys(groups))
+    except Exception as exc:  # noqa: BLE001 - unresolved identity must never widen access
+        _log_error("reader lookup", exc)
+        return [own]
 
 
 def _post(path: str, payload: Dict[str, Any], timeout: float) -> Any:
@@ -150,16 +209,23 @@ def record(chat_id: str, kind: str, text: str, mode: str = "", created_at: Optio
 
 
 def search(query: str, chat_id: str, is_approver: bool, max_facts: int = MAX_FACTS,
-           timeout: float = RECALL_TIMEOUT) -> List[Dict[str, Any]]:
-    """Facts matching the query that this reader may see. Blocking; [] on any failure."""
+           timeout: float = RECALL_TIMEOUT, groups: Any = _ALL) -> List[Dict[str, Any]]:
+    """Facts matching the query that this reader may see. Blocking; [] on any failure.
+    `groups` is readable_groups()'s answer (None = all); left out, the owner reads all
+    and everyone else their own chat."""
     q = " ".join(str(query or "").split())[:1000]
     if not enabled() or not q:
         return []
+    if groups is _ALL:
+        groups = None if is_approver else [group_for(chat_id)]
     try:
-        res = _post("/search", {"query": q, "max_facts": max_facts,
-                                "group_ids": None if is_approver else [group_for(chat_id)]}, timeout)
+        res = _post("/search", {"query": q, "max_facts": max_facts, "group_ids": groups}, timeout)
         facts = (res or {}).get("facts") or []
-        return [f for f in facts if isinstance(f, dict) and str(f.get("fact") or "").strip()]
+        # Second check: the search was already limited to these groups; a fact from any
+        # other group, or one that does not say which group it came from, is dropped.
+        allowed = None if groups is None else set(groups)
+        return [f for f in facts if isinstance(f, dict) and str(f.get("fact") or "").strip()
+                and (allowed is None or f.get("group_id") in allowed)]
     except Exception as exc:  # noqa: BLE001
         _log_error("search", exc)
         return []
@@ -184,13 +250,13 @@ def render(facts: List[Dict[str, Any]]) -> str:
     return "\n".join(lines)
 
 
-async def recall_facts(query: str, chat_id: str, is_approver: bool) -> List[Dict[str, Any]]:
+async def recall_facts(query: str, chat_id: str, is_approver: bool, groups: Any = _ALL) -> List[Dict[str, Any]]:
     """The facts for one turn; [] when memory is off or the graph did not answer in time."""
     if not enabled():
         return []
     start = time.monotonic()
     try:
-        facts = await asyncio.wait_for(asyncio.to_thread(search, query, chat_id, is_approver),
+        facts = await asyncio.wait_for(asyncio.to_thread(search, query, chat_id, is_approver, MAX_FACTS, RECALL_TIMEOUT, groups),
                                        timeout=RECALL_TIMEOUT + 0.5)
     except Exception as exc:  # noqa: BLE001
         _log_error("recall", exc)
@@ -217,6 +283,6 @@ def message_ids(facts: List[Dict[str, Any]]) -> List[int]:
     return out
 
 
-async def recall(query: str, chat_id: str, is_approver: bool) -> str:
+async def recall(query: str, chat_id: str, is_approver: bool, groups: Any = _ALL) -> str:
     """The memory block for one turn, or "" when there is nothing to add."""
-    return block(await recall_facts(query, chat_id, is_approver))
+    return block(await recall_facts(query, chat_id, is_approver, groups))

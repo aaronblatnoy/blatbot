@@ -113,3 +113,122 @@ def test_tasks_for_messages_ranked_by_hits(tmp_path):
     # A reply is tied to the task active in its own chat at that moment, and to nothing otherwise.
     assert store.task_ids_for_messages([20, 21, 22]) == [7]
     assert store.task_ids_for_messages([]) == []
+
+
+# ---- who may read which memory groups --------------------------------------
+
+def _people_store(tmp_path):
+    """Owner (commander), Ann (role "friend", phone + email + telegram), Bob (no role), a group
+    chat both Ann and Bob are in, and a private chat per channel."""
+    from inkbox_claude.gate.store import Store
+    store = Store(str(tmp_path / "gate.db"))
+    owner = store.create_person(display="Aaron")
+    store.add_contact(owner["id"], "phone", "+14075550100")
+    store._ensure_settings()
+    with store._lock:  # pin the owner's person record the way start-up does
+        store._db.execute("INSERT INTO settings(name,value,updated_at) VALUES('commander_person_id',?,0)", (owner["id"],))
+        store._db.commit()
+    ann = store.create_person(display="Ann", role="friend")
+    store.add_contact(ann["id"], "phone", "+12015550111")
+    store.add_contact(ann["id"], "email", "ann@example.com")
+    store.add_contact(ann["id"], "telegram", "555111")
+    bob = store.create_person(display="Bob")
+    store.add_contact(bob["id"], "phone", "+13475550122")
+    store.set_role("friend", [])
+    for chat, mode, meta in (
+            ("im-ann", "imessage", {"sender": "+12015550111", "conversation_kind": "direct"}),
+            ("mail-ann", "email", {"sender": "ann@example.com"}),
+            ("tg:555111", "telegram", {"sender": "telegram:555111"}),
+            ("im-bob", "imessage", {"sender": "+13475550122"}),
+            ("tg:-77", "telegram", {"sender": "telegram:555111", "conversation_kind": "group", "group_title": "Club"}),
+            ("owner", "telegram", {"sender": "telegram:1", "owner": 1}),
+            ("im-owner-dm", "imessage", {"sender": "+14075550100", "owner": 1})):
+        store.set_thread(chat, "idle", mode, meta)
+    return store, ann, bob
+
+
+def _groups(store, chat, handles, *, approver=False, group=False):
+    return graphmem.readable_groups(store, chat, is_approver=approver, is_group=group, handles=handles)
+
+
+def test_owner_reads_every_group(tmp_path):
+    store, _, _ = _people_store(tmp_path)
+    assert _groups(store, "owner", ["+14075550100"], approver=True) is None
+
+
+def test_person_recalls_across_their_own_channels(tmp_path):
+    store, _, _ = _people_store(tmp_path)
+    got = _groups(store, "mail-ann", ["ann@example.com"])
+    assert got[0] == "blatbot_mail-ann"
+    assert set(got) == {"blatbot_im-ann", "blatbot_mail-ann", "blatbot_tg_555111"}
+    # Telegram resolves the same person from the stamped id alone.
+    assert set(_groups(store, "tg:555111", ["telegram:555111"])) == set(got)
+
+
+def test_stranger_and_unrelated_person_see_only_their_own_chat(tmp_path):
+    store, _, _ = _people_store(tmp_path)
+    assert _groups(store, "im-new", ["+19995550000"]) == ["blatbot_im-new"]
+    # Bob is on record but has no chats of Ann's, and Ann's chats never reach him.
+    assert _groups(store, "im-bob", ["+13475550122"]) == ["blatbot_im-bob"]
+
+
+def test_group_chat_facts_do_not_reach_a_dm_and_dm_facts_do_not_reach_the_group(tmp_path):
+    store, _, _ = _people_store(tmp_path)
+    assert "blatbot_tg_-77" not in _groups(store, "im-ann", ["+12015550111"])
+    # Inside the group only the group is read, even for Ann who has a role and private chats.
+    assert _groups(store, "tg:-77", ["telegram:555111"], group=True) == ["blatbot_tg_-77"]
+
+
+def test_role_grants_extra_groups(tmp_path):
+    store, _, _ = _people_store(tmp_path)
+    store.set_role("friend", ["memory:chat:im-bob", "memory:groups"])
+    got = set(_groups(store, "im-ann", ["+12015550111"]))
+    assert {"blatbot_im-bob", "blatbot_tg_-77", "blatbot_im-ann"} <= got
+    assert "blatbot_owner" not in got and "blatbot_im-owner-dm" not in got
+    store.set_role("friend", ["memory:all"])
+    assert _groups(store, "im-ann", ["+12015550111"]) is None
+
+
+def test_memory_entries_are_not_tool_scopes(tmp_path):
+    store, _, _ = _people_store(tmp_path)
+    store.set_role("friend", ["memory:all"])
+    who = store.resolve_handles(["+12015550111"])
+    assert who["memory"] == ["memory:all"] and who["scopes"] == []
+
+
+def test_commander_contact_without_approval_gets_only_its_own_chat(tmp_path):
+    store, _, _ = _people_store(tmp_path)
+    # A forged or unverified contact that resolves to the owner's record is not the owner.
+    assert _groups(store, "im-x", ["+14075550100"]) == ["blatbot_im-x"]
+
+
+def test_unresolvable_identity_falls_back_to_own_chat(tmp_path):
+    class Broken:
+        def resolve_handles(self, handles):
+            raise RuntimeError("db down")
+    assert graphmem.readable_groups(Broken(), "c1", is_approver=False, is_group=False, handles=["x"]) == ["blatbot_c1"]
+    store, _, _ = _people_store(tmp_path)
+    assert _groups(store, "c2", []) == ["blatbot_c2"]
+
+
+def test_conflicting_handles_fall_back_to_own_chat(tmp_path):
+    store, _, _ = _people_store(tmp_path)
+    assert _groups(store, "im-ann", ["+12015550111", "+13475550122"]) == ["blatbot_im-ann"]
+
+
+def test_search_sends_groups_and_drops_facts_from_other_groups(monkeypatch):
+    monkeypatch.setenv("GRAPHITI_URL", "http://graph.test")
+    sent = []
+
+    def fake_post(path, payload, timeout):
+        sent.append(payload)
+        return {"facts": [{"fact": "mine", "group_id": "blatbot_a"},
+                          {"fact": "theirs", "group_id": "blatbot_z"},
+                          {"fact": "no group"}]}
+
+    monkeypatch.setattr(graphmem, "_post", fake_post)
+    out = graphmem.search("q", "a", False, groups=["blatbot_a", "blatbot_b"])
+    assert sent[0]["group_ids"] == ["blatbot_a", "blatbot_b"]
+    assert [f["fact"] for f in out] == ["mine"]
+    # The owner (all groups) keeps every fact.
+    assert len(graphmem.search("q", "owner", True, groups=None)) == 3

@@ -2157,7 +2157,7 @@ class Store:
             if kind in ("email", "phone", "telegram"):
                 wanted.add((kind, self.contact_value(kind, h)))
         if not wanted:
-            return {"role": "", "scopes": [], "person": "", "person_id": "", "conflict": False}
+            return {"role": "", "scopes": [], "person": "", "person_id": "", "conflict": False, "memory": []}
         clause = " OR ".join("(kind=? AND value=?)" for _ in wanted)
         args = [x for pair in sorted(wanted) for x in pair]
         with self._lock:
@@ -2168,13 +2168,13 @@ class Store:
         person_ids = {self._resolve_person(r["person_id"]) for r in rows}
         person_ids.discard(None)
         if not person_ids:
-            return {"role": "", "scopes": [], "person": "", "person_id": "", "conflict": False}
+            return {"role": "", "scopes": [], "person": "", "person_id": "", "conflict": False, "memory": []}
         if len(person_ids) > 1:
             logger.warning(
                 "resolve_handles: handles %s resolve to %d different people (%s) -- granting neither",
                 handles, len(person_ids), sorted(person_ids),
             )
-            return {"role": "", "scopes": [], "person": "", "person_id": "", "conflict": True}
+            return {"role": "", "scopes": [], "person": "", "person_id": "", "conflict": True, "memory": []}
         pid = next(iter(person_ids))
         person = self._person_row(pid) or {}
         roles = {r["name"]: json.loads(r["scopes"] or "[]")
@@ -2184,8 +2184,12 @@ class Store:
         for name in role_names(role):
             role_scopes += roles.get(name, [])
         scopes = sorted(set(person.get("scopes") or []) | set(role_scopes))
+        # `memory:` entries say which long-term memory groups the person may recall
+        # (gate/graphmem.py). They are not tool scopes, so they are kept apart from `scopes`.
+        memory = [s for s in scopes if graphmem.is_memory_scope(s)]
+        scopes = [s for s in scopes if not graphmem.is_memory_scope(s)]
         return {"role": role, "scopes": scopes, "person": person.get("display") or "",
-                "person_id": pid, "conflict": False}
+                "person_id": pid, "conflict": False, "memory": memory}
 
     def _migrate_people_model(self) -> None:
         """One-time, idempotent: build persons+contacts from the legacy trust / people /
@@ -3187,6 +3191,43 @@ class Store:
                 kind = self.guess_contact_kind(k)
                 self._upsert_contact_locked(kind, k, person_id=None, source="traffic", last_seen=now)
             self._db.commit()
+
+    def _thread_senders(self) -> List[Dict[str, Any]]:
+        """Every thread's id, whether it is a group, and the handle it was last written from."""
+        with self._lock:
+            rows = self._db.execute("SELECT chat_id, meta_json FROM threads").fetchall()
+        out: List[Dict[str, Any]] = []
+        for r in rows:
+            try:
+                meta = json.loads(r["meta_json"] or "{}")
+                meta = meta if isinstance(meta, dict) else {}
+            except Exception:  # noqa: BLE001
+                meta = {}
+            out.append({"chat_id": str(r["chat_id"]), "sender": str(meta.get("sender") or ""),
+                        "group": meta.get("conversation_kind") == "group" or bool(meta.get("group_title")),
+                        "owner": bool(meta.get("owner"))})
+        return out
+
+    def memory_group_chats(self) -> List[str]:
+        """The group chats (several people in one room) that have a thread here."""
+        return [t["chat_id"] for t in self._thread_senders() if t["group"]]
+
+    def memory_chats_for_person(self, person_id: str) -> List[str]:
+        """The direct chats, on any channel, whose sender is a contact of this person.
+        Group chats are left out (a group's last sender says nothing about its members), and
+        so are the owner's own threads."""
+        with self._lock:
+            rows = self._db.execute(
+                "SELECT kind, value, person_id FROM contacts WHERE person_id IS NOT NULL").fetchall()
+        mine = {(r["kind"], r["value"]) for r in rows if self._resolve_person(r["person_id"]) == person_id}
+        out: List[str] = []
+        for t in self._thread_senders():
+            if t["group"] or t["owner"] or t["chat_id"] == "owner" or not t["sender"]:
+                continue
+            kind = self.guess_contact_kind(t["sender"])
+            if kind in ("email", "phone", "telegram") and (kind, self.contact_value(kind, t["sender"])) in mine:
+                out.append(t["chat_id"])
+        return out
 
     def person_keys(self, raw_key: str) -> List[str]:
         """All keys that belong to the same person as ``raw_key`` (itself included)."""
