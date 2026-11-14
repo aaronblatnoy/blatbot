@@ -309,13 +309,13 @@ def show_settings() -> str:
 
 def show_setting(text: str) -> str:
     row = resolve_setting(text)
-    return setting_line_for(row) if row else wording.setting_unknown(text)
+    return setting_line_for(row) if row else wording.setting_unknown_guided(text)
 
 
 def set_setting(store: Any, text: str, value: Any) -> str:
     row = resolve_setting(text)
     if row is None:
-        return wording.setting_unknown(text)
+        return wording.setting_unknown_guided(text)
     if (row.get("kind") == "bool") and _norm(value) in ("on", "off", "true", "false", "yes", "no", "1", "0"):
         value = _norm(value) in ("on", "true", "yes", "1")
     from ..console import api as console_api
@@ -324,13 +324,65 @@ def set_setting(store: Any, text: str, value: Any) -> str:
         from . import settings as gate_settings
         if gate_settings.coerce(row["name"], value) != gate_settings.coerce(row["name"], old):
             console_api.settings_set(store, {"name": row["name"], "value": value})
-    except (ValueError, console_api.ValidationError) as exc:
-        return wording.setting_refused(row.get("label") or row["name"], str(exc))
+    except (ValueError, console_api.ValidationError):
+        from . import admincmd
+        return wording.setting_invalid(row.get("label") or row["name"], row, admincmd.setting_example(row))
     new_row = next((r for r in _setting_rows() if r["name"] == row["name"]), row)
     return setting_line_for(new_row, old_value=old, changed=True)
 
 
 def handle(store: Any, cmd: Any, *, here: Tuple[str, str] = ("", "This chat")) -> str:
+    """The reply to an access command, plus the phrase that undoes it when it changed
+    something (see _undo_for). The one-line state itself comes from _handle."""
+    before = _before_state(store, cmd, here)
+    reply = _handle(store, cmd, here=here)
+    undo = _undo_for(store, cmd, before, reply)
+    return f"{reply}\n{wording.undo_line(undo)}" if undo else reply
+
+
+def _before_state(store: Any, cmd: Any, here: Tuple[str, str]) -> Dict[str, Any]:
+    """What the command is about to change, read before it runs, so the undo phrase can
+    name the old value."""
+    action = cmd.action
+    out: Dict[str, Any] = {}
+    if action == "set_mode":
+        chat_id, title = _chat_target(store, cmd.chat or "", here)
+        if chat_id:
+            out["mode"] = roommode.effective_mode(store.get_response_mode(chat_id))
+            out["title"] = title
+    elif action == "set_setting":
+        row = resolve_setting(getattr(cmd, "setting", None) or "")
+        if row is not None:
+            out["row"] = dict(row)
+    elif action in ("add_role", "remove_role", "set_role"):
+        person, _err = _one_person(store, cmd.person or "")
+        if person is not None:
+            out["person"] = person.get("display") or ""
+            out["roles"] = list(_effective(store, person)[0])
+    return out
+
+
+def _undo_for(store: Any, cmd: Any, before: Dict[str, Any], reply: str) -> str:
+    """The phrase that puts things back, only when this very message changed something."""
+    action = cmd.action
+    if action == "set_mode" and before.get("mode") and f"(was {before['mode']})" in reply:
+        return f"set {before['title']} to {before['mode']}"
+    if action == "set_setting" and before.get("row") and "(was " in reply:
+        row = before["row"]
+        label = " ".join(str(row.get("label") or row["name"]).split()).lower()
+        old = row.get("value")
+        if row.get("kind") == "bool":
+            return f"turn {'on' if wording.setting_value_text(old, 'bool') == 'on' else 'off'} {label}"
+        return f"set the {label} to {wording.setting_value_text(old, row.get('kind') or '')}"
+    if action in ("add_role", "remove_role", "set_role") and before.get("roles") is not None and "(was " in reply:
+        old = before["roles"]
+        if len(old) == 1:
+            return f"set {before['person']}'s role to {old[0]}"
+        return " and ".join(f"make {before['person']} a {r}" for r in old[:2])
+    return ""
+
+
+def _handle(store: Any, cmd: Any, *, here: Tuple[str, str] = ("", "This chat")) -> str:
     """The one-line reply to an access command (router.AccessCommand or the shape
     match() builds). `here` is (chat_id, title) of the chat the message came in on,
     for "this chat"."""
@@ -397,7 +449,7 @@ _PATTERNS: List[Tuple[str, re.Pattern]] = [(a, re.compile(p, re.I)) for a, p in 
     ("set_mode", r"^" + _MODES + r" mode(?: (?:in|for|on) (?P<chat>.+?))?$"),
     ("show_settings", r"^(?:show|list|what are|tell me)(?: me)? (?:your|blatbot's|the|all|all your|all of your) "
                       r"settings\??$"),
-    ("show_settings", r"^(?:your )?settings\??$"),
+    ("show_settings", r"^(?:show|list)(?: me)?(?: all)?(?: of)?(?: my| your)? settings(?: please)?$"),
     ("set_setting", r"^(?:set|change|put) (?:the |your )?(?P<setting>.+?) to (?P<value>.+?)$"),
     ("set_setting", r"^turn (?P<value>on|off) (?:the |your )?(?P<setting>.+?)$"),
     ("set_setting", r"^turn (?:the |your )?(?P<setting>.+?) (?P<value>on|off)$"),

@@ -814,3 +814,103 @@ def schedule_line(title: str, state_text: str, *, was: Optional[str] = None) -> 
     if was and was != state_text:
         line += f" (was {was})"
     return line + "."
+
+
+# ---------------------------------------------------------------------------
+# Guides and admin replies (admincmd.py): the console's pages, in chat. A guide is
+# one line saying what the area is, the values that matter now, and the exact
+# phrases to type, one per line. Every phrase shown here is checked by a test to be
+# understood by admincmd.match() or accesscmd.match(), so a guide can never offer
+# something that does not work. Plain words only: never a setting key or scope id.
+# ---------------------------------------------------------------------------
+
+GUIDE_INTRO = {
+    "overview": "I can change anything the web console can, from here. Pick an area and I will show you what is set now and what to type.",
+    "settings": "Settings are how I behave: when I speak up, what I ask you first, and which models I use.",
+    "roles": "Roles decide what people can do without asking you. Each person holds one or more roles.",
+    "schedules": "Schedules are the jobs I run on my own, like a daily check or a weekly summary.",
+    "groups": "Group chats are the rooms I am in. Each one has a mode that says how freely I speak there.",
+    "people": "People is the list of everyone I know, with the emails, numbers and handles I reach them on.",
+    "requests": "Requests are things I am waiting on you to approve, and things that failed and can be retried.",
+}
+
+GUIDE_AREAS = ["settings", "roles", "schedules", "groups", "people", "requests"]
+
+
+def guide(area: str, state: List[str], examples: List[str]) -> str:
+    """The reply to "settings" / "roles" / ...: what the area is, what is set now, and
+    the exact phrases to type, one per line."""
+    parts = [GUIDE_INTRO.get(area, GUIDE_INTRO["overview"])]
+    if state:
+        parts.append("\n".join(state))
+    if examples:
+        parts.append("Type any of these:\n" + "\n".join(examples))
+    return "\n\n".join(parts)
+
+
+def guide_overview(examples: List[str]) -> str:
+    return guide("overview", [], examples)
+
+
+def undo_line(phrase: str) -> str:
+    return f'To undo, say: {phrase}'
+
+
+def setting_allowed_text(row: Dict[str, Any]) -> str:
+    """What a setting accepts, in words: "a number from 0 to 1", "on or off", "one of
+    opus, sonnet or haiku", "any text"."""
+    kind = row.get("kind") or ""
+    if kind == "bool":
+        return "on or off"
+    if kind == "number":
+        lo, hi = row.get("min"), row.get("max")
+        if lo is not None and hi is not None:
+            return f"a number from {setting_value_text(lo, 'number')} to {setting_value_text(hi, 'number')}"
+        return "a number"
+    if kind == "choice":
+        return "one of " + _and_list(list(row.get("choices") or []), "or")
+    return "any text"
+
+
+def setting_invalid(label: str, row: Dict[str, Any], example: str) -> str:
+    """A value the setting does not accept: what it takes, and the phrase to type."""
+    return f"{label} takes {setting_allowed_text(row)}. Try: {example}"
+
+
+def setting_unknown_guided(text: str) -> str:
+    return (f"I don't have a setting called {' '.join(str(text or '').split())}. "
+            f"Say settings and I will list what I have.")
+
+
+def role_line(name: str, scopes: Any, members: int, *, created: bool = False, old_scopes: Any = None) -> str:
+    """"interns: asks you before doing anything; nobody holds it (new role)." The role's
+    state now; "(new role)" or "(was ...)" appear only on the message that changed it."""
+    who = "nobody holds it" if members == 0 else (f"{members} person holds it" if members == 1
+                                                   else f"{members} people hold it")
+    line = f"{name}: {access_can_text(scopes)}; {who}"
+    if created:
+        line += " (new role)"
+    elif old_scopes is not None and set(old_scopes or []) != set(scopes or []):
+        before = access_can_text(old_scopes)
+        line += f" (was: {before})"
+    return line + "."
+
+
+def role_name_invalid(text: str) -> str:
+    return ("A role name is one to four words, like interns or board advisors. "
+            'Try: create a role called interns')
+
+
+def role_name_taken(name: str) -> str:
+    return f"There is already a role called {name}."
+
+
+def schedules_global_line(paused: bool, *, was: Optional[bool] = None) -> str:
+    """"Every schedule is paused (was running)." Same line when asked again, without "(was)"."""
+    line = "Every schedule is paused" if paused else "Every schedule is running"
+    if was is not None and was != paused:
+        line += " (was " + ("paused" if was else "running") + ")"
+    line += "."
+    if was is not None and was != paused:
+        line += "\n" + undo_line("resume every schedule" if paused else "pause every schedule")
+    return line

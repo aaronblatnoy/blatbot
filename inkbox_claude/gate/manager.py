@@ -29,7 +29,7 @@ from .schedules import ScheduleService, starts_unasked
 from . import schedprop
 from . import wording
 from . import peopleindex
-from . import accesscmd
+from . import accesscmd, admincmd
 from . import graphmem
 
 logger = logging.getLogger(__name__)
@@ -1582,6 +1582,15 @@ class GateSession:
             # Aaron changing or asking who may do what, a room's mode, or a setting, in
             # one of his own common phrasings: answered by code in one state line, before
             # any lookup, model or running request can turn it into something else.
+            admin = admincmd.match(body, self.m.store)
+            if admin is not None:
+                from types import SimpleNamespace
+                logger.info("[gate %s] admin command: %s", self.chat_id, admin["action"])
+                ctx = SimpleNamespace(store=self.m.store, chat_id=self.record_id, here=self._here(),
+                                      manager=self.m, session=self,
+                                      directory_client=getattr(self.m, "directory_client", None))
+                reply = await admincmd.handle(ctx, admin)
+                return await self.send_to_sender(reply, role="answer")
             access = accesscmd.match(body, self.m.store)
             if access is not None:
                 from types import SimpleNamespace
