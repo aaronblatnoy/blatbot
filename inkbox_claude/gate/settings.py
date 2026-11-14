@@ -53,6 +53,17 @@ KNOBS: List[Dict[str, Any]] = [
      "label": "Pause every schedule",
      "help": "Stops new scheduled runs from starting. Existing runs keep going."},
 
+    # -- formatted pages ------------------------------------------------------
+    {"name": "GATE_HTML_PAGES_AUDIENCE", "kind": "choice", "default": "owner",
+     "choices": ["off", "owner", "everyone"], "group": "Pages",
+     "label": "Who gets a formatted web page for a long answer",
+     "help": "A long or structured answer can go out as a web page with a short text and its link. "
+             "owner means only replies to you; everyone widens it to every reply; off turns pages off."},
+    {"name": "GATE_HTML_PAGE_DAYS", "kind": "number", "default": 30, "min": 1, "max": 365,
+     "step": 1, "group": "Pages",
+     "label": "Days a page link keeps working",
+     "help": "After this many days the link returns not found and the page is deleted."},
+
     # -- how it runs ----------------------------------------------------------
     {"restart": True, "name": "GATE_EXECUTOR", "kind": "choice", "default": "claude", "choices": ["claude", "jev"],
      "group": "Engine", "label": "Which engine does the work",

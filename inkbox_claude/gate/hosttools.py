@@ -10,6 +10,8 @@ import re
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
+from . import pages
+
 COMMANDS: Dict[str, list] = {
     "containers": ["docker", "ps", "--format", "{{.Names}}\t{{.Status}}\t{{.Image}}\t{{.Ports}}"],
     "services": ["systemctl", "--user", "list-units", "--type=service", "--state=running", "--no-pager", "--no-legend"],
@@ -219,7 +221,11 @@ def sdk_server(*, vault_prefixes: Optional[List[str]] = None, manager: Any = Non
     async def _admin_show_access(args: Dict[str, Any]) -> Dict[str, Any]:
         return {"content": [{"type": "text", "text": await admin_show_access(args, manager, is_commander)}]}
 
-    tools = [_host_status, _vault_search, _vault_read, _vault_list,
+    @tool("make_page", pages.PUBLISH_PAGE_DESCRIPTION, pages.PUBLISH_PAGE_SCHEMA)
+    async def _make_page(args: Dict[str, Any]) -> Dict[str, Any]:
+        return {"content": [{"type": "text", "text": await pages.publish_page(args, pages.allowed_for(is_commander))}]}
+
+    tools = [_make_page, _host_status, _vault_search, _vault_read, _vault_list,
              _telegram_find_chats, _telegram_list_chats, _telegram_read_chat,
              _admin_list_settings, _admin_get_setting, _admin_set_setting,
              _admin_list_roles, _admin_set_role_scopes, _admin_set_person_role,
