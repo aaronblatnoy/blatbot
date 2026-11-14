@@ -103,6 +103,13 @@ def test_tasks_for_messages_ranked_by_hits(tmp_path):
                 "INSERT INTO requests(id, chat_id, sender, mode, original_message, summary, scopes_json, prompt, prompt_sha256, state, "
                 "created_at, updated_at, task_id, inbound_id) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
                 (rid, "c", "s", "imessage", "m", "s", "[]", "p", "x", "done", 0, 0, task, inbound))
+        for mid, chat, at in ((20, "c", 1000.0), (21, "c", 5000.0), (22, "other", 1000.0)):
+            store._db.execute("INSERT INTO messages(id, chat_id, kind, mode, text, created_at) VALUES(?,?,?,?,?,?)",
+                              (mid, chat, "outbound", "imessage", "t", at))
+        store._db.execute("INSERT INTO task_events(task_id, kind, chat_id, text, created_at) VALUES(?,?,?,?,?)",
+                          (7, "done", "c", "t", 1000.5))
         store._db.commit()
     assert store.task_ids_for_messages([10, 11, 12, 13, 99]) == [6, 5]
+    # A reply is tied to the task active in its own chat at that moment, and to nothing otherwise.
+    assert store.task_ids_for_messages([20, 21, 22]) == [7]
     assert store.task_ids_for_messages([]) == []
