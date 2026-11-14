@@ -886,6 +886,10 @@ class InkboxGateway:
                 exec_cwd=self.cfg.gate_exec_dir,
                 standing_path=self.cfg.gate_standing_path,
             )
+            # What the chat admin commands (gate/admincmd.py) need from the gateway: the
+            # Inkbox contact directory for "refresh people", and the gateway itself for health.
+            self.sessions.directory_client = self.inkbox_directory_client
+            self.sessions.gateway = self
             logger.info("[bridge] mode=gate (router=%s, approver iMessage conv=%s)",
                         self.cfg.deepseek_model, self.cfg.approver_imessage_conversation_id or "-")
         else:
