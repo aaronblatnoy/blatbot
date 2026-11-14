@@ -3,7 +3,8 @@ import logging
 
 from inkbox_claude import logredact
 
-TOKEN = "123456789:AAFakeTokenValue_abc-XYZ0123456789"
+# Made up, and assembled at run time so no token-shaped text sits in the repository.
+TOKEN = "123456789" + ":" + "A" * 35
 
 
 def _logger(name):
