@@ -137,6 +137,9 @@ def run_foreground() -> int:
         level=logging.INFO,
         format="%(asctime)s %(levelname)s %(name)s: %(message)s",
     )
+    # The HTTP client logs each request URL, and a Telegram URL carries the bot token.
+    from .logredact import install as _mask_tokens_in_logs
+    _mask_tokens_in_logs()
     # Make SIGTERM (how `stop` and service managers ask us to quit) unwind the
     # same graceful path as Ctrl+C, so the tunnel and webhook server close.
     if os.name == "posix":
