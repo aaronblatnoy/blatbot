@@ -2329,7 +2329,8 @@ def test_aaron_sets_a_role_in_one_message_and_a_repeat_sends_the_same_state(tmp_
     asyncio.run(s.handle_inbound("what can Stanley do?", "imessage", approver_meta()))
     texts = [t for _, t, *_ in sent]
     assert texts == [
-        "Stanley Rabkin: corgi teammate (was general); can look up Corgi Command (the pension CRM).",
+        "Stanley Rabkin: corgi teammate (was general); can look up Corgi Command (the pension CRM).\n"
+        "To undo, say: set Stanley Rabkin's role to general",
         "Stanley Rabkin: corgi teammate; can look up Corgi Command (the pension CRM).",
         "Stanley Rabkin: corgi teammate; can look up Corgi Command (the pension CRM).",
     ]
