@@ -11,7 +11,7 @@ import threading
 import time
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Callable, Dict, List, Optional, Tuple
 
 from .pgdb import PGConnection, is_postgres_target
 from .peopleindex import same_name as same_name_tokens
@@ -35,6 +35,23 @@ CREATE TABLE IF NOT EXISTS messages (
   created_at REAL NOT NULL
 );
 CREATE INDEX IF NOT EXISTS messages_chat ON messages(chat_id, id);
+CREATE TABLE IF NOT EXISTS inbox_events (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  chat_id TEXT NOT NULL,
+  source TEXT NOT NULL,
+  source_event_id TEXT NOT NULL,
+  mode TEXT NOT NULL,
+  body TEXT NOT NULL,
+  meta_json TEXT NOT NULL,
+  status TEXT NOT NULL DEFAULT 'pending',
+  attempts INTEGER NOT NULL DEFAULT 0,
+  error TEXT,
+  created_at REAL NOT NULL,
+  started_at REAL,
+  finished_at REAL,
+  UNIQUE(source, source_event_id)
+);
+CREATE INDEX IF NOT EXISTS inbox_events_chat ON inbox_events(chat_id, status, id);
 CREATE TABLE IF NOT EXISTS mail_ids (
   message_id TEXT PRIMARY KEY,   -- RFC Message-ID of a mail we have seen
   root TEXT NOT NULL             -- Message-ID of the first mail in its reply chain
@@ -235,6 +252,23 @@ CREATE TABLE IF NOT EXISTS messages (
   schedule_id BIGINT
 );
 CREATE INDEX IF NOT EXISTS messages_chat ON messages(chat_id, id);
+CREATE TABLE IF NOT EXISTS inbox_events (
+  id BIGSERIAL PRIMARY KEY,
+  chat_id TEXT NOT NULL,
+  source TEXT NOT NULL,
+  source_event_id TEXT NOT NULL,
+  mode TEXT NOT NULL,
+  body TEXT NOT NULL,
+  meta_json TEXT NOT NULL,
+  status TEXT NOT NULL DEFAULT 'pending',
+  attempts INTEGER NOT NULL DEFAULT 0,
+  error TEXT,
+  created_at DOUBLE PRECISION NOT NULL,
+  started_at DOUBLE PRECISION,
+  finished_at DOUBLE PRECISION,
+  UNIQUE(source, source_event_id)
+);
+CREATE INDEX IF NOT EXISTS inbox_events_chat ON inbox_events(chat_id, status, id);
 CREATE INDEX IF NOT EXISTS messages_reply_to ON messages(reply_to);
 CREATE INDEX IF NOT EXISTS messages_schedule ON messages(schedule_id);
 CREATE TABLE IF NOT EXISTS mail_ids (
@@ -1335,6 +1369,81 @@ class Store:
                 return g
         matches = [g for g in groups if needle in g["title"].strip().lower()]
         return matches[0] if len(matches) == 1 else None
+
+    # -- durable inbound queue ------------------------------------------
+    def insert_inbox_event(self, chat_id: str, source: str, source_event_id: str,
+                           mode: str, body: str, meta: Dict[str, Any]) -> Optional[int]:
+        with self._lock:
+            row = self._db.execute(
+                "INSERT INTO inbox_events(chat_id,source,source_event_id,mode,body,meta_json,created_at) "
+                "VALUES(?,?,?,?,?,?,?) ON CONFLICT(source,source_event_id) DO NOTHING RETURNING id",
+                (chat_id, source, source_event_id, mode, body, json.dumps(meta, default=str), time.time()),
+            ).fetchone()
+            self._db.commit()
+        return int(row["id"]) if row else None
+
+    def list_pending_inbox(self, chat_id: str) -> List[Dict[str, Any]]:
+        with self._lock:
+            rows = self._db.execute(
+                "SELECT * FROM inbox_events WHERE chat_id=? AND status='pending' ORDER BY id", (chat_id,)
+            ).fetchall()
+        return [dict(r) for r in rows]
+
+    def claim_inbox_event(self, event_id: int) -> bool:
+        with self._lock:
+            row = self._db.execute(
+                "UPDATE inbox_events SET status='running', attempts=attempts+1, started_at=? "
+                "WHERE id=? AND status='pending' RETURNING id", (time.time(), event_id)
+            ).fetchone()
+            self._db.commit()
+        return row is not None
+
+    def finish_inbox_event(self, event_id: int, status: str, error: str = "") -> None:
+        with self._lock:
+            self._db.execute(
+                "UPDATE inbox_events SET status=?, error=?, finished_at=? WHERE id=?",
+                (status, error or None, time.time(), event_id),
+            )
+            self._db.commit()
+
+    def inbox_counts(self) -> Dict[str, int]:
+        counts = {s: 0 for s in ("pending", "running", "done", "failed")}
+        with self._lock:
+            rows = self._db.execute("SELECT status, COUNT(*) AS n FROM inbox_events GROUP BY status").fetchall()
+        counts.update({r["status"]: int(r["n"]) for r in rows})
+        return counts
+
+    def recover_inbox_events(self, record_id_for_event: Optional[Callable[[Dict[str, Any]], str]] = None
+                             ) -> List[Dict[str, Any]]:
+        """Requeue interrupted turns only when nothing went out after they started."""
+        replay = []
+        with self._lock:
+            rows = self._db.execute(
+                "SELECT * FROM inbox_events WHERE status IN ('pending','running') ORDER BY id"
+            ).fetchall()
+            for row in rows:
+                event = dict(row)
+                if event["attempts"] > 3:
+                    self._db.execute("UPDATE inbox_events SET status='failed', error=?, finished_at=? WHERE id=?",
+                                     ("too many attempts", time.time(), event["id"]))
+                    continue
+                if event["status"] == "running":
+                    record_id = record_id_for_event(event) if record_id_for_event else event["chat_id"]
+                    sent = self._db.execute(
+                        "SELECT 1 FROM messages WHERE chat_id=? AND kind='outbound' AND created_at>=? LIMIT 1",
+                        (record_id, event["started_at"] or 0),
+                    ).fetchone()
+                    if sent:
+                        self._db.execute(
+                            "UPDATE inbox_events SET status='done', error=?, finished_at=? WHERE id=?",
+                            ("interrupted after replying", time.time(), event["id"]),
+                        )
+                        continue
+                    self._db.execute("UPDATE inbox_events SET status='pending', started_at=NULL WHERE id=?",
+                                     (event["id"],))
+                replay.append(event)
+            self._db.commit()
+        return replay
 
     # -- messages --------------------------------------------------------
     def add_message(self, chat_id: str, kind: str, text: str, mode: str = "",
