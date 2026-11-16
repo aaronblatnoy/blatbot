@@ -52,6 +52,24 @@ CREATE TABLE IF NOT EXISTS inbox_events (
   UNIQUE(source, source_event_id)
 );
 CREATE INDEX IF NOT EXISTS inbox_events_chat ON inbox_events(chat_id, status, id);
+CREATE TABLE IF NOT EXISTS outbox (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  chat_id TEXT NOT NULL,
+  target TEXT NOT NULL,
+  mode TEXT NOT NULL,
+  text TEXT NOT NULL,
+  meta_json TEXT NOT NULL DEFAULT '{}',
+  kind TEXT NOT NULL DEFAULT 'reply',
+  status TEXT NOT NULL DEFAULT 'queued',
+  attempts INTEGER NOT NULL DEFAULT 0,
+  last_error TEXT NOT NULL DEFAULT '',
+  not_before REAL NOT NULL DEFAULT 0,
+  created_at REAL NOT NULL,
+  sent_at REAL,
+  provider_message_id TEXT
+);
+CREATE INDEX IF NOT EXISTS outbox_due ON outbox(status, not_before, id);
+CREATE INDEX IF NOT EXISTS outbox_recipient ON outbox(target, sent_at);
 CREATE TABLE IF NOT EXISTS mail_ids (
   message_id TEXT PRIMARY KEY,   -- RFC Message-ID of a mail we have seen
   root TEXT NOT NULL             -- Message-ID of the first mail in its reply chain
@@ -271,6 +289,24 @@ CREATE TABLE IF NOT EXISTS inbox_events (
 CREATE INDEX IF NOT EXISTS inbox_events_chat ON inbox_events(chat_id, status, id);
 CREATE INDEX IF NOT EXISTS messages_reply_to ON messages(reply_to);
 CREATE INDEX IF NOT EXISTS messages_schedule ON messages(schedule_id);
+CREATE TABLE IF NOT EXISTS outbox (
+  id BIGSERIAL PRIMARY KEY,
+  chat_id TEXT NOT NULL,
+  target TEXT NOT NULL,
+  mode TEXT NOT NULL,
+  text TEXT NOT NULL,
+  meta_json TEXT NOT NULL DEFAULT '{}',
+  kind TEXT NOT NULL DEFAULT 'reply',
+  status TEXT NOT NULL DEFAULT 'queued',
+  attempts INTEGER NOT NULL DEFAULT 0,
+  last_error TEXT NOT NULL DEFAULT '',
+  not_before DOUBLE PRECISION NOT NULL DEFAULT 0,
+  created_at DOUBLE PRECISION NOT NULL,
+  sent_at DOUBLE PRECISION,
+  provider_message_id TEXT
+);
+CREATE INDEX IF NOT EXISTS outbox_due ON outbox(status, not_before, id);
+CREATE INDEX IF NOT EXISTS outbox_recipient ON outbox(target, sent_at);
 CREATE TABLE IF NOT EXISTS mail_ids (
   message_id TEXT PRIMARY KEY,
   root TEXT NOT NULL
@@ -1446,6 +1482,128 @@ class Store:
         return replay
 
     # -- messages --------------------------------------------------------
+    def add_outbox(self, chat_id: str, target: str, mode: str, text: str,
+                   meta: Dict[str, Any], kind: str) -> int:
+        """Keep a send on disk before asking a channel to deliver it."""
+        with self._lock:
+            cur = self._db.execute(
+                "INSERT INTO outbox(chat_id,target,mode,text,meta_json,kind,created_at) "
+                "VALUES(?,?,?,?,?,?,?)",
+                (chat_id, target, mode, text, json.dumps(meta), kind, time.time()))
+            self._db.commit()
+            return int(cur.lastrowid)
+
+    def get_outbox(self, row_id: int) -> Optional[Dict[str, Any]]:
+        with self._lock:
+            row = self._db.execute("SELECT * FROM outbox WHERE id=?", (row_id,)).fetchone()
+            return dict(row) if row else None
+
+    def claim_outbox(self, row_id: int, status: str = "queued") -> bool:
+        """Only one worker may own a send, including across processes."""
+        with self._lock:
+            cur = self._db.execute(
+                "UPDATE outbox SET status='sending', attempts=attempts+1 "
+                "WHERE id=? AND status=? AND not_before<=?", (row_id, status, time.time()))
+            self._db.commit()
+            return cur.rowcount == 1
+
+    def hold_outbox(self, row_id: int) -> bool:
+        """Move a waiting send to held only if no dispatcher has claimed it."""
+        with self._lock:
+            cur = self._db.execute(
+                "UPDATE outbox SET status='held' WHERE id=? AND status='queued'", (row_id,))
+            self._db.commit()
+            return cur.rowcount == 1
+
+    def abandon_outbox(self, row_id: int) -> None:
+        """A direct fallback must not leave a waiting copy for the dispatcher."""
+        with self._lock:
+            self._db.execute(
+                "UPDATE outbox SET status='failed',last_error='outbox unavailable; tried direct delivery' "
+                "WHERE id=? AND status IN ('queued','held','sending')", (row_id,))
+            self._db.commit()
+
+    def set_outbox_state(self, row_id: int, status: str, *, error: str = "",
+                         not_before: float = 0, provider_message_id: Optional[str] = None) -> None:
+        with self._lock:
+            self._db.execute(
+                "UPDATE outbox SET status=?, last_error=?, not_before=?, "
+                "sent_at=?, provider_message_id=? WHERE id=?",
+                (status, error, not_before, time.time() if status == "sent" else None,
+                 provider_message_id, row_id))
+            self._db.commit()
+
+    def due_outbox(self, now: float, limit: int = 100) -> List[Dict[str, Any]]:
+        with self._lock:
+            rows = self._db.execute(
+                "SELECT * FROM outbox WHERE status='queued' AND not_before<=? "
+                "ORDER BY not_before,id LIMIT ?", (now, limit)).fetchall()
+            return [dict(row) for row in rows]
+
+    def held_outbox(self, target: str, mode: str) -> List[Dict[str, Any]]:
+        with self._lock:
+            rows = self._db.execute(
+                "SELECT * FROM outbox WHERE status='held' AND target=? AND mode=? "
+                "ORDER BY created_at,id", (target, mode)).fetchall()
+            return [dict(row) for row in rows]
+
+    def held_recipients(self) -> List[Tuple[str, str]]:
+        with self._lock:
+            rows = self._db.execute(
+                "SELECT DISTINCT target,mode FROM outbox WHERE status='held'").fetchall()
+            return [(row["target"], row["mode"]) for row in rows]
+
+    def has_held_outbox(self, target: str, mode: str) -> bool:
+        with self._lock:
+            return self._db.execute(
+                "SELECT 1 FROM outbox WHERE status='held' AND target=? AND mode=? LIMIT 1",
+                (target, mode)).fetchone() is not None
+
+    def recent_outbox_sends(self, target: str, since: float, mode: Optional[str] = None) -> List[Dict[str, Any]]:
+        with self._lock:
+            if mode is None:
+                rows = self._db.execute(
+                    "SELECT text,sent_at,kind,last_error FROM outbox WHERE target=? "
+                    "AND status='sent' AND sent_at>=? ORDER BY sent_at,id",
+                    (target, since)).fetchall()
+            else:
+                rows = self._db.execute(
+                    "SELECT text,sent_at,kind,last_error FROM outbox WHERE target=? AND mode=? "
+                    "AND status='sent' AND sent_at>=? ORDER BY sent_at,id",
+                    (target, mode, since)).fetchall()
+            return [dict(row) for row in rows]
+
+    def outbox_counts(self) -> Dict[str, int]:
+        counts = {status: 0 for status in ("queued", "sending", "sent", "failed", "held")}
+        with self._lock:
+            rows = self._db.execute("SELECT status,COUNT(*) AS n FROM outbox GROUP BY status").fetchall()
+        counts.update({row["status"]: int(row["n"]) for row in rows})
+        return counts
+
+    def recent_outbox(self, since: float) -> List[Dict[str, Any]]:
+        with self._lock:
+            rows = self._db.execute(
+                "SELECT * FROM outbox WHERE status IN ('queued','held','failed') "
+                "AND created_at>=? ORDER BY created_at DESC,id DESC", (since,)).fetchall()
+            return [dict(row) for row in rows]
+
+    def retry_outbox(self, row_id: int) -> bool:
+        with self._lock:
+            cur = self._db.execute(
+                "UPDATE outbox SET status='queued',attempts=0,last_error='',not_before=0 "
+                "WHERE id=? AND status='failed'", (row_id,))
+            self._db.commit()
+            return cur.rowcount == 1
+
+    def fail_interrupted_outbox(self) -> int:
+        """A crashed send may already have reached its channel, so never repeat it."""
+        with self._lock:
+            cur = self._db.execute(
+                "UPDATE outbox SET status='failed',last_error='interrupted mid-send, not retried' "
+                "WHERE status='sending'")
+            self._db.commit()
+            return cur.rowcount
+
     def add_message(self, chat_id: str, kind: str, text: str, mode: str = "",
                     reply_to: Optional[int] = None, role: Optional[str] = None,
                     schedule_id: Optional[int] = None) -> int:

@@ -53,6 +53,10 @@ EXPIRE_SECONDS = 24 * 3600
 # the real work past this window.
 CALL_ASK_FOLD_WINDOW_S = 45
 VOICE_FAST_PATH_MAX_CHARS = 600
+# Only messages nobody asked for are paced. A notice or a late result answers a request
+# someone made, so it always goes at once.
+OUTBOX_PROACTIVE_KINDS = {"schedule", "proactive"}
+OUTBOX_BACKOFF = (30, 120, 600)
 
 
 def _normalize_caller_words(text: str) -> str:
@@ -1901,14 +1905,16 @@ class GateSession:
             # recording a second one below under mode "voice" (never spoken) was the
             # voice+imessage double-row bug.
             if self.is_aaron_on_phone():
-                await self.m.send_to_approver(text)
+                await self.m.send_to_approver(text, kind=getattr(self, "_outbox_kind", "reply"))
             else:
                 num = self._sender()
-                await self.m.send(f"sms:{num}", text, "sms", {"to": num, "sender": num}, record=False)
+                await self.m.send(f"sms:{num}", text, "sms", {"to": num, "sender": num},
+                                  record=False, kind=getattr(self, "_outbox_kind", "reply"))
                 self.m.store.add_message(self.record_id, "outbound", text, "sms", reply_to=self.inbound_id, role=role)
         else:
             self.typing_stop()
-            await self.m.send(self.chat_id, text, self.mode, self.reply_meta, record=False)
+            await self.m.send(self.chat_id, text, self.mode, self.reply_meta, record=False,
+                              kind=getattr(self, "_outbox_kind", "reply"))
             self.m.store.add_message(self.record_id, "outbound", text, self.mode, reply_to=self.inbound_id, role=role)
         t = self.task()
         if t is not None:
@@ -2258,10 +2264,20 @@ class GateSessionManager:
         self._expiry_task: Optional[asyncio.Task] = None
         self._schedule_task: Optional[asyncio.Task] = None
         self._followup_task: Optional[asyncio.Task] = None
+        self._outbox_task: Optional[asyncio.Task] = None
+        if self._outbox_enabled():
+            try:
+                interrupted = self.store.fail_interrupted_outbox()
+                if interrupted:
+                    logger.warning("[gate] outbox marked %d interrupted sends failed; not retried", interrupted)
+            except Exception as exc:
+                logger.warning("[gate] outbox startup recovery failed: %s", exc)
         try:
             self._expiry_task = asyncio.get_running_loop().create_task(self._expiry_loop())
             self._schedule_task = asyncio.get_running_loop().create_task(self._schedule_loop())
             self._followup_task = asyncio.get_running_loop().create_task(self._followup_loop())
+            if self._outbox_enabled():
+                self._outbox_task = asyncio.get_running_loop().create_task(self._outbox_loop())
         except RuntimeError:
             pass
 
@@ -2283,6 +2299,8 @@ class GateSessionManager:
             self._schedule_task.cancel()
         if self._followup_task:
             self._followup_task.cancel()
+        if self._outbox_task:
+            self._outbox_task.cancel()
 
     # -- approver channel ----------------------------------------------------
     @property
@@ -2300,12 +2318,40 @@ class GateSessionManager:
 
     async def send(self, target: str, text: str, mode: str, meta: Dict[str, Any], *,
                    chat_id: str = "", role: str = "notice", reply_to: Optional[int] = None,
-                   record: bool = True) -> None:
-        """Every outbound message goes through here, and every one of them is written to a
-        thread. What was said is what can be referred to later, so a message that was sent
-        but never recorded leaves the next turn reading a conversation that did not happen."""
+                   record: bool = True, kind: str = "reply",
+                   retry_on_failure: bool = True) -> None:
+        """Save a message before delivery, then use the same channel as before.
+        Callers that write their own reply record pass record=False."""
         text = wording.plain_dashes(text)
-        await self.send_fn(target, text, mode, meta)
+        if not self._outbox_enabled() or mode == "voice":
+            await self.send_fn(target, text, mode, meta)
+        else:
+            row_id = None
+            try:
+                row_id = self.store.add_outbox(chat_id or self._threads_for(target)[0], target,
+                                               mode, text, meta, kind)
+                if kind in OUTBOX_PROACTIVE_KINDS and self._proactive_limit() > 0:
+                    recent = self.store.recent_outbox_sends(target, time.time() - 3600, mode)
+                    sent = [row for row in recent if row["kind"] in OUTBOX_PROACTIVE_KINDS
+                            and row["last_error"] != "duplicate suppressed"]
+                    if len(sent) >= self._proactive_limit() or self.store.has_held_outbox(target, mode):
+                        self.store.hold_outbox(row_id)
+                        return
+                if not self.store.claim_outbox(row_id):
+                    return
+            except Exception as exc:
+                logger.warning("[gate] outbox unavailable, sending directly: %s", exc)
+                if row_id is not None:
+                    try:
+                        self.store.abandon_outbox(row_id)
+                    except Exception:
+                        pass
+                await self.send_fn(target, text, mode, meta)
+            else:
+                await self._deliver_outbox(row_id, retry_on_failure=retry_on_failure,
+                                           row={"target": target, "text": text, "mode": mode,
+                                                "meta_json": json.dumps(meta), "kind": kind,
+                                                "attempts": 1})
         if not record:
             return      # the caller writes its own line, with the turn's reply_to and role
         for cid in self._threads_for(target, chat_id):
@@ -2313,6 +2359,141 @@ class GateSessionManager:
                 self.store.add_message(cid, "outbound", text, mode, reply_to=reply_to, role=role)
             except Exception:
                 logger.debug("[gate] could not record an outbound on %s", cid, exc_info=True)
+
+    @staticmethod
+    def _outbox_enabled() -> bool:
+        return os.getenv("GATE_OUTBOX", "1").strip().lower() not in ("0", "false", "no")
+
+    @staticmethod
+    def _proactive_limit() -> int:
+        try:
+            return max(0, int(os.getenv("OUTBOX_PROACTIVE_PER_HOUR", "6")))
+        except ValueError:
+            return 6
+
+    @staticmethod
+    def _outbox_transient(exc: Exception) -> bool:
+        response = getattr(exc, "response", None)
+        status = (getattr(exc, "status", None) or getattr(exc, "status_code", None)
+                  or getattr(response, "status_code", None) or getattr(response, "status", None))
+        try:
+            status = int(status)
+        except (TypeError, ValueError):
+            match = re.search(r"\b(4\d\d|5\d\d)\b", str(exc))
+            status = int(match.group(1)) if match else None
+        if status is not None:
+            return status == 429 or status >= 500
+        if isinstance(exc, (TimeoutError, ConnectionError, OSError)):
+            return True
+        message = str(exc).lower()
+        return any(word in message for word in ("timeout", "timed out", "connection", "rate limit", "network"))
+
+    async def _deliver_outbox(self, row_id: int, *, retry_on_failure: bool = True,
+                              row: Optional[Dict[str, Any]] = None) -> Any:
+        row = row or self.store.get_outbox(row_id)
+        if row is None:
+            return
+        try:
+            if row["kind"] != "reply":
+                try:
+                    recent = self.store.recent_outbox_sends(row["target"], time.time() - 600, row["mode"])
+                except Exception as exc:
+                    logger.warning("[gate] outbox duplicate check unavailable: %s", exc)
+                    recent = []
+                if any(other["text"] == row["text"] and other["last_error"] != "duplicate suppressed"
+                       for other in recent):
+                    try:
+                        self.store.set_outbox_state(row_id, "sent", error="duplicate suppressed")
+                    except Exception as exc:
+                        logger.warning("[gate] outbox could not record duplicate: %s", exc)
+                    return
+            result = await self.send_fn(row["target"], row["text"], row["mode"],
+                                        json.loads(row["meta_json"] or "{}"))
+        except Exception as exc:
+            attempts = int(row["attempts"])
+            transient = retry_on_failure and self._outbox_transient(exc) and attempts < 4
+            delay = OUTBOX_BACKOFF[min(attempts - 1, 2)] if transient else 0
+            try:
+                self.store.set_outbox_state(row_id, "queued" if transient else "failed",
+                                            error=str(exc), not_before=time.time() + delay)
+            except Exception as store_exc:
+                logger.warning("[gate] outbox could not record send failure: %s", store_exc)
+            raise
+        else:
+            provider_id = None
+            if isinstance(result, dict):
+                provider_id = result.get("message_id") or result.get("id")
+            try:
+                self.store.set_outbox_state(row_id, "sent", provider_message_id=str(provider_id) if provider_id else None)
+            except Exception as exc:
+                logger.warning("[gate] outbox could not record sent message: %s", exc)
+            return result
+
+    async def _outbox_loop(self) -> None:
+        while True:
+            await asyncio.sleep(15)
+            try:
+                await self._dispatch_outbox()
+            except Exception as exc:
+                logger.warning("[gate] outbox dispatcher failed: %s", exc)
+
+    async def _dispatch_outbox(self) -> None:
+        for row in self.store.due_outbox(time.time()):
+            if row["kind"] in OUTBOX_PROACTIVE_KINDS and self._proactive_limit() > 0:
+                recent = self.store.recent_outbox_sends(row["target"], time.time() - 3600, row["mode"])
+                if sum(r["kind"] in OUTBOX_PROACTIVE_KINDS and r["last_error"] != "duplicate suppressed"
+                       for r in recent) >= self._proactive_limit() or self.store.has_held_outbox(row["target"], row["mode"]):
+                    self.store.hold_outbox(row["id"])
+                    continue
+            if self.store.claim_outbox(row["id"]):
+                try:
+                    await self._deliver_outbox(row["id"])
+                except Exception as exc:
+                    logger.warning("[gate] outbox send %s failed: %s", row["id"], exc)
+        for target, mode in self.store.held_recipients():
+            try:
+                await self._dispatch_held(target, mode)
+            except Exception as exc:
+                logger.warning("[gate] held outbox delivery failed: %s", exc)
+
+    async def _dispatch_held(self, target: str, mode: str) -> None:
+        recent = self.store.recent_outbox_sends(target, time.time() - 3600, mode)
+        if self._proactive_limit() > 0 and sum(
+                row["kind"] in OUTBOX_PROACTIVE_KINDS and row["last_error"] != "duplicate suppressed"
+                for row in recent) >= self._proactive_limit():
+            return
+        sent_texts = {row["text"] for row in self.store.recent_outbox_sends(target, time.time() - 600, mode)
+                      if row["last_error"] != "duplicate suppressed"}
+        held = self.store.held_outbox(target, mode)
+        if any(row["not_before"] > time.time() for row in held):
+            return      # Wait for the oldest failed batch so all held words stay together.
+        claimed = [row for row in held if self.store.claim_outbox(row["id"], "held")]
+        if not claimed:
+            return
+        fresh = []
+        for row in claimed:
+            if row["text"] in sent_texts:
+                self.store.set_outbox_state(row["id"], "sent", error="duplicate suppressed")
+            else:
+                fresh.append(row)
+        claimed = fresh
+        if not claimed:
+            return
+        text = "\n\n".join(row["text"] for row in claimed)
+        try:
+            result = await self.send_fn(target, text, mode, json.loads(claimed[0]["meta_json"] or "{}"))
+        except Exception as exc:
+            for row in claimed:
+                attempts = int(row["attempts"]) + 1
+                transient = self._outbox_transient(exc) and attempts < 4
+                delay = OUTBOX_BACKOFF[min(attempts - 1, 2)] if transient else 0
+                self.store.set_outbox_state(row["id"], "held" if transient else "failed",
+                                            error=str(exc), not_before=time.time() + delay)
+            raise
+        else:
+            provider_id = (result.get("message_id") or result.get("id")) if isinstance(result, dict) else None
+            for row in claimed:
+                self.store.set_outbox_state(row["id"], "sent", provider_message_id=str(provider_id) if provider_id else None)
 
     def _threads_for(self, target: str, chat_id: str = "") -> List[str]:
         """Where an outbound belongs. The caller's record when it named one, the owner's
@@ -2360,16 +2541,16 @@ class GateSessionManager:
                         f"Nothing was reported back. Say the word and I will run it again.")
                 session = self.get(req.chat_id)
                 if not await session.notify_after_request(line, inbound_id=req.inbound_id):
-                    await self.send_to_approver(f"[Blatbot #{req.id}] {line}")
+                    await self.send_to_approver(f"[Blatbot #{req.id}] {line}", kind="notice")
                 logger.info("[gate] told %s about interrupted request #%s", req.chat_id, req.id)
             except Exception:
                 logger.exception("[gate] could not report interrupted request #%s", req.id)
 
-    async def send_to_approver(self, text: str) -> None:
+    async def send_to_approver(self, text: str, *, kind: str = "reply") -> None:
         conv = self.approver_conv
-        await self.send(f"imessage:{conv}", text, "imessage", {"conversation_id": conv})
+        await self.send(f"imessage:{conv}", text, "imessage", {"conversation_id": conv}, kind=kind)
 
-    async def send_schedule_notice(self, schedule: Any, text: str) -> int:
+    async def send_schedule_notice(self, schedule: Any, text: str, *, kind: str = "schedule") -> int:
         """Every schedule notice and proposal (schedules.py's only way to speak)
         goes through here: send the same way an ordinary owner reply on that channel
         is sent (the real chat_id and reply meta captured at proposal time, packed into
@@ -2392,7 +2573,11 @@ class GateSessionManager:
         sent = False
         if target and mode and mode != "console":
             try:
-                await self.send_fn(target, text, mode, meta)
+                if self._outbox_enabled():
+                    await self.send(target, text, mode, meta, record=False, kind=kind,
+                                    retry_on_failure=False)
+                else:
+                    await self.send_fn(target, text, mode, meta)
                 sent = True
             except Exception:
                 logger.exception("[gate] schedule %s notice failed on %s/%s; falling back to the owner's thread",
@@ -2401,7 +2586,11 @@ class GateSessionManager:
             conv = self.approver_conv
             mode = "imessage"
             target = f"imessage:{conv}"
-            await self.send_fn(target, text, mode, {"conversation_id": conv})
+            if self._outbox_enabled():
+                await self.send(target, text, mode, {"conversation_id": conv}, record=False,
+                                kind=kind)
+            else:
+                await self.send_fn(target, text, mode, {"conversation_id": conv})
         return self.store.add_message(OWNER_THREAD, "outbound", text, mode, role="notice",
                                       schedule_id=getattr(schedule, "id", None))
 
@@ -2430,7 +2619,7 @@ class GateSessionManager:
         who = "DeepSeek" if "deepseek" in host else ("TypeSafe" if "typesafe" in host else host or "a provider")
         try:
             await self.send_to_approver(f"Heads up: {who} {what}. I cannot finish turns until that is fixed. "
-                                        f"Your last message was not answered.")
+                                        f"Your last message was not answered.", kind="notice")
         except Exception:
             logger.exception("[gate] could not deliver the outage notice")
 
@@ -2494,7 +2683,7 @@ class GateSessionManager:
                     lines.append(line)
                 seen.append(person)
             if lines:
-                await self.send_to_approver("\n".join(lines))
+                await self.send_to_approver("\n".join(lines), kind="notice")
             for person in seen:
                 self.store.mark_person_told(person["id"], person)
             return len(lines)
@@ -2509,7 +2698,7 @@ class GateSessionManager:
         if subj:
             head += f" | {subj}"
         try:
-            await self.send_to_approver(f"{head}\n{snippet}")
+            await self.send_to_approver(f"{head}\n{snippet}", kind="notice")
         except Exception:
             logger.exception("[gate] FYI to approver failed")
 
@@ -2614,7 +2803,7 @@ class GateSessionManager:
             self.store.task_event(tid, kind, text, chat_id=req.chat_id, request_id=req.id, state=state)
 
     async def send_approval_text(self, req: Request, revised: bool = False) -> None:
-        await self.send_to_approver(self.format_request(req, revised))
+        await self.send_to_approver(self.format_request(req, revised), kind="approval")
 
     async def handle_task_command(self, session: GateSession, text: str) -> bool:
         """Aaron's task commands: "tasks" lists open work; "T12 done" / "T12 close" /
@@ -2729,9 +2918,9 @@ class GateSessionManager:
             # A held call that belongs to a scheduled run asks on that
             # schedule's own channel, not always the owner's iMessage -- the
             # "#<id> yes" reply mechanics themselves are unchanged.
-            await self.send_schedule_notice(schedule, full_text)
+            await self.send_schedule_notice(schedule, full_text, kind="approval")
         else:
-            await self.send_to_approver(full_text)
+            await self.send_to_approver(full_text, kind="approval")
 
     async def _phrase_confirmation(self, req: Request, short: str, shown: Dict[str, Any], about: List[str]) -> str:
         """One or two plain sentences saying what the change would do, for the owner."""
@@ -3489,15 +3678,20 @@ class GateSessionManager:
         self.task_note(req, "done" if ok else "failed", f"{req.summary} -> {result}",
                        state="done" if ok else "failed")
         session = self.get(req.chat_id)
+        previous_kind = getattr(session, "_outbox_kind", "reply")
+        session._outbox_kind = "late_result"
         try:
             if ok:
                 delivered = await session.notify_after_request(note, inbound_id=req.inbound_id)
             else:
                 delivered = await session.notify_failure(message, note, inbound_id=req.inbound_id)
             if not delivered:
-                await self.send_to_approver(f"[Blatbot #{req.id} {outcome}, finished late] {title}\n{message}")
+                await self.send_to_approver(f"[Blatbot #{req.id} {outcome}, finished late] {title}\n{message}",
+                                            kind="late_result")
         except Exception:
             logger.exception("[gate] #%s late delivery failed", req.id)
+        finally:
+            session._outbox_kind = previous_kind
 
     async def execute(self, req: Request, notify: bool = True) -> str:
         """Run an approved request. With notify=False the caller delivers the
@@ -3680,15 +3874,15 @@ class GateSessionManager:
         if not ok:
             if told_already:
                 same_limit = wording.same_limit_message(status)
-                await self.send_to_approver(f"[Blatbot #{req.id} FAILED, same limit] {title}")
+                await self.send_to_approver(f"[Blatbot #{req.id} FAILED, same limit] {title}", kind="notice")
                 await session.notify_failure(same_limit, note, inbound_id=req.inbound_id)
             else:
-                await self.send_to_approver(f"[Blatbot #{req.id} FAILED] {title}\n{message}")
+                await self.send_to_approver(f"[Blatbot #{req.id} FAILED] {title}\n{message}", kind="notice")
                 await session.notify_failure(message, note, inbound_id=req.inbound_id)
             session.typing_stop()
             return ""
         try:
-            await self.send_to_approver(f"[Blatbot #{req.id} {outcome}] {title}\n{message}")
+            await self.send_to_approver(f"[Blatbot #{req.id} {outcome}] {title}\n{message}", kind="notice")
             await session.notify_after_request(note, inbound_id=req.inbound_id)
         finally:
             session.typing_stop()
@@ -3711,12 +3905,12 @@ class GateSessionManager:
             if self.schedules.is_proposal_request(req):
                 self.schedules.proposal_expired(req)
                 await self.send_to_approver(
-                    f"[Blatbot #{req.id}] expired after 24h with no answer: {req.summary}")
+                    f"[Blatbot #{req.id}] expired after 24h with no answer: {req.summary}", kind="notice")
             elif req.schedule_id and (req.status or {}).get("confirm"):
                 await self.schedules.held_ended(req, "expired")
             else:
                 await self.send_to_approver(
-                    f"[Blatbot #{req.id}] expired after 24h with no answer: {req.summary}")
+                    f"[Blatbot #{req.id}] expired after 24h with no answer: {req.summary}", kind="notice")
             self.store.add_message(req.chat_id, "system", f"Task #{req.id} expired unanswered: {req.summary}")
             self.task_note(req, "expired", f"Expired after 24h with no answer from Aaron: {req.summary}", state="open")
 

@@ -738,8 +738,13 @@ async def _handle_repair(manager: Any, schedule: Schedule, changes: Dict[str, An
     if "cadence_kind" in changes and "cadence" in changes:
         timing = {"cadence_kind": changes["cadence_kind"], "cadence": changes["cadence"]}
     if plan["timing"] is None and timing is None:
-        await manager.send_schedule_notice(
-            schedule, f"How often should {schedule.title} run? For example, every 4 hours.")
+        question = f"How often should {schedule.title} run? For example, every 4 hours."
+        try:
+            await manager.send_schedule_notice(schedule, question, kind="reply")
+        except TypeError as exc:
+            if "unexpected keyword argument 'kind'" not in str(exc):
+                raise
+            await manager.send_schedule_notice(schedule, question)
         return ""
     try:
         result = await manager.schedules.repair_apply(schedule.id, owner=True, timing=timing)
