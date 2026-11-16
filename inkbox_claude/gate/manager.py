@@ -76,6 +76,22 @@ _YES = {"yes", "y", "1", "ok", "approve", "run", "go"}
 _NO = {"no", "n", "3", "deny", "reject", "drop", "cancel"}
 
 
+def is_inbox_command(text: str) -> bool:
+    """Keep commands on their own turns so a burst cannot change their meaning."""
+    from . import wording, schedprop, roommode
+    t = (text or "").strip()
+    low = t.lower()
+    return bool(
+        low in (_YES | _NO | {"tasks", "task list", "open tasks", "what's open", "whats open"})
+        or re.match(r"^#?\d+\s*[:\-]?\s*(?:yes|no|y|n|ok|approve|run|go|deny|reject|drop|cancel|edit\s*:.*)$", t, re.I | re.S)
+        or re.match(r"^t\d+\s*[:\-]?\s*(?:done|close|closed|reopen|open|note\s*:.*)$", t, re.I | re.S)
+        or re.match(r"^edit\s*:.+", t, re.I | re.S)
+        or wording.is_try_again(t) or wording.is_send_what_you_have(t)
+        or wording.is_blanket_permission(t) or schedprop.looks_like_permission_grant(t)
+        or roommode.parse_mode_command(t) is not None
+    )
+
+
 def _clean_result(text: str) -> str:
     """Drop the STATUS line and trailing whitespace from an executor result."""
     lines = [ln for ln in text.strip().splitlines() if not ln.strip().upper().startswith("STATUS:")]
@@ -1108,7 +1124,8 @@ class GateSession:
                              for t in result["tasks"][:3]) or "(no tasks on record)"
 
     # -- gateway interface ---------------------------------------------------
-    async def handle_inbound(self, text: str, mode: str, meta: Dict[str, Any]) -> None:
+    async def handle_inbound(self, text: str, mode: str, meta: Dict[str, Any],
+                             *, raise_errors: bool = False) -> None:
         async with self._lock:
             self.__dict__.pop("_ledger_memory", None)
             self.__dict__.pop("_ledger_candidates", None)
@@ -1144,6 +1161,8 @@ class GateSession:
             except Exception as exc:
                 logger.exception("[gate %s] turn failed", self.chat_id)
                 await self.m.report_outage(exc, self.chat_id)
+                if raise_errors:
+                    raise
             finally:
                 self.typing_stop()
                 if self.m.store.thread_state(self.chat_id) == "routing":

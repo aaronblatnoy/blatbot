@@ -763,6 +763,7 @@ class InkboxGateway:
         self._public_host: str = ""
         self._runner: Any = None
         self.sessions: Optional[SessionManager] = None
+        self.inbox: Any = None
         # Last few lines of each Telegram group, so Jev can judge an unaddressed
         # message against what was being said around it.
         self._tg_recent: Dict[str, List[str]] = {}
@@ -890,6 +891,15 @@ class InkboxGateway:
             # Inkbox contact directory for "refresh people", and the gateway itself for health.
             self.sessions.directory_client = self.inkbox_directory_client
             self.sessions.gateway = self
+            try:
+                from .gate.inbox import Inbox
+                if self._inbox_enabled():
+                    self.inbox = Inbox(self.sessions.store, self._inbox_session,
+                                       self._inbox_record_id, self._inbox_mode_command)
+                    self.inbox.recover()
+            except Exception as exc:
+                logger.warning("[inbox] startup failed: %s", exc)
+                self.inbox = None
             logger.info("[bridge] mode=gate (router=%s, approver iMessage conv=%s)",
                         self.cfg.deepseek_model, self.cfg.approver_imessage_conversation_id or "-")
         else:
@@ -1623,6 +1633,8 @@ class InkboxGateway:
             logger.exception("[bridge] hosted call completion failed call_id=%s", call_id)
 
     async def _cleanup(self) -> None:
+        if self.inbox is not None:
+            await self.inbox.close()
         jobs = list(self._hosted_call_jobs.values())
         for task in jobs:
             task.cancel()
@@ -1647,7 +1659,88 @@ class InkboxGateway:
         executor = getattr(self.sessions, "executor", None) if self.sessions is not None else None
         if executor is not None:
             quota = executor.quota_state()
-        return web.json_response({"ok": True, "identity": self.cfg.identity, "quota": quota})
+        counts = {"pending": 0, "running": 0, "done": 0, "failed": 0}
+        try:
+            store = getattr(self.sessions, "store", None)
+            if store is not None:
+                counts = store.inbox_counts()
+        except Exception as exc:
+            logger.warning("[inbox] health count failed: %s", exc)
+        return web.json_response({"ok": True, "identity": self.cfg.identity, "quota": quota,
+                                  "inbox": counts})
+
+    def _inbox_session(self, chat_id: str, mode: str, meta: Dict[str, Any]) -> Any:
+        session = self.sessions.get(chat_id)
+        if mode in ("imessage", "telegram"):
+            channel = {"imessage": "iMessage", "telegram": "Telegram"}[mode]
+            self._set_room(session, chat_id=chat_id, channel=channel,
+                           is_group=meta.get("conversation_kind") == "group",
+                           title=meta.get("group_title") or "",
+                           members=meta.get("_inbox_members") or [])
+        return session
+
+    def _inbox_record_id(self, event: Dict[str, Any]) -> str:
+        # The owner's messages are stored in one shared record across channels.
+        from .gate.manager import GateSession
+        probe = GateSession(event["chat_id"], self.sessions)
+        probe.mode = event["mode"]
+        probe.reply_meta = json.loads(event["meta_json"])
+        return probe.record_id
+
+    async def _inbox_mode_command(self, event: Dict[str, Any]) -> bool:
+        meta = json.loads(event["meta_json"])
+        if event["source"] != "telegram" or not meta.get("_inbox_mode_command"):
+            return False
+        chat_id = str(meta.get("telegram_chat_id") or "")
+        async def reply(message: str) -> None:
+            await telegram.send_message(chat_id, message)
+            self.sessions.store.add_message(self._inbox_record_id(event), "outbound",
+                                            message, "telegram")
+        return await self._maybe_handle_mode_command(
+            event["body"], channel="telegram", is_commander=True,
+            self_chat_id=event["chat_id"], self_label=str(meta.get("_inbox_self_label") or chat_id),
+            reply=reply)
+
+    def _inbox_enabled(self) -> bool:
+        if getattr(getattr(self, "cfg", None), "mode", None) != "gate":
+            return False
+        try:
+            from .gate import settings
+            return bool(settings.get("GATE_INBOX"))
+        except Exception as exc:
+            logger.warning("[inbox] setting unavailable; handling directly: %s", exc)
+            return False
+
+    @staticmethod
+    def _telegram_inbox_id(update: Dict[str, Any]) -> str:
+        # Telegram message numbers repeat in different chats; its update number
+        # identifies the delivery across the bot's chats.
+        if update.get("update_id"):
+            return str(update["update_id"])
+        if update.get("message_id"):
+            return f"{update['chat_id']}:{update['message_id']}"
+        return ""
+
+    async def _inbox_or_direct(self, chat_id: str, source: str, source_event_id: str,
+                               mode: str, body: str, meta: Dict[str, Any]) -> str:
+        if self._inbox_enabled():
+            try:
+                if self.inbox is None:
+                    from .gate.inbox import Inbox
+                    self.inbox = Inbox(self.sessions.store, self._inbox_session,
+                                       self._inbox_record_id, self._inbox_mode_command)
+                    self.inbox.recover()
+                return self.inbox.submit(chat_id, source, source_event_id, mode, body, meta,
+                                         self._inbox_session)
+            except Exception as exc:
+                logger.warning("[inbox] submit failed; handling directly: %s", exc)
+        if meta.get("_inbox_mode_command"):
+            event = {"source": source, "chat_id": chat_id, "body": body,
+                     "meta_json": json.dumps(meta, default=str)}
+            if await self._inbox_mode_command(event):
+                return "direct"
+        await self.sessions.get(chat_id).handle_inbound(body, mode, meta)
+        return "direct"
 
     def _prune_dedup_ids(self) -> None:
         now = time.time()
@@ -2041,7 +2134,12 @@ class InkboxGateway:
         session = self.sessions.get(f"tg:{chat_id}")
         self._set_room(session, chat_id=f"tg:{chat_id}", channel="Telegram", is_group=u["is_group"],
                        title=u.get("group_title") or "", members=[name] if name else [])
-        await session.handle_inbound(text, "telegram", meta)
+        if self._inbox_enabled():
+            meta["_inbox_members"] = [name] if name else []
+            await self._inbox_or_direct(f"tg:{chat_id}", "telegram", self._telegram_inbox_id(u),
+                                        "telegram", text, meta)
+        else:
+            await session.handle_inbound(text, "telegram", meta)
 
     async def _handle_telegram(self, request: "web.Request") -> "web.Response":
         """One Telegram update. Telegram echoes the secret we registered with the
@@ -2085,6 +2183,22 @@ class InkboxGateway:
         if age is not None:
             await self._telegram_file_stale(u, age)
             return web.json_response({"ok": True, "stale": True})
+        if self._inbox_enabled() and is_commander:
+            # Mode changes must keep their place in this chat's event order,
+            # including when the room is currently silent.
+            mode_command = roommode.parse_mode_command(text) is not None
+            if not mode_command:
+                from .gate import accesscmd
+                store = getattr(self.sessions, "store", None)
+                access = accesscmd.match(text, store) if store is not None else None
+                mode_command = bool(access and access["action"] in ("set_mode", "show_mode"))
+            if mode_command:
+                meta = self._telegram_meta(u)
+                meta["_inbox_mode_command"] = True
+                meta["_inbox_self_label"] = u.get("group_title") or chat_id
+                await self._inbox_or_direct(f"tg:{chat_id}", "telegram", self._telegram_inbox_id(u),
+                                            "telegram", text, meta)
+                return web.json_response({"ok": True, "mode_command": True})
         handled = await self._maybe_handle_mode_command(
             text, channel="telegram", is_commander=is_commander,
             self_chat_id=f"tg:{chat_id}", self_label=u.get("group_title") or chat_id,
@@ -2110,7 +2224,10 @@ class InkboxGateway:
             return web.json_response({"ok": True, "judging": True})
         logger.info("[bridge] telegram %s from %s (%s) in chat %s",
                     "group message" if u["is_group"] else "message", name or "?", from_id, chat_id)
-        asyncio.create_task(self._telegram_dispatch(u), name=f"telegram-{chat_id}")
+        if self._inbox_enabled():
+            await self._telegram_dispatch(u)
+        else:
+            asyncio.create_task(self._telegram_dispatch(u), name=f"telegram-{chat_id}")
         return web.json_response({"ok": True})
 
     async def _handle_webhook(self, request: "web.Request") -> "web.Response":
@@ -2645,7 +2762,8 @@ class InkboxGateway:
         # A fresh inbound starts a fresh logical reply — reset its failed-send budget.
         self._clear_outbound_failures("email", None, sender, chat_id=chat_id)
         # The channel tag (Subject included) is added by frame_inbound.
-        await self.sessions.get(chat_id).handle_inbound(body_text, "email", meta)
+        await self._inbox_or_direct(chat_id, "email", str(message.get("id") or meta["message_id"] or ""),
+                                    "email", body_text, meta)
         return web.json_response({"ok": True})
 
     async def _fetch_mail_attachments(self, message: Dict[str, Any]) -> List[Dict[str, Any]]:
@@ -2969,7 +3087,8 @@ class InkboxGateway:
             return web.json_response({"ok": True, "mode": "blocked"})
         # A fresh inbound starts a fresh logical reply — reset its failed-send budget.
         self._clear_outbound_failures("sms", conversation_id, sender, chat_id=chat_id)
-        await self.sessions.get(chat_id).handle_inbound(body, "sms", meta)
+        await self._inbox_or_direct(chat_id, "sms", str(message.get("id") or ""),
+                                    "sms", body, meta)
         return web.json_response({"ok": True})
 
     async def _on_imessage_received(self, envelope: Dict[str, Any]) -> "web.Response":
@@ -3069,7 +3188,10 @@ class InkboxGateway:
         session = self.sessions.get(chat_id)
         self._set_room(session, chat_id=chat_id, channel="iMessage", is_group=bool(is_group),
                        members=list(participants or []))
-        await session.handle_inbound(body, "imessage", meta)
+        if self._inbox_enabled():
+            meta["_inbox_members"] = list(participants or [])
+        await self._inbox_or_direct(chat_id, "imessage", str(message.get("id") or ""),
+                                    "imessage", body, meta)
         return web.json_response({"ok": True})
 
     async def _on_imessage_reaction_received(self, envelope: Dict[str, Any]) -> "web.Response":

@@ -20,6 +20,14 @@ logger = logging.getLogger(__name__)
 # name, kind, default, group, label, help
 KNOBS: List[Dict[str, Any]] = [
     # -- when it speaks -------------------------------------------------------
+    {"name": "GATE_INBOX", "kind": "bool", "default": True, "group": "Speaking",
+     "label": "Use the message inbox",
+     "help": "Save new messages before handling them and combine messages sent close together. "
+             "Turn this off to handle each new message as it arrives."},
+    {"name": "INBOX_SETTLE_SECONDS", "kind": "number", "default": 1.0, "min": 0.0,
+     "max": 60.0, "step": 0.5, "group": "Speaking",
+     "label": "Seconds to wait for more messages",
+     "help": "Wait this long after the newest message before answering a conversation."},
     {"name": "GATE_GROUP_REPLY_MIN", "kind": "number", "default": 0.45, "min": 0.0, "max": 1.0,
      "step": 0.05, "group": "Speaking",
      "label": "Bar for speaking in a group unprompted",
