@@ -23,7 +23,7 @@ from . import settings as _settings
 from .jevagent import JevAgent, enabled as jev_agent_enabled
 from .taskpick import TaskPicker, enabled as jev_enabled
 from .router import Router, RouterOutput, RouterRequest, ScheduleCommand
-from .scopes import SCOPES, READ_SCOPES, EXPLICIT_ONLY_SCOPES, BLATBOT_ADMIN_SCOPE
+from .scopes import SCOPES, READ_SCOPES, EXPLICIT_ONLY_SCOPES, BLATBOT_ADMIN_SCOPE, LABELS, ASK
 from .store import Person, Request, Store, TaskRequired, task_key
 from .schedules import ScheduleService, starts_unasked
 from . import schedprop
@@ -2926,6 +2926,55 @@ class GateSessionManager:
         else:
             await self.send_to_approver(full_text, kind="approval")
 
+    async def handle_access_ask(self, req: Request, status: Dict[str, Any]) -> Optional[str]:
+        """Grant what this sender already has, then park only the remaining access for Aaron."""
+        ask = status.get("access_request") or {}
+        wanted = [s for s in ask.get("scopes", []) if s in SCOPES and s not in req.scopes]
+        if not wanted:
+            saved = {**((self.store.get_request(req.id) or req).status or {}), **status}
+            saved.pop("access_request", None)
+            self.store.set_state(req.id, "running", status=saved)
+            return "Access granted. Continue the task from where you stopped; do not repeat finished steps."
+        try:
+            # Use the request's sender, since the live chat session may now belong
+            # to a later message from someone else in the same conversation.
+            session = self.get(req.chat_id)
+            handles = session.handles() if session._sender() == req.sender else [req.sender]
+            role_scopes = set(self.store.trust_for(handles).get("scopes") or [])
+        except Exception as exc:
+            logger.warning("[gate] #%s could not read role access: %s", req.id, exc)
+            role_scopes = set()
+        covered = [s for s in wanted if s in role_scopes or
+                   (_owner_request(self, req) and s not in EXPLICIT_ONLY_SCOPES)]
+        uncovered = [s for s in wanted if s not in covered]
+        if covered:
+            self.store.set_scopes(req.id, list(req.scopes) + covered)
+            self.task_note(req, "approved", "Granted access to " + ", ".join(LABELS.get(s, s) for s in covered) + ".")
+        if uncovered:
+            saved = {**(self.store.get_request(req.id).status or {}), **status,
+                     "access_request": {**ask, "uncovered": uncovered}}
+            self.store.set_state(req.id, "pending", status=saved, raw_output=status.get("raw"))
+            self.store.set_thread(req.chat_id, "awaiting_aaron")
+            labels = ", ".join(ASK.get(s) or LABELS.get(s, s) for s in uncovered).replace("\u2014", ":")
+            who = (req.sender_name or req.sender or "Someone").replace("\u2014", ":")
+            summary = (req.summary or "the task").replace("\u2014", ":")
+            why = str(ask.get("why") or "No reason given").replace("\u2014", ":")
+            self.task_note(req, "request", f"Waiting on Aaron for access to {labels}.", state="waiting_aaron")
+            await self.send_to_approver(
+                f'#{req.id} {who} asked: {summary}. To finish it also needs to: {labels}. '
+                f'Why: {why}. Reply "#{req.id} yes" or "#{req.id} no".',
+                kind="approval")
+            if not _owner_request(self, req):
+                try:
+                    await self.get(req.chat_id).send_to_sender(HANDOFF_LINE, role="access_wait")
+                except Exception as exc:
+                    logger.warning("[gate] #%s could not send access wait notice: %s", req.id, exc)
+            return None
+        saved = {**(self.store.get_request(req.id).status or {}), **status}
+        saved.pop("access_request", None)
+        self.store.set_state(req.id, "running", status=saved)
+        return "Access granted: " + ", ".join(LABELS.get(s, s) for s in covered) + ". Continue the task from where you stopped; do not repeat finished steps."
+
     async def _phrase_confirmation(self, req: Request, short: str, shown: Dict[str, Any], about: List[str]) -> str:
         """One or two plain sentences saying what the change would do, for the owner."""
         try:
@@ -3020,6 +3069,31 @@ class GateSessionManager:
         if self.schedules.is_proposal_request(req):
             return await self.schedules.decide_proposal(req, decision, note)
         d = (decision or "").strip().lower()
+        access_ask = (req.status or {}).get("access_request") or {}
+        if access_ask and d != "edit":
+            if d not in ("yes", "y", "ok", "approve", "run", "go", "no", "n", "stop", "drop", "reject", "decline"):
+                return {"ok": False, "error": f"#{req.id} needs a yes or a no", "state": req.state}
+            try:
+                allowed = d in ("yes", "y", "ok", "approve", "run", "go")
+                uncovered = list(access_ask.get("uncovered") or [])
+                labels = ", ".join(LABELS.get(s, s) for s in uncovered).replace("\u2014", ":")
+                status = dict(req.status or {})
+                status.pop("access_request", None)
+                if allowed:
+                    self.store.set_scopes(req.id, list(req.scopes) + uncovered)
+                    self.task_note(req, "approved", f"Aaron granted access to {labels}.", state="running")
+                    prompt = f"Access granted: {labels}. Continue the task from where you stopped; do not repeat finished steps."
+                else:
+                    status["access_refused"] = list(dict.fromkeys(list(status.get("access_refused") or []) + uncovered))
+                    self.task_note(req, "rejected", f"Aaron refused access to {labels}.", state="running")
+                    prompt = f"Aaron said no to {labels}. Finish with what you have, or say plainly what could not be done."
+                self.store.set_state(req.id, "approved", status=status)
+                fresh = self.store.get_request(req.id) or req
+                asyncio.create_task(self.execute(fresh, continuation=prompt, resume_session=status.get("session_id")))
+                return {"ok": True, "state": "approved", "error": ""}
+            except Exception as exc:
+                logger.warning("[gate] #%s could not decide access: %s", req.id, exc)
+                return {"ok": False, "state": req.state, "error": f"I could not decide access for #{req.id} right now."}
         confirm = (req.status or {}).get("confirm") or {}
         if d in ("yes", "y", "ok", "approve", "run", "go"):
             if confirm:
@@ -3052,6 +3126,10 @@ class GateSessionManager:
         if d == "edit":
             if not note.strip():
                 return {"ok": False, "error": "an edit needs instructions", "state": req.state}
+            if access_ask:
+                clean = dict(req.status or {})
+                clean.pop("access_request", None)
+                self.store.set_state(req.id, "pending", status=clean)
             base = req.prompt.split("\n\n--- AARON'S INSTRUCTIONS ---")[0]
             new_req = self.store.revise_prompt(req.id, f"{base}\n\n--- AARON'S INSTRUCTIONS ---\n{note.strip()}")
             await self.send_approval_text(new_req, revised=True)
@@ -3352,10 +3430,12 @@ class GateSessionManager:
 
         For the owner's own requests the named scope is granted and the run repeated once.
         For anyone else the scopes are what he approved, so it is reported rather than widened."""
-        if status.get("confirm") or status.get("ok"):
+        if (status.get("confirm") or status.get("access_request") or status.get("ok")
+                or "mcp__host__request_access" in (status.get("tool_calls") or [])):
             return status
         said = f"{status.get('summary') or ''}\n{status.get('error') or ''}\n{status.get('raw') or ''}"
-        wanted = [sc for sc in SCOPES if sc not in req.scopes and re.search(
+        refused = set((req.status or {}).get("access_refused") or [])
+        wanted = [sc for sc in SCOPES if sc not in req.scopes and sc not in refused and re.search(
             r"\b" + re.escape(sc) + r"\b", said)]
         if not wanted or not _owner_request(self, req) or req.schedule_id or (req.status or {}).get("followup_id"):
             return status
@@ -3389,7 +3469,7 @@ class GateSessionManager:
         and that reads as the question already being settled. The record is evidence about
         the past, not a substitute for looking now. One retry says so in as many words; a
         second refusal to act is reported as a failure rather than dressed up as a result."""
-        if status.get("confirm") or not status.get("ok") or status.get("tool_calls"):
+        if status.get("confirm") or status.get("access_request") or not status.get("ok") or status.get("tool_calls"):
             return status
         if self._answered_from_attached_notes(req):
             # His own notes were attached to this run's prompt and the answer came from
@@ -3415,7 +3495,8 @@ class GateSessionManager:
                 "summary": (again.get("summary") or "") + "\n\n(Nothing was actually looked up. "
                             "The task record was treated as the answer.)"}
 
-    async def _run_executor(self, req: Request, context: str) -> Dict[str, Any]:
+    async def _run_executor(self, req: Request, context: str, *, continuation: str = "",
+                            resume_session: Optional[str] = None) -> Dict[str, Any]:
         """Run one request and return exactly ONE status object. Claude Code is an
         escalation inside this call, not a second execution: nothing is delivered,
         noted, or phrased for the Jev attempt when it escalates; only the final
@@ -3428,25 +3509,31 @@ class GateSessionManager:
         scheduled-run prompt, no RESULT/NOTE/STATUS closing-line contract and
         no third-party-send hold, all of which the scheduled-run contract
         (schedrun.py, schedules.py) requires."""
-        if not self.jev_agent or req.schedule_id or (req.status or {}).get("followup_id"):
+        if continuation or not self.jev_agent or req.schedule_id or (req.status or {}).get("followup_id"):
             model = await self._pick_model(req)
             run_kwargs: Dict[str, Any] = {}
             if req.schedule_id:
                 sched = self.store.get_schedule(req.schedule_id)
                 if sched is not None:
                     run_kwargs = {"timezone": sched.timezone, "note": sched.last_note}
+            if continuation:
+                run_kwargs["continuation"] = continuation if resume_session else ""
+                run_kwargs["resume_session"] = resume_session or ""
+                if not resume_session and (req.status or {}).get("raw"):
+                    run_kwargs["prior_work"] = str(req.status["raw"])
             status = await self.executor.run(req, context=context, model=model,
-                                             from_owner=_owner_request(self, req),
-                                             **run_kwargs)
+                                             from_owner=_owner_request(self, req), **run_kwargs)
             if status.get("quota_error"):
                 return await self._run_quota_fallback(req, context, status)
+            if continuation:
+                return status
             status = await self._grant_what_it_asked_for(req, status, context, model)
             return await self._insist_it_actually_ran(req, status, context, model)
         status = await self.jev_agent.run(req, context=context)
         logger.info("[gate] jev agent #%s: ok=%s steps=%s jev=%s prose=%s %ss",
                     req.id, status.get("ok"), status.get("tool_calls"), status.get("jev_calls"),
                     status.get("prose_calls"), status.get("seconds"))
-        if status.get("confirm") or not self.jev_fallback:
+        if status.get("confirm") or status.get("access_request") or not self.jev_fallback:
             return status
         if status.get("ok"):
             # Fast is only worth it when right: a draft answer that the grounding judge
@@ -3670,6 +3757,25 @@ class GateSessionManager:
         if the fast timeout path already told the person something in the meantime."""
         fresh = self.store.get_request(req.id)
         req = fresh or req
+        if status.get("access_request"):
+            try:
+                next_prompt = await self.handle_access_ask(req, status)
+            except Exception as exc:
+                logger.warning("[gate] #%s access decision failed: %s", req.id, exc)
+                status.pop("access_request", None)
+                next_prompt = False
+            if next_prompt is not None:
+                if next_prompt is not False:
+                    fresh = self.store.get_request(req.id) or req
+                    saved_session = (fresh.status or {}).get("session_id") or status.get("session_id")
+                    asyncio.create_task(self.execute(fresh,
+                                                     continuation=next_prompt if saved_session else "",
+                                                     resume_session=saved_session))
+            if next_prompt is not False:
+                return
+        if status.get("confirm"):
+            await self.ask_confirmation(req, status)
+            return
         ok = bool(status.get("ok"))
         self.store.set_state(req.id, "done" if ok else "failed", status=status, raw_output=status.get("raw"))
         self.store.set_thread(req.chat_id, "idle")
@@ -3697,7 +3803,8 @@ class GateSessionManager:
         finally:
             session._outbox_kind = previous_kind
 
-    async def execute(self, req: Request, notify: bool = True) -> str:
+    async def execute(self, req: Request, notify: bool = True, *, continuation: str = "",
+                      resume_session: Optional[str] = None) -> str:
         """Run an approved request. With notify=False the caller delivers the
         result itself (a live phone call reads it aloud) and gets it back."""
         self.store.set_state(req.id, "running")
@@ -3733,12 +3840,32 @@ class GateSessionManager:
                     ledger_info.get("pool"), ledger_info.get("dropped"), ledger_info.get("matched"),
                     len(vault_block))
         try:
-            status = await self._run_executor(req, context)
+            if continuation:
+                status = await self._run_executor(req, context, continuation=continuation,
+                                                  resume_session=resume_session)
+            else:
+                status = await self._run_executor(req, context)
         finally:
             if slow_ack is not None and not slow_ack.done():
                 slow_ack.cancel()
             if not notify:
                 session.typing_stop()
+        if status.get("access_request"):
+            session.typing_stop()
+            try:
+                next_prompt = await self.handle_access_ask(req, status)
+            except Exception as exc:
+                logger.warning("[gate] #%s access decision failed: %s", req.id, exc)
+                status.pop("access_request", None)
+                next_prompt = False
+            if next_prompt is None:
+                return "I'm checking with Aaron and will get back to you."
+            if next_prompt is not False:
+                fresh = self.store.get_request(req.id) or req
+                saved_session = (fresh.status or {}).get("session_id") or status.get("session_id")
+                return await self.execute(fresh, notify=notify,
+                                          continuation=next_prompt if saved_session else "",
+                                          resume_session=saved_session)
         if status.get("confirm"):
             session.typing_stop()
             await self.ask_confirmation(req, status)
