@@ -33,6 +33,7 @@ from claude_agent_sdk import (
 from .router import now_line
 from .scopes import BLATBOT_ADMIN_SCOPE, ORG_ACCOUNT, OWNER_ACCOUNT, SCOPES, blocks_requester_send, tools_for
 from . import hosttools
+from . import graphmem
 from . import pages
 from . import schedrun
 from . import wording
@@ -451,8 +452,9 @@ class Executor:
                 f"results; it stopped because it could not decide the next step). The complete record is in {path}; "
                 "Read it before calling any tool. Do not repeat those calls. Continue from them. Head of the record:\n" + head
             )
+        memory_groups = graphmem.groups_for_request(getattr(self.manager, "store", None), req, bool(from_owner))
         host_server = hosttools.sdk_server(vault_prefixes=vault_prefixes, manager=self.manager,
-                                           is_commander=bool(from_owner))
+                                           is_commander=bool(from_owner), memory_groups=memory_groups)
         mcp_servers = self._mcp_servers_for(scoped_allowed, host_server)
         logger.info("[gate] #%s mcp servers: %s", req.id, sorted(mcp_servers.keys()))
         options = ClaudeAgentOptions(

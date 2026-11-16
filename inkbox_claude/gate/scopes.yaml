@@ -20,13 +20,25 @@ where_things_live:
 - '''black sky'' / ''black-sky'' is the server: containers, services, uptime. Not the web.'
 - 'What Aaron has written down for himself (notes on his projects, people, decisions, preferences, how something
   was set up, daily notes): his second brain, the Obsidian vault. Not Drive, not the public web.'
+- 'What happened in earlier conversations with Blatbot, on any channel (who someone is, what they asked for, what
+  was agreed, decided, sent or done, and when): Blatbot''s long-term memory. Aaron''s own written notes are the
+  vault; the two can both apply. Neither is live state: for what is true now, read the system itself.'
 - 'US pension and benefit plans, their Form 5500 filings, plan assets, trustees, investment managers, consultants
   and other service providers: the pension filings database (public Department of Labor data). Not the public web.'
 systems:
+  long_term_memory:
+    description: 'Blatbot''s long-term memory: a graph of dated facts from every past conversation it has had,
+      on any channel (who someone is, what they asked for, what was agreed, decided, sent or done, and when).
+      For looking back past the recent conversation. Not Aaron''s written notes, not a live system.'
+    requires: graphiti
+    always:
+    - memory_read
+    leaves: {}
   second_brain:
     description: 'Aaron''s second brain (''the vault'', ''Obsidian'', ''my notes''): his own markdown notes on projects,
       areas, people, decisions, preferences, reference material and daily notes. Not Google Drive, not an inbox,
       not the public web.'
+    requires: vault
     always:
     - vault_read
     leaves: {}
@@ -600,6 +612,19 @@ scopes:
     - mcp__playwright__browser_find
     - mcp__playwright__browser_wait_for
     - mcp__playwright__browser_navigate_back
+  memory_read:
+    description: 'look back through Blatbot''s long-term memory of past conversations (dated facts about people,
+      requests, agreements, decisions and what was done). Read-only. Each person only reaches what they may see:
+      their own conversations, unless their role grants more; Aaron reaches all of it.'
+    label: look back through past conversations
+    ask: 'look back through past conversations'
+    synonyms:
+    - what did we say
+    - earlier conversation
+    - long-term memory
+    read: true
+    tools:
+    - mcp__host__memory_search
   vault_read:
     description: 'search and read Aaron''s second brain (his Obsidian vault of personal notes on projects, people,
       decisions, preferences, daily notes). Read-only; cannot add or change a note. Not Drive, not the web.'

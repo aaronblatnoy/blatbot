@@ -88,6 +88,7 @@ def _last_request_outcome(task: Optional[Dict[str, Any]]) -> str:
 
 
 from .scopes import SCOPES, SCOPE_TREE_ALWAYS, SCOPE_TREE_LEAVES, SCOPE_TREE_SYSTEMS, WHERE_THINGS_LIVE  # the registry
+from .scopes import available_systems
 from . import settings as _settings
 
 
@@ -451,7 +452,10 @@ class TaskPicker:
 
         # One request: every system noul and every leaf noul together. The tree is applied
         # in code afterwards: a leaf counts only when its system opened.
-        questions: Dict[str, Any] = {f"sys::{k}": noul(v) for k, v in SCOPE_TREE_SYSTEMS.items()}
+        # Only systems Blatbot can actually reach are offered (scopes.available_systems):
+        # a system with no backend or no tools would be a scope that resolves to nothing.
+        offered = available_systems() or dict(SCOPE_TREE_SYSTEMS)
+        questions: Dict[str, Any] = {f"sys::{k}": noul(v) for k, v in offered.items()}
         questions["wants_change"] = {"type": "noul",
                                      "instructions": {"question": "Does `task_prompt` (with the conversation it quotes) ask for "
                                                                   "something to be CHANGED, created, moved, cancelled, sent or "
@@ -459,6 +463,8 @@ class TaskPicker:
                                      "criteria": {"true": "Something must be written or sent somewhere.",
                                                   "false": "Only reading, finding, counting or answering."}}
         for sysname, leaves in SCOPE_TREE_LEAVES.items():
+            if sysname not in offered:
+                continue
             for leaf, (capability, _) in leaves.items():
                 questions[f"leaf::{sysname}::{leaf}"] = noul(capability)
         try:
@@ -466,7 +472,7 @@ class TaskPicker:
         except Exception as exc:
             logger.warning("scope tree via TypeSafe failed: %s", exc)
             return {"scopes": None, "probabilities": {}, "reason": f"error: {exc}"}
-        systems = {k: answers.get(f"sys::{k}", 0.0) for k in SCOPE_TREE_SYSTEMS}
+        systems = {k: answers.get(f"sys::{k}", 0.0) for k in offered}
         wants_change = answers.get("wants_change", 0.0) >= 0.5
         # Scopes are the security boundary, so how wide they open depends on whose request
         # this is. The owner's own work is bounded by what he can already reach himself, and
