@@ -5,12 +5,112 @@ from __future__ import annotations
 
 import ast
 import asyncio
+import logging
 import os
 import re
+import time
+from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, List, Optional
+from zoneinfo import ZoneInfo
 
 from . import pages
+
+logger = logging.getLogger(__name__)
+
+SET_FOLLOWUP_DESCRIPTION = (
+    "SET A FOLLOW-UP TIMER for work you already have permission to do. When you sent something and need to "
+    "see whether it was answered, or something is due later, set a follow-up instead of waiting or asking "
+    "the person to remind you. A new run will continue this task at that time."
+)
+SET_FOLLOWUP_SCHEMA = {"type": "object", "required": ["note"], "properties": {
+    "when": {"type": "string", "description": "ISO-8601 date and local time, America/New_York unless an offset is given"},
+    "in_minutes": {"type": "integer", "description": "whole minutes from now"},
+    "note": {"type": "string", "description": "what to check and why"}}}
+CANCEL_FOLLOWUP_DESCRIPTION = "CANCEL a pending follow-up timer on this task by its id."
+CANCEL_FOLLOWUP_SCHEMA = {"type": "object", "required": ["id"], "properties": {
+    "id": {"type": "integer", "description": "follow-up id returned by set_followup"}}}
+_EASTERN = ZoneInfo("America/New_York")
+
+
+def followup_time(epoch: float) -> str:
+    return datetime.fromtimestamp(epoch, _EASTERN).strftime("%A, %B %-d, %Y at %-I:%M %p")
+
+
+def _followup_due(args: Dict[str, Any]) -> float:
+    now = time.time()
+    if ("when" in args) == ("in_minutes" in args):
+        raise ValueError("Give either when or in_minutes.")
+    if "in_minutes" in args:
+        minutes = args["in_minutes"]
+        if isinstance(minutes, bool) or not isinstance(minutes, int):
+            raise ValueError("in_minutes must be a whole number.")
+        due = now + minutes * 60
+    else:
+        when = str(args["when"])
+        if not re.search(r"[T ]\d{2}:\d{2}", when):
+            raise ValueError("when needs a date and a time.")
+        try:
+            dt = datetime.fromisoformat(when.replace("Z", "+00:00"))
+        except ValueError as exc:
+            raise ValueError("when must be an ISO-8601 date and time.") from exc
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=_EASTERN)
+            if datetime.fromtimestamp(dt.timestamp(), _EASTERN).replace(tzinfo=None) != dt.replace(tzinfo=None):
+                raise ValueError("That local time does not exist in New York.")
+        due = dt.timestamp()
+    delta = due - now
+    if delta < 5 * 60 or delta > 30 * 86400:
+        raise ValueError("Choose a time at least 5 minutes and at most 30 days from now.")
+    return due
+
+
+def set_followup(args: Dict[str, Any], manager: Any, request: Any) -> str:
+    from .settings import get
+    try:
+        if (not get("GATE_FOLLOWUPS") or manager is None or request is None or request.schedule_id
+                or not request.scopes or not getattr(manager.store, "followups_available", True)):
+            return "Follow-up timers are unavailable for this run."
+        note = str(args.get("note") or "").strip()
+        if not note:
+            return "A note saying what to check is required."
+        due = _followup_due(args)
+        task_id = manager.store.task_id_for_request(request.id)
+        if not task_id:
+            return "This run has no task to follow up on."
+        fid, pending = manager.store.add_followup(task_id=task_id, request_id=request.id,
+            chat_id=request.chat_id, requester=request.sender, scopes=list(request.scopes), due_at=due, note=note)
+        if fid is None:
+            items = "; ".join(f"#{r['id']} {followup_time(r['due_at'])}: {r['note']}" for r in pending)
+            return f"This task already has three pending follow-ups: {items}. Cancel one before adding another."
+        manager.store.task_event(task_id, "note", f"Follow-up set for {followup_time(due)}: {note}",
+                                 chat_id=request.chat_id, request_id=request.id)
+        return f"Follow-up #{fid} set. I will check back {followup_time(due)}."
+    except ValueError as exc:
+        return str(exc)
+    except Exception as exc:
+        logger.warning("[gate] follow-up set failed: %s", exc)
+        return "I could not set that follow-up. Please continue normally."
+
+
+def cancel_followup(args: Dict[str, Any], manager: Any, request: Any) -> str:
+    from .settings import get
+    try:
+        if (not get("GATE_FOLLOWUPS") or manager is None or request is None or request.schedule_id
+                or not request.scopes or not getattr(manager.store, "followups_available", True)):
+            return "Follow-up timers are unavailable for this run."
+        task_id = manager.store.task_id_for_request(request.id)
+        row = manager.store.cancel_followup(int(args.get("id")), task_id)
+        if row is None:
+            return "No pending follow-up with that id on this task."
+        manager.store.task_event(task_id, "note", f"Follow-up #{row['id']} cancelled: {row['note']}",
+                                 chat_id=request.chat_id, request_id=request.id)
+        return f"Follow-up #{row['id']} cancelled."
+    except (TypeError, ValueError):
+        return "Give a follow-up id."
+    except Exception as exc:
+        logger.warning("[gate] follow-up cancellation failed: %s", exc)
+        return "I could not cancel that follow-up. Please continue normally."
 
 COMMANDS: Dict[str, list] = {
     "containers": ["docker", "ps", "--format", "{{.Names}}\t{{.Status}}\t{{.Image}}\t{{.Ports}}"],
@@ -136,7 +236,8 @@ async def telegram_read_chat(args: Dict[str, Any]) -> str:
 
 
 def sdk_server(*, vault_prefixes: Optional[List[str]] = None, manager: Any = None,
-               is_commander: bool = False, memory_groups: Optional[List[str]] = []) -> Any:  # noqa: B006
+               is_commander: bool = False, memory_groups: Optional[List[str]] = [],
+               request: Any = None) -> Any:  # noqa: B006
     """The same tool as an in-process MCP server for the Claude Code executor.
 
     vault_prefixes bounds vault_search/vault_read/vault_list to the vault-relative
@@ -159,6 +260,14 @@ def sdk_server(*, vault_prefixes: Optional[List[str]] = None, manager: Any = Non
     @tool("host_status", DESCRIPTION, SCHEMA)
     async def _host_status(args: Dict[str, Any]) -> Dict[str, Any]:
         return {"content": [{"type": "text", "text": await host_status(args)}]}
+
+    @tool("set_followup", SET_FOLLOWUP_DESCRIPTION, SET_FOLLOWUP_SCHEMA)
+    async def _set_followup(args: Dict[str, Any]) -> Dict[str, Any]:
+        return {"content": [{"type": "text", "text": set_followup(args, manager, request)}]}
+
+    @tool("cancel_followup", CANCEL_FOLLOWUP_DESCRIPTION, CANCEL_FOLLOWUP_SCHEMA)
+    async def _cancel_followup(args: Dict[str, Any]) -> Dict[str, Any]:
+        return {"content": [{"type": "text", "text": cancel_followup(args, manager, request)}]}
 
     @tool("vault_search", VAULT_SEARCH_DESCRIPTION, VAULT_SEARCH_SCHEMA)
     async def _vault_search(args: Dict[str, Any]) -> Dict[str, Any]:
@@ -233,7 +342,8 @@ def sdk_server(*, vault_prefixes: Optional[List[str]] = None, manager: Any = Non
     async def _make_page(args: Dict[str, Any]) -> Dict[str, Any]:
         return {"content": [{"type": "text", "text": await pages.publish_page(args, pages.allowed_for(is_commander))}]}
 
-    tools = [_make_page, _host_status, _vault_search, _vault_read, _vault_list, _memory_search,
+    tools = [_make_page, _host_status, _set_followup, _cancel_followup,
+             _vault_search, _vault_read, _vault_list, _memory_search,
              _telegram_find_chats, _telegram_list_chats, _telegram_read_chat,
              _admin_list_settings, _admin_get_setting, _admin_set_setting,
              _admin_list_roles, _admin_set_role_scopes, _admin_set_person_role,

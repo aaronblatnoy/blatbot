@@ -61,6 +61,8 @@ TABLES: List[Tuple[str, List[str], List[str], str | None]] = [
      [], None),  # no PK/unique in either schema; cleared and reinserted whole
     ("task_events", ["id", "task_id", "kind", "chat_id", "request_id", "text", "created_at"],
      ["id"], "id"),
+    ("followups", ["id", "task_id", "request_id", "chat_id", "requester", "scopes_json", "due_at",
+                    "note", "status", "created_at", "fired_at", "result"], ["id"], "id"),
     ("schedules", ["id", "chat_id", "task_id", "title", "prompt", "prompt_sha256", "kind", "cron",
                    "run_at", "timezone", "scopes_json", "report_mode", "state", "next_run",
                    "last_run", "last_request_id", "run_count", "max_runs", "deadline", "notes",

@@ -98,6 +98,8 @@ def split_tool(name: str) -> Tuple[str, str]:
 SEARCH_URL = os.getenv("GATE_SEARCH_URL") or "http://127.0.0.1:8888/search"
 
 VIRTUAL_TOOLS: Dict[str, Dict[str, Any]] = {
+    "mcp__host__set_followup": {"description": hosttools.SET_FOLLOWUP_DESCRIPTION, "schema": hosttools.SET_FOLLOWUP_SCHEMA},
+    "mcp__host__cancel_followup": {"description": hosttools.CANCEL_FOLLOWUP_DESCRIPTION, "schema": hosttools.CANCEL_FOLLOWUP_SCHEMA},
     "mcp__host__host_status": {"description": hosttools.DESCRIPTION, "schema": hosttools.SCHEMA},
     "mcp__host__rows_where": {"description": hosttools.ROWS_WHERE_DESCRIPTION, "schema": hosttools.ROWS_WHERE_SCHEMA},
     "mcp__host__memory_search": {"description": hosttools.MEMORY_SEARCH_DESCRIPTION, "schema": hosttools.MEMORY_SEARCH_SCHEMA},
@@ -248,7 +250,7 @@ class ToolBox:
 
     def __init__(self, inkbox_server: Any, mcp_config: Dict[str, Dict[str, Any]],
                 manager: Any = None, is_commander: bool = False,
-                memory_groups: Optional[List[str]] = []):  # noqa: B006 - [] = no memory access
+                memory_groups: Optional[List[str]] = [], request: Any = None):  # noqa: B006 - [] = no memory access
         self._memory_groups = memory_groups
         self._inkbox = inkbox_server
         self._cfg = mcp_config
@@ -260,6 +262,7 @@ class ToolBox:
         # req.scopes through to is_commander here -- the same check call() enforces).
         self._manager = manager
         self._is_commander = is_commander
+        self._request = request
 
     async def __aenter__(self) -> "ToolBox":
         return self
@@ -306,6 +309,10 @@ class ToolBox:
         return self._schemas.get(name, {"description": "", "schema": {}})
 
     async def call(self, name: str, args: Dict[str, Any]) -> Any:
+        if name == "mcp__host__set_followup":
+            return hosttools.set_followup(args, self._manager, self._request)
+        if name == "mcp__host__cancel_followup":
+            return hosttools.cancel_followup(args, self._manager, self._request)
         if name == "mcp__playwright__browser_search":
             return await self._browser_search(str(args.get("query") or ""))
         if name == "mcp__host__host_status":
@@ -858,6 +865,8 @@ class JevAgent:
             return {"ok": False, "error": "prompt hash mismatch; refused to run", "tool_calls": []}
         judge, prose = Judge(), Prose(self.router)
         allowed = tools_for(req.scopes)
+        if req.schedule_id:
+            allowed = [t for t in allowed if t not in ("mcp__host__set_followup", "mcp__host__cancel_followup")]
         started = time.time()
         steps: List[Dict[str, Any]] = []
         facts: Dict[str, Any] = {"request": req.original_message, "task_context": context,
@@ -866,6 +875,7 @@ class JevAgent:
         try:
             async with ToolBox(self.inkbox_server, self.mcp_config, manager=self.manager,
                                is_commander="blatbot_admin" in (req.scopes or []),
+                               request=req,
                                memory_groups=graphmem.groups_for_request(
                                    getattr(self.manager, "store", None), req,
                                    "blatbot_admin" in (req.scopes or []))) as box:
