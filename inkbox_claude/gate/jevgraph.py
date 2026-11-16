@@ -511,6 +511,8 @@ async def record(state: AgentState, config: RunnableConfig) -> Dict[str, Any]:
     new = steps[-n:] if n else []
     facts = dict(state.get("facts", {}))
     step_no = state.get("step", 0) + 1
+    if (_rt(config)["req"].status or {}).get("access_request"):
+        return {"facts": facts, "step": step_no, "outcome": "access"}
     for s in new:
         short = s["tool"].split("__")[-1]
         shown = json.dumps({k: v for k, v in s["args"].items() if k != "user_google_email"}, ensure_ascii=False)[:300]
@@ -630,7 +632,9 @@ async def run(agent: "ja.JevAgent", req: Any, context: str = "") -> Dict[str, An
     started = time.time()
     allowed = ja.tools_for(req.scopes)
     if req.schedule_id:
-        allowed = [t for t in allowed if t not in ("mcp__host__set_followup", "mcp__host__cancel_followup")]
+        allowed = [t for t in allowed if t not in ("mcp__host__set_followup", "mcp__host__cancel_followup", "mcp__host__request_access")]
+    if (req.status or {}).get("followup_id"):
+        allowed = [t for t in allowed if t != "mcp__host__request_access"]
     if req.schedule_kind == "continue":
         allowed.append("mcp__host__schedule_continue")
     background = req.prompt if req.prompt != req.original_message else ""
@@ -663,6 +667,12 @@ async def run(agent: "ja.JevAgent", req: Any, context: str = "") -> Dict[str, An
             if outcome == "confirm":
                 st = agent._status(False, "confirmation required", steps, judge, prose, started)
                 st["confirm"] = final["confirm"]
+                return st
+            if outcome == "access":
+                st = agent._status(False, "Waiting for access", steps, judge, prose, started)
+                st["access_request"] = req.status["access_request"]
+                st["access_ask_count"] = req.status.get("access_ask_count", 1)
+                st["access_refused"] = req.status.get("access_refused", [])
                 return st
             if outcome == "fail":
                 return agent._status(False, final.get("error") or "failed", steps, judge, prose, started, probs=final.get("probs"))

@@ -1476,9 +1476,61 @@ def test_host_read_scope_maps_to_the_status_tool():
     from inkbox_claude.gate.scopes import tools_for
     from inkbox_claude.gate import hosttools
     assert tools_for(["host_read"]) == ["mcp__host__host_status", "mcp__host__rows_where",
-                                       "mcp__host__set_followup", "mcp__host__cancel_followup"]
+                                       "mcp__host__set_followup", "mcp__host__cancel_followup",
+                                       "mcp__host__request_access"]
     out = asyncio.run(hosttools.host_status({"parts": ["uptime_load", "nope"]}))
     assert out.startswith("## uptime_load") and "nope" not in out
+
+
+def test_request_access_is_saved_and_bounded(tmp_path):
+    from inkbox_claude.gate import hosttools
+    m, _ = make_manager(tmp_path)
+    req = m.store.create_request(chat_id="c", sender="person@example.com", sender_name="Person",
+                                 mode="email", subject="", original_message="check", summary="check",
+                                 scopes=["host_read"], prompt="check", state="running",
+                                 task_id=m.store.create_task("check")["id"])
+    assert "Valid names:" in hosttools.request_access({"access": ["not_a_scope"], "why": "Need it."}, m, req)
+    assert "Asked." in hosttools.request_access({"access": ["web"], "why": "Need public facts."}, m, req)
+    saved = m.store.get_request(req.id)
+    assert saved.status["access_request"]["scopes"] == ["web"]
+    assert saved.status["access_ask_count"] == 1
+    assert "already waiting" in hosttools.request_access({"access": ["web"], "why": "Again."}, m, req)
+    m.store.set_state(req.id, "running", status={"access_ask_count": 2})
+    assert "already asked twice" in hosttools.request_access({"access": ["web"], "why": "Again."}, m, req)
+
+
+def test_access_ask_waits_for_owner_and_no_resumes_request(tmp_path):
+    async def scenario():
+        m, sent = make_manager(tmp_path)
+        req = m.store.create_request(chat_id="c", sender="person@example.com", sender_name="Person",
+                                     mode="email", subject="", original_message="check", summary="check",
+                                     scopes=["host_read"], prompt="check", state="running",
+                                     task_id=m.store.create_task("check")["id"])
+        status = {"access_request": {"scopes": ["web"], "why": "Need public facts.", "asked_at": time.time()},
+                  "access_ask_count": 1, "session_id": "saved-session", "ok": False}
+        assert await m.handle_access_ask(req, status) is None
+        waiting = m.store.get_request(req.id)
+        assert waiting.state == "pending" and waiting.status["session_id"] == "saved-session"
+        assert any("Reply" in text and "Need public facts" in text for _, text, *_ in sent)
+        resumed = []
+        async def execute(_req, **kw):
+            resumed.append(kw)
+        m.execute = execute
+        decided = await m.decide_request(req.id, "no")
+        await asyncio.sleep(0)
+        assert decided["ok"] and resumed[0]["resume_session"] == "saved-session"
+        assert "Aaron said no" in resumed[0]["continuation"]
+        assert "web" in m.store.get_request(req.id).status["access_refused"]
+        approved_req = m.store.create_request(chat_id="d", sender="other@example.com", sender_name="Other",
+                                              mode="email", subject="", original_message="check", summary="check",
+                                              scopes=["host_read"], prompt="check", state="running",
+                                              task_id=m.store.create_task("another check")["id"])
+        assert await m.handle_access_ask(approved_req, status) is None
+        assert (await m.decide_request(approved_req.id, "yes"))["ok"]
+        await asyncio.sleep(0)
+        assert "web" in m.store.get_request(approved_req.id).scopes
+        assert resumed[-1]["resume_session"] == "saved-session"
+    asyncio.run(scenario())
 
 
 def test_followup_continues_task_with_saved_scopes_and_only_reports_changes(tmp_path):

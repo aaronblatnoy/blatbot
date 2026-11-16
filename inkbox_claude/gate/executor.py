@@ -307,7 +307,8 @@ class Executor:
 
     async def run(self, req: Request, context: str = "", prior_work: str = "", model: Optional[str] = None,
                   from_owner: bool = False, timezone: str = "America/New_York",
-                  note: Optional[str] = None, *, _retried: bool = False) -> Dict[str, Any]:
+                  note: Optional[str] = None, *, _retried: bool = False,
+                  resume_session: Optional[str] = None, continuation: str = "") -> Dict[str, Any]:
         """Run an approved request. Returns a status dict; never raises.
 
         `context` is the task ledger for the person this request concerns. It is
@@ -338,7 +339,9 @@ class Executor:
         scoped_allowed = tools_for(req.scopes)
         if req.schedule_id:
             scoped_allowed = [t for t in scoped_allowed if t not in
-                              ("mcp__host__set_followup", "mcp__host__cancel_followup")]
+                              ("mcp__host__set_followup", "mcp__host__cancel_followup", "mcp__host__request_access")]
+        if (req.status or {}).get("followup_id"):
+            scoped_allowed = [t for t in scoped_allowed if t != "mcp__host__request_access"]
         pages_ok = bool(scoped_allowed) and not req.schedule_id and pages.allowed_for(bool(from_owner))
         if pages_ok:
             scoped_allowed = list(scoped_allowed) + ["mcp__host__make_page"]
@@ -384,6 +387,13 @@ class Executor:
         async def can_use(tool_name: str, input_data: Dict[str, Any], context: Any):
             if tool_name not in allowed_set:
                 denied_steps.append({"tool": tool_name, "args": dict(input_data or {}), "ok": False, "denied": "scope"})
+                from .scopes import scope_for_tool
+                scope = scope_for_tool(tool_name)
+                if scope and "mcp__host__request_access" in allowed_set:
+                    return PermissionResultDeny(message=(
+                        f"{tool_name} needs {scope}, which is outside this task's scope. "
+                        f"Call request_access with access [\"{scope}\"] and one sentence saying why. "
+                        "Then stop and say you are waiting. Do not try another route to the same data."))
                 return PermissionResultDeny(message=f"{tool_name} is outside this task's scope; do not retry it.")
             if tool_name.startswith("mcp__host__admin_") and not from_owner:
                 # Belt and suspenders: allowed_set should already exclude these for
@@ -432,7 +442,7 @@ class Executor:
             prompt_text = schedrun.build_prompt(req.prompt, started_at, timezone, note)
         else:
             system_append = EXECUTOR_SYSTEM + f"\nNow: {now_line()}. Resolve 'today', 'tomorrow', weekday names and relative dates from this.\n"
-            prompt_text = req.prompt
+            prompt_text = continuation or req.prompt
         if pages_ok:
             system_append += "\n" + pages.PAGE_GUIDANCE
         if context.strip():
@@ -474,7 +484,8 @@ class Executor:
             # request: what was looked up an hour ago is still in view and a follow-up does
             # not arrive as a stranger's first sentence. A scheduled run never resumes:
             # session_key is None for it, so resume is always None too.
-            resume=(self._sessions.get(session_key) if session_key is not None else None),
+            resume=(resume_session if resume_session is not None else
+                    (self._sessions.get(session_key) if session_key is not None else None)),
             can_use_tool=can_use,
             max_turns=30,
             # The SDK's default is 1 MB per message from the CLI; one large tool result
@@ -484,8 +495,10 @@ class Executor:
         )
 
         closing_texts: List[str] = []
+        session_id: Optional[str] = None
 
         async def _go():
+            nonlocal session_id
             final: Optional[Any] = None
             # Consume the generator to completion; returning from inside the
             # loop leaves the SDK's async generator half-closed.
@@ -519,12 +532,26 @@ class Executor:
                                     page_urls.extend(pages.urls_in(block.content))
                 elif isinstance(msg, ResultMessage):
                     sid = getattr(msg, "session_id", None)
+                    if sid:
+                        session_id = sid
                     if sid and session_key is not None:
                         self._sessions[session_key] = sid
+                        if self.manager is not None:
+                            try:
+                                fresh = self.manager.store.get_request(req.id)
+                                if fresh is not None:
+                                    saved = dict(fresh.status or {})
+                                    saved["session_id"] = sid
+                                    self.manager.store.set_state(req.id, fresh.state, status=saved)
+                            except Exception as exc:
+                                logger.warning("[gate] #%s could not save session: %s", req.id, exc)
                     final = msg
             return final
 
         def _finalize_exception(exc: Exception) -> Dict[str, Any]:
+            if continuation and resume_session and not tool_calls:
+                logger.warning("[gate] #%s saved session could not resume: %s", req.id, exc)
+                return {"resume_failed": True, "error": str(exc), "ok": False}
             logger.exception("executor failed for request %s", req.id)
             finished_at = time.time()
             error = str(exc)
@@ -590,6 +617,14 @@ class Executor:
                 "finished_at": finished_at,
                 "cost_usd": getattr(result, "total_cost_usd", None) if result is not None else None,
             }
+            if session_id:
+                out["session_id"] = session_id
+            ask = (req.status or {}).get("access_request")
+            if ask:
+                out["access_request"] = ask
+                out["access_ask_count"] = (req.status or {}).get("access_ask_count", 1)
+                out["access_refused"] = (req.status or {}).get("access_refused", [])
+                out["ok"] = False
             if self.held_send is not None:
                 # Something was going to be said to someone else. It is not sent, it is shown.
                 out["confirm"] = {"tool": self.held_send["tool"], "args": self.held_send["args"],
@@ -623,13 +658,25 @@ class Executor:
                     "started_at": started_at, "finished_at": finished_at, "cost_usd": None,
                     "timed_out": True}
         except Exception as exc:  # noqa: BLE001
-            return _finalize_exception(exc)
+            failed = _finalize_exception(exc)
+            if failed.get("resume_failed"):
+                return await self.run(req, context=context, model=model, from_owner=from_owner,
+                                      resume_session="", _retried=True)
+            return failed
 
         out = _finalize(result)
+        if (continuation and resume_session and bool(getattr(result, "is_error", False))
+                and not tool_calls and any(word in ((out.get("raw") or "") + " " + str(getattr(result, "result", ""))).lower()
+                                       for word in ("session not found", "invalid session", "cannot resume", "failed to resume"))):
+            logger.warning("[gate] #%s saved session is unavailable; starting the task once more", req.id)
+            return await self.run(req, context=context, model=model, from_owner=from_owner,
+                                  resume_session="", _retried=True)
         refused_for_scope = any(d.get("denied") == "scope" for d in denied_steps)
         no_real_answer = (not out.get("final_status")
                           or out.get("final_status") == "(no status text)")
-        if (from_owner and not req.schedule_id and refused_for_scope and not _retried
+        if (from_owner and not req.schedule_id and not continuation and not (req.status or {}).get("access_refused")
+                and not out.get("access_request") and "mcp__host__request_access" not in tool_calls
+                and refused_for_scope and not _retried
                 and (not out["ok"] or no_real_answer)):
             widened = [sc for sc in SCOPES if not sc.startswith("vault:")] + [BLATBOT_ADMIN_SCOPE]
             if not set(widened).issubset(set(req.scopes)):

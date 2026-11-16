@@ -112,6 +112,19 @@ def test_ordinary_request_still_resumes_its_thread_session(tmp_path, monkeypatch
     assert ex._sessions["owner-thread"] == "sess-y"
 
 
+def test_access_continuation_uses_saved_session_and_keeps_prompt_hash(tmp_path, monkeypatch):
+    ex = Executor(mcp_server=None, cwd=str(tmp_path))
+    ex._sessions["access-thread"] = "another-session"
+    req = make_request(chat_id="access-thread", scopes=["web", "contacts"])
+    scripted = ScriptedQuery([{"closing_texts": ["Finished.\nSTATUS: OK"]}], session_id="new-session")
+    monkeypatch.setattr(gate_executor, "query", scripted)
+    out = asyncio.run(ex.run(req, resume_session="saved-session",
+                             continuation="Access granted: contacts. Continue the task."))
+    assert scripted.captured_options.resume == "saved-session"
+    assert scripted.captured_prompt == "Access granted: contacts. Continue the task."
+    assert req.prompt == "m" and out["session_id"] == "new-session"
+
+
 def test_start_time_line_uses_the_schedules_own_time_zone_for_a_different_utc_day():
     # 11:30 PM Eastern on Oct 12 2026 is 03:30 UTC on Oct 13: a case where the UTC
     # calendar day and the schedule's own local day disagree.

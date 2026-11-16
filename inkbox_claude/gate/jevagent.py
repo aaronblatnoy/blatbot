@@ -98,6 +98,7 @@ def split_tool(name: str) -> Tuple[str, str]:
 SEARCH_URL = os.getenv("GATE_SEARCH_URL") or "http://127.0.0.1:8888/search"
 
 VIRTUAL_TOOLS: Dict[str, Dict[str, Any]] = {
+    "mcp__host__request_access": {"description": "Ask for a missing system and stop until access is decided.", "schema": hosttools.REQUEST_ACCESS_SCHEMA},
     "mcp__host__set_followup": {"description": hosttools.SET_FOLLOWUP_DESCRIPTION, "schema": hosttools.SET_FOLLOWUP_SCHEMA},
     "mcp__host__cancel_followup": {"description": hosttools.CANCEL_FOLLOWUP_DESCRIPTION, "schema": hosttools.CANCEL_FOLLOWUP_SCHEMA},
     "mcp__host__host_status": {"description": hosttools.DESCRIPTION, "schema": hosttools.SCHEMA},
@@ -300,6 +301,8 @@ class ToolBox:
         return out
 
     async def schema(self, name: str) -> Dict[str, Any]:
+        if name == "mcp__host__request_access":
+            return {"description": hosttools.access_description(self._request), "schema": hosttools.REQUEST_ACCESS_SCHEMA}
         if name in VIRTUAL_TOOLS:
             return VIRTUAL_TOOLS[name]
         server, short = split_tool(name)
@@ -309,6 +312,8 @@ class ToolBox:
         return self._schemas.get(name, {"description": "", "schema": {}})
 
     async def call(self, name: str, args: Dict[str, Any]) -> Any:
+        if name == "mcp__host__request_access":
+            return hosttools.request_access(args, self._manager, self._request)
         if name == "mcp__host__set_followup":
             return hosttools.set_followup(args, self._manager, self._request)
         if name == "mcp__host__cancel_followup":
@@ -866,7 +871,9 @@ class JevAgent:
         judge, prose = Judge(), Prose(self.router)
         allowed = tools_for(req.scopes)
         if req.schedule_id:
-            allowed = [t for t in allowed if t not in ("mcp__host__set_followup", "mcp__host__cancel_followup")]
+            allowed = [t for t in allowed if t not in ("mcp__host__set_followup", "mcp__host__cancel_followup", "mcp__host__request_access")]
+        if (req.status or {}).get("followup_id"):
+            allowed = [t for t in allowed if t != "mcp__host__request_access"]
         started = time.time()
         steps: List[Dict[str, Any]] = []
         facts: Dict[str, Any] = {"request": req.original_message, "task_context": context,
@@ -1032,6 +1039,12 @@ class JevAgent:
                         if len(batch) > 1:
                             logger.info("jev agent step %d: also collecting %s", step + 1, [t.split("__")[-1] for t, _ in batch[1:]])
                     outcomes = await asyncio.gather(*[self._call(box, judge, t, a, req) for t, a in batch])
+                    if (req.status or {}).get("access_request"):
+                        st = self._status(False, "Waiting for access", steps, judge, prose, started)
+                        st["access_request"] = req.status["access_request"]
+                        st["access_ask_count"] = req.status.get("access_ask_count", 1)
+                        st["access_refused"] = req.status.get("access_refused", [])
+                        return st
                     for (t, a), (ok_call, result, evidence, err) in zip(batch, outcomes):
                         if ok_call:
                             steps.append({"tool": t, "args": a, "result": result, "ok": True, "evidence": evidence})

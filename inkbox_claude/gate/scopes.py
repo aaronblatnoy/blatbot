@@ -328,6 +328,8 @@ def tools_for(scopes: List[str]) -> List[str]:
         try:
             if get_setting("GATE_FOLLOWUPS"):
                 out += [t for t in ("mcp__host__set_followup", "mcp__host__cancel_followup") if t not in out]
+            if get_setting("GATE_ACCESS_ASKS") and "mcp__host__request_access" not in out:
+                out.append("mcp__host__request_access")
         except Exception as exc:
             logging.getLogger(__name__).warning("[gate] follow-up tools unavailable: %s", exc)
     return out

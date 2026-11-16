@@ -30,6 +30,68 @@ SET_FOLLOWUP_SCHEMA = {"type": "object", "required": ["note"], "properties": {
 CANCEL_FOLLOWUP_DESCRIPTION = "CANCEL a pending follow-up timer on this task by its id."
 CANCEL_FOLLOWUP_SCHEMA = {"type": "object", "required": ["id"], "properties": {
     "id": {"type": "integer", "description": "follow-up id returned by set_followup"}}}
+REQUEST_ACCESS_SCHEMA = {"type": "object", "required": ["access", "why"], "properties": {
+    "access": {"type": "array", "items": {"type": "string"}, "description": "Exact scope names needed"},
+    "why": {"type": "string", "description": "One sentence saying why the task needs this access"}}}
+
+
+def access_choices(request: Any) -> Dict[str, str]:
+    from .scopes import SCOPES, LABELS, BLATBOT_ADMIN_SCOPE
+    refused = set((request.status or {}).get("access_refused") or [])
+    return {name: LABELS.get(name) or str(spec.get("description") or name)
+            for name, spec in SCOPES.items()
+            if name not in (request.scopes or []) and name not in refused and name != BLATBOT_ADMIN_SCOPE
+            and not name.startswith(("vault:", "memory:"))}
+
+
+def access_description(request: Any) -> str:
+    choices = access_choices(request)
+    listed = "; ".join(f"{name}: {label}" for name, label in choices.items())
+    return ("When this task needs a system you were not given, ask here with the exact names and one "
+            "sentence saying why, then stop and say you are waiting; never try another route to the same data. "
+            f"You can ask for: {listed or 'nothing further'}.")
+
+
+def request_access(args: Dict[str, Any], manager: Any, request: Any) -> str:
+    from .settings import get
+    try:
+        if (not get("GATE_ACCESS_ASKS") or manager is None or request is None or request.schedule_id
+                or (request.status or {}).get("followup_id") or not request.scopes):
+            return "Access requests are unavailable for this run. Finish with what you have."
+        fresh = manager.store.get_request(request.id) or request
+        status = dict(fresh.status or {})
+        if int(status.get("access_ask_count") or 0) >= 2:
+            manager.task_note(request, "rejected", "A third access request was refused; this task may ask only twice.")
+            return "You have already asked twice; finish with what you have."
+        if status.get("access_request"):
+            return "An access request is already waiting. Stop now and wait for the answer."
+        choices = access_choices(fresh)
+        names = args.get("access")
+        if not isinstance(names, list) or not names or any(not isinstance(n, str) for n in names):
+            return "Give one or more exact access names. Valid names: " + ", ".join(choices)
+        names = list(dict.fromkeys(names))
+        if any(n in status.get("access_refused", []) for n in names):
+            manager.task_note(request, "rejected", "Access was refused again because Aaron already said no for this task.")
+            return "Aaron already refused that access for this task. Finish with what you have."
+        if any(n not in choices for n in names):
+            manager.task_note(request, "rejected", "An access request used an unknown name and was refused.")
+            return "Unknown access name. Valid names: " + ", ".join(choices)
+        why = " ".join(str(args.get("why") or "").replace("—", ", ").split())[:500].strip()
+        if not why:
+            return "Say in one sentence why this task needs that access."
+        ask = {"scopes": names, "why": why, "asked_at": time.time()}
+        status["access_request"] = ask
+        status["access_ask_count"] = int(status.get("access_ask_count") or 0) + 1
+        manager.store.set_state(request.id, "running", status=status)
+        request.status = status
+        try:
+            manager.task_note(request, "request", "Asked for access to " + ", ".join(choices[n] for n in names) + f": {why}")
+        except Exception as exc:
+            logger.warning("[gate] access ask note failed: %s", exc)
+        return "Asked. Stop now; you will be continued when it is answered."
+    except Exception as exc:
+        logger.warning("[gate] access request failed: %s", exc)
+        return "I could not ask for access. Please continue normally."
 _EASTERN = ZoneInfo("America/New_York")
 
 
@@ -269,6 +331,10 @@ def sdk_server(*, vault_prefixes: Optional[List[str]] = None, manager: Any = Non
     async def _cancel_followup(args: Dict[str, Any]) -> Dict[str, Any]:
         return {"content": [{"type": "text", "text": cancel_followup(args, manager, request)}]}
 
+    @tool("request_access", access_description(request) if request is not None else "Ask for access to a missing system.", REQUEST_ACCESS_SCHEMA)
+    async def _request_access(args: Dict[str, Any]) -> Dict[str, Any]:
+        return {"content": [{"type": "text", "text": request_access(args, manager, request)}]}
+
     @tool("vault_search", VAULT_SEARCH_DESCRIPTION, VAULT_SEARCH_SCHEMA)
     async def _vault_search(args: Dict[str, Any]) -> Dict[str, Any]:
         return {"content": [{"type": "text", "text": vault_search(args, vault_prefixes)}]}
@@ -342,7 +408,7 @@ def sdk_server(*, vault_prefixes: Optional[List[str]] = None, manager: Any = Non
     async def _make_page(args: Dict[str, Any]) -> Dict[str, Any]:
         return {"content": [{"type": "text", "text": await pages.publish_page(args, pages.allowed_for(is_commander))}]}
 
-    tools = [_make_page, _host_status, _set_followup, _cancel_followup,
+    tools = [_make_page, _host_status, _set_followup, _cancel_followup, _request_access,
              _vault_search, _vault_read, _vault_list, _memory_search,
              _telegram_find_chats, _telegram_list_chats, _telegram_read_chat,
              _admin_list_settings, _admin_get_setting, _admin_set_setting,
