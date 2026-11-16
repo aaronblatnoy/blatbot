@@ -136,7 +136,7 @@ async def telegram_read_chat(args: Dict[str, Any]) -> str:
 
 
 def sdk_server(*, vault_prefixes: Optional[List[str]] = None, manager: Any = None,
-               is_commander: bool = False) -> Any:
+               is_commander: bool = False, memory_groups: Optional[List[str]] = []) -> Any:  # noqa: B006
     """The same tool as an in-process MCP server for the Claude Code executor.
 
     vault_prefixes bounds vault_search/vault_read/vault_list to the vault-relative
@@ -150,7 +150,10 @@ def sdk_server(*, vault_prefixes: Optional[List[str]] = None, manager: Any = Non
     verified channel (manager._is_owner_request-derived). Both are request-scoped
     and passed in fresh by the executor on every call -- the admin tools check
     is_commander themselves, so this is the hard gate even if allowed_tools ever
-    let an admin_* tool name through for someone else."""
+    let an admin_* tool name through for someone else.
+
+    memory_groups is which long-term memory groups memory_search may read for this
+    request (graphmem.groups_for_request): None every group, [] none (the default)."""
     from claude_agent_sdk import create_sdk_mcp_server, tool
 
     @tool("host_status", DESCRIPTION, SCHEMA)
@@ -164,6 +167,11 @@ def sdk_server(*, vault_prefixes: Optional[List[str]] = None, manager: Any = Non
     @tool("vault_read", VAULT_READ_DESCRIPTION, VAULT_READ_SCHEMA)
     async def _vault_read(args: Dict[str, Any]) -> Dict[str, Any]:
         return {"content": [{"type": "text", "text": vault_read(args, vault_prefixes)}]}
+
+    @tool("memory_search", MEMORY_SEARCH_DESCRIPTION, MEMORY_SEARCH_SCHEMA)
+    async def _memory_search(args: Dict[str, Any]) -> Dict[str, Any]:
+        text = await asyncio.to_thread(memory_search, args, memory_groups)
+        return {"content": [{"type": "text", "text": text}]}
 
     @tool("vault_list", VAULT_LIST_DESCRIPTION, VAULT_LIST_SCHEMA)
     async def _vault_list(args: Dict[str, Any]) -> Dict[str, Any]:
@@ -225,7 +233,7 @@ def sdk_server(*, vault_prefixes: Optional[List[str]] = None, manager: Any = Non
     async def _make_page(args: Dict[str, Any]) -> Dict[str, Any]:
         return {"content": [{"type": "text", "text": await pages.publish_page(args, pages.allowed_for(is_commander))}]}
 
-    tools = [_make_page, _host_status, _vault_search, _vault_read, _vault_list,
+    tools = [_make_page, _host_status, _vault_search, _vault_read, _vault_list, _memory_search,
              _telegram_find_chats, _telegram_list_chats, _telegram_read_chat,
              _admin_list_settings, _admin_get_setting, _admin_set_setting,
              _admin_list_roles, _admin_set_role_scopes, _admin_set_person_role,
@@ -373,6 +381,47 @@ VAULT_LIST_SCHEMA = {"type": "object", "properties": {
 
 def vault_dir() -> Path:
     return Path(os.getenv("BLATBOT_VAULT_DIR") or (Path.home() / "vault")).resolve()
+
+
+# ---------------------------------------------------------------------------
+# Long-term memory: the Graphiti knowledge graph every stored message is written
+# to (gate/graphmem.py). A tool the run calls when it needs to look back, not a
+# block it is stuck with: what a run may see is the groups the person who asked
+# may read, fixed by the executor before the run starts.
+# ---------------------------------------------------------------------------
+
+MEMORY_SEARCH_DESCRIPTION = (
+    "SEARCH BLATBOT'S LONG-TERM MEMORY (a knowledge graph built from every past conversation Blatbot has had, "
+    "on every channel): dated facts about people, what they asked for, what was agreed, decided, sent or done, "
+    "and when. Use it to look back past the recent conversation, to find who someone is or what happened "
+    "before. Facts carry the date they became true and, if they stopped being true, when. Read-only. Not "
+    "Aaron's own written notes (that is the vault), and not a live system: check the system itself for "
+    "current state."
+)
+MEMORY_SEARCH_SCHEMA = {"type": "object", "required": ["query"], "properties": {
+    "query": {"type": "string", "description": "what to look for, in plain words: a name, a topic, a question"},
+    "max_facts": {"type": "integer", "description": "how many facts at most (default 15, up to 40)"},
+}}
+
+
+def memory_search(args: Dict[str, Any], groups: Optional[List[str]] = []) -> str:  # noqa: B006 - [] = no access
+    """Facts from the long-term memory graph. `groups` is what this run may read:
+    None every group (the owner's own request), [] nothing."""
+    from . import graphmem
+    query = " ".join(str(args.get("query") or "").split())
+    if not query:
+        return "ERROR: a query is required"
+    if not graphmem.enabled():
+        return "Long-term memory is not available (no memory graph is configured)."
+    if groups is not None and not groups:
+        return "ERROR: this request may not read long-term memory."
+    try:
+        n = max(1, min(int(args.get("max_facts") or 15), 40))
+    except (TypeError, ValueError):
+        n = 15
+    facts = graphmem.search(query, "", False, max_facts=n, timeout=10.0, groups=groups)
+    text = graphmem.render(facts)
+    return text or f"No remembered facts match {query!r}."
 
 
 def _vault_path(rel: str) -> Path:

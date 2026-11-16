@@ -198,6 +198,42 @@ def _scope_system() -> Dict[str, str]:
 
 
 SCOPE_SYSTEM: Dict[str, str] = _scope_system()
+
+# What a system needs on this machine before the scope tree may offer it. Systems
+# backed by an MCP server are offered when at least one of their scopes resolved to
+# tools; `requires:` in the registry names a backend the gateway reaches itself.
+SYSTEM_REQUIRES: Dict[str, str] = {k: str(v.get("requires") or "") for k, v in (_REGISTRY.get("systems") or {}).items()}  # type: ignore[union-attr]
+
+
+def _backend_up(need: str) -> bool:
+    if need == "graphiti":
+        from . import graphmem
+        return graphmem.enabled()
+    if need == "vault":
+        from .vaultscopes import vault_dir
+        root = vault_dir()
+        try:
+            return root.is_dir() and next(root.rglob("*.md"), None) is not None
+        except OSError:
+            return False
+    return True
+
+
+def system_available(sysname: str) -> bool:
+    """Whether the scope tree may offer this system: its backend is there and at least
+    one scope it grants has tools. A system Blatbot cannot reach is never picked, so a
+    run is never handed a scope that resolves to nothing."""
+    if not _backend_up(SYSTEM_REQUIRES.get(sysname, "")):
+        return False
+    grants = list(SCOPE_TREE_ALWAYS.get(sysname, []))
+    for _, (_, g) in SCOPE_TREE_LEAVES.get(sysname, {}).items():
+        grants += list(g)  # type: ignore[arg-type]
+    return any(SCOPES.get(sc, {}).get("tools") for sc in grants)  # type: ignore[union-attr]
+
+
+def available_systems() -> Dict[str, str]:
+    """SCOPE_TREE_SYSTEMS limited to the systems Blatbot can reach right now."""
+    return {k: v for k, v in SCOPE_TREE_SYSTEMS.items() if system_available(k)}
 TOOL_SYSTEM: Dict[str, str] = {}
 for _sc, _v in SCOPES.items():
     for _t in _v["tools"]:  # type: ignore[union-attr]
@@ -329,6 +365,7 @@ def blocks_requester_send(req, tool_name: str, args: dict, protected: list) -> b
 # descriptions. Tools not listed fall back to the server's description.
 TOOL_PURPOSE: Dict[str, str] = {
     "mcp__host__rows_where": "COUNT OR FILTER ROWS of a result ALREADY GATHERED (a sheet read, a calendar list, search hits) by a text they contain, optionally within one column. Exact counts; the matching rows come back. Use it after a read, never instead of one.",
+    "mcp__host__memory_search": "SEARCH BLATBOT'S LONG-TERM MEMORY (a graph of dated facts from every past conversation, any channel): who someone is, what they asked for, what was agreed, decided or done, and when. Use it to look back past the recent conversation. Read-only; not Aaron's written notes and not live state.",
     "mcp__host__vault_search": "SEARCH AARON'S SECOND BRAIN (his Obsidian vault of notes) for notes containing every word of a query: what he has written down about a project, a person, a decision, a preference. Read-only.",
     "mcp__host__vault_read": "READ ONE VAULT NOTE IN FULL by the path vault_search or vault_list printed, or by title. Read-only.",
     "mcp__host__vault_list": "LIST THE NOTES in Aaron's vault, all or under one folder (Projects, Areas, Daily, Reference, Inbox, Archive). Read-only.",

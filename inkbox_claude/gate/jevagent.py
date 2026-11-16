@@ -40,6 +40,7 @@ import httpx
 
 from .scopes import ORG_ACCOUNT, OWNER_ACCOUNT, TOOL_DESCRIPTIONS, TOOL_PURPOSE, blocks_requester_send, sends_to_requester, tools_for
 from . import hosttools
+from . import graphmem
 from .store import Request, sha256
 from .taskpick import TYPESAFE_URL
 
@@ -99,6 +100,7 @@ SEARCH_URL = os.getenv("GATE_SEARCH_URL") or "http://127.0.0.1:8888/search"
 VIRTUAL_TOOLS: Dict[str, Dict[str, Any]] = {
     "mcp__host__host_status": {"description": hosttools.DESCRIPTION, "schema": hosttools.SCHEMA},
     "mcp__host__rows_where": {"description": hosttools.ROWS_WHERE_DESCRIPTION, "schema": hosttools.ROWS_WHERE_SCHEMA},
+    "mcp__host__memory_search": {"description": hosttools.MEMORY_SEARCH_DESCRIPTION, "schema": hosttools.MEMORY_SEARCH_SCHEMA},
     "mcp__host__vault_search": {"description": hosttools.VAULT_SEARCH_DESCRIPTION, "schema": hosttools.VAULT_SEARCH_SCHEMA},
     "mcp__host__vault_read": {"description": hosttools.VAULT_READ_DESCRIPTION, "schema": hosttools.VAULT_READ_SCHEMA},
     "mcp__host__vault_list": {"description": hosttools.VAULT_LIST_DESCRIPTION, "schema": hosttools.VAULT_LIST_SCHEMA},
@@ -245,7 +247,9 @@ class ToolBox:
     pool: started on first use, then kept across requests."""
 
     def __init__(self, inkbox_server: Any, mcp_config: Dict[str, Dict[str, Any]],
-                manager: Any = None, is_commander: bool = False):
+                manager: Any = None, is_commander: bool = False,
+                memory_groups: Optional[List[str]] = []):  # noqa: B006 - [] = no memory access
+        self._memory_groups = memory_groups
         self._inkbox = inkbox_server
         self._cfg = mcp_config
         self._sessions: Dict[str, Any] = {}
@@ -308,6 +312,8 @@ class ToolBox:
             return await hosttools.host_status(args)
         if name == "mcp__host__rows_where":
             return hosttools.rows_where(args, getattr(self, "facts", None) or {})
+        if name == "mcp__host__memory_search":
+            return await asyncio.to_thread(hosttools.memory_search, args, self._memory_groups)
         if name == "mcp__host__vault_search":
             return hosttools.vault_search(args)
         if name == "mcp__host__vault_read":
@@ -859,7 +865,10 @@ class JevAgent:
                                  "accounts": {"org_google": ORG_ACCOUNT, "owner_google": OWNER_ACCOUNT}}
         try:
             async with ToolBox(self.inkbox_server, self.mcp_config, manager=self.manager,
-                               is_commander="blatbot_admin" in (req.scopes or [])) as box:
+                               is_commander="blatbot_admin" in (req.scopes or []),
+                               memory_groups=graphmem.groups_for_request(
+                                   getattr(self.manager, "store", None), req,
+                                   "blatbot_admin" in (req.scopes or []))) as box:
                 tool_options: Dict[str, str] = {}
                 for name in allowed:
                     try:

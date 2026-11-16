@@ -125,6 +125,29 @@ def readable_groups(store: Any, chat_id: str, *, is_approver: bool, is_group: bo
         return [own]
 
 
+def groups_for_request(store: Any, req: Any, from_owner: bool) -> Optional[List[str]]:
+    """Which memory groups an approved request's run may search with the memory_search
+    tool. The owner's own request reads every group (None); anyone else's reads what
+    readable_groups gives the person who asked, decided from the request's own chat and
+    sender. Any failure gives the request's own chat only (fails closed)."""
+    if from_owner:
+        return None
+    chat = str(getattr(req, "chat_id", "") or "")
+    own = [group_for(chat)]
+    if store is None:
+        return own
+    try:
+        route = store.thread_route(chat) or {}
+        meta = route.get("meta") or {}
+        is_group = meta.get("conversation_kind") == "group" or bool(meta.get("group_title"))
+        sender = str(getattr(req, "sender", "") or "").strip()
+        return readable_groups(store, chat, is_approver=False, is_group=is_group,
+                               handles=[sender] if sender else [])
+    except Exception as exc:  # noqa: BLE001 - unresolved identity must never widen access
+        _log_error("request reader lookup", exc)
+        return own
+
+
 def _post(path: str, payload: Dict[str, Any], timeout: float) -> Any:
     req = urllib.request.Request(base_url() + path, data=json.dumps(payload).encode(),
                                  headers={"Content-Type": "application/json"}, method="POST")
