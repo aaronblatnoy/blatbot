@@ -726,6 +726,45 @@ def _trust_key(value: str) -> str:
     return v
 
 
+# Both database paths create the timer table after their core schema. Keeping it
+# separate lets the gate start normally if only the timer table cannot be made.
+FOLLOWUPS_SCHEMA = """
+CREATE TABLE IF NOT EXISTS followups (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  task_id INTEGER NOT NULL,
+  request_id INTEGER NOT NULL,
+  chat_id TEXT NOT NULL,
+  requester TEXT NOT NULL,
+  scopes_json TEXT NOT NULL,
+  due_at REAL NOT NULL,
+  note TEXT NOT NULL,
+  status TEXT NOT NULL DEFAULT 'pending',
+  created_at REAL NOT NULL,
+  fired_at REAL,
+  result TEXT NOT NULL DEFAULT ''
+);
+CREATE INDEX IF NOT EXISTS followups_due ON followups(status, due_at);
+"""
+
+FOLLOWUPS_SCHEMA_PG = """
+CREATE TABLE IF NOT EXISTS followups (
+  id BIGSERIAL PRIMARY KEY,
+  task_id BIGINT NOT NULL,
+  request_id BIGINT NOT NULL,
+  chat_id TEXT NOT NULL,
+  requester TEXT NOT NULL,
+  scopes_json TEXT NOT NULL,
+  due_at DOUBLE PRECISION NOT NULL,
+  note TEXT NOT NULL,
+  status TEXT NOT NULL DEFAULT 'pending',
+  created_at DOUBLE PRECISION NOT NULL,
+  fired_at DOUBLE PRECISION,
+  result TEXT NOT NULL DEFAULT ''
+);
+CREATE INDEX IF NOT EXISTS followups_due ON followups(status, due_at);
+"""
+
+
 class Store:
     def __init__(self, path: str):
         self._is_pg = is_postgres_target(path)
@@ -736,6 +775,7 @@ class Store:
             self._db = sqlite3.connect(path, check_same_thread=False)
             self._db.row_factory = sqlite3.Row
         self._lock = threading.Lock()
+        self.followups_available = True
         # The commander's two verified handles. Set once by the manager via
         # set_approver_handles() after it reads the environment/config; the
         # store itself never reads the environment and never logs these values.
@@ -876,6 +916,17 @@ class Store:
                 self._db.execute("ALTER TABLE tasks ADD COLUMN waiting_on TEXT NOT NULL DEFAULT ''")
             self._db.execute("CREATE INDEX IF NOT EXISTS requests_task_latest ON requests(task_id, id DESC)")
             self._db.commit()
+            # A timer table failure must not prevent ordinary requests from starting.
+            try:
+                self._db.executescript(FOLLOWUPS_SCHEMA_PG if self._is_pg else FOLLOWUPS_SCHEMA)
+                self._db.commit()
+            except Exception as exc:
+                self.followups_available = False
+                try:
+                    self._db.rollback()
+                except Exception:
+                    pass
+                logging.getLogger(__name__).warning("[gate] follow-up storage unavailable: %s", exc)
             n_tasks = self._db.execute("SELECT COUNT(*) AS n FROM tasks").fetchone()["n"]
             n_fts = self._db.execute("SELECT COUNT(*) AS n FROM task_fts").fetchone()["n"]
         if n_fts < n_tasks:
@@ -3577,6 +3628,65 @@ class Store:
                 f"SELECT 1 FROM task_participants WHERE task_id=? AND key IN ({marks}) LIMIT 1", (task_id, *keys)
             ).fetchone()
         return bool(r)
+
+    def add_followup(self, *, task_id: int, request_id: int, chat_id: str,
+                     requester: str, scopes: List[str], due_at: float, note: str) -> Tuple[Optional[int], List[Dict[str, Any]]]:
+        """Keep the three pending slots under one lock across processes."""
+        with self._lock:
+            if self._is_pg:
+                self._db.execute("SELECT id FROM tasks WHERE id=? FOR UPDATE", (task_id,)).fetchone()
+            else:
+                self._db.execute("BEGIN IMMEDIATE")
+            pending = [dict(r) for r in self._db.execute(
+                "SELECT * FROM followups WHERE task_id=? AND status='pending' ORDER BY due_at, id", (task_id,)).fetchall()]
+            if len(pending) >= 3:
+                # Release the task lock before returning a full queue.
+                self._db.commit()
+                return None, pending
+            cur = self._db.execute(
+                "INSERT INTO followups(task_id,request_id,chat_id,requester,scopes_json,due_at,note,status,created_at) "
+                "VALUES(?,?,?,?,?,?,?,'pending',?)",
+                (task_id, request_id, chat_id, requester, json.dumps(scopes), due_at, note, time.time()))
+            self._db.commit()
+            return cur.lastrowid, pending
+
+    def pending_followups(self, task_id: Optional[int] = None) -> List[Dict[str, Any]]:
+        where = " AND task_id=?" if task_id is not None else ""
+        with self._lock:
+            rows = self._db.execute(
+                "SELECT * FROM followups WHERE status='pending'" + where + " ORDER BY due_at, id",
+                (task_id,) if task_id is not None else ()).fetchall()
+        return [dict(r) for r in rows]
+
+    def due_followups(self, now: Optional[float] = None) -> List[Dict[str, Any]]:
+        with self._lock:
+            rows = self._db.execute(
+                "SELECT * FROM followups WHERE status='pending' AND due_at<=? ORDER BY due_at, id",
+                (time.time() if now is None else now,)).fetchall()
+        return [dict(r) for r in rows]
+
+    def mark_followup_fired(self, followup_id: int) -> bool:
+        with self._lock:
+            cur = self._db.execute(
+                "UPDATE followups SET status='fired',fired_at=? WHERE id=? AND status='pending'",
+                (time.time(), followup_id))
+            self._db.commit()
+            return cur.rowcount == 1
+
+    def cancel_followup(self, followup_id: int, task_id: Optional[int] = None) -> Optional[Dict[str, Any]]:
+        with self._lock:
+            row = self._db.execute("SELECT * FROM followups WHERE id=? AND status='pending'", (followup_id,)).fetchone()
+            if not row or (task_id is not None and row["task_id"] != task_id):
+                return None
+            cur = self._db.execute("UPDATE followups SET status='cancelled' WHERE id=? AND status='pending'", (followup_id,))
+            self._db.commit()
+            return dict(row) if cur.rowcount == 1 else None
+
+    def finish_followup(self, followup_id: int, result: str, *, failed: bool = False) -> None:
+        with self._lock:
+            self._db.execute("UPDATE followups SET status=?,result=? WHERE id=? AND status='fired'",
+                             ("failed" if failed else "fired", result, followup_id))
+            self._db.commit()
 
     def task_event(self, task_id: int, kind: str, text: str, *, chat_id: str = "",
                    request_id: Optional[int] = None, state: Optional[str] = None,

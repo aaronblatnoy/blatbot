@@ -336,6 +336,9 @@ class Executor:
         started_at = time.time()
         vault_prefixes = vault_prefixes_for_scopes(req.scopes)
         scoped_allowed = tools_for(req.scopes)
+        if req.schedule_id:
+            scoped_allowed = [t for t in scoped_allowed if t not in
+                              ("mcp__host__set_followup", "mcp__host__cancel_followup")]
         pages_ok = bool(scoped_allowed) and not req.schedule_id and pages.allowed_for(bool(from_owner))
         if pages_ok:
             scoped_allowed = list(scoped_allowed) + ["mcp__host__make_page"]
@@ -454,7 +457,8 @@ class Executor:
             )
         memory_groups = graphmem.groups_for_request(getattr(self.manager, "store", None), req, bool(from_owner))
         host_server = hosttools.sdk_server(vault_prefixes=vault_prefixes, manager=self.manager,
-                                           is_commander=bool(from_owner), memory_groups=memory_groups)
+                                           is_commander=bool(from_owner), memory_groups=memory_groups,
+                                           request=req)
         mcp_servers = self._mcp_servers_for(scoped_allowed, host_server)
         logger.info("[gate] #%s mcp servers: %s", req.id, sorted(mcp_servers.keys()))
         options = ClaudeAgentOptions(

@@ -5,6 +5,7 @@ applied by Claude Code on top of every scope and cannot be widened here."""
 from __future__ import annotations
 
 import os
+import logging
 from typing import Any, Dict, List, Optional
 
 # Which Google accounts the workspace tools act as. Set in the environment; the
@@ -323,6 +324,12 @@ def tools_for(scopes: List[str]) -> List[str]:
                 out.append(t)
     if out:
         out += [t for t in ALWAYS_TOOLS if t not in out]
+        from .settings import get as get_setting
+        try:
+            if get_setting("GATE_FOLLOWUPS"):
+                out += [t for t in ("mcp__host__set_followup", "mcp__host__cancel_followup") if t not in out]
+        except Exception as exc:
+            logging.getLogger(__name__).warning("[gate] follow-up tools unavailable: %s", exc)
     return out
 
 

@@ -58,6 +58,9 @@ KNOBS: List[Dict[str, Any]] = [
     {"name": "GATE_SCHEDULES_PAUSED", "kind": "bool", "default": False, "group": "Safety",
      "label": "Pause every schedule",
      "help": "Stops new scheduled runs from starting. Existing runs keep going."},
+    {"name": "GATE_FOLLOWUPS", "kind": "bool", "default": True, "group": "Safety",
+     "label": "Let runs set follow-up timers",
+     "help": "Lets ordinary runs check back later on work they already have permission to do."},
 
     # -- formatted pages ------------------------------------------------------
     {"name": "GATE_HTML_PAGES_AUDIENCE", "kind": "choice", "default": "owner",

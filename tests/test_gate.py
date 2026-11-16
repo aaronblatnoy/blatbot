@@ -1475,9 +1475,49 @@ def test_no_action_reply_may_not_promise_action(tmp_path):
 def test_host_read_scope_maps_to_the_status_tool():
     from inkbox_claude.gate.scopes import tools_for
     from inkbox_claude.gate import hosttools
-    assert tools_for(["host_read"]) == ["mcp__host__host_status", "mcp__host__rows_where"]   # analysis rides along
+    assert tools_for(["host_read"]) == ["mcp__host__host_status", "mcp__host__rows_where",
+                                       "mcp__host__set_followup", "mcp__host__cancel_followup"]
     out = asyncio.run(hosttools.host_status({"parts": ["uptime_load", "nope"]}))
     assert out.startswith("## uptime_load") and "nope" not in out
+
+
+def test_followup_continues_task_with_saved_scopes_and_only_reports_changes(tmp_path):
+    from inkbox_claude.gate import hosttools
+
+    m, sent = make_manager(tmp_path)
+    m.jev_agent = None
+    task = m.store.create_task("Check for a reply")
+    m.store.set_thread("imessage:person", "idle", mode="imessage", meta={"conversation_id": "person"})
+    original = m.store.create_request(
+        chat_id="imessage:person", sender="person", sender_name="Person", mode="imessage",
+        subject="", original_message="Ask", summary="Ask", scopes=["host_read"], prompt="Ask",
+        state="approved", task_id=task["id"])
+    for n in range(3):
+        assert "I will check back" in hosttools.set_followup(
+            {"in_minutes": 5 + n, "note": f"Check reply {n}"}, m, original)
+    assert "three pending" in hosttools.set_followup(
+        {"in_minutes": 10, "note": "fourth"}, m, original)
+    rows = m.store.pending_followups(task["id"])
+    assert "cancelled" in hosttools.cancel_followup({"id": rows[2]["id"]}, m, original)
+
+    async def fire(row, changed, result):
+        m.executor.result = {"ok": True, "changed": changed, "summary": result,
+                             "final_status": result, "tool_calls": ["mcp__host__host_status"]}
+        assert m.store.mark_followup_fired(row["id"])
+        await m._run_followup(row)
+
+    asyncio.run(fire(rows[0], False, "Nothing changed."))
+    assert sent == []
+    asyncio.run(fire(rows[1], True, "They replied."))
+    assert sent == [("imessage:person", "They replied.", "imessage", {"conversation_id": "person"})]
+    followup_requests = [m.store.get_request(rid) for rid in m.executor.ran]
+    assert all(req.scopes == ["host_read"] for req in followup_requests)
+
+
+def test_followup_setting_withholds_tools(monkeypatch):
+    monkeypatch.setenv("GATE_FOLLOWUPS", "0")
+    assert "mcp__host__set_followup" not in tools_for(["host_read"])
+    assert "mcp__host__cancel_followup" not in tools_for(["host_read"])
 
 
 def test_destructive_call_asks_the_owner_and_runs_only_on_yes(tmp_path):

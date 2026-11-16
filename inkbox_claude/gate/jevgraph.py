@@ -629,6 +629,8 @@ async def run(agent: "ja.JevAgent", req: Any, context: str = "") -> Dict[str, An
     judge, prose = ja.Judge(), ja.Prose(agent.router)
     started = time.time()
     allowed = ja.tools_for(req.scopes)
+    if req.schedule_id:
+        allowed = [t for t in allowed if t not in ("mcp__host__set_followup", "mcp__host__cancel_followup")]
     if req.schedule_kind == "continue":
         allowed.append("mcp__host__schedule_continue")
     background = req.prompt if req.prompt != req.original_message else ""
@@ -637,7 +639,7 @@ async def run(agent: "ja.JevAgent", req: Any, context: str = "") -> Dict[str, An
     steps: List[Dict[str, Any]] = []
     try:
         async with ja.ToolBox(agent.inkbox_server, agent.mcp_config, manager=agent.manager,
-                              is_commander="blatbot_admin" in (req.scopes or [])) as box:
+                              is_commander="blatbot_admin" in (req.scopes or []), request=req) as box:
             tool_options: Dict[str, str] = {}
             for name in allowed:
                 try:

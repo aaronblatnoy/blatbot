@@ -2238,9 +2238,11 @@ class GateSessionManager:
         self._people_notice_lock = asyncio.Lock()
         self._expiry_task: Optional[asyncio.Task] = None
         self._schedule_task: Optional[asyncio.Task] = None
+        self._followup_task: Optional[asyncio.Task] = None
         try:
             self._expiry_task = asyncio.get_running_loop().create_task(self._expiry_loop())
             self._schedule_task = asyncio.get_running_loop().create_task(self._schedule_loop())
+            self._followup_task = asyncio.get_running_loop().create_task(self._followup_loop())
         except RuntimeError:
             pass
 
@@ -2260,6 +2262,8 @@ class GateSessionManager:
             self._expiry_task.cancel()
         if self._schedule_task:
             self._schedule_task.cancel()
+        if self._followup_task:
+            self._followup_task.cancel()
 
     # -- approver channel ----------------------------------------------------
     @property
@@ -2597,6 +2601,34 @@ class GateSessionManager:
         """Aaron's task commands: "tasks" lists open work; "T12 done" / "T12 close" /
         "T12 reopen" change state; "T12 note: ..." adds a note. Returns True if consumed."""
         t = (text or "").strip()
+        if t.lower() in ("followups", "what are you waiting on", "what are you waiting on?"):
+            from .hosttools import followup_time
+            try:
+                rows = self.store.pending_followups()
+                lines = ["Pending follow-ups:"]
+                for row in rows:
+                    task = self.store.get_task(row["task_id"])
+                    lines.append(f"#{row['id']} T{row['task_id']} {followup_time(row['due_at'])}: "
+                                 f"{row['note']} ({task['title'] if task else 'task'})")
+                await self.send_to_approver("\n".join(lines) if rows else "No pending follow-ups.")
+            except Exception as exc:
+                logger.warning("[gate] follow-up list failed: %s", exc)
+                await self.send_to_approver("I could not list follow-ups right now.")
+            return True
+        match = re.fullmatch(r"cancel followup\s+#?(\d+)", t, re.I)
+        if match:
+            try:
+                row = self.store.cancel_followup(int(match.group(1)))
+                if row:
+                    self.store.task_event(row["task_id"], "note",
+                                          f"Follow-up #{row['id']} cancelled: {row['note']}",
+                                          chat_id=session.chat_id)
+                await self.send_to_approver(f"Follow-up #{match.group(1)} cancelled." if row else
+                                            f"No pending follow-up #{match.group(1)}.")
+            except Exception as exc:
+                logger.warning("[gate] follow-up cancellation failed: %s", exc)
+                await self.send_to_approver("I could not cancel that follow-up right now.")
+            return True
         if t.lower() in ("tasks", "task list", "open tasks", "what's open", "whats open"):
             rows = self.store.open_tasks(limit=25)
             if not rows:
@@ -3113,7 +3145,7 @@ class GateSessionManager:
         said = f"{status.get('summary') or ''}\n{status.get('error') or ''}\n{status.get('raw') or ''}"
         wanted = [sc for sc in SCOPES if sc not in req.scopes and re.search(
             r"\b" + re.escape(sc) + r"\b", said)]
-        if not wanted or not _owner_request(self, req) or req.schedule_id:
+        if not wanted or not _owner_request(self, req) or req.schedule_id or (req.status or {}).get("followup_id"):
             return status
         grown = list(req.scopes) + wanted
         logger.info("[gate] #%s stopped for want of %s; granting and running again",
@@ -3178,12 +3210,13 @@ class GateSessionManager:
         status leaves this function. Executors themselves never message anyone who
         asked (denied at the tool call).
 
-        A scheduled run always takes the Claude Code branch, GATE_EXECUTOR=jev
-        or not: the Jev agent has no time zone, no carried-forward note, no
+        Scheduled and follow-up runs take the Claude Code branch so the closing
+        text can say whether anything changed. The Jev agent has no time zone,
+        no carried-forward note, no
         scheduled-run prompt, no RESULT/NOTE/STATUS closing-line contract and
         no third-party-send hold, all of which the scheduled-run contract
         (schedrun.py, schedules.py) requires."""
-        if not self.jev_agent or req.schedule_id:
+        if not self.jev_agent or req.schedule_id or (req.status or {}).get("followup_id"):
             model = await self._pick_model(req)
             run_kwargs: Dict[str, Any] = {}
             if req.schedule_id:
@@ -3500,6 +3533,13 @@ class GateSessionManager:
         self.store.set_state(req.id, "done" if ok else "failed",
                              status=status, raw_output=status.get("raw"))
         self.store.set_thread(req.chat_id, "idle")
+        if (req.status or {}).get("followup_id"):
+            # The timer owns delivery. This run is already approved, but it has no
+            # inbound message to answer and must not close the ongoing task.
+            self.task_note(req, "done" if ok else "failed",
+                           f"Follow-up checked: {status.get('result_line') or status.get('final_status') or status.get('error') or ''}",
+                           state="open")
+            return ""
         if req.id in self._blanket_pending:
             # "You have my permission for everything" was said about this request
             # while it was still running (item 4): it applies to this request's
@@ -3681,3 +3721,77 @@ class GateSessionManager:
                 await self.schedules.tick()
             except Exception:
                 logger.exception("schedule loop error")
+
+    async def _followup_loop(self) -> None:
+        while True:
+            await asyncio.sleep(30)
+            try:
+                if _settings.get("GATE_FOLLOWUPS") and self.store.followups_available:
+                    for row in self.store.due_followups():
+                        # Claim before starting any work. A restart cannot repeat it.
+                        if self.store.mark_followup_fired(row["id"]):
+                            asyncio.create_task(self._run_followup(row))
+            except Exception as exc:
+                logger.warning("[gate] follow-up loop failed: %s", exc)
+
+    async def _run_followup(self, row: Dict[str, Any]) -> None:
+        from .hosttools import followup_time
+        request = None
+        try:
+            original = self.store.get_request(row["request_id"])
+            if original is None:
+                raise ValueError("original request is missing")
+            scopes = json.loads(row["scopes_json"])
+            # The saved approval is the ceiling even if the task gained scopes later.
+            scopes = [scope for scope in scopes if scope in original.scopes]
+            if not scopes:
+                raise ValueError("original scopes are missing")
+            prompt = (f"Follow-up you set on {followup_time(row['created_at'])}: {row['note']}\n\n"
+                      "Check the task ledger. Report CHANGED: yes if there is something worth telling "
+                      "the chat, or CHANGED: no if nothing changed. Explain the result in plain words.")
+            request = self.store.create_request(
+                chat_id=row["chat_id"], sender=row["requester"], sender_name=original.sender_name,
+                mode=original.mode, subject=original.subject, original_message=prompt,
+                summary=f"Follow-up: {row['note']}", scopes=scopes, prompt=prompt,
+                state="approved", task_id=row["task_id"])
+            self.store.set_state(request.id, "approved", status={"followup_id": row["id"]})
+            request = self.store.get_request(request.id)
+            self.store.task_event(row["task_id"], "request", f"Follow-up fired: {row['note']}",
+                                  chat_id=row["chat_id"], request_id=request.id, state="running")
+            await self.execute(request, notify=False)
+            finished = self.store.get_request(request.id)
+            status = (finished.status or {}) if finished else {}
+            if finished and finished.state == "pending":
+                self.store.finish_followup(row["id"], "Waiting for confirmation.")
+                return
+            result = str(status.get("result_line") or status.get("final_status") or
+                         status.get("summary") or status.get("error") or "").strip()
+            self.store.finish_followup(row["id"], result, failed=not bool(status.get("ok")))
+            if status.get("ok") and (status.get("changed") is False or re.search(
+                    r"\b(nothing changed|no change|nothing to report|no update)\b", result, re.I)):
+                self.store.task_event(row["task_id"], "note", "Follow-up found nothing changed.",
+                                      chat_id=row["chat_id"], request_id=request.id, state="open")
+                return
+            if not result and status.get("ok"):
+                return
+            message = result if status.get("ok") else wording.failure_message(
+                wording.plain_title(self.store, request), status)
+            route = self.store.thread_route(row["chat_id"])
+            mode = (route or {}).get("mode") or original.mode
+            if mode == "voice" and not self._is_owner_request(original) and len(_digits(row["requester"])) >= 7:
+                number = row["requester"]
+                await self.send(f"sms:{number}", message, "sms", {"to": number, "sender": number},
+                                chat_id=row["chat_id"])
+            elif mode == "voice" or not route:
+                await self.send_to_approver(message)
+            else:
+                await self.send(row["chat_id"], message, mode, route["meta"], chat_id=row["chat_id"])
+        except Exception as exc:
+            logger.warning("[gate] follow-up #%s failed: %s", row["id"], exc)
+            try:
+                self.store.finish_followup(row["id"], str(exc), failed=True)
+                self.store.task_event(row["task_id"], "failed", f"Follow-up failed: {exc}",
+                                      chat_id=row["chat_id"], request_id=request.id if request else None,
+                                      state="open")
+            except Exception as record_exc:
+                logger.warning("[gate] follow-up #%s failure recording failed: %s", row["id"], record_exc)
