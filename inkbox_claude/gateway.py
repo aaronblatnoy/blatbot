@@ -1660,14 +1660,19 @@ class InkboxGateway:
         if executor is not None:
             quota = executor.quota_state()
         counts = {"pending": 0, "running": 0, "done": 0, "failed": 0}
+        store = getattr(self.sessions, "store", None)
         try:
-            store = getattr(self.sessions, "store", None)
             if store is not None:
                 counts = store.inbox_counts()
         except Exception as exc:
             logger.warning("[inbox] health count failed: %s", exc)
-        return web.json_response({"ok": True, "identity": self.cfg.identity, "quota": quota,
-                                  "inbox": counts})
+        report = {"ok": True, "identity": self.cfg.identity, "quota": quota, "inbox": counts}
+        if store is not None and hasattr(store, "outbox_counts"):
+            try:
+                report["outbox"] = store.outbox_counts()
+            except Exception as exc:
+                logger.warning("[gateway] outbox health counts unavailable: %s", exc)
+        return web.json_response(report)
 
     def _inbox_session(self, chat_id: str, mode: str, meta: Dict[str, Any]) -> Any:
         session = self.sessions.get(chat_id)

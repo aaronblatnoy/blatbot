@@ -395,8 +395,22 @@ class ScheduleService:
         from . import schedprop
         return schedprop.capability_match(text)
 
-    async def _notice(self, schedule: Schedule, text: str) -> None:
-        await self.manager.send_schedule_notice(schedule, text)
+    async def _notice(self, schedule: Schedule, text: str, *, kind: str = "schedule") -> None:
+        try:
+            await self.manager.send_schedule_notice(schedule, text, kind=kind)
+        except TypeError as exc:
+            if "unexpected keyword argument 'kind'" not in str(exc):
+                raise
+            # Older manager stand-ins still have the two-argument send method.
+            await self.manager.send_schedule_notice(schedule, text)
+
+    async def _owner_notice(self, text: str) -> None:
+        try:
+            await self.manager.send_to_approver(text, kind="schedule")
+        except TypeError as exc:
+            if "unexpected keyword argument 'kind'" not in str(exc):
+                raise
+            await self.manager.send_to_approver(text)
 
     def _scopes_for_tool(self, tool: str) -> List[str]:
         best = scope_for_tool(tool)
@@ -447,7 +461,7 @@ class ScheduleService:
             logger.info("[schedules] %s self-serve: started without a proposal: %s", schedule.id, title)
             return await self.decide(schedule.id, True)
         logger.info("[schedules] %s proposed: %s", schedule.id, title)
-        await self._notice(schedule, self._proposal_text(schedule))
+        await self._notice(schedule, self._proposal_text(schedule), kind="approval")
         return schedule
 
     @staticmethod
@@ -478,7 +492,7 @@ class ScheduleService:
                     schedule_id, prompt=revert["prompt"], scopes=revert["scopes"], state=state,
                     next_run=next_run, notes=[], last_outcome="a change was rejected; kept as it was")
                 logger.info("[schedules] %s edit rejected; reverted", schedule_id)
-                await self._notice(updated, f"Left {updated.title} as it was.")
+                await self._notice(updated, f"Left {updated.title} as it was.", kind="reply")
                 return updated
             # Either a brand-new proposal, or an edit snapshot whose own pre-edit state
             # was "proposed" (he never actually said yes to it even once): either way
@@ -487,7 +501,7 @@ class ScheduleService:
             updated = self.store.update_schedule(schedule_id, state="ended", next_run=None,
                                                  last_outcome="rejected")
             logger.info("[schedules] %s rejected", schedule_id)
-            await self._notice(updated, f"Rejected {updated.title}.")
+            await self._notice(updated, f"Rejected {updated.title}.", kind="reply")
             return updated
         cadence = dict(schedule.cadence or {})
         start_now = bool(cadence.pop("start_now", False))
@@ -507,7 +521,7 @@ class ScheduleService:
         updated = self.store.update_schedule(schedule_id, state="active", next_run=next_run, notes=[])
         logger.info("[schedules] %s activated, first run %s", schedule_id, next_run)
         await self._notice(updated, f"Changed {updated.title}. Next check {_shown(next_run, updated.timezone)}."
-                           if was_edit else self._started_text(updated, next_run))
+                           if was_edit else self._started_text(updated, next_run), kind="reply")
         return updated
 
     def _started_text(self, schedule: Schedule, next_run: Optional[float]) -> str:
@@ -733,7 +747,7 @@ class ScheduleService:
                 schedule_id, prompt=prompt, scopes=scopes, state="proposed",
                 revision=old.revision + 1, notes=[json.dumps({"_edit_revert": revert})])
             await self._notice(updated, _insert_before_reply_yes(
-                self._proposal_text(updated), extra_proposal_note))
+                self._proposal_text(updated), extra_proposal_note), kind="approval")
             message = f"Updated proposal sent for {updated.title}."
         if immediate or needs_approval:
             updated = self.store.update_schedule(schedule_id, failure_reset_at=time.time(),
@@ -944,7 +958,7 @@ class ScheduleService:
             str(confirm.get("tool", "")).split("__")[-1].replace("_", " ") or "do that"
         when = _shown(running.updated_at, schedule.timezone)
         await self._notice(schedule, f'{schedule.title} is waiting for your yes to {what} since {when}. '
-                                     'Say yes or no to that first.')
+                                     'Say yes or no to that first.', kind="approval")
         self.store.set_state(running.id, running.state, status={**status, "held_skip_notified": True})
 
     async def _run_fired(self, req: Request) -> None:
@@ -1099,7 +1113,7 @@ class ScheduleService:
             updated = self.store.update_schedule(schedule.id, state="paused", next_run=None,
                                                  last_outcome=failure_reason({**status, **classification}))
             logger.info("[schedules] %s paused: blocked (%s)", schedule.id, result_line or "no reason given")
-            await self.manager.send_to_approver(self.notice_text(updated, run_dict, None))
+            await self._owner_notice(self.notice_text(updated, run_dict, None))
             return True
         stop = bool(status.get("stop"))
         failures = 0 if complete else schedule.consecutive_failures + 1
@@ -1117,7 +1131,7 @@ class ScheduleService:
             logger.info("[schedules] %s paused: three consecutive runs that could not finish", schedule.id)
             paused_run = dict(run_dict)
             paused_run["paused"] = True
-            await self.manager.send_to_approver(self.notice_text(updated, paused_run, None))
+            await self._owner_notice(self.notice_text(updated, paused_run, None))
             return True
         extra: Dict[str, Any] = {}
         if schedule.cadence_kind == "once":

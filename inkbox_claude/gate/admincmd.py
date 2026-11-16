@@ -23,6 +23,7 @@ from __future__ import annotations
 import json
 import logging
 import re
+import time
 from types import SimpleNamespace
 from typing import Any, Dict, List, Optional
 
@@ -102,6 +103,8 @@ _PATTERNS: List[Any] = [(a, re.compile(p, re.I)) for a, p in [
     ("requests_list", r"^(?:show|list)(?: me)?(?: all)?(?: the| my)? (?P<which>pending|failed|waiting) requests$"),
     ("requests_list", r"^what(?:'s| is| are) (?:pending|waiting)(?: on me| for me| for my approval)?\??$"),
     ("request_retry", r"^(?:retry|try again on|try) (?:request )?#?(?P<id>\d+)(?: again)?$"),
+    ("outbox_retry", r"^retry outbox #?(?P<id>\d+)$"),
+    ("outbox_list", r"^outbox$"),
     ("health", r"^(?:health|health check|how are you doing|how(?:'s| is) blatbot(?: doing)?|are you ok(?:ay)?|are you healthy)\??$"),
     ("schedule_do", r"^(?P<sact>pause|resume|stop) (?:the )?(?P<target>.+?)(?: schedule| job)?$"),
     ("schedule_do", r"^(?P<sact>run) (?:the )?(?P<target>.+?)(?: schedule| job)? now$"),
@@ -809,6 +812,25 @@ def health(ctx: Any) -> str:
     return wording.health_line(data, pending=len(ctx.store.pending()))
 
 
+def outbox_list(store: Any) -> str:
+    rows = store.recent_outbox(time.time() - 24 * 3600)
+    if not rows:
+        return "No queued, held, or failed messages in the last 24 hours."
+    lines = ["Outbox in the last 24 hours:"]
+    for row in rows[:30]:
+        preview = " ".join(str(row["text"]).split())[:100]
+        reason = f" ({row['last_error']})" if row["status"] == "failed" and row["last_error"] else ""
+        lines.append(f"#{row['id']} {row['status']} for {row['target']}: {preview}{reason}")
+    if len(rows) > 30:
+        lines.append(f"And {len(rows) - 30} more.")
+    return "\n".join(lines)
+
+
+def outbox_retry(store: Any, row_id: str) -> str:
+    return (f"Outbox #{row_id} is queued to try again." if store.retry_outbox(int(row_id))
+            else f"Outbox #{row_id} was not a failed message.")
+
+
 # ---------------------------------------------------------------------------
 # pause or resume every schedule (the console's one global switch)
 # ---------------------------------------------------------------------------
@@ -856,6 +878,8 @@ async def handle(ctx: Any, cmd: Dict[str, Any]) -> str:
         "groups_list": lambda: groups_list(store),
         "requests_list": lambda: requests_list(store, cmd.get("which") or "pending"),
         "health": lambda: health(ctx),
+        "outbox_list": lambda: outbox_list(store),
+        "outbox_retry": lambda: outbox_retry(store, cmd.get("id") or "0"),
     }
     if action in sync_actions:
         return sync_actions[action]()
