@@ -1216,7 +1216,8 @@ class ScheduleService:
         if outcome == "blocked":
             reason = self._blocked_reason(run)
             match = self._capability_match(str(run.get("needs") or "")) or self._capability_match(result_line)
-            if match:
+            # Offering what it already has would send him round in a circle.
+            if match and match not in (schedule.scopes or []):
                 fix = f'Say "let it {self._labels([match])}" and I will run it now, or "stop it".'
             else:
                 fix = 'Tell me where to find it or what to change, or say "stop it".'

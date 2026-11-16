@@ -22,11 +22,42 @@ def start_time_line(started_at: float, timezone: str) -> str:
     return f"This run started {local.strftime(_START_FMT)} ({timezone})."
 
 
-def build_prompt(prompt: str, started_at: float, timezone: str, note: Optional[str] = None) -> str:
+def delivery_line(origin_mode: str, origin_chat_id: str) -> str:
+    """Where this schedule's result is posted, said to the run in plain words. A
+    schedule set up in a chat reports back into that chat: the gateway posts RESULT
+    there. A run that is asked to "post" or "send" something to that same chat has
+    no tool for it and needs none, and without being told so it reports that it
+    cannot post. Empty when the schedule has no chat of its own (console-made)."""
+    import json
+    mode = str(origin_mode or "").strip()
+    raw = str(origin_chat_id or "")
+    if not mode or mode == "console" or not raw:
+        return ""
+    title = ""
+    if raw.startswith("{"):
+        try:
+            meta = json.loads(raw).get("meta") or {}
+            title = " ".join(str(meta.get("group_title") or "").split())
+        except Exception:
+            title = ""
+    names = {"imessage": "iMessage", "telegram": "Telegram", "sms": "text message", "email": "email"}
+    where = (f'the {names.get(mode, mode)} group "{title}"' if title
+             else f"the {names.get(mode, mode)} conversation this schedule was set up in")
+    return (f"WHERE YOUR RESULT GOES: the gateway posts your RESULT in {where}. If this schedule asks you to "
+            "post, send or say something there, RESULT is that message: write it in full, exactly as it should "
+            "appear, on as many lines as it needs. Do not look for a tool to send it there, and do not report "
+            "that you cannot post there.")
+
+
+def build_prompt(prompt: str, started_at: float, timezone: str, note: Optional[str] = None,
+                 delivery: str = "") -> str:
     """The user prompt text for one scheduled run: the start-time line, then the
-    schedule's own prompt, then the previous run's note (if any). No task ledger
-    is ever added here; a scheduled run carries none."""
+    schedule's own prompt, then where the result is posted (if it has a chat of its
+    own), then the previous run's note (if any). No task ledger is ever added here;
+    a scheduled run carries none."""
     parts = [start_time_line(started_at, timezone), prompt]
+    if delivery:
+        parts.append(delivery)
     if note and note.strip():
         parts.append("NOTE FROM THE PREVIOUS RUN:\n" + note.strip())
     return "\n\n".join(parts)

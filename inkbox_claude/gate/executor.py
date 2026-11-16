@@ -439,7 +439,15 @@ class Executor:
 
         if req.schedule_id:
             system_append = SCHEDULE_EXECUTOR_SYSTEM + f"\nNow: {now_line()}. Resolve 'today', 'tomorrow', weekday names and relative dates from this.\n"
-            prompt_text = schedrun.build_prompt(req.prompt, started_at, timezone, note)
+            delivery = ""
+            try:
+                sched = self.manager.store.get_schedule(req.schedule_id) if self.manager is not None else None
+                if sched is not None:
+                    delivery = schedrun.delivery_line(getattr(sched, "origin_mode", ""),
+                                                      getattr(sched, "origin_chat_id", ""))
+            except Exception:
+                logger.warning("[gate] #%s could not read where its schedule reports", req.id)
+            prompt_text = schedrun.build_prompt(req.prompt, started_at, timezone, note, delivery)
         else:
             system_append = EXECUTOR_SYSTEM + f"\nNow: {now_line()}. Resolve 'today', 'tomorrow', weekday names and relative dates from this.\n"
             prompt_text = continuation or req.prompt
