@@ -2023,7 +2023,11 @@ class GateSession:
                 logger.warning("[gate %s] inbound #%s already answered; failure result not delivered again",
                                self.chat_id, self.inbound_id)
                 return True
-            return await self.send_to_sender(message, role="answer")
+            # "Still working, I'll text you the answer" promises an answer; it is not one.
+            # Filed as an answer it made the real result, when the run finished, look like
+            # a second answer to the same message, and the result was never sent.
+            role = "ack" if message == wording.still_working_message() else "answer"
+            return await self.send_to_sender(message, role=role)
 
     async def notify_after_request(self, note: str, inbound_id: Optional[int] = None) -> bool:
         """Phrase a request's result for the sender. The result is THE answer to the
