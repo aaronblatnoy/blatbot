@@ -65,9 +65,11 @@ def _captures_bare_answer(store: Any, chat_id: str, schedule: Schedule) -> bool:
     since, so a bare yes/no is not captured at all (item G) -- the message
     goes on to the router as today."""
     with store._lock:
+        # A proposal said in a group used to be written down on the owner's thread
+        # only; it still answers a yes in the group it was said in.
         prop_row = store._db.execute(
-            "SELECT created_at FROM messages WHERE chat_id=? AND schedule_id=? AND kind='outbound' "
-            "ORDER BY created_at DESC LIMIT 1", (chat_id, schedule.id)).fetchone()
+            "SELECT created_at FROM messages WHERE chat_id IN (?, 'owner') AND schedule_id=? "
+            "AND kind='outbound' ORDER BY created_at DESC LIMIT 1", (chat_id, schedule.id)).fetchone()
         if prop_row is None:
             return False
         sent_at = float(prop_row["created_at"])

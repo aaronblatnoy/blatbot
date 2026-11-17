@@ -386,6 +386,11 @@ def _repair_join(parts: List[str]) -> str:
     return ", ".join(parts[:-1]) + ", and " + parts[-1]
 
 
+def _ends_only(schedule: Schedule) -> bool:
+    """A follow-up: Aaron hears from it only when it ends (see schedprop.is_follow_up)."""
+    return str(getattr(schedule, "report_mode", "") or "") == "end"
+
+
 class ScheduleService:
     def __init__(self, manager: Any):
         self.manager = manager
@@ -448,10 +453,16 @@ class ScheduleService:
                       cadence_kind: str, cadence: Dict[str, Any], timezone: Optional[str] = None,
                       report_every_time: Optional[bool] = None, until: Optional[float] = None,
                       scopes: List[str], start_now: bool = False, origin_mode: str = "",
-                      origin_chat_id: str = "", auto_start: bool = False) -> Schedule:
+                      origin_chat_id: str = "", auto_start: bool = False,
+                      start_at: Optional[float] = None, stop_when: Optional[str] = None) -> Schedule:
         """Create a schedule. It is proposed to Aaron for his yes, unless `auto_start`:
         then it is activated at once and he hears what was set up instead. The caller
-        decides `auto_start` (see self_serve); the service never widens it."""
+        decides `auto_start` (see self_serve); the service never widens it.
+
+        `start_at` is the first run he stated ("starting 9am"): an `every` cadence is
+        anchored on it, any other repeating cadence fires no earlier. `stop_when` makes
+        it a follow-up: the condition is stated in its prompt as each run's first
+        check (the run ends it with STATUS: STOP), and he hears only when it ends."""
         if not owner:
             raise PermissionError("only Aaron can create or change schedules")
         cadence_module.validate(cadence_kind, cadence)
@@ -467,9 +478,22 @@ class ScheduleService:
                         else self._default_report_every_time(prompt, cadence_kind))
         stored_cadence = dict(cadence or {})
         stored_cadence["start_now"] = bool(start_now)
+        if start_at is not None and start_at > time.time() and cadence_kind != "once":
+            stored_cadence["start_now"] = False
+            if cadence_kind == "every":
+                stored_cadence["anchor"] = float(start_at)
+            else:
+                stored_cadence["not_before"] = float(start_at)
+        report_mode = "changed"
+        stop_when = " ".join(str(stop_when or "").split())
+        if stop_when:
+            from . import schedprop
+            stored_cadence["stop_when"] = stop_when
+            prompt = schedprop.follow_up_prompt(prompt, stop_when)
+            report_mode, report_every = "end", False
         schedule = self.store.create_schedule(
             chat_id=chat_id, task_id=task_id, title=title, prompt=prompt,
-            kind=cadence_kind, scopes=scopes, timezone=timezone_name, report_mode="changed",
+            kind=cadence_kind, scopes=scopes, timezone=timezone_name, report_mode=report_mode,
             cadence_kind=cadence_kind, cadence=stored_cadence, report_every_time=report_every,
             until=until, origin_mode=origin_mode, origin_chat_id=origin_chat_id or chat_id,
         )
@@ -1145,7 +1169,7 @@ class ScheduleService:
                        "denied": denied, "note": note, "changed": changed, "cost_usd": status.get("cost_usd"),
                        "needs": str(status.get("needs") or ""), "error": status.get("error")}
             send = ((not complete) or schedule.report_every_time or changed) and not told_itself
-            if send:
+            if send and not _ends_only(schedule):
                 await self._notice(schedule, self.notice_text(schedule, run_dict, None))
             return True
         if classification["failure_class"] == "usage_limit":
@@ -1188,9 +1212,26 @@ class ScheduleService:
                                                  last_outcome=result_line or "stopped itself",
                                                  consecutive_failures=0)
             logger.info("[schedules] %s ended: STATUS: STOP", schedule.id)
-            await self._notice(updated, _ot().compose(
+            text = _ot().compose(
                 "timer", f"{_title_for_sentence(updated.title)} has ended",
-                body=_sentence(result_line or "it stopped itself"), tail="It will not run again."))
+                body=_sentence(result_line or "it stopped itself"), tail="It will not run again.")
+            if _ends_only(updated):
+                # A follow-up's end is its report, and it is for Aaron, not the room.
+                await self._owner_notice(text)
+            else:
+                await self._notice(updated, text)
+            return True
+        if _ends_only(schedule) and schedule.cadence_kind != "once" and schedule.run_count >= schedule.max_runs:
+            # A follow-up whose condition never came true gives up after max_runs tries.
+            updated = self.store.update_schedule(schedule.id, state="ended", next_run=None,
+                                                 consecutive_failures=failures,
+                                                 last_outcome=f"gave up after {schedule.run_count} tries")
+            logger.info("[schedules] %s ended: gave up after %s tries", schedule.id, schedule.run_count)
+            stop_text = (getattr(schedule, "cadence", None) or {}).get("stop_when") or "what it was waiting for"
+            await self._owner_notice(_ot().compose(
+                "timer", f"{_title_for_sentence(updated.title)} gave up after {schedule.run_count} tries",
+                body=_sentence(f"{_normalize_reason(str(stop_text))} has not happened"),
+                tail=_sentence(f"Last run: {result_line or self._shown_text(run_dict)}")))
             return True
         if failures >= 3:
             updated = self.store.update_schedule(schedule.id, state="paused", next_run=None,
@@ -1206,6 +1247,9 @@ class ScheduleService:
         updated = self.store.update_schedule(schedule.id, consecutive_failures=failures,
                                              last_outcome=result_line, **extra)
         send = ((not complete) or schedule.report_every_time or changed) and not told_itself
+        if _ends_only(updated):
+            # A follow-up reports when it ends (above), not on each run.
+            send = False
         if told_itself:
             logger.info("[schedules] %s run #%s %s; no notice added", schedule.id, run_id,
                         "posted its own message" if status.get("answered_requester") else "chose to send nothing")
