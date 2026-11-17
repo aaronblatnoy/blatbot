@@ -15,6 +15,7 @@ RUN pip install --no-cache-dir . "inkbox==0.6.10" "claude-agent-sdk==0.2.152" "l
     && mkdir -p /data /etc/gondroid && chown -R app:app /data
 COPY deploy/gondroid/scopes.yaml /etc/gondroid/scopes.yaml
 COPY deploy/gondroid/entrypoint.sh /entrypoint.sh
+COPY scripts/http_mcp_bridge.py /app/scripts/http_mcp_bridge.py
 USER app
 EXPOSE 8772
 HEALTHCHECK --interval=30s --timeout=5s --start-period=60s --retries=3 \

@@ -1,25 +1,29 @@
 # Gondroid's scope registry: the professional instance starts with its own mailbox, contacts,
-# the public web and its own long-term memory. Nothing personal (no TAMID, Brightspace, Stern,
+# the public web and the Definite Optimists brain as its memory. Nothing personal (no TAMID, Brightspace, Stern,
 # personal Drive or Gmail, Telegram account, vault, server or Coolify). Add scopes here as
 # professional systems are connected.
 version: 1
 where_things_live:
-- 'What happened in earlier conversations with Gondroid, on any channel (who someone is, what they asked for, what
-  was agreed, decided, sent or done, and when): Gondroid''s long-term memory. It is not live state: for what is
-  true now, read the system itself.'
+- 'What the Definite Optimists team and its agents have written down (the company, its plans, people, decisions,
+  how things were set up), and anything Gondroid saved there: the Definite Optimists brain, Gondroid''s memory.
+  It is not live state: for what is true now, read the system itself.'
 - 'The public web is only for things outside Aaron''s systems: other organizations, people''s public profiles,
   articles, general facts.'
 - A task that only reads never needs a write capability; a task that changes something needs the write capability
   of that system, not a browser.
 systems:
   long_term_memory:
-    description: 'Gondroid''s long-term memory: a graph of dated facts from every past conversation it has had,
-      on any channel (who someone is, what they asked for, what was agreed, decided, sent or done, and when).
-      For looking back past the recent conversation. Not a live system.'
-    requires: graphiti
+    description: 'Gondroid''s memory: the Definite Optimists brain, the startup''s one shared team memory (dated
+      facts the team''s people and agents saved about the company, its plans, customers, people, decisions and how
+      things were set up). Searching it, listing recent memories, and adding to it. Not a live system.'
     always:
     - memory_read
-    leaves: {}
+    leaves:
+      memory_write:
+        question: Save something new to the Definite Optimists brain (a fact, decision, note or update for the team
+          to remember).
+        grants:
+        - memory_write
   blatbot_inkbox:
     description: 'Gondroid''s own mailbox, phone line and address book: its email, SMS and iMessage threads, sending
       a message to a third party, contact records and notes.'
@@ -134,15 +138,29 @@ scopes:
     tools:
     - WebSearch
   memory_read:
-    description: 'look back through Gondroid''s long-term memory of past conversations (dated facts about people,
-      requests, agreements, decisions and what was done). Read-only. Each person only reaches what they may see:
-      their own conversations, unless their role grants more; Aaron reaches all of it.'
-    label: look back through past conversations
-    ask: 'look back through past conversations'
+    description: 'search and read the Definite Optimists brain, the startup''s shared team memory (facts the team
+      and its agents saved, with who added each). Read-only.'
+    label: search the Definite Optimists brain
+    ask: 'search the Definite Optimists brain'
     synonyms:
     - what did we say
     - earlier conversation
     - long-term memory
+    - definite optimists
+    - do brain
+    - team brain
     read: true
     tools:
-    - mcp__host__memory_search
+    - mcp__do-brain__search_memory
+    - mcp__do-brain__recent_memories
+  memory_write:
+    description: 'add a memory to the Definite Optimists brain, the startup''s shared team memory. Adds only;
+      cannot change or delete what is there. Saved as added by gondroid (agent).'
+    label: save to the Definite Optimists brain
+    ask: 'save to the Definite Optimists brain'
+    synonyms:
+    - remember this for the team
+    - add to the do brain
+    read: false
+    tools:
+    - mcp__do-brain__add_memory
