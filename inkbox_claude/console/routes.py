@@ -274,6 +274,11 @@ async def post_request_retry(request: web.Request) -> web.StreamResponse:
     return _json(result)
 
 
+async def post_request_dismiss(request: web.Request) -> web.StreamResponse:
+    result = await api.dismiss_request_endpoint(_manager(request), await _payload(request))
+    return _json(result)
+
+
 async def get_tasks(request: web.Request) -> web.StreamResponse:
     return _json(api.tasks(_manager(request).store))
 
@@ -437,6 +442,9 @@ def register(app: web.Application, gateway: Any) -> None:
     )
     app.router.add_post(
         "/console/api/requests/retry", _endpoint(post_request_retry, mutation=True)
+    )
+    app.router.add_post(
+        "/console/api/requests/dismiss", _endpoint(post_request_dismiss, mutation=True)
     )
     app.router.add_get("/console/api/tasks", _endpoint(get_tasks))
     app.router.add_get("/console/api/tasks/{id}", _endpoint(get_task))

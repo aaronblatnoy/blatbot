@@ -804,6 +804,25 @@ async def retry_request_endpoint(manager: Any, payload: Dict[str, Any]) -> Dict[
     return {"ok": True, "id": new_req.id, "needs_approval": not approved, "message": message}
 
 
+async def dismiss_request_endpoint(manager: Any, payload: Dict[str, Any]) -> Dict[str, Any]:
+    """POST /console/api/requests/dismiss: clear one failed request from Stuck
+    without retrying it (already handled another way). The request stays
+    `failed` in Runs; only a `dismissed` flag is added to its status through
+    the store's own set_state. Owner-console only, like every console write."""
+    try:
+        request_id = int(payload.get("id"))
+    except (TypeError, ValueError):
+        raise ValidationError("id must be an integer") from None
+    req = manager.store.get_request(request_id)
+    if req is None:
+        raise ValidationError(f"no such request: {request_id}")
+    if req.state != "failed":
+        raise ValidationError(f"that request is {req.state}, not failed -- nothing to dismiss")
+    manager.store.set_state(request_id, "failed", status={**(req.status or {}), "dismissed": True})
+    events.publish("requests.changed", {"id": request_id, "action": "dismiss"})
+    return {"ok": True, "id": request_id, "message": "Dismissed."}
+
+
 def _task_runs(requests_: List[Request]) -> List[Dict[str, Any]]:
     return [{"id": r.id, "state": r.state, "summary": r.summary or "", "created_at": r.created_at,
              "outcome": run_outcome(r)} for r in requests_]
@@ -982,7 +1001,8 @@ def _schedule_view(store: Store, service: Any, schedule: Any) -> Dict[str, Any]:
         "next_run": next_run, "next_run_text": _schedule_time_text(next_run, schedule.timezone),
         "next_run_in_seconds": (next_run - time.time()) if next_run is not None else None,
         "report_every_time": schedule.report_every_time,
-        "report_text": ("Every time it runs" if schedule.report_every_time
+        "report_text": ("Only when it ends" if schedprop.is_follow_up(schedule)
+                        else "Every time it runs" if schedule.report_every_time
                         else "Only when something changed or it could not finish"),
         "until": schedule.until,
         "capabilities": _capability_list(schedule.scopes),
