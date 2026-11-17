@@ -61,7 +61,9 @@ SEND_MESSAGE_DESCRIPTION = (
     "iMessage, text message, email or Telegram. to is \"requester\" (the person who asked, answered on "
     "the surface they wrote from: this is how you give them your answer), \"aaron\", a person's name, or a "
     "group chat's name. surface is optional (imessage, telegram, sms, email): without it the surface they "
-    "last used with Blatbot is picked. subject is for email only. The answer says where it went."
+    "last used with Blatbot is picked. subject is for email only. The answer says where it went. "
+    "Posting in a Telegram group Blatbot is in is done here too: to is the group's name. It needs no extra "
+    "access; the telegram_* tools only read Aaron's personal account and have nothing to do with sending."
 )
 SEND_MESSAGE_SCHEMA = {"type": "object", "required": ["to", "text"], "properties": {
     "to": {"type": "string", "description": "\"requester\", \"aaron\", a person's name, or a group chat's name"},
@@ -423,8 +425,14 @@ def resolve(manager: Any, req: Any, to: Any, surface: Any = None) -> Dict[str, A
                             _dest(f"imessage:{phone}", "imessage", {"imessage_to": phone},
                                   f"imessage:{phone}", name))
                 else:
-                    raise ValueError(f'No person or group chat called "{name}" is on record. '
-                                     "Use where_to_reach, or the exact name.")
+                    try:
+                        titles = [g["title"] for g in manager.store.known_group_chats()][:12]
+                    except Exception:
+                        titles = []
+                    known = (" Group chats Blatbot can post in: " + "; ".join(titles) + "."
+                             if titles else "")
+                    raise ValueError(f'No person or group chat called "{name}" is on record.{known} '
+                                     "Use one of those names exactly, or a person's name.")
                 if want and dest["mode"] != want and not (want == "email" and kind == "email"):
                     raise ValueError(f"{name} can only be reached on {SURFACE_WORDS[dest['mode']]}.")
             else:
