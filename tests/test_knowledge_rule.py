@@ -170,3 +170,13 @@ def test_console_shows_notes_and_memory_per_role_and_person(tmp_path, monkeypatc
                 if s.startswith("memory:")]
     parts = {p["part"]: p for p in api.memory_access(m.store)}
     assert "Never in a group chat" in parts["User notes"]["readers"]
+
+
+def test_console_routes_register(tmp_path, monkeypatch):
+    """The whole console registers on a real aiohttp app (a broken route once took it down)."""
+    from aiohttp import web
+    from inkbox_claude.console import routes
+    app = web.Application()
+    routes.register(app, SimpleNamespace())
+    paths = {r.resource.canonical for r in app.router.routes() if r.resource is not None}
+    assert {"/console/api/knowledge", "/console/api/roles/set_memory", "/console/api/roles/set_notes"} <= paths
