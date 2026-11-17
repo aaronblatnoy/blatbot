@@ -159,6 +159,7 @@ def test_schedule_list_shapes_every_state_and_top_level_fields(tmp_path):
     assert team["cadence_text"] == "every 4 hours"
     assert team["capabilities"] == [{"scope": "web", "label": "read public web pages"}]
     assert team["last_run"]["outcome_label"] == "Finished"
+    assert team["report_text"] == "Only when something changed or it could not finish"
     assert team["next_run_text"] is not None
     assert team["next_run_in_seconds"] is not None
 
@@ -562,3 +563,14 @@ def test_ran_before_history_false_once_a_real_run_exists(tmp_path):
     rows = api.schedule_list(manager.store, manager.schedules)["schedules"]
     row = next(r for r in rows if r["id"] == schedule.id)
     assert row["ran_before_history"] is False
+
+
+def test_follow_up_report_text_says_only_when_it_ends(tmp_path):
+    store = make_store(tmp_path)
+    schedule = _make_schedule(store, title="Watch the reply")
+    store._db.execute("UPDATE schedules SET report_mode='end' WHERE id=?", (schedule.id,))
+    store._db.commit()
+    manager = FakeManager(store)
+    result = api.schedule_list(store, manager.schedules)
+    row = next(r for r in result["schedules"] if r["id"] == schedule.id)
+    assert row["report_text"] == "Only when it ends"

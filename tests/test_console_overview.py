@@ -310,7 +310,9 @@ def test_retry_action_wired_to_the_real_endpoint(tmp_path):
 
     row = next(r for r in result["stuck"] if r["kind"] == "request" and r["id"] == request.id)
     assert row["actions"] == [{"action": "retry", "label": "Try again",
-                               "target": {"endpoint": "requests/retry", "id": request.id}}]
+                               "target": {"endpoint": "requests/retry", "id": request.id}},
+                              {"action": "dismiss", "label": "Dismiss",
+                               "target": {"endpoint": "requests/dismiss", "id": request.id}}]
 
 
 @pytest.mark.asyncio
@@ -366,7 +368,9 @@ def test_a_failed_request_in_the_last_day_is_stuck(tmp_path):
     assert "vendor portal timed out" not in row["sentence"]
     assert row["sentence"] == "Wire the vendor invoice.: it took too long."
     assert row["actions"] == [{"action": "retry", "label": "Try again",
-                               "target": {"endpoint": "requests/retry", "id": request.id}}]
+                               "target": {"endpoint": "requests/retry", "id": request.id}},
+                              {"action": "dismiss", "label": "Dismiss",
+                               "target": {"endpoint": "requests/dismiss", "id": request.id}}]
 
 
 def test_failed_request_older_than_a_day_is_not_stuck(tmp_path):
@@ -821,3 +825,28 @@ def test_denied_capability_is_the_only_fix(tmp_path):
     assert row['actions'][0]['label'].startswith('Let it ')
     assert 'contacts' in row['actions'][0]['target']['scopes']
     assert 'permission' in row['sentence']
+
+
+def test_declined_request_is_declined_not_could_not_finish(tmp_path):
+    store = make_store(tmp_path)
+    request = _make_request(store, summary="Add this to my gcal.", state="rejected")
+    result = api.overview(FakeGateway(FakeManager(store)), store)
+    row = next(r for r in result["done_today"] if r["id"] == request.id)
+    assert row["outcome"] == "declined"
+
+
+@pytest.mark.asyncio
+async def test_dismissed_failed_request_leaves_stuck_and_done_today(tmp_path):
+    store = make_store(tmp_path)
+    manager = FakeManager(store)
+    request = _make_request(store, summary="Send this to the group.", state="failed",
+                            status={"error": "no telegram tool"})
+    before = api.overview(FakeGateway(manager), store)
+    row = next(r for r in before["stuck"] if r["id"] == request.id)
+    assert any(a["action"] == "dismiss" for a in row["actions"])
+    out = await api.dismiss_request_endpoint(manager, {"id": request.id})
+    assert out["ok"] is True
+    after = api.overview(FakeGateway(manager), store)
+    assert request.id not in [r["id"] for r in after["stuck"] if r["kind"] == "request"]
+    assert request.id not in [r["id"] for r in after["done_today"] if r["kind"] == "request"]
+    assert store.get_request(request.id).state == "failed"

@@ -194,6 +194,8 @@ def _failed_request_candidates(store: Store, now: float) -> List[Dict[str, Any]]
         if request.schedule_id or request.state != "failed" or request.updated_at < cutoff:
             continue
         status = request.status or {}
+        if status.get("dismissed"):
+            continue  # the owner cleared it from Stuck (requests/dismiss)
         if wording.failure_category(status) == "usage_limit":
             continue
         is_latest_on_thread = bool(request.chat_id) and request.created_at >= latest_created_by_chat.get(
@@ -219,7 +221,9 @@ def _stuck_failed_requests(store: Store, now: float) -> List[Dict[str, Any]]:
         reason = wording.failure_in_words(request.status or {})
         sentence = f"{title}: {reason}."
         actions = [{"action": "retry", "label": "Try again",
-                    "target": {"endpoint": "requests/retry", "id": request.id}}]
+                    "target": {"endpoint": "requests/retry", "id": request.id}},
+                   {"action": "dismiss", "label": "Dismiss",
+                    "target": {"endpoint": "requests/dismiss", "id": request.id}}]
         out.append(_request_row(request, store, kind="request", since_field="since_text",
                                  sentence=sentence, title=title, actions=actions, say="try again"))
     return out
@@ -511,6 +515,8 @@ def _done_today_items(store: Store, now: float) -> List[Dict[str, Any]]:
             continue
         if request.updated_at < cutoff or request.id in stuck_failed_ids:
             continue
+        if request.state == "failed" and (request.status or {}).get("dismissed"):
+            continue  # cleared by the owner: neither Stuck nor Done today
         who = _request_who(request, store)
         title, plain = _request_title_and_plain(store, request)
         if request.state == "done":
@@ -520,7 +526,7 @@ def _done_today_items(store: Store, now: float) -> List[Dict[str, Any]]:
             outcome = "failed"
             result = wording.failure_in_words(request.status or {}) + "."
         else:
-            outcome = "could_not_finish"
+            outcome = "declined"
             result = _request_result_text(request) or "Declined."
         sentence = f"{who}: {result}" if who else f"{title}: {result}"
         items.append({
