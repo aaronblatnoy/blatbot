@@ -125,6 +125,36 @@ def _names_the_bot(text: str, msg: Dict[str, Any]) -> bool:
     return False
 
 
+_MENTION = re.compile(r"(?<![\w@])@([A-Za-z][A-Za-z0-9_]{2,31})")
+_SLASH_TARGET = re.compile(r"(?<!\w)/\w{1,32}@([A-Za-z][A-Za-z0-9_]{2,31})")
+
+
+def names_blatbot(text: str) -> bool:
+    """The text itself calls Blatbot: its @username, or its plain name as a word. A reply
+    to one of Blatbot's messages or a slash command is not a call by name."""
+    low = text.lower()
+    handle = (os.getenv("TELEGRAM_BOT_USERNAME") or "").lstrip("@").lower()
+    if handle and f"@{handle}" in low:
+        return True
+    for name in (os.getenv("TELEGRAM_BOT_NAME") or "", handle):
+        name = name.strip().lower()
+        if name and re.search(r"\b" + re.escape(name) + r"\b", low):
+            return True
+    return False
+
+
+def for_other_bot(text: str) -> bool:
+    """Is this message plainly aimed at a different bot? It @mentions another bot's handle
+    (Telegram bot usernames always end in "bot") and never calls Blatbot by handle or name.
+    Deterministic on purpose: it must hold when every judgment service is down. It holds
+    even when the message is a reply to something Blatbot said, because typing another
+    bot's @handle in that reply is the person choosing who to talk to."""
+    handle = (os.getenv("TELEGRAM_BOT_USERNAME") or "").lstrip("@").lower()
+    others = [m for m in _MENTION.findall(text or "") + _SLASH_TARGET.findall(text or "")
+              if m.lower().endswith("bot") and m.lower() != handle]
+    return bool(others) and not names_blatbot(text)
+
+
 def parse_update(update: Dict[str, Any]) -> Optional[Dict[str, Any]]:
     """What the gateway needs from one message update, or None when there is nothing
     to act on. In a group the bot now sees every message (privacy mode off), so the
@@ -141,11 +171,13 @@ def parse_update(update: Dict[str, Any]) -> Optional[Dict[str, Any]]:
         name = str(frm.get("username") or "")
     kind = str(chat.get("type") or "private")
     is_group = kind in ("group", "supergroup")
-    addressed = not is_group or _names_the_bot(text, msg)
+    other_bot = is_group and for_other_bot(text)
+    addressed = not is_group or (not other_bot and _names_the_bot(text, msg))
     return {"update_id": str(update.get("update_id") or ""),
             "message_id": str(msg.get("message_id") or ""),
             "chat_id": chat_id, "from_id": str(frm.get("id") or ""), "name": name, "text": text,
             "is_group": is_group, "group_title": str(chat.get("title") or ""), "addressed": addressed,
+            "for_other_bot": other_bot,
             "username": str(frm.get("username") or ""), "is_bot": bool(frm.get("is_bot")),
             # Unix seconds the message was sent (or last edited); 0 when Telegram gave none.
             "date": _unix(msg.get("edit_date") or msg.get("date"))}
