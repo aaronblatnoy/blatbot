@@ -409,6 +409,10 @@ class Executor:
                                "mcp__host__ask_aaron")]
         if (req.status or {}).get("followup_id"):
             scoped_allowed = [t for t in scoped_allowed if t not in ("mcp__host__request_access", "mcp__host__ask_aaron")]
+        if req.mode == "voice":
+            # A live call speaks the run's result to the caller; it keeps ending that way.
+            from .outcomes import ALL_TOOLS as _outcome_tools
+            scoped_allowed = [t for t in scoped_allowed if t not in _outcome_tools]
         run_outcomes = bool(_setting("GATE_RUN_OUTCOMES")) and "mcp__host__send_message" in scoped_allowed
         outcome_log: Dict[str, Any] = {"sends": [], "quiet": None}
         pages_ok = bool(scoped_allowed) and not req.schedule_id and pages.allowed_for(bool(from_owner))
