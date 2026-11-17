@@ -20,6 +20,7 @@ The bridge's runtime core:
 
 from __future__ import annotations
 
+from inkbox_claude.instance import ASSISTANT as _ASSISTANT, ASSISTANT_UPPER as _ASSISTANT_UPPER, ASSISTANT_EMAIL as _ASSISTANT_EMAIL, SERVER_NAME as _SERVER_NAME  # noqa: F401
 import asyncio
 import hashlib
 import json
@@ -722,6 +723,10 @@ def _claude_health() -> str:
     return "NOT authenticated — log in to Claude or set ANTHROPIC_API_KEY"
 
 
+def _inkbox_offline() -> bool:
+    return (os.getenv("INKBOX_OFFLINE") or "").strip().lower() in {"1", "true", "yes", "on"}
+
+
 def _tunnel_state_dir() -> Path:
     root = Path.home() / ".inkbox-claude" / "tunnel"
     root.mkdir(parents=True, exist_ok=True)
@@ -830,11 +835,21 @@ class InkboxGateway:
             raise RuntimeError(
                 "INKBOX_VOICE_AI_AUTHORITY_MODE must be contact_scoped or yolo"
             )
-        if not self.cfg.api_key or not self.cfg.identity:
-            raise RuntimeError("INKBOX_API_KEY and INKBOX_IDENTITY must be set (see README)")
+        # INKBOX_OFFLINE=1 runs an instance that has no Inkbox identity yet (no mailbox, phone or
+        # tunnel): the console, Telegram and the gate still work, nothing is sent through Inkbox.
+        offline = _inkbox_offline()
+        if offline:
+            import types as _types
+            logger.warning("[bridge] INKBOX_OFFLINE: running without an Inkbox identity, mailbox or tunnel")
+            self._inkbox = None
+            self._identity = _types.SimpleNamespace(
+                agent_handle=self.cfg.identity or "offline", id="offline", mailbox=None, phone_number=None)
+        else:
+            if not self.cfg.api_key or not self.cfg.identity:
+                raise RuntimeError("INKBOX_API_KEY and INKBOX_IDENTITY must be set (see README)")
 
-        self._inkbox = Inkbox(**inkbox_client_kwargs(self.cfg.api_key, self.cfg.base_url))
-        self._identity = await asyncio.to_thread(self._inkbox.get_identity, self.cfg.identity)
+            self._inkbox = Inkbox(**inkbox_client_kwargs(self.cfg.api_key, self.cfg.base_url))
+            self._identity = await asyncio.to_thread(self._inkbox.get_identity, self.cfg.identity)
 
         mailbox = getattr(self._identity, "mailbox", None)
         phone = getattr(self._identity, "phone_number", None)
@@ -863,12 +878,16 @@ class InkboxGateway:
         if self.cfg.public_url:
             self._public_url = self.cfg.public_url.rstrip("/")
             self._public_host = self._public_url.split("://", 1)[-1]
+        elif offline:
+            self._public_url = f"http://127.0.0.1:{self.cfg.port}"
+            self._public_host = f"127.0.0.1:{self.cfg.port}"
         else:
             await self._open_tunnel()
         from .gate import pages as _pages
         _pages.set_public_base(self._public_url)
 
-        await asyncio.to_thread(self._patch_identity_objects)
+        if not offline:
+            await asyncio.to_thread(self._patch_identity_objects)
 
         # Sessions get the Inkbox tools so Claude can message proactively.
         server, tool_names = build_inkbox_mcp_server(
@@ -1908,7 +1927,7 @@ class InkboxGateway:
             verdict = await picker.judge_group_reply(
                 message=u["text"], sender=u["name"] or u["from_id"],
                 group=u.get("group_title") or "group", recent=recent,
-                bot_name=os.getenv("TELEGRAM_BOT_NAME") or os.getenv("TELEGRAM_BOT_USERNAME") or "Blatbot",
+                bot_name=os.getenv("TELEGRAM_BOT_NAME") or os.getenv("TELEGRAM_BOT_USERNAME") or _ASSISTANT,
                 from_principal=bool(owner and str(u["from_id"]) == owner))
         except Exception as exc:
             logger.warning("[bridge] telegram group judgment failed: %s", exc)
@@ -1924,7 +1943,7 @@ class InkboxGateway:
                     said = await fallback(
                         message=u["text"], sender=u["name"] or u["from_id"],
                         group=u.get("group_title") or "group", recent=recent,
-                        bot_name=os.getenv("TELEGRAM_BOT_NAME") or os.getenv("TELEGRAM_BOT_USERNAME") or "Blatbot",
+                        bot_name=os.getenv("TELEGRAM_BOT_NAME") or os.getenv("TELEGRAM_BOT_USERNAME") or _ASSISTANT,
                         from_principal=bool(owner and str(u["from_id"]) == owner))
                 except Exception as exc:
                     logger.warning("[bridge] telegram group fallback failed: %s", exc)
@@ -1967,7 +1986,7 @@ class InkboxGateway:
                     if not text:
                         continue
                     if row.get("kind") == "outbound":
-                        text = f"{os.getenv('TELEGRAM_BOT_NAME') or 'Blatbot'}: {text}"
+                        text = f"{os.getenv('TELEGRAM_BOT_NAME') or _ASSISTANT}: {text}"
                     lines.append(text)
             except Exception as exc:
                 logger.warning("[bridge] could not read telegram history: %s", exc)
@@ -2015,7 +2034,7 @@ class InkboxGateway:
                 known.append(name)
         session.room = rooms.room_note(
             channel=channel, title=title,
-            me=os.getenv("TELEGRAM_BOT_NAME") or (self.cfg.agent_name if hasattr(self.cfg, "agent_name") else "") or "Blatbot",
+            me=os.getenv("TELEGRAM_BOT_NAME") or (self.cfg.agent_name if hasattr(self.cfg, "agent_name") else "") or _ASSISTANT,
             members=known,
             principal=(self.cfg.approver_name if hasattr(self.cfg, "approver_name") else "") or "")
 
@@ -4538,7 +4557,7 @@ class InkboxGateway:
                     continue
                 event = payload.get("event")
                 if event == "start":
-                    await self._speak(ws, "Hi, this is Blatbot, Aaron Blatnoy's assistant. How can I help?", "greeting")
+                    await self._speak(ws, f"Hi, this is {_ASSISTANT}, Aaron Blatnoy's assistant. How can I help?", "greeting")
                 elif event == "transcript" and payload.get("is_final"):
                     text = str(payload.get("text") or "").strip()
                     if not text:

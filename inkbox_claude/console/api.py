@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from inkbox_claude.instance import ASSISTANT as _ASSISTANT, ASSISTANT_UPPER as _ASSISTANT_UPPER, ASSISTANT_EMAIL as _ASSISTANT_EMAIL, SERVER_NAME as _SERVER_NAME  # noqa: F401
 import asyncio
 import os
 import re
@@ -504,7 +505,7 @@ def _scope_detail(name: str, *, roles_holding: Optional[Dict[str, List[str]]] = 
 
 
 _SEND_WARNING = (
-    "People in this role can have Blatbot send messages without Aaron seeing them first."
+    f"People in this role can have {_ASSISTANT} send messages without Aaron seeing them first."
 )
 
 
@@ -1652,7 +1653,7 @@ _SYSTEM_SHORT_LABEL = {
     "tamid_workspace": "TAMID workspace",
     "tamid_calendar": "TAMID calendar",
     "aaron_stern": "Your Stern account",
-    "blatbot_inkbox": "Blatbot's inbox and contacts",
+    "blatbot_inkbox": f"{_ASSISTANT}'s inbox and contacts",
     "club_websites": "Club websites",
     "public_web": "Public web",
     "server": "The server",
@@ -1824,7 +1825,7 @@ def _roles_summary_sources(store: Store) -> List[Dict[str, Any]]:
         },
         {
             "label": "Abilities",
-            "detail": f"Blatbot's permission registry: {scope_count} " + _plural(scope_count, "ability", "abilities"),
+            "detail": f"{_ASSISTANT}'s permission registry: {scope_count} " + _plural(scope_count, "ability", "abilities"),
         },
         {
             "label": "Note folders",

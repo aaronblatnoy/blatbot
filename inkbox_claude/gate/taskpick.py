@@ -15,6 +15,7 @@ Configuration (environment):
 
 from __future__ import annotations
 
+from inkbox_claude.instance import ASSISTANT as _ASSISTANT, ASSISTANT_UPPER as _ASSISTANT_UPPER, ASSISTANT_EMAIL as _ASSISTANT_EMAIL, SERVER_NAME as _SERVER_NAME  # noqa: F401
 import asyncio
 import json
 import logging
@@ -273,19 +274,19 @@ class TaskPicker:
                     "schedules, trackers, form responses); read docs; write cells, append rows, create sheets, "
                     "docs and folders; read a form's questions and every response.",
                     "TAMID Gmail and Aaron's Stern Gmail: search messages and threads, read one in full.",
-                    "Blatbot's own Inkbox mailbox, texts and iMessages: list and read threads, send email, "
+                    f"{_ASSISTANT}'s own Inkbox mailbox, texts and iMessages: list and read threads, send email, "
                     "SMS or iMessage to a third party; look up, create and update contacts and their notes.",
                     "TAMID and SJBA website admin: list and read board members and bios, events, members, "
                     "semesters, site settings, contact-form submissions, newsletter signups; create, update "
                     "and delete any of those; replace headshots and flyers.",
                     "Public web: search, open a page, read and find text on it, click, type and fill forms.",
-                    "The black-sky server: what is running (containers, services, uptime, disk, memory, GPUs).",
+                    f"The {_SERVER_NAME} server: what is running (containers, services, uptime, disk, memory, GPUs).",
                     "Aaron's second brain (his Obsidian vault of notes): search notes, read a note, list notes.",
                     "TAMID's Instagram and LinkedIn: account, recent posts, insights, audience; stage and publish posts.",
                     "TAMID's Google Analytics property: dimensions, metrics, key events, streams, access; change them.",
                     "Aaron's NYU Brightspace: courses, assignments, due dates, grades, announcements, discussions, "
                     "content; submit, post, mark complete.",
-                    "Coolify (black-sky and Vox): apps, services, databases, deployments, logs, env vars; deploy, "
+                    f"Coolify ({_SERVER_NAME} and Vox): apps, services, databases, deployments, logs, env vars; deploy, "
                     "restart, stop.",
                     "The pension filings database (public Department of Labor Form 5500 data): search pension "
                     "plans, read a plan's assets, managers and consultants, find a provider's client plans, "
@@ -855,7 +856,7 @@ class TaskPicker:
                  # Whether this came from the person the assistant works for. A room full of
                  # equals is one thing; the one whose assistant you are is not one of them.
                  "sender_is_the_person_you_work_for": bool(from_principal),
-                 "recent_messages": recent, "assistant_name": bot_name or "Blatbot",
+                 "recent_messages": recent, "assistant_name": bot_name or _ASSISTANT,
                  # Who the assistant is in this room. Without it, "is this mine to answer?"
                  # has no referent and the judgment is guessing at its own job.
                  "assistant_role": role or (_settings.get("GATE_ASSISTANT_ROLE") or _DEFAULT_ROLE)}

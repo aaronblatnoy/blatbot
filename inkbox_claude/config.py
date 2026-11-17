@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from inkbox_claude.instance import ASSISTANT as _ASSISTANT, ASSISTANT_UPPER as _ASSISTANT_UPPER, ASSISTANT_EMAIL as _ASSISTANT_EMAIL, SERVER_NAME as _SERVER_NAME  # noqa: F401
 import importlib.metadata
 import os
 from dataclasses import dataclass, field
@@ -149,7 +150,7 @@ def inkbox_client_kwargs(api_key: str, base_url: str | None = None) -> Dict[str,
 
 
 _BLATBOT_VOICE = (
-    "You are Blatbot, Aaron Blatnoy's executive assistant, answering his assistant line. You're a guy in "
+    f"You are {_ASSISTANT}, Aaron Blatnoy's executive assistant, answering his assistant line. You're a guy in "
     "your late twenties: relaxed, quick, dry sense of humor, low-key confident. Talk like a real person on "
     "the phone, not like a customer service agent."
 )
