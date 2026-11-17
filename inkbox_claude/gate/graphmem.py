@@ -14,8 +14,9 @@ Who may read what: each chat's messages are stored under that chat's own group, 
 readable_groups() decides which groups one reader's turn may search, from the same
 people, roles and contacts records that gate everything else:
 
-  owner (the approver)      every group;
-  in a group chat           that group only, whoever is talking: other people are present;
+  in a group chat           that group only, whoever is talking, Aaron included: other
+                            people are present (checked first);
+  owner (the approver)      every group, in his own chats;
   a person on record        their current chat, plus every direct chat that resolves to the
                             same person (iMessage, Telegram, email, voice), plus what their
                             role or their own record grants with `memory:` entries
@@ -105,10 +106,12 @@ def readable_groups(store: Any, chat_id: str, *, is_approver: bool, is_group: bo
     """Which memory groups this reader's turn may search; None means all of them (owner only).
     Any failure to resolve the reader returns the current chat's own group."""
     own = group_for(chat_id)
+    if is_group:
+        # Checked before the owner: in a group others are present, so even Aaron's turn
+        # there reads that group's own conversation only (gate/knowledge.py).
+        return [own]
     if is_approver:
         return None
-    if is_group:
-        return [own]
     try:
         who = store.resolve_handles(handles)
         pid = who.get("person_id") or ""
@@ -130,16 +133,20 @@ def groups_for_request(store: Any, req: Any, from_owner: bool) -> Optional[List[
     tool. The owner's own request reads every group (None); anyone else's reads what
     readable_groups gives the person who asked, decided from the request's own chat and
     sender. Any failure gives the request's own chat only (fails closed)."""
-    if from_owner:
-        return None
     chat = str(getattr(req, "chat_id", "") or "")
     own = [group_for(chat)]
     if store is None:
-        return own
+        return None if from_owner else own
     try:
         route = store.thread_route(chat) or {}
         meta = route.get("meta") or {}
         is_group = meta.get("conversation_kind") == "group" or bool(meta.get("group_title"))
+        if is_group:
+            # A run in a group answers the whole group: its own conversation only, even
+            # when Aaron asked (the Jev engine passes his admin scope as from_owner).
+            return own
+        if from_owner:
+            return None
         sender = str(getattr(req, "sender", "") or "").strip()
         return readable_groups(store, chat, is_approver=False, is_group=is_group,
                                handles=[sender] if sender else [])

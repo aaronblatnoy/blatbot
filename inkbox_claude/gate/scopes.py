@@ -297,6 +297,8 @@ def refresh_vault_scopes(force: bool = False) -> None:
     for name in stale:
         SCOPES.pop(name, None)
         SCOPE_SYSTEM.pop(name, None)
+        LABELS.pop(name, None)
+        ASK.pop(name, None)
     for name, info in discovered.items():
         SCOPES[name] = {
             "description": info.description or info.title,
@@ -309,6 +311,13 @@ def refresh_vault_scopes(force: bool = False) -> None:
             "vault_title": info.title,
         }
         SCOPE_SYSTEM[name] = VAULT_SYSTEM
+        # Named by the folder itself, so an access ask or an approval says exactly which
+        # of Aaron's notes it opens ("read your notes in Projects / Corgi"), never a
+        # note's own first lines.
+        from .knowledge import folder_title
+        where = folder_title(name, SCOPES)
+        LABELS[name] = f"read your notes in {where}"
+        ASK[name] = f"read your notes in {where}"
 
 
 refresh_vault_scopes()

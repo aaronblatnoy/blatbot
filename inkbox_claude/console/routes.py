@@ -232,6 +232,14 @@ async def post_roles_set_notes(request: web.Request) -> web.StreamResponse:
     return _json(api.roles_set_notes(_manager(request).store, await _payload(request)))
 
 
+async def post_roles_set_memory(request: web.Request) -> web.StreamResponse:
+    return _json(api.roles_set_memory(_manager(request).store, await _payload(request)))
+
+
+async def get_knowledge(request: web.Request) -> web.StreamResponse:
+    return _json(api.knowledge_access(_manager(request).store))
+
+
 async def get_roles_who_can(request: web.Request) -> web.StreamResponse:
     q = request.query.get("q", "")
     return _json(api.roles_who_can(_manager(request).store, q))
@@ -416,7 +424,10 @@ def register(app: web.Application, gateway: Any) -> None:
     app.router.add_get("/console/api/roles/summary", _endpoint(get_roles_summary))
     app.router.add_post("/console/api/roles/set_level", _endpoint(post_roles_set_level, mutation=True))
     app.router.add_post("/console/api/roles/set_send", _endpoint(post_roles_set_send, mutation=True))
-    app.router.add_post("/console/api/roles/set_notes", _endpoint(post_roles_set_notes, mutation=True))
+    app.router.add_post("/console/api/roles/set_notes",
+        "/console/api/roles/set_memory", "/console/api/knowledge", _endpoint(post_roles_set_notes, mutation=True))
+    app.router.add_post("/console/api/roles/set_memory", _endpoint(post_roles_set_memory, mutation=True))
+    app.router.add_get("/console/api/knowledge", _endpoint(get_knowledge))
     app.router.add_get("/console/api/roles/who_can", _endpoint(get_roles_who_can))
     app.router.add_get("/console/api/roles/delete_preview", _endpoint(get_roles_delete_preview))
     app.router.add_get("/console/api/scopes", _endpoint(get_scopes))
@@ -457,6 +468,7 @@ def register(app: web.Application, gateway: Any) -> None:
         "/console/api/people/contact/move", "/console/api/people/contact/update", "/console/api/people/link",
         "/console/api/roles", "/console/api/roles/delete", "/console/api/roles/rename", "/console/api/roles/members/add",
         "/console/api/roles/members/remove", "/console/api/roles/scopes/add", "/console/api/roles/scopes/remove", "/console/api/roles/set_level", "/console/api/roles/set_send", "/console/api/roles/set_notes",
+        "/console/api/roles/set_memory", "/console/api/knowledge",
         "/console/api/scopes", "/console/api/scopes/breakdown", "/console/api/requests",
         "/console/api/requests/decide", "/console/api/tasks", "/console/api/health",
         "/console/api/settings", "/console/api/groups", "/console/api/groups/mode",
