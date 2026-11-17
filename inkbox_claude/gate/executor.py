@@ -536,7 +536,8 @@ class Executor:
                 decision, reason, kind = permhook.decide(
                     req, name, args, allowed_set, from_owner=from_owner,
                     protected=self.protected, manager=self.manager,
-                    confirm_sends=confirm_sends, owner_handle=_is_owner_handle)
+                    confirm_sends=confirm_sends, owner_handle=_is_owner_handle,
+                    read_dirs=permhook.run_read_dirs(input_data, allowed_set))
                 if decision == "defer":
                     native_holds[tool_use_id] = kind
                 elif decision == "deny":

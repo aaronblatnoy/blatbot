@@ -690,6 +690,7 @@ scopes:
     - mcp__playwright__browser_resize
     - mcp__playwright__browser_console_messages
     - mcp__playwright__browser_network_requests
+    - mcp__playwright__browser_network_request
     - mcp__playwright__browser_close
   browser_act:
     description: operate a headless browser like a person (click, type, fill and submit forms, select options, upload,
@@ -714,6 +715,7 @@ scopes:
     - mcp__playwright__browser_resize
     - mcp__playwright__browser_console_messages
     - mcp__playwright__browser_network_requests
+    - mcp__playwright__browser_network_request
     - mcp__playwright__browser_close
     - mcp__playwright__browser_click
     - mcp__playwright__browser_type
