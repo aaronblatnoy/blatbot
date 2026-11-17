@@ -537,7 +537,9 @@ class Executor:
                     req, name, args, allowed_set, from_owner=from_owner,
                     protected=self.protected, manager=self.manager,
                     confirm_sends=confirm_sends, owner_handle=_is_owner_handle,
-                    read_dirs=permhook.run_read_dirs(input_data, allowed_set))
+                    read_dirs=permhook.run_read_dirs(input_data, allowed_set)
+                    # The record of work already done that this run is told to Read first.
+                    + [os.path.join(self.cwd, "findings", f"request-{req.id}.txt")])
                 if decision == "defer":
                     native_holds[tool_use_id] = kind
                 elif decision == "deny":
