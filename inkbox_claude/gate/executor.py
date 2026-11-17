@@ -20,6 +20,7 @@ from typing import Any, Dict, List, Optional
 from claude_agent_sdk import (
     AssistantMessage,
     ClaudeAgentOptions,
+    HookMatcher,
     PermissionResultAllow,
     PermissionResultDeny,
     ResultMessage,
@@ -37,6 +38,7 @@ from . import graphmem
 from . import pages
 from . import schedrun
 from . import wording
+from . import permhook
 from .store import Request, sha256
 
 logger = logging.getLogger(__name__)
@@ -110,7 +112,11 @@ def vault_prefixes_for_scopes(scopes: List[str]) -> Optional[List[str]]:
 EXECUTOR_SYSTEM = (
     "You are running ONE approved task for Blatbot, Executive Assistant to Aaron Blatnoy. "
     "You are given the sender's message verbatim, the recent conversation, and the task's record. "
-    "Read them and do what the message calls for using only the tools you have, then stop. Do not ask "
+    "Read them and do what the message calls for using only the tools you have, then stop. If the work needs "
+    "a system or tool you were not given, call request_access with exactly what it needs and one sentence "
+    "saying why: asking is expected and safe, it only asks, and whether it is granted is decided for you by "
+    "this person's own permissions or by Aaron. Never give up on a step, or look for another route to the "
+    "same thing, without asking first. Do not ask the person "
     "questions. Do not send anything the message and task record do not call for. If an essential "
     "detail is missing, stop and report what is missing. When something must be found in a document, sheet, "
     "calendar or inbox: search, open the most likely result, and if it is not the right one open the next "
@@ -307,7 +313,7 @@ class Executor:
 
     async def run(self, req: Request, context: str = "", prior_work: str = "", model: Optional[str] = None,
                   from_owner: bool = False, timezone: str = "America/New_York",
-                  note: Optional[str] = None, *, _retried: bool = False,
+                  note: Optional[str] = None, *, _retried: bool = False, _auto_default: bool = False,
                   resume_session: Optional[str] = None, continuation: str = "") -> Dict[str, Any]:
         """Run an approved request. Returns a status dict; never raises.
 
@@ -335,8 +341,12 @@ class Executor:
                 "finished_at": now, "cost_usd": None,
             }
         started_at = time.time()
+        from .settings import get as _setting
+        native_defer = bool(_setting("GATE_NATIVE_DEFER"))
         vault_prefixes = vault_prefixes_for_scopes(req.scopes)
         scoped_allowed = tools_for(req.scopes)
+        if not _setting("GATE_ACCESS_ASKS"):
+            scoped_allowed = [t for t in scoped_allowed if t != "mcp__host__request_access"]
         if req.schedule_id:
             scoped_allowed = [t for t in scoped_allowed if t not in
                               ("mcp__host__set_followup", "mcp__host__cancel_followup", "mcp__host__request_access")]
@@ -347,7 +357,7 @@ class Executor:
             scoped_allowed = list(scoped_allowed) + ["mcp__host__make_page"]
         allowed = list(scoped_allowed)
         allowed_set = set(allowed)   # what this task may touch at all, send tools included
-        if req.schedule_id:
+        if req.schedule_id and not native_defer:
             # Every scheduled write reaches the hook. The schedule pre-approves ordinary
             # writes and sends, while delete-like calls are parked for Aaron's yes.
             from .jevagent import is_write_tool as _is_write
@@ -371,13 +381,12 @@ class Executor:
         # A message the owner asked to have sent is him speaking to someone through the
         # assistant, and he sees it before it goes. A request that came from someone else
         # was already read and approved by him in full, so answering it needs nothing more.
-        from .settings import get as _setting
         confirm_sends = bool(from_owner) and bool(_setting("GATE_CONFIRM_SENDS"))
         # A scheduled run's sends are routed through the hook too, but never on a blanket
         # from_owner basis: can_use below decides each one by its own recipients, letting a
         # send to Aaron himself through and holding anything to a third party (or anything
         # whose recipients cannot be told at all).
-        if confirm_sends or req.schedule_id:
+        if (confirm_sends or req.schedule_id) and not native_defer:
             # A tool listed in allowed_tools is pre-approved and the permission hook is never
             # consulted for it. Sends are therefore taken off that list, which is what routes
             # them through the hook so they can be held and shown to him first.
@@ -385,6 +394,8 @@ class Executor:
             allowed = [t for t in allowed if not _out(t, {})]
 
         async def can_use(tool_name: str, input_data: Dict[str, Any], context: Any):
+            if native_defer:
+                return PermissionResultDeny(message="The tool call was not checked by Blatbot. Stop and report what could not be done.")
             if tool_name not in allowed_set:
                 denied_steps.append({"tool": tool_name, "args": dict(input_data or {}), "ok": False, "denied": "scope"})
                 from .scopes import scope_for_tool
@@ -437,6 +448,46 @@ class Executor:
                                                     "result. Put the answer in your final status and stop.")
             return PermissionResultAllow()
 
+        native_holds: Dict[str, str] = {}
+        consumed_decisions: set[str] = set()
+
+        async def permission_hook(input_data: Dict[str, Any], tool_use_id: str, context: Any):
+            nonlocal native_defer
+            name = str(input_data.get("tool_name") or "")
+            args = input_data.get("tool_input") or {}
+            try:
+                decision_record = (req.status or {}).get("deferred_decision") or {}
+                pending_record = (req.status or {}).get("deferred") or {}
+                if (tool_use_id == decision_record.get("id") and tool_use_id not in consumed_decisions
+                        and name == pending_record.get("name") and args == pending_record.get("input")):
+                    consumed_decisions.add(tool_use_id)
+                    decision = "allow" if decision_record.get("allow") else "deny"
+                    reason = "" if decision == "allow" else (
+                        "Aaron said no to this. Finish with what you have, or say plainly what could not be done.")
+                    if decision == "deny":
+                        denied_steps.append({"tool": name, "args": dict(args), "ok": False,
+                                             "denied": "Aaron refused"})
+                    return permhook.hook_result(decision, reason)
+                decision, reason, kind = permhook.decide(
+                    req, name, args, allowed_set, from_owner=from_owner,
+                    protected=self.protected, manager=self.manager,
+                    confirm_sends=confirm_sends, owner_handle=_is_owner_handle)
+                if decision == "defer":
+                    native_holds[tool_use_id] = kind
+                elif decision == "deny":
+                    denied_steps.append({"tool": name, "args": dict(args), "ok": False, "denied": kind})
+                return permhook.hook_result(decision, reason)
+            except Exception as exc:
+                logger.warning("[gate] #%s permission hook failed: %s", req.id, exc)
+                # The old permission check still covers this one call.
+                native_defer = False
+                try:
+                    old = await can_use(name, args, context)
+                finally:
+                    native_defer = True
+                return permhook.hook_result("allow" if isinstance(old, PermissionResultAllow) else "deny",
+                                            getattr(old, "message", ""))
+
         if req.schedule_id:
             system_append = SCHEDULE_EXECUTOR_SYSTEM + f"\nNow: {now_line()}. Resolve 'today', 'tomorrow', weekday names and relative dates from this.\n"
             delivery = ""
@@ -479,28 +530,46 @@ class Executor:
                                            request=req)
         mcp_servers = self._mcp_servers_for(scoped_allowed, host_server)
         logger.info("[gate] #%s mcp servers: %s", req.id, sorted(mcp_servers.keys()))
-        options = ClaudeAgentOptions(
+        saved_session = resume_session
+        if saved_session is None and session_key is not None:
+            try:
+                saved_session = (self.manager.store.get_session(
+                    session_key, float(_setting("SESSION_MAX_AGE_HOURS"))) if self.manager
+                    else self._sessions.get(session_key))
+            except Exception as exc:
+                logger.warning("[gate] #%s could not read saved session: %s", req.id, exc)
+                saved_session = self._sessions.get(session_key)
+        permission_mode = "auto" if _setting("GATE_AUTO_MODE") and not _auto_default else "default"
+        option_kwargs = dict(
             cwd=self.cwd,
             model=model or self.model,
             system_prompt={"type": "preset", "preset": "claude_code", "append": system_append},
             setting_sources=["user", "project"],
             strict_mcp_config=True,
-            permission_mode="default",
+            permission_mode=permission_mode,
             allowed_tools=allowed,
             mcp_servers=mcp_servers,
             # One conversation per thread, continued rather than restarted, for an ordinary
             # request: what was looked up an hour ago is still in view and a follow-up does
             # not arrive as a stranger's first sentence. A scheduled run never resumes:
             # session_key is None for it, so resume is always None too.
-            resume=(resume_session if resume_session is not None else
-                    (self._sessions.get(session_key) if session_key is not None else None)),
+            resume=saved_session,
             can_use_tool=can_use,
+            hooks={"PreToolUse": [HookMatcher(matcher=None, hooks=[permission_hook])]} if native_defer else None,
             max_turns=30,
             # The SDK's default is 1 MB per message from the CLI; one large tool result
             # (a page snapshot, a slide deck, a long listing) is bigger than that and
             # killed the whole run with a JSON decode error.
             max_buffer_size=64 * 1024 * 1024,
         )
+        try:
+            options = ClaudeAgentOptions(**option_kwargs)
+        except Exception as exc:
+            if permission_mode != "auto":
+                raise
+            logger.warning("[gate] #%s auto mode unavailable; using default mode: %s", req.id, exc)
+            option_kwargs["permission_mode"] = "default"
+            options = ClaudeAgentOptions(**option_kwargs)
 
         closing_texts: List[str] = []
         session_id: Optional[str] = None
@@ -546,10 +615,12 @@ class Executor:
                         self._sessions[session_key] = sid
                         if self.manager is not None:
                             try:
+                                self.manager.store.set_session(session_key, sid)
                                 fresh = self.manager.store.get_request(req.id)
                                 if fresh is not None:
                                     saved = dict(fresh.status or {})
                                     saved["session_id"] = sid
+                                    saved["session_saved_at"] = time.time()
                                     self.manager.store.set_state(req.id, fresh.state, status=saved)
                             except Exception as exc:
                                 logger.warning("[gate] #%s could not save session: %s", req.id, exc)
@@ -557,6 +628,9 @@ class Executor:
             return final
 
         def _finalize_exception(exc: Exception) -> Dict[str, Any]:
+            if resume_session and (req.status or {}).get("deferred_decision") and not tool_calls:
+                logger.warning("[gate] #%s saved approval session could not resume: %s", req.id, exc)
+                return {"resume_failed": True, "error": str(exc), "ok": False}
             if continuation and resume_session and not tool_calls:
                 logger.warning("[gate] #%s saved session could not resume: %s", req.id, exc)
                 return {"resume_failed": True, "error": str(exc), "ok": False}
@@ -627,6 +701,28 @@ class Executor:
             }
             if session_id:
                 out["session_id"] = session_id
+                out["session_saved_at"] = time.time()
+            if (req.status or {}).get("access_granted"):
+                out["access_granted"] = list(req.status["access_granted"])
+            pending = getattr(result, "deferred_tool_use", None) if native_defer else None
+            if pending is not None:
+                kind = native_holds.get(pending.id, "")
+                if kind:
+                    out["deferred"] = {"id": pending.id, "name": pending.name,
+                                       "input": pending.input, "kind": kind,
+                                       "session_id": session_id or ""}
+                    out["held"] = True
+                    out["ok"] = False
+                    if kind in ("send", "destructive"):
+                        from .jevagent import recipients_of
+                        about = ([", ".join(recipients_of(pending.input)) or "(no recipient in the call)"]
+                                 if kind == "send" else [req.summary or req.original_message])
+                        out["confirm"] = {"tool": pending.name, "args": pending.input,
+                                          "about": about, "kind": kind}
+                    elif kind == "access":
+                        out["access_request"] = {"scopes": pending.input.get("access") or [],
+                                                 "why": pending.input.get("why") or ""}
+                    return out
             ask = (req.status or {}).get("access_request")
             if ask:
                 out["access_request"] = ask
@@ -666,13 +762,64 @@ class Executor:
                     "started_at": started_at, "finished_at": finished_at, "cost_usd": None,
                     "timed_out": True}
         except Exception as exc:  # noqa: BLE001
+            if (permission_mode == "auto" and not _retried and
+                    any(word in str(exc).lower() for word in ("auto", "permission mode", "permissionmode"))):
+                logger.warning("[gate] #%s auto mode unavailable; using default mode", req.id)
+                return await self.run(req, context=context, prior_work=prior_work, model=model,
+                                      from_owner=from_owner, timezone=timezone, note=note,
+                                      resume_session=resume_session, continuation=continuation,
+                                      _retried=True, _auto_default=True)
+            if (saved_session and session_key is not None and not tool_calls and not _retried
+                    and not (req.status or {}).get("deferred_decision") and
+                    any(word in str(exc).lower() for word in
+                        ("session not found", "invalid session", "cannot resume", "failed to resume"))):
+                logger.warning("[gate] #%s saved session was refused; starting fresh", req.id)
+                self._sessions.pop(session_key, None)
+                try:
+                    if self.manager is not None:
+                        self.manager.store.drop_session(session_key)
+                except Exception as drop_exc:
+                    logger.warning("[gate] #%s could not drop refused session: %s", req.id, drop_exc)
+                return await self.run(req, context=context, prior_work=prior_work, model=model,
+                                      from_owner=from_owner, timezone=timezone, note=note,
+                                      resume_session="", _retried=True)
             failed = _finalize_exception(exc)
             if failed.get("resume_failed"):
+                if (req.status or {}).get("deferred_decision"):
+                    return failed
                 return await self.run(req, context=context, model=model, from_owner=from_owner,
                                       resume_session="", _retried=True)
             return failed
 
         out = _finalize(result)
+        auto_error = ((out.get("raw") or "") + " " + str(getattr(result, "result", ""))).lower()
+        if (permission_mode == "auto" and bool(getattr(result, "is_error", False))
+                and not tool_calls and not _retried and
+                any(word in auto_error for word in ("auto", "permission mode", "permissionmode"))):
+            logger.warning("[gate] #%s auto mode unavailable; using default mode", req.id)
+            return await self.run(req, context=context, prior_work=prior_work, model=model,
+                                  from_owner=from_owner, timezone=timezone, note=note,
+                                  resume_session=resume_session, continuation=continuation,
+                                  _retried=True, _auto_default=True)
+        if (resume_session and (req.status or {}).get("deferred_decision") and
+                bool(getattr(result, "is_error", False)) and not tool_calls and
+                any(word in ((out.get("raw") or "") + " " + str(getattr(result, "result", ""))).lower()
+                    for word in ("session not found", "invalid session", "cannot resume", "failed to resume"))):
+            logger.warning("[gate] #%s saved approval session is unavailable", req.id)
+            return {"resume_failed": True, "ok": False, "error": "saved session unavailable"}
+        if (saved_session and session_key is not None and not tool_calls and not _retried and
+                any(word in ((out.get("raw") or "") + " " + str(getattr(result, "result", ""))).lower()
+                    for word in ("session not found", "invalid session", "cannot resume", "failed to resume"))):
+            logger.warning("[gate] #%s saved session was refused; starting fresh", req.id)
+            self._sessions.pop(session_key, None)
+            try:
+                if self.manager is not None:
+                    self.manager.store.drop_session(session_key)
+            except Exception as drop_exc:
+                logger.warning("[gate] #%s could not drop refused session: %s", req.id, drop_exc)
+            return await self.run(req, context=context, prior_work=prior_work, model=model,
+                                  from_owner=from_owner, timezone=timezone, note=note,
+                                  resume_session="", _retried=True)
         if (continuation and resume_session and bool(getattr(result, "is_error", False))
                 and not tool_calls and any(word in ((out.get("raw") or "") + " " + str(getattr(result, "result", ""))).lower()
                                        for word in ("session not found", "invalid session", "cannot resume", "failed to resume"))):

@@ -12,7 +12,7 @@ from typing import Any, Dict, List, Optional
 from zoneinfo import ZoneInfo
 
 import pytest
-from claude_agent_sdk import AssistantMessage, ResultMessage, TextBlock, ToolResultBlock, ToolUseBlock, UserMessage
+from claude_agent_sdk import AssistantMessage, DeferredToolUse, ResultMessage, TextBlock, ToolResultBlock, ToolUseBlock, UserMessage
 
 from inkbox_claude.gate import executor as gate_executor
 from inkbox_claude.gate import schedrun
@@ -30,10 +30,7 @@ def make_request(**over) -> Request:
 
 
 class ScriptedQuery:
-    """Stands in for claude_agent_sdk.query: plays back a scripted sequence of
-    assistant turns, running each turn's tool calls through the executor's own
-    can_use_tool (as the real SDK would) so permission denials behave exactly
-    as they would live -- a denied call never gets a ToolResultBlock."""
+    """Play tool calls through the SDK's PreToolUse hook."""
 
     def __init__(self, turns: List[Dict[str, Any]], session_id: str = "sess-1", cost_usd: Optional[float] = None):
         self.turns = turns
@@ -57,8 +54,16 @@ class ScriptedQuery:
             if blocks:
                 yield AssistantMessage(content=blocks, model="sonnet")
             for tub, call in tool_use_blocks:
-                result = await options.can_use_tool(call["tool"], call.get("args", {}), None)
-                if result.__class__.__name__ == "PermissionResultAllow":
+                hook = options.hooks["PreToolUse"][0].hooks[0]
+                result = await hook({"tool_name": call["tool"], "tool_input": call.get("args", {})}, tub.id, None)
+                decision = result["hookSpecificOutput"]["permissionDecision"]
+                if decision == "defer":
+                    yield ResultMessage(subtype="success", duration_ms=1, duration_api_ms=1,
+                                        is_error=False, num_turns=len(self.turns), session_id=self.session_id,
+                                        stop_reason="tool_deferred",
+                                        deferred_tool_use=DeferredToolUse(tub.id, call["tool"], call.get("args", {})))
+                    return
+                if decision == "allow":
                     yield UserMessage(content=[ToolResultBlock(tool_use_id=tub.id, content="done",
                                                                is_error=not call.get("ok", True))])
             for text in turn.get("closing_texts", []):
@@ -231,7 +236,7 @@ def test_scheduled_send_to_third_party_is_held(tmp_path, monkeypatch):
     monkeypatch.setattr(gate_executor, "query", scripted)
     out = asyncio.run(ex.run(req))
     assert out["tool_results"] == []
-    assert ex.held_send is not None and ex.held_send["to"] == "9995551234"
+    assert out["deferred"]["kind"] == "send" and out["confirm"]["about"] == ["9995551234"]
     assert out["confirm"]["kind"] == "send"
 
 
@@ -245,7 +250,7 @@ def test_scheduled_send_mixed_owner_and_third_party_is_held(tmp_path, monkeypatc
     monkeypatch.setattr(gate_executor, "query", scripted)
     out = asyncio.run(ex.run(req))
     assert out["tool_results"] == []
-    assert ex.held_send is not None
+    assert out["deferred"]["kind"] == "send"
 
 
 def test_scheduled_send_with_no_recipient_determinable_is_held(tmp_path, monkeypatch):
@@ -258,7 +263,35 @@ def test_scheduled_send_with_no_recipient_determinable_is_held(tmp_path, monkeyp
     monkeypatch.setattr(gate_executor, "query", scripted)
     out = asyncio.run(ex.run(req))
     assert out["tool_results"] == []
-    assert ex.held_send is not None and ex.held_send["to"] == "(no recipient in the call)"
+    assert out["deferred"]["kind"] == "send" and out["confirm"]["about"] == ["(no recipient in the call)"]
+
+
+def test_native_defer_resumes_only_the_saved_call(tmp_path, monkeypatch):
+    turn = {"calls": [{"tool": "mcp__inkbox__inkbox_send_sms",
+                       "args": {"to": "9995551234", "text": "hi"}}],
+            "closing_texts": ["RESULT: sent.\nSTATUS: OK"]}
+    req = make_request(scopes=["sms_send"], chat_id="defer-test")
+    ex = Executor(mcp_server=None, cwd=str(tmp_path), protected=["5125550100"])
+    first = ScriptedQuery([turn], session_id="saved-session")
+    monkeypatch.setattr(gate_executor, "query", first)
+    held = asyncio.run(ex.run(req, from_owner=True))
+    assert held["deferred"]["session_id"] == "saved-session"
+    assert held["tool_results"] == []
+
+    req.status = {"deferred": held["deferred"],
+                  "deferred_decision": {"id": held["deferred"]["id"], "allow": True}}
+    resumed = ScriptedQuery([turn], session_id="finished-session")
+    monkeypatch.setattr(gate_executor, "query", resumed)
+    done = asyncio.run(ex.run(req, from_owner=True, resume_session="saved-session", continuation="continue"))
+    assert resumed.captured_options.resume == "saved-session"
+    assert done["tool_results"] == [{"tool": "mcp__inkbox__inkbox_send_sms", "ok": True}]
+    assert "deferred" not in done
+
+    req.status["deferred_decision"]["id"] = "another-call"
+    again = ScriptedQuery([turn], session_id="new-session")
+    monkeypatch.setattr(gate_executor, "query", again)
+    held_again = asyncio.run(ex.run(req, from_owner=True, resume_session="", continuation="continue"))
+    assert held_again["deferred"]["id"] == held["deferred"]["id"]
 
 
 # -- schedrun.parse_closing pure-function coverage -------------------------

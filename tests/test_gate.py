@@ -101,6 +101,16 @@ def test_store_request_lifecycle(tmp_path):
     assert s.pending() == []
 
 
+def test_saved_sessions_survive_store_reopen_and_expire(tmp_path):
+    path = str(tmp_path / "g.db")
+    Store(path).set_session("chat", "session-1")
+    reopened = Store(path)
+    assert reopened.get_session("chat") == "session-1"
+    assert reopened.get_session("chat", max_age_hours=0) is None
+    reopened.drop_session("chat")
+    assert reopened.get_session("chat") is None
+
+
 def test_stranger_benign_reply_no_request(tmp_path):
     m, sent = make_manager(tmp_path)
     m.router.next = RouterOutput(reply="Sure, what times work?", request=None)
@@ -1503,6 +1513,21 @@ def test_request_access_is_saved_and_bounded(tmp_path):
     assert "already asked twice" in hosttools.request_access({"access": ["web"], "why": "Again."}, m, req)
 
 
+def test_owner_covered_access_is_granted_without_an_approval_wait(tmp_path):
+    from inkbox_claude.gate import hosttools
+
+    m, _ = make_manager(tmp_path)
+    req = m.store.create_request(chat_id=OWNER_THREAD, sender="+15550100001", sender_name="Aaron",
+                                 mode="imessage", subject="", original_message="check", summary="check",
+                                 scopes=["host_read"], prompt="check", state="running",
+                                 task_id=m.store.create_task("check")["id"])
+    reply = hosttools.request_access({"access": ["web"], "why": "Need public facts."}, m, req)
+    assert reply.startswith("Access granted:")
+    fresh = m.store.get_request(req.id)
+    assert "web" in fresh.scopes
+    assert not (fresh.status or {}).get("access_request")
+
+
 def test_access_ask_waits_for_owner_and_no_resumes_request(tmp_path):
     async def scenario():
         m, sent = make_manager(tmp_path)
@@ -1534,6 +1559,36 @@ def test_access_ask_waits_for_owner_and_no_resumes_request(tmp_path):
         await asyncio.sleep(0)
         assert "web" in m.store.get_request(approved_req.id).scopes
         assert resumed[-1]["resume_session"] == "saved-session"
+    asyncio.run(scenario())
+
+
+def test_native_approval_resumes_the_saved_call_without_manual_perform(tmp_path):
+    async def scenario():
+        m, _ = make_manager(tmp_path)
+        m.jev_agent = None
+        deferred = {"id": "call-1", "name": "mcp__inkbox__inkbox_send_sms",
+                    "input": {"to": "someone", "text": "hello"}, "kind": "send",
+                    "session_id": "saved-session"}
+        req = m.store.create_request(chat_id="c", sender="person@example.com", sender_name="Person",
+                                     mode="email", subject="", original_message="send", summary="send",
+                                     scopes=["sms_send"], prompt="send", state="pending",
+                                     task_id=m.store.create_task("send")['id'])
+        m.store.set_state(req.id, "pending", status={"deferred": deferred,
+                          "confirm": {"tool": deferred["name"], "args": deferred["input"],
+                                      "about": ["someone"], "kind": "send"},
+                          "session_saved_at": time.time()})
+        resumed = []
+        async def execute(_req, **kw):
+            resumed.append(kw)
+        m.execute = execute
+        async def manual(_req):
+            raise AssertionError("the held call must run inside Claude")
+        m.perform_confirmed = manual
+        assert (await m.decide_request(req.id, "yes"))["ok"]
+        await asyncio.sleep(0)
+        saved = m.store.get_request(req.id)
+        assert saved.status["deferred_decision"] == {"id": "call-1", "allow": True}
+        assert resumed == [{"continuation": "continue", "resume_session": "saved-session"}]
     asyncio.run(scenario())
 
 
@@ -1731,10 +1786,8 @@ def telegram_meta(user_id: str):
             "telegram_user_id": user_id, "contact": {"name": "Someone"}}
 
 
-def test_send_tools_are_taken_off_the_preapproved_list_for_the_owner(tmp_path, monkeypatch):
-    """The permission hook is never consulted for a tool the SDK was told to allow, so a
-    send has to be withheld from that list or it goes out unseen. This is the bug that let
-    a poem reach a stranger and an email reach five people."""
+def test_send_tools_are_checked_by_the_native_hook_for_the_owner(tmp_path, monkeypatch):
+    """The native hook sees even tools on the SDK's allowed list."""
     import asyncio as _a
     from inkbox_claude.gate.executor import Executor
     from inkbox_claude.gate.store import Request, sha256
@@ -1765,7 +1818,8 @@ def test_send_tools_are_taken_off_the_preapproved_list_for_the_owner(tmp_path, m
     except Exception:
         pass
     sends = [t for t in captured.get("allowed_tools", []) if "send" in t]
-    assert sends == [], f"a send tool was pre-approved and would never reach the hook: {sends}"
+    assert sends
+    assert captured["hooks"]["PreToolUse"][0].hooks
 
     captured.clear()
     try:

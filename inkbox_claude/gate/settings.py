@@ -72,6 +72,16 @@ KNOBS: List[Dict[str, Any]] = [
     {"name": "GATE_ACCESS_ASKS", "kind": "bool", "default": True, "group": "Safety",
      "label": "Let runs ask for access",
      "help": "Lets a run pause and ask for a missing system, then continue when access is decided."},
+    {"name": "GATE_NATIVE_DEFER", "kind": "bool", "default": True, "group": "Safety",
+     "label": "Pause on the exact tool call",
+     "help": "Save a call while it waits for your answer, then continue that same run."},
+    {"name": "GATE_AUTO_MODE", "kind": "bool", "default": True, "group": "Safety",
+     "label": "Use Claude Code auto mode",
+     "help": "Let Claude Code screen risky actions on top of Blatbot's own permissions."},
+    {"name": "SESSION_MAX_AGE_HOURS", "kind": "number", "default": 24, "min": 0,
+     "max": 8760, "step": 1, "group": "Engine",
+     "label": "Hours to keep a saved session",
+     "help": "Start fresh when a saved run is older than this."},
 
     # -- formatted pages ------------------------------------------------------
     {"name": "GATE_HTML_PAGES_AUDIENCE", "kind": "choice", "default": "owner",
