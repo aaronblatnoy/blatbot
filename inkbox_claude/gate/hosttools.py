@@ -60,6 +60,13 @@ def request_access(args: Dict[str, Any], manager: Any, request: Any) -> str:
             return "Access requests are unavailable for this run. Finish with what you have."
         fresh = manager.store.get_request(request.id) or request
         status = dict(fresh.status or {})
+        decided = status.get("deferred_decision") or {}
+        deferred = status.get("deferred") or {}
+        if (decided.get("allow") and decided.get("id") == deferred.get("id")
+                and deferred.get("kind") == "access"):
+            from .scopes import LABELS
+            labels = [LABELS.get(str(n), str(n)) for n in args.get("access") or []]
+            return "Access granted: " + ", ".join(labels) + ". Continue."
         if int(status.get("access_ask_count") or 0) >= 2:
             manager.task_note(request, "rejected", "A third access request was refused; this task may ask only twice.")
             return "You have already asked twice; finish with what you have."
@@ -79,6 +86,25 @@ def request_access(args: Dict[str, Any], manager: Any, request: Any) -> str:
         why = " ".join(str(args.get("why") or "").replace("—", ", ").split())[:500].strip()
         if not why:
             return "Say in one sentence why this task needs that access."
+        if get("GATE_NATIVE_DEFER"):
+            try:
+                from .scopes import EXPLICIT_ONLY_SCOPES
+                session = manager.get(request.chat_id)
+                handles = session.handles() if session._sender() == request.sender else [request.sender]
+                role_scopes = set(manager.store.trust_for(handles).get("scopes") or [])
+                owner = bool(manager._is_owner_request(fresh))
+                if all(n in role_scopes or (owner and n not in EXPLICIT_ONLY_SCOPES) for n in names):
+                    manager.store.set_scopes(request.id, list(fresh.scopes) + names)
+                    status["access_ask_count"] = int(status.get("access_ask_count") or 0) + 1
+                    status["access_granted"] = names
+                    manager.store.set_state(request.id, "running", status=status)
+                    request.status = status
+                    request.scopes = list(dict.fromkeys(list(request.scopes) + names))
+                    manager.task_note(request, "approved", "Granted access to " +
+                                      ", ".join(choices[n] for n in names) + ".")
+                    return "Access granted: " + ", ".join(choices[n] for n in names) + ". Continue."
+            except Exception as exc:
+                logger.warning("[gate] covered access check failed: %s", exc)
         ask = {"scopes": names, "why": why, "asked_at": time.time()}
         status["access_request"] = ask
         status["access_ask_count"] = int(status.get("access_ask_count") or 0) + 1

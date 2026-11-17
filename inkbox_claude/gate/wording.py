@@ -236,9 +236,19 @@ def run_own_explanation(status: Dict[str, Any]) -> str:
     return text.strip()
 
 
+def owner_refused(status: Dict[str, Any]) -> bool:
+    """True when the only thing that stopped the run is that the owner said no to a
+    call he was asked about. That is his decision carried out, not a failure to fix."""
+    denied = [d for d in (status.get("denied") or []) if isinstance(d, dict)]
+    return bool(denied) and all(str(d.get("reason") or d.get("denied") or "") == "Aaron refused" for d in denied)
+
+
 def failure_message(summary: str, status: Dict[str, Any]) -> str:
     """The whole message a person receives for a failed request: never
     'That failed.', never an exception or SDK string, never markdown."""
+    if owner_refused(status):
+        # Offering "let it ..." back to the person who just said no would be absurd.
+        return f"Left as it was: {summary}. You said no, so I did not {_denied_label(status)}."
     if status.get("timed_out"):
         # The run itself has not failed -- it outran the live-call budget and is
         # still going in the background (see executor.py's _continue_after_timeout

@@ -26,6 +26,11 @@ CREATE TABLE IF NOT EXISTS threads (
   response_mode TEXT NOT NULL DEFAULT '',
   updated_at REAL NOT NULL
 );
+CREATE TABLE IF NOT EXISTS sessions (
+  session_key TEXT PRIMARY KEY,
+  session_id TEXT NOT NULL,
+  updated_at REAL NOT NULL
+);
 CREATE TABLE IF NOT EXISTS messages (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   chat_id TEXT NOT NULL,
@@ -257,6 +262,11 @@ CREATE TABLE IF NOT EXISTS threads (
   mode TEXT,
   meta_json TEXT,
   response_mode TEXT NOT NULL DEFAULT '',
+  updated_at DOUBLE PRECISION NOT NULL
+);
+CREATE TABLE IF NOT EXISTS sessions (
+  session_key TEXT PRIMARY KEY,
+  session_id TEXT NOT NULL,
   updated_at DOUBLE PRECISION NOT NULL
 );
 CREATE TABLE IF NOT EXISTS messages (
@@ -1301,6 +1311,29 @@ class Store:
         )
 
     # -- threads ---------------------------------------------------------
+    def get_session(self, session_key: str, max_age_hours: float = 24) -> Optional[str]:
+        with self._lock:
+            row = self._db.execute(
+                "SELECT session_id, updated_at FROM sessions WHERE session_key=?", (session_key,)
+            ).fetchone()
+        if not row or time.time() - float(row["updated_at"]) > max(0, max_age_hours) * 3600:
+            return None
+        return str(row["session_id"])
+
+    def set_session(self, session_key: str, session_id: str) -> None:
+        with self._lock:
+            self._db.execute(
+                "INSERT INTO sessions(session_key,session_id,updated_at) VALUES(?,?,?) "
+                "ON CONFLICT(session_key) DO UPDATE SET session_id=excluded.session_id, updated_at=excluded.updated_at",
+                (session_key, session_id, time.time()),
+            )
+            self._db.commit()
+
+    def drop_session(self, session_key: str) -> None:
+        with self._lock:
+            self._db.execute("DELETE FROM sessions WHERE session_key=?", (session_key,))
+            self._db.commit()
+
     def thread_state(self, chat_id: str) -> str:
         with self._lock:
             r = self._db.execute("SELECT state FROM threads WHERE chat_id=?", (chat_id,)).fetchone()

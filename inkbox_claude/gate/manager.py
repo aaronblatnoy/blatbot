@@ -2435,7 +2435,10 @@ class GateSessionManager:
         if row is None:
             return
         try:
-            if row["kind"] != "reply":
+            # An answer, and a question that is waiting on his yes or no, always go out:
+            # dropping a repeated ask as a duplicate would leave a request waiting on a
+            # question he never received.
+            if row["kind"] not in ("reply", "approval"):
                 try:
                     recent = self.store.recent_outbox_sends(row["target"], time.time() - 600, row["mode"])
                 except Exception as exc:
@@ -3101,6 +3104,9 @@ class GateSessionManager:
 
     async def handle_access_ask(self, req: Request, status: Dict[str, Any]) -> Optional[str]:
         """Grant what this sender already has, then park only the remaining access for Aaron."""
+        if status.get("deferred"):
+            status = dict(status)
+            status["access_ask_count"] = int((req.status or {}).get("access_ask_count") or 0) + 1
         ask = status.get("access_request") or {}
         wanted = [s for s in ask.get("scopes", []) if s in SCOPES and s not in req.scopes]
         if not wanted:
@@ -3242,6 +3248,41 @@ class GateSessionManager:
         if self.schedules.is_proposal_request(req):
             return await self.schedules.decide_proposal(req, decision, note)
         d = (decision or "").strip().lower()
+        deferred = (req.status or {}).get("deferred") or {}
+        if deferred and d != "edit":
+            if d not in ("yes", "y", "ok", "approve", "run", "go",
+                         "no", "n", "stop", "drop", "reject", "decline"):
+                return {"ok": False, "error": f"#{req.id} needs a yes or a no", "state": req.state}
+            allowed = d in ("yes", "y", "ok", "approve", "run", "go")
+            status = dict(req.status or {})
+            status["deferred_decision"] = {"id": deferred["id"], "allow": allowed}
+            if deferred.get("kind") == "access":
+                ask = status.pop("access_request", {}) or {}
+                names = list(ask.get("uncovered") or ask.get("scopes") or [])
+                labels = ", ".join(LABELS.get(s, s) for s in names)
+                if allowed:
+                    self.store.set_scopes(req.id, list(req.scopes) + names)
+                    self.task_note(req, "approved", f"Aaron granted access to {labels}.", state="running")
+                else:
+                    status["access_refused"] = list(dict.fromkeys(
+                        list(status.get("access_refused") or []) + names))
+                    self.task_note(req, "rejected", f"Aaron refused access to {labels}.", state="running")
+            else:
+                self.task_note(req, "approved" if allowed else "rejected",
+                               f"Aaron {'approved' if allowed else 'refused'} the held {deferred.get('kind') or 'call'}: {req.summary}",
+                               state="running")
+            self.store.set_state(req.id, "approved", status=status)
+            if req.schedule_id and not allowed and deferred.get("kind") in ("send", "destructive"):
+                await self.schedules.held_ended(req, "declined")
+            fresh = self.store.get_request(req.id) or req
+            saved_session = deferred.get("session_id") or ""
+            saved_at = float(status.get("session_saved_at") or 0)
+            if (saved_at and time.time() - saved_at >
+                    float(_settings.get("SESSION_MAX_AGE_HOURS")) * 3600):
+                saved_session = ""
+            asyncio.create_task(self.execute(fresh, continuation="continue",
+                                             resume_session=saved_session))
+            return {"ok": True, "state": "approved", "error": ""}
         access_ask = (req.status or {}).get("access_request") or {}
         if access_ask and d != "edit":
             if d not in ("yes", "y", "ok", "approve", "run", "go", "no", "n", "stop", "drop", "reject", "decline"):
@@ -3299,9 +3340,12 @@ class GateSessionManager:
         if d == "edit":
             if not note.strip():
                 return {"ok": False, "error": "an edit needs instructions", "state": req.state}
-            if access_ask:
+            if access_ask or deferred:
                 clean = dict(req.status or {})
                 clean.pop("access_request", None)
+                clean.pop("deferred", None)
+                clean.pop("deferred_decision", None)
+                clean.pop("confirm", None)
                 self.store.set_state(req.id, "pending", status=clean)
             base = req.prompt.split("\n\n--- AARON'S INSTRUCTIONS ---")[0]
             new_req = self.store.revise_prompt(req.id, f"{base}\n\n--- AARON'S INSTRUCTIONS ---\n{note.strip()}")
@@ -3700,6 +3744,16 @@ class GateSessionManager:
                 return await self._run_quota_fallback(req, context, status)
             if continuation:
                 return status
+            if (status.get("access_granted") and
+                    any(d.get("reason") == "scope" for d in status.get("denied") or [])):
+                # A newly covered MCP server is loaded by the next run. Keep the
+                # completed work in view so Claude can continue from the refusal.
+                fresh = self.store.get_request(req.id) or req
+                status = await self.executor.run(
+                    fresh, context=context, prior_work=status.get("raw") or "",
+                    model=model, from_owner=_owner_request(self, fresh), resume_session="")
+            if status.get("deferred"):
+                return status
             status = await self._grant_what_it_asked_for(req, status, context, model)
             return await self._insist_it_actually_ran(req, status, context, model)
         status = await self.jev_agent.run(req, context=context)
@@ -3930,6 +3984,25 @@ class GateSessionManager:
         if the fast timeout path already told the person something in the meantime."""
         fresh = self.store.get_request(req.id)
         req = fresh or req
+        if status.get("deferred") and status["deferred"].get("kind") == "access":
+            try:
+                next_prompt = await self.handle_access_ask(req, status)
+            except Exception as exc:
+                logger.warning("[gate] #%s access decision failed: %s", req.id, exc)
+                status.pop("deferred", None)
+                status.pop("access_request", None)
+                next_prompt = False
+            if next_prompt is None:
+                return
+            if next_prompt is not False:
+                fresh = self.store.get_request(req.id) or req
+                saved = dict(fresh.status or {})
+                saved["deferred_decision"] = {"id": status["deferred"]["id"], "allow": True}
+                self.store.set_state(req.id, "approved", status=saved)
+                fresh = self.store.get_request(req.id) or req
+                asyncio.create_task(self.execute(fresh, continuation="continue",
+                                                 resume_session=status["deferred"].get("session_id") or ""))
+                return
         if status.get("access_request"):
             try:
                 next_prompt = await self.handle_access_ask(req, status)
@@ -3952,6 +4025,10 @@ class GateSessionManager:
         ok = bool(status.get("ok"))
         self.store.set_state(req.id, "done" if ok else "failed", status=status, raw_output=status.get("raw"))
         self.store.set_thread(req.chat_id, "idle")
+        if req.schedule_id and (req.status or {}).get("deferred"):
+            if ((req.status or {}).get("deferred_decision") or {}).get("allow"):
+                await self.schedules.held_resolved(req, status)
+            return
         title = wording.plain_title(self.store, req)
         result = (status.get("summary") or status.get("error") or "").strip()
         message = wording.success_message(result) if ok else wording.failure_message(title, status)
@@ -3975,6 +4052,37 @@ class GateSessionManager:
             logger.exception("[gate] #%s late delivery failed", req.id)
         finally:
             session._outbox_kind = previous_kind
+
+    async def _fallback_deferred(self, req: Request, context: str) -> Optional[Dict[str, Any]]:
+        """A lost Claude session uses the older single-call path or starts access work afresh."""
+        deferred = (req.status or {}).get("deferred") or {}
+        decision = (req.status or {}).get("deferred_decision") or {}
+        try:
+            self.executor._sessions.pop(req.chat_id, None)
+            self.store.drop_session(req.chat_id)
+        except Exception as exc:
+            logger.warning("[gate] #%s could not clear saved session: %s", req.id, exc)
+        if deferred.get("kind") in ("send", "destructive"):
+            if decision.get("allow"):
+                await self.perform_confirmed(req)
+            else:
+                self.store.set_state(req.id, "rejected")
+                self.store.set_thread(req.chat_id, "idle")
+                if req.schedule_id:
+                    await self.schedules.held_ended(req, "declined")
+                else:
+                    await self.send_to_approver(f"Left alone. Nothing was changed for #{req.id}.")
+            return None
+        fresh = self.store.get_request(req.id) or req
+        saved = dict(fresh.status or {})
+        saved.pop("deferred", None)
+        saved.pop("deferred_decision", None)
+        saved.pop("access_request", None)
+        self.store.set_state(req.id, "running", status=saved)
+        fresh = self.store.get_request(req.id) or req
+        model = await self._pick_model(fresh)
+        return await self.executor.run(fresh, context=context, model=model,
+                                       from_owner=_owner_request(self, fresh), resume_session="")
 
     async def execute(self, req: Request, notify: bool = True, *, continuation: str = "",
                       resume_session: Optional[str] = None) -> str:
@@ -4012,8 +4120,23 @@ class GateSessionManager:
                     req.id, tid, ledger_chars,
                     ledger_info.get("pool"), ledger_info.get("dropped"), ledger_info.get("matched"),
                     len(vault_block))
+        if continuation and (req.status or {}).get("deferred_decision") and not resume_session:
+            try:
+                status = await self._fallback_deferred(req, context)
+            except Exception as exc:
+                logger.warning("[gate] #%s could not continue held call: %s", req.id, exc)
+                status = {"ok": False, "error": "could not continue the saved call", "tool_calls": []}
+            if status is None:
+                if slow_ack is not None:
+                    slow_ack.cancel()
+                session.typing_stop()
+                return ""
+        else:
+            status = None
         try:
-            if continuation:
+            if status is not None:
+                pass
+            elif continuation:
                 status = await self._run_executor(req, context, continuation=continuation,
                                                   resume_session=resume_session)
             else:
@@ -4023,6 +4146,33 @@ class GateSessionManager:
                 slow_ack.cancel()
             if not notify:
                 session.typing_stop()
+        if status.get("resume_failed") and (req.status or {}).get("deferred_decision"):
+            try:
+                status = await self._fallback_deferred(req, context)
+            except Exception as exc:
+                logger.warning("[gate] #%s could not continue held call: %s", req.id, exc)
+                status = {"ok": False, "error": "could not continue the saved call", "tool_calls": []}
+            if status is None:
+                return ""
+        if status.get("deferred") and status["deferred"].get("kind") == "access":
+            session.typing_stop()
+            try:
+                next_prompt = await self.handle_access_ask(req, status)
+            except Exception as exc:
+                logger.warning("[gate] #%s access decision failed: %s", req.id, exc)
+                status.pop("deferred", None)
+                status.pop("access_request", None)
+                next_prompt = False
+            if next_prompt is None:
+                return "I'm checking with Aaron and will get back to you."
+            if next_prompt is not False:
+                fresh = self.store.get_request(req.id) or req
+                saved = dict(fresh.status or {})
+                saved["deferred_decision"] = {"id": status["deferred"]["id"], "allow": True}
+                self.store.set_state(req.id, "approved", status=saved)
+                fresh = self.store.get_request(req.id) or req
+                return await self.execute(fresh, notify=notify, continuation="continue",
+                                          resume_session=status["deferred"].get("session_id") or "")
         if status.get("access_request"):
             session.typing_stop()
             try:
@@ -4088,6 +4238,11 @@ class GateSessionManager:
             told_already = any(wording.is_usage_limit_failure(st) for st in prior)
         self.task_note(req, "done" if ok else "failed", f"{req.summary} -> {result}",
                        state="open" if req.schedule_id else ("done" if ok else "failed"))
+        if req.schedule_id and (req.status or {}).get("deferred"):
+            if ((req.status or {}).get("deferred_decision") or {}).get("allow"):
+                await self.schedules.held_resolved(req, status)
+            session.typing_stop()
+            return ""
         if await self.schedules.finished(req, status):
             # A message the owner sent while this ran already got its own turn when it
             # arrived (store.running_for_thread ignores schedule requests, so it was never
