@@ -32,6 +32,7 @@ from . import peopleindex
 from . import accesscmd, admincmd
 from . import graphmem
 from . import outcomes
+from . import ownertext
 
 logger = logging.getLogger(__name__)
 _MISSING = object()
@@ -173,6 +174,7 @@ def _parse_until(until_text: Optional[str], timezone_name: Optional[str]) -> Opt
 
 
 OWNER_THREAD = "owner"   # the one thread for the person the assistant works for
+OWNER_NAME = "Aaron Blatnoy"
 
 
 class GateSession:
@@ -2724,7 +2726,11 @@ class GateSessionManager:
                         f"Nothing was reported back. Say the word and I will run it again.")
                 session = self.get(req.chat_id)
                 if not await session.notify_after_request(line, inbound_id=req.inbound_id):
-                    await self.send_to_approver(f"[Blatbot #{req.id}] {line}", kind="notice")
+                    await self.send_to_approver(ownertext.compose(
+                        "failed", f"Stopped by a restart \u00b7 #{req.id}",
+                        facts=[("Asked", ownertext.strip_group_tag(req.summary))],
+                        body="It never finished and nothing was reported back.",
+                        tail="Say the word and I will run it again."), kind="notice")
                 logger.info("[gate] told %s about interrupted request #%s", req.chat_id, req.id)
             except Exception:
                 logger.exception("[gate] could not report interrupted request #%s", req.id)
@@ -2801,8 +2807,10 @@ class GateSessionManager:
                 "403": "refused the request (403)", "429": "is rate limiting (429)"}.get(status, f"returned {status}")
         who = "DeepSeek" if "deepseek" in host else ("TypeSafe" if "typesafe" in host else host or "a provider")
         try:
-            await self.send_to_approver(f"Heads up: {who} {what}. I cannot finish turns until that is fixed. "
-                                        f"Your last message was not answered.", kind="notice")
+            await self.send_to_approver(ownertext.compose(
+                "failed", f"{who} {what}",
+                body="I cannot finish turns until that is fixed. Your last message was not answered."),
+                kind="notice")
         except Exception:
             logger.exception("[gate] could not deliver the outage notice")
 
@@ -2866,50 +2874,94 @@ class GateSessionManager:
                     lines.append(line)
                 seen.append(person)
             if lines:
-                await self.send_to_approver("\n".join(lines), kind="notice")
+                await self.send_to_approver(peopleindex.notice_text(lines), kind="notice")
             for person in seen:
                 self.store.mark_person_told(person["id"], person)
             return len(lines)
 
-    async def notify_inbound(self, session: GateSession, body: str) -> None:
-        who = session._sender_name()
-        sender = session._sender()
-        who = f"{who} ({sender})" if who else sender
-        subj = str((session.reply_meta or {}).get("subject") or "").strip()
-        snippet = body.strip()  # the whole message; Aaron asked for no truncation
-        head = f"[Blatbot FYI] {who} via {session.mode}"
-        if subj:
-            head += f" | {subj}"
+    def result_notice(self, req: Request, title: str, message: str, *, ok: bool,
+                      late: bool = False, same_limit: bool = False, own: bool = False) -> str:
+        """How a finished request reads on Aaron's phone: what happened and for whom in
+        the first line, what was asked and where on the label lines, then the result."""
+        group, tagged_from, _ = ownertext.split_group_tag(req.original_message or "")
+        who = "" if own else ownertext.person(req.sender_name or tagged_from, req.sender)
+        if same_limit:
+            head = "Could not run"
+            message = "Same usage limit as before."
+        elif ok:
+            head = "Finished late" if late else "Done"
+        else:
+            head = "Could not finish" + (", finished late" if late else "")
+        if who:
+            head += f" for {who}"
+        head += f" \u00b7 #{req.id}"
+        facts = [("Asked", ownertext.strip_group_tag(title))]
+        if not own:
+            facts.append(("Where", ownertext.where(req.mode, group)))
+        return ownertext.compose("done" if ok else "failed", head, facts=facts, body=message)
+
+    def owner_in_group(self, session: GateSession) -> bool:
+        """True when this thread is a group chat Aaron is in himself. There is no
+        membership roster anywhere, so this is what the record shows: he has written in
+        that group (his own messages are stored there under his name)."""
+        meta = session.reply_meta or {}
+        if meta.get("conversation_kind") != "group":
+            return False
+        first = OWNER_NAME.split()[0].lower()
         try:
-            await self.send_to_approver(f"{head}\n{snippet}", kind="notice")
+            names = self.store._group_member_names(session.record_id)
+        except Exception:
+            logger.debug("[gate] could not read who is in %s", session.chat_id, exc_info=True)
+            return False
+        return any(str(n).split()[0].lower() == first for n in names if str(n).strip())
+
+    def fyi_text(self, session: GateSession, body: str) -> str:
+        """The copy Aaron gets of a message someone else sent: who wrote, where, the
+        message itself, and that nothing is needed from him (an ask, if one is needed,
+        comes separately). Never the run's routing note or a raw sender id."""
+        meta = session.reply_meta or {}
+        group, tagged_from, message = ownertext.split_group_tag(body)
+        group = group or str(meta.get("group_title") or "")
+        who = ownertext.person(session._sender_name() or tagged_from, session._sender())
+        subject = str(meta.get("subject") or "").strip()
+        return ownertext.compose(
+            "fyi", f"{who} wrote to Blatbot",
+            facts=[("Where", ownertext.where(session.mode, group)), ("Subject", subject)],
+            body=ownertext.quote(message, limit=0),
+            tail=("Nothing needed from you. I answer in the group only when it is meant for me."
+                  if group or meta.get("conversation_kind") == "group" else
+                  "Nothing needed from you. I am answering it, and anything that needs your yes "
+                  "comes as its own text."))
+
+    async def notify_inbound(self, session: GateSession, body: str) -> None:
+        if self.owner_in_group(session):
+            # He is in that group and already sees the message there.
+            return
+        try:
+            await self.send_to_approver(self.fyi_text(session, body), kind="notice")
         except Exception:
             logger.exception("[gate] FYI to approver failed")
 
     def _approval_reply_text(self, req: Request) -> str:
-        if len(self.store.pending()) <= 1:
-            return "Reply yes, no, or edit: <instructions>"
-        return (f'Reply "#{req.id} yes", "#{req.id} no", '
-                f'or "#{req.id} edit: <instructions>".')
+        return ownertext.reply_handle(req.id, edit=True)
 
     def format_request(self, req: Request, revised: bool = False) -> str:
-        name = req.sender_name or req.sender
-        mode_label = _MODE_LABEL.get(req.mode, req.mode)
-        head = f"{name} ({mode_label}) wants you to{' (revised)' if revised else ''}:"
-        lines = [head, req.summary]
-        if req.subject:
-            lines.append(f"Subject: {req.subject}")
-        parts = ["\n".join(lines)]
-        if req.original_message:
-            parts.append(f'"{req.original_message.strip()}"')
+        group, tagged_from, original = ownertext.split_group_tag(req.original_message or "")
+        _, _, summary = ownertext.split_group_tag(req.summary or "")
+        name = ownertext.person(req.sender_name or tagged_from, req.sender)
+        facts = [("Where", ownertext.where(req.mode, group)), ("Wants", summary),
+                 ("Subject", req.subject or "")]
         if req.scopes:
             # Scope labels are already verb phrases ("look up and manage your Stern
-            # calendar"), so this reads as one sentence, not "It would use <verb phrase>."
-            parts.append(f"It would {schedprop.short_labels(req.scopes)}.")
+            # calendar"), so this reads as one sentence after "It would".
+            facts.append(("It would", schedprop.short_labels(req.scopes)))
         marker = "--- AARON'S INSTRUCTIONS ---"
         if marker in req.prompt:
-            parts.append("Your instructions: " + req.prompt.split(marker, 1)[1].strip())
-        parts.append(self._approval_reply_text(req))
-        return "\n\n".join(parts)
+            facts.append(("Your instructions", req.prompt.split(marker, 1)[1].strip()))
+        quoted = ownertext.quote(original) if original and " ".join(original.split()) != " ".join(summary.split()) else ""
+        head = f"{name} needs your yes" + (", revised" if revised else "") + f" \u00b7 #{req.id}"
+        return ownertext.compose("ask", head, facts=facts, body=quoted,
+                                 handle=self._approval_reply_text(req))
 
     def resolve_task(self, session: GateSession, out: RouterOutput, message: str = "") -> Dict[str, Any]:
         """Decide which task a request belongs to. Always returns a task.
@@ -3087,15 +3139,26 @@ class GateSessionManager:
         shown = {k: v for k, v in c["args"].items() if k != "user_google_email"}
         about = "\n".join(f"  {ln}" for ln in c.get("about") or []) or "  (no further detail found)"
         self.task_note(req, "request", f"Waiting on Aaron to confirm: {short} {json.dumps(shown, ensure_ascii=False)}", state="waiting_aaron")
+        schedule_title = ""
+        if req.schedule_id:
+            sch = self.store.get_schedule(req.schedule_id)
+            schedule_title = str(getattr(sch, "title", "") or "") if sch is not None else ""
         if c.get("kind") == "send":
             # Not a summary of a message: the message. He approves the words that will go out.
-            plain = f"Nothing has been sent. This is what would go out:\n\n{_draft_text(shown)}"
+            full_text = ownertext.compose(
+                "held", f"Held for your yes \u00b7 #{req.id}",
+                facts=[("Schedule", schedule_title)],
+                body=f"Nothing has been sent. This is what would go out:\n\n{_draft_text(shown)}",
+                handle=ownertext.reply_handle(req.id))
         else:
             plain = await self._phrase_confirmation(req, short, shown, c.get("about") or [])
-        if len(self.store.pending()) <= 1:
-            full_text = f"{plain}\nReply yes to do it or no to leave it alone."
-        else:
-            full_text = f'{plain}\nReply "#{req.id} yes" to do it or "#{req.id} no" to leave it alone.'
+            plain = re.sub(r"^Before I do this, I need your yes[.:]?\s*", "", plain).strip()
+            if plain:
+                plain = plain[0].upper() + plain[1:]
+            full_text = ownertext.compose(
+                "ask", f"Before I do this, I need your yes \u00b7 #{req.id}",
+                facts=[("Schedule", schedule_title)], body=plain,
+                tail="Nothing has happened yet.", handle=ownertext.reply_handle(req.id))
         schedule = self.store.get_schedule(req.schedule_id) if req.schedule_id else None
         if schedule is not None:
             # A held call that belongs to a scheduled run asks on that
@@ -3154,7 +3217,7 @@ class GateSessionManager:
                 # in the words that actually went out rather than the run's note to itself.
                 said = "\n".join(f"Sent to {s.get('to')} on {outcomes.SURFACE_WORDS.get(s.get('surface'), s.get('surface'))}: "
                                  f"{s.get('text') or ''}" for s in status.get("sends") or [])
-                await self.send_to_approver(f"[Blatbot #{req.id} {'done' if ok else 'FAILED'}] {title}\n{said or message}",
+                await self.send_to_approver(self.result_notice(req, title, said or message, ok=ok),
                                             kind="notice")
         finally:
             session.typing_stop()
@@ -3197,9 +3260,14 @@ class GateSessionManager:
             summary = (req.summary or "the task").replace("\u2014", ":")
             why = str(ask.get("why") or "No reason given").replace("\u2014", ":")
             self.task_note(req, "request", f"Waiting on Aaron for access to {labels}.", state="waiting_aaron")
-            await self.send_to_approver(
-                f'#{req.id} {who} asked: {summary}. To finish it also needs to: {labels}. '
-                f'Why: {why}. Reply "#{req.id} yes" or "#{req.id} no".',
+            group, tagged_from, _ = ownertext.split_group_tag(req.original_message or "")
+            await self.send_to_approver(ownertext.compose(
+                "ask", f"Needs more access \u00b7 #{req.id}",
+                facts=[("From", ownertext.person(req.sender_name or tagged_from, req.sender)),
+                       ("Where", ownertext.where(req.mode, group)),
+                       ("Task", ownertext.strip_group_tag(summary)),
+                       ("Also needs to", labels), ("Why", why)],
+                handle=ownertext.reply_handle(req.id)),
                 kind="approval")
             if not _owner_request(self, req):
                 try:
@@ -3270,10 +3338,11 @@ class GateSessionManager:
         if await self.schedules.finished(req, status):
             return
         session = self.get(req.chat_id)
-        note = f"Task #{req.id} {'done' if ok else 'FAILED'}: {req.summary}\nResult:\n{result}"
+        note = f"Task #{req.id} {'done' if ok else 'failed'}: {req.summary}\nResult:\n{result}"
         replied = await session.notify_after_request(note, inbound_id=req.inbound_id)
         if not replied:
-            await self.send_to_approver(f"{'Done' if ok else 'Failed'}: {req.summary}\n{result}")
+            await self.send_to_approver(self.result_notice(req, req.summary, result, ok=ok,
+                                                           own=self._is_owner_request(req)))
 
     async def decide_request(self, request_id: int, decision: str, *, actor: str = "aaron",
                             source: str = "imessage", note: str = "") -> Dict[str, Any]:
@@ -4132,7 +4201,7 @@ class GateSessionManager:
         title = wording.plain_title(self.store, req)
         result = (status.get("summary") or status.get("error") or "").strip()
         message = wording.success_message(result) if ok else wording.failure_message(title, status)
-        outcome = "done" if ok else "FAILED"
+        outcome = "done" if ok else "failed"
         note = (f"Task #{req.id} {outcome} (after running past the live-call budget in the background): "
                 f"{req.summary}\nResult:\n{result}")
         self.task_note(req, "done" if ok else "failed", f"{req.summary} -> {result}",
@@ -4150,7 +4219,8 @@ class GateSessionManager:
             else:
                 delivered = await session.notify_failure(message, note, inbound_id=req.inbound_id)
             if not delivered:
-                await self.send_to_approver(f"[Blatbot #{req.id} {outcome}, finished late] {title}\n{message}",
+                await self.send_to_approver(self.result_notice(req, title, message, ok=ok, late=True,
+                                                               own=self._is_owner_request(req)),
                                             kind="late_result")
         except Exception:
             logger.exception("[gate] #%s late delivery failed", req.id)
@@ -4337,7 +4407,7 @@ class GateSessionManager:
                 await self._grant_blanket_and_retry(session, self.store.get_request(req.id) or req)
                 session.typing_stop()
                 return ""
-        outcome = "done" if ok else "FAILED"
+        outcome = "done" if ok else "failed"
         result = _clean_result(status.get("summary") or status.get("error") or "")
         title = wording.plain_title(self.store, req)
         # The message a person actually reads for this result: the cleaned result on
@@ -4422,7 +4492,7 @@ class GateSessionManager:
                 else:
                     replied = await session.notify_failure(message, note, inbound_id=req.inbound_id)
                     if not replied:
-                        await self.send_to_approver(f"Failed: {title}\n{message}")
+                        await self.send_to_approver(self.result_notice(req, title, message, ok=False, own=True))
                 if meanwhile:
                     # Aaron said more while it ran (a hint, a correction): the failure
                     # above is the answer to the request itself; this is a separate,
@@ -4445,7 +4515,7 @@ class GateSessionManager:
                     logger.info("[gate] #%s: no phrased reply for the room; posting the result there", req.id)
                     replied = await session.send_to_sender(message, role="answer")
                 if not replied:
-                    await self.send_to_approver(f"Done: {title}\n{message}")
+                    await self.send_to_approver(self.result_notice(req, title, message, ok=True, own=True))
             finally:
                 session.typing_stop()
             return ""
@@ -4455,15 +4525,16 @@ class GateSessionManager:
         if not ok:
             if told_already:
                 same_limit = wording.same_limit_message(status)
-                await self.send_to_approver(f"[Blatbot #{req.id} FAILED, same limit] {title}", kind="notice")
+                await self.send_to_approver(self.result_notice(req, title, "", ok=False, same_limit=True),
+                                            kind="notice")
                 await session.notify_failure(same_limit, note, inbound_id=req.inbound_id)
             else:
-                await self.send_to_approver(f"[Blatbot #{req.id} FAILED] {title}\n{message}", kind="notice")
+                await self.send_to_approver(self.result_notice(req, title, message, ok=False), kind="notice")
                 await session.notify_failure(message, note, inbound_id=req.inbound_id)
             session.typing_stop()
             return ""
         try:
-            await self.send_to_approver(f"[Blatbot #{req.id} {outcome}] {title}\n{message}", kind="notice")
+            await self.send_to_approver(self.result_notice(req, title, message, ok=ok), kind="notice")
             await session.notify_after_request(note, inbound_id=req.inbound_id)
         finally:
             session.typing_stop()
@@ -4486,14 +4557,24 @@ class GateSessionManager:
             if self.schedules.is_proposal_request(req):
                 self.schedules.proposal_expired(req)
                 await self.send_to_approver(
-                    f"[Blatbot #{req.id}] expired after 24h with no answer: {req.summary}", kind="notice")
+                    self._expired_text(req), kind="notice")
             elif req.schedule_id and (req.status or {}).get("confirm"):
                 await self.schedules.held_ended(req, "expired")
             else:
                 await self.send_to_approver(
-                    f"[Blatbot #{req.id}] expired after 24h with no answer: {req.summary}", kind="notice")
+                    self._expired_text(req), kind="notice")
             self.store.add_message(req.chat_id, "system", f"Task #{req.id} expired unanswered: {req.summary}")
             self.task_note(req, "expired", f"Expired after 24h with no answer from Aaron: {req.summary}", state="open")
+
+    @staticmethod
+    def _expired_text(req: Request) -> str:
+        group, tagged_from, _ = ownertext.split_group_tag(req.original_message or req.summary or "")
+        who = ownertext.person(req.sender_name or tagged_from, req.sender)
+        return ownertext.compose(
+            "timer", f"Expired with no answer \u00b7 #{req.id}",
+            facts=[("From", who), ("Where", ownertext.where(req.mode, group)),
+                   ("Asked", ownertext.strip_group_tag(req.summary))],
+            tail="Nothing was done. It waited 24 hours for your yes.")
 
     async def _expiry_loop(self) -> None:
         while True:

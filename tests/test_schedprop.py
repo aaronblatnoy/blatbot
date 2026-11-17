@@ -219,9 +219,10 @@ def test_format_proposal_matches_the_specs_example_shape(monkeypatch):
     schedule = _schedule()
     text = schedprop.format_proposal(schedule)
     assert text == (
-        'Set up "Team total watch": every 4 hours, starting 2:30 PM today. '
-        'It will read public web pages and look up and edit contacts. '
-        'You hear from it only when something changed or it could not finish. '
+        '\u25c6 Set up "Team total watch"?\n\n'
+        'When: every 4 hours, starting 2:30 PM today\n'
+        'It will: read public web pages and look up and edit contacts\n'
+        'You hear from it: only when something changed or it could not finish\n\n'
         'Reply yes to start, or tell me what to change.'
     )
     assert "cron" not in text
@@ -236,7 +237,7 @@ def test_format_proposal_with_no_capabilities_never_reads_it_will_dot(monkeypatc
     schedule = _schedule(scopes=[])
     text = schedprop.format_proposal(schedule)
     assert "It will ." not in text
-    assert "It will not be able to use any tools." in text
+    assert "It will: not be able to use any tools" in text
 
 
 def test_format_proposal_every_time_reporting(monkeypatch):
@@ -244,7 +245,7 @@ def test_format_proposal_every_time_reporting(monkeypatch):
     monkeypatch.setattr(schedprop, "_first_run_text", lambda s: "9:00 AM tomorrow")
     schedule = _schedule(cadence_kind="once", cadence={"at": "2026-11-01T09:00:00"}, report_every_time=True)
     text = schedprop.format_proposal(schedule)
-    assert "You hear from it every time it runs." in text
+    assert "You hear from it: every time it runs" in text
     assert "only when something changed" not in text
 
 
@@ -276,14 +277,15 @@ def test_format_change_cadence_only(monkeypatch):
     monkeypatch.setattr(schedprop, "_first_run_text", lambda s: "8:00 AM tomorrow")
     schedule = _schedule(title="Team total watch", cadence_kind="daily", cadence={"time": "08:00"})
     text = schedprop.format_change(schedule, {"cadence_kind": "daily", "cadence": {"time": "08:00"}})
-    assert text == ("Team total watch will run daily at 8:00 AM, next 8:00 AM tomorrow. "
-                     "Reply yes to confirm.")
+    assert text == ("\u25c6 Change Team total watch?\n\n"
+                    "Runs: daily at 8:00 AM, next 8:00 AM tomorrow\n\nReply yes to confirm.")
 
 
 def test_format_change_added_capabilities_only(monkeypatch):
     schedule = _schedule(title="Team total watch")
     text = schedprop.format_change(schedule, {"scopes": ["contacts"]})
-    assert text == "Team total watch will also be allowed to look up and edit contacts. Reply yes to confirm."
+    assert text == ("\u25c6 Change Team total watch?\n\n"
+                    "Also allowed to: look up and edit contacts\n\nReply yes to confirm.")
 
 
 def test_format_change_both_cadence_and_capabilities(monkeypatch):
@@ -291,8 +293,9 @@ def test_format_change_both_cadence_and_capabilities(monkeypatch):
     monkeypatch.setattr(schedprop, "_first_run_text", lambda s: "8:00 AM tomorrow")
     schedule = _schedule(title="Team total watch")
     text = schedprop.format_change(schedule, {"cadence_kind": "daily", "scopes": ["contacts"]})
-    assert "Team total watch will run daily at 8:00 AM, next 8:00 AM tomorrow. Reply yes to confirm." in text
-    assert "Team total watch will also be allowed to look up and edit contacts. Reply yes to confirm." in text
+    assert text == ("\u25c6 Change Team total watch?\n\n"
+                    "Runs: daily at 8:00 AM, next 8:00 AM tomorrow\n"
+                    "Also allowed to: look up and edit contacts\n\nReply yes to confirm.")
 
 
 # ---------------------------------------------------------------------------

@@ -360,34 +360,35 @@ def _until_text(schedule: Any) -> str:
 # ---------------------------------------------------------------------------
 
 def format_proposal(schedule: Any) -> str:
-    """The proposal message, in the specification's voice. No scope names, no
-    cadence kind, no cron string, no "#<id>" and no markdown."""
-    cadence_text = _cadence_text(schedule)
-    first_run = _first_run_text(schedule)
-    sentence = f'Set up "{schedule.title}": {cadence_text}, starting {first_run}'
+    """The proposal message, in the house format (ownertext.py). No scope names, no
+    cadence kind, no cron string, no "#<id>" and no markdown: a bare yes on this
+    thread answers it."""
+    from . import ownertext
+    when = f"{_cadence_text(schedule)}, starting {_first_run_text(schedule)}"
     if getattr(schedule, "until", None):
-        sentence += f", until {_until_text(schedule)}"
-    if schedule.scopes:
-        sentence += ". It will " + labels(schedule.scopes) + "."
-    else:
-        # Belt and suspenders: manager.py refuses to propose a schedule with
-        # no capabilities at all, but format_proposal must never read "It
-        # will ." if that guard is ever bypassed (an edit path, a test).
-        sentence += ". It will not be able to use any tools."
+        when += f", until {_until_text(schedule)}"
+    # Belt and suspenders: manager.py refuses to propose a schedule with no
+    # capabilities at all, but this must never read "It will: ." if that guard is
+    # ever bypassed (an edit path, a test).
+    will = labels(schedule.scopes) if schedule.scopes else "not be able to use any tools"
     hears = "every time it runs" if schedule.report_every_time else "only when something changed or it could not finish"
-    sentence += f" You hear from it {hears}."
-    sentence += " Reply yes to start, or tell me what to change."
-    return sentence
+    return ownertext.compose(
+        "ask", f'Set up "{schedule.title}"?',
+        facts=[("When", when), ("It will", will), ("You hear from it", hears)],
+        handle="Reply yes to start, or tell me what to change.")
 
 
 def format_change(schedule: Any, changes: Dict[str, Any]) -> str:
     """The message after an edit: the new cadence if it changed, and/or newly
     added capabilities. Each half asks for his yes on its own."""
-    parts: List[str] = []
+    from . import ownertext
+    facts = []
     if any(k in changes for k in ("cadence_kind", "cadence", "until", "report_every_time")):
-        parts.append(f"{schedule.title} will run {_cadence_text(schedule)}, next {_first_run_text(schedule)}. "
-                     "Reply yes to confirm.")
+        facts.append(("Runs", f"{_cadence_text(schedule)}, next {_first_run_text(schedule)}"))
     added = changes.get("scopes")
     if added:
-        parts.append(f"{schedule.title} will also be allowed to {labels(added)}. Reply yes to confirm.")
-    return " ".join(parts)
+        facts.append(("Also allowed to", labels(added)))
+    if not facts:
+        return ""
+    return ownertext.compose("ask", f"Change {schedule.title}?", facts=facts,
+                             handle="Reply yes to confirm.")

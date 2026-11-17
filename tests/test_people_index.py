@@ -125,15 +125,22 @@ def _owner_texts(sent):
     return [t for _, t, *_ in sent]
 
 
+def told(head, *lines):
+    """The one People text in the house format (gate/ownertext.py)."""
+    body = lines[0] if len(lines) == 1 else "\n".join("\u2022 " + ln for ln in lines)
+    return f"\u25ce {head}\n\n{body}\n\nNothing needed from you."
+
+
 def test_the_notice_states_the_record_once_and_never_again(tmp_path):
     m, sent = make_manager(tmp_path)
     m.index_person_seen(display="Stanley Rabkin",
                         handles=[("telegram", "8804662817"), ("telegram_username", "@stanrab")],
                         met_in=ROOM, note="Aaron's TAMID senior advisor.")
     assert asyncio.run(m.flush_people_notices()) == 1
-    assert _owner_texts(sent) == [
+    assert _owner_texts(sent) == [told(
+        "Added to People",
         "Stanley Rabkin is in People: Telegram @stanrab, met in FellowSIp of the Ring. "
-        "Note: Aaron's TAMID senior advisor."]
+        "Note: Aaron's TAMID senior advisor.")]
     # Indexed again, flushed again, after a restart: nothing more.
     m.index_person_seen(display="Stanley Rabkin", handles=[("telegram", "8804662817")], met_in=ROOM)
     assert asyncio.run(m.flush_people_notices()) == 0
@@ -148,9 +155,10 @@ def test_only_handle_is_the_id_so_the_id_is_said(tmp_path):
     m.index_person_seen(display="Stanley Rabkin", handles=[("telegram", "8804662817")],
                         met_in="Aaron & Stanley, Blatbot")
     asyncio.run(m.flush_people_notices())
-    assert _owner_texts(sent) == [
+    assert _owner_texts(sent) == [told(
+        "Added to People",
         "Stanley Rabkin is in People: Telegram id 8804662817, met in FellowSIp of the Ring "
-        "and in Aaron & Stanley, Blatbot."]
+        "and in Aaron & Stanley, Blatbot.")]
     for text in _owner_texts(sent):
         assert "—" not in text and "**" not in text
 
@@ -163,7 +171,8 @@ def test_a_later_handle_is_one_text_naming_only_what_is_new(tmp_path):
                                                            ("phone", "+1 555 010 0042")], met_in=ROOM)
     asyncio.run(m.flush_people_notices())
     asyncio.run(m.flush_people_notices())
-    assert _owner_texts(sent)[1:] == ["Stanley Rabkin in People now also has phone +1 555 010 0042."]
+    assert _owner_texts(sent)[1:] == [told("People updated",
+                                           "Stanley Rabkin in People now also has phone +1 555 010 0042.")]
 
 
 def test_several_people_at_once_are_one_text(tmp_path):
@@ -173,8 +182,9 @@ def test_several_people_at_once_are_one_text(tmp_path):
                                                    ("telegram_username", "@leekim")], met_in="Board")
     assert asyncio.run(m.flush_people_notices()) == 2
     assert len(sent) == 1
-    assert sent[0][1].splitlines() == ["Dana Reyes is in People: Telegram id 5550100011, met in Board.",
-                                       "Lee Kim is in People: Telegram @leekim, met in Board."]
+    assert sent[0][1] == told("Added to People",
+                              "Dana Reyes is in People: Telegram id 5550100011, met in Board.",
+                              "Lee Kim is in People: Telegram @leekim, met in Board.")
 
 
 def test_a_record_made_by_hand_is_told_only_what_indexing_added(tmp_path):
@@ -188,7 +198,7 @@ def test_a_record_made_by_hand_is_told_only_what_indexing_added(tmp_path):
     assert sent == []           # touched, nothing new
     m.index_person_seen(display="", handles=[("email", "sean@example.com"), ("phone", "+15550100077")])
     asyncio.run(m.flush_people_notices())
-    assert _owner_texts(sent) == ["Sean Parnell in People now also has phone +15550100077."]
+    assert _owner_texts(sent) == [told("People updated", "Sean Parnell in People now also has phone +15550100077.")]
 
 
 def test_an_email_from_someone_new_indexes_them(tmp_path):
@@ -200,7 +210,7 @@ def test_an_email_from_someone_new_indexes_them(tmp_path):
     assert people[0]["role"] == "" and people[0]["scopes"] == []
     sent.clear()
     asyncio.run(m.flush_people_notices())
-    assert _owner_texts(sent) == ["Cand Idate is in People: email cand@nyu.edu, met over email."]
+    assert _owner_texts(sent) == [told("Added to People", "Cand Idate is in People: email cand@nyu.edu, met over email.")]
 
 
 def test_mail_from_a_mailbox_nobody_writes_from_is_not_indexed(tmp_path):

@@ -206,7 +206,7 @@ async def test_first_run_notifies(env):
     await service.finished(req, status)
     store.set_state(req.id, "done")
     assert len(manager.notices) == before + 1
-    assert "all clear" in manager.notices[-1][1]
+    assert "All clear" in manager.notices[-1][1]
 
 
 @pytest.mark.asyncio
@@ -271,7 +271,7 @@ async def test_complete_run_different_result_sends_short_notice_with_next_time(e
                                   "denied": [], "held": False})
     store.set_state(req2.id, "done")
     text = manager.notices[-1][1]
-    assert "total went up" in text
+    assert "Total went up" in text
     assert "Next check" in text
 
 
@@ -306,7 +306,7 @@ async def test_failed_notice_renders_a_timeout_as_it_took_too_long(env):
                                  "final_status": "", "finished_at": time.time(),
                                  "denied": [], "held": False})
     text = manager.notices[-1][1]
-    assert "it took too long" in text
+    assert "It took too long" in text
     assert "timed out after 600s" not in text
 
 
@@ -338,7 +338,7 @@ async def test_failed_notice_never_degenerates_to_bare_it_failed(env):
                                  "finished_at": time.time(), "denied": [], "held": False})
     text = manager.notices[-1][1]
     assert "it failed" not in text
-    assert "could not finish: it could not finish" in text
+    assert "could not finish\n\nIt could not finish." in text
 
 
 @pytest.mark.asyncio
@@ -376,7 +376,7 @@ async def test_finished_still_notices_a_paused_mid_flight_run_with_no_next_run_l
                                  "finished_at": time.time(), "denied": [], "held": False, "changed": True})
     assert len(manager.notices) == before + 1
     text = manager.notices[-1][1]
-    assert "found something before the pause landed" in text
+    assert "Found something before the pause landed" in text
     assert "Next check" not in text
     assert store.get_schedule(schedule.id).state == "paused"
 
@@ -510,7 +510,7 @@ async def test_first_failure_has_no_pause_warning(env):
     await service.finished(req, status)
     store.set_state(req.id, "done")
     text = manager.notices[-1][1]
-    assert "I will try again at" in text
+    assert "\n\nNext try: " in text
     assert "pause it" not in text
 
 
@@ -529,7 +529,7 @@ async def test_second_consecutive_failure_warns_one_more_miss(env):
         store.set_state(req.id, "done")
         activated = store.get_schedule(schedule.id)
     text = manager.notices[-1][1]
-    assert "I will try again at" in text
+    assert "\n\nNext try: " in text
     assert "One more miss and I will pause it." in text
 
 
@@ -549,7 +549,7 @@ async def test_three_consecutive_incomplete_runs_pause_and_then_nothing_fires(en
         current = store.get_schedule(schedule.id)
     assert current.state == "paused"
     assert len(manager.approver_texts) == 1
-    assert "paused after three" in manager.approver_texts[0]
+    assert "is paused\n\nThree runs in a row could not finish." in manager.approver_texts[0]
     await service.finished(req, dict(status))
     assert len(manager.approver_texts) == 1
     runs_before = len(manager.executed)
@@ -795,7 +795,7 @@ async def test_failed_notice_title_ending_in_punctuation_does_not_double_up(env)
                                  "denied": [], "held": False})
     text = manager.notices[-1][1]
     assert "Nightly check!:" not in text
-    assert text.startswith("Nightly check could not finish:")
+    assert text.startswith("\u25b2 Nightly check could not finish\n")
 
 
 def test_run_outcome_ok_with_could_not_result_is_incomplete():
@@ -944,9 +944,9 @@ def test_model_could_not_notice_does_not_claim_missing_permission(env):
     run = {'outcome': 'incomplete', 'result_line': 'I could not find any matching events'}
     schedule = types.SimpleNamespace(title='Calendar check')
     text = service.notice_text(schedule, run, None)
-    assert 'it could not find any matching events' in text
+    assert 'It could not find any matching events' in text
     assert 'not allowed' not in text
-    assert text.endswith('Run now.')
+    assert text.endswith('Say "run now" to try again.')
 
 
 def test_failure_metadata_survives_store_reopen(tmp_path):

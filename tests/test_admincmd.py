@@ -303,11 +303,12 @@ def test_a_role_hold_for_memory_or_sending_waits_for_a_numbered_yes(tmp_path):
     m.store.set_role("interns", [], "")
     aaron(m, "let the interns role remember everything")
     ask = last_text(sent)
-    assert ask.startswith("Let the interns role remember everything? That widens access")
-    handle = re.search(r'"#(\d+) yes"', ask).group(1)
+    assert ask.startswith("\u25c6 Needs your yes \u00b7 #")
+    assert "\n\nLet the interns role remember everything? That widens access" in ask
+    handle = re.search(r'#(\d+) yes', ask).group(1)
     assert role_scopes(m.store, "interns") == [], "nothing changes before his yes"
     aaron(m, "let the interns role remember everything")
-    assert re.search(r'"#(\d+) yes"', last_text(sent)).group(1) == handle, "the same ask is the same hold"
+    assert re.search(r'#(\d+) yes', last_text(sent)).group(1) == handle, "the same ask is the same hold"
     assert len(m.store.pending()) == 1
     aaron(m, f"#{handle} yes")
     assert role_scopes(m.store, "interns") == ["memory:all"]
@@ -322,9 +323,9 @@ def test_a_no_leaves_the_role_alone(tmp_path):
     seed(m.store)
     m.store.set_role("interns", [], "")
     aaron(m, "delete the interns role")
-    assert last_text(sent) == ('Delete the interns role? Nobody holds it.\n'
-                               'Reply "#1 yes" to do it or "#1 no" to leave it alone.') or "#" in last_text(sent)
-    handle = re.search(r'"#(\d+) yes"', last_text(sent)).group(1)
+    assert last_text(sent) == ('\u25c6 Needs your yes \u00b7 #1\n\nDelete the interns role? Nobody holds it.\n\n'
+                               '#1 yes / no')
+    handle = re.search(r'#(\d+) yes', last_text(sent)).group(1)
     aaron(m, f"#{handle} no")
     assert any(r["name"] == "interns" for r in m.store.roles())
     assert "Left alone" in last_text(sent)
@@ -335,7 +336,7 @@ def test_delete_a_role_after_yes_and_the_undo_phrase_recreates_it(tmp_path):
     seed_people(m.store)
     aaron(m, "delete the corgi teammate role")
     assert "held by Sean Parnell" in last_text(sent) and "keep their other roles" in last_text(sent)
-    handle = re.search(r'"#(\d+) yes"', last_text(sent)).group(1)
+    handle = re.search(r'#(\d+) yes', last_text(sent)).group(1)
     aaron(m, f"#{handle} yes")
     assert not any(r["name"] == "corgi teammate" for r in m.store.roles())
     assert last_text(sent).startswith("The corgi teammate role is deleted; Sean Parnell keeps their other roles") or \
@@ -430,15 +431,15 @@ def test_merge_and_remove_a_person_wait_for_a_yes(tmp_path):
     aaron(m, "add Jordan Lee to people")
     aaron(m, "add Jordan L to people")
     aaron(m, "merge Jordan L into Jordan Lee")
-    assert last_text(sent).startswith("Merge Jordan L into Jordan Lee? Every contact of Jordan L moves to Jordan Lee")
-    handle = re.search(r'"#(\d+) yes"', last_text(sent)).group(1)
+    assert "\n\nMerge Jordan L into Jordan Lee? Every contact of Jordan L moves to Jordan Lee" in last_text(sent)
+    handle = re.search(r'#(\d+) yes', last_text(sent)).group(1)
     assert len(m.store.list_people()) >= 3, "nothing merged yet"
     aaron(m, f"#{handle} yes")
     assert last_text(sent) == "Jordan L is merged into Jordan Lee."
     assert not any(p["display"] == "Jordan L" for p in m.store.list_people())
     aaron(m, "remove Jordan Lee from people")
-    assert last_text(sent).startswith("Remove Jordan Lee from People?")
-    handle = re.search(r'"#(\d+) yes"', last_text(sent)).group(1)
+    assert "\n\nRemove Jordan Lee from People?" in last_text(sent)
+    handle = re.search(r'#(\d+) yes', last_text(sent)).group(1)
     aaron(m, f"#{handle} yes")
     assert last_text(sent) == "Jordan Lee is no longer in People."
     assert not any(p["display"] == "Jordan Lee" for p in m.store.list_people())
@@ -539,9 +540,9 @@ def test_pause_resume_and_run_a_schedule_by_name_and_stop_waits_for_a_yes(tmp_pa
     aaron(m, "resume the Corgi NYC digest schedule")
     assert m.store.get_schedule(schedule.id).state == "active"
     aaron(m, "stop the Corgi NYC digest schedule")
-    assert last_text(sent).startswith("End the Corgi NYC digest schedule for good?")
+    assert "\n\nEnd the Corgi NYC digest schedule for good?" in last_text(sent)
     assert m.store.get_schedule(schedule.id).state == "active", "stop waits for his yes"
-    handle = re.search(r'"#(\d+) yes"', last_text(sent)).group(1)
+    handle = re.search(r'#(\d+) yes', last_text(sent)).group(1)
     aaron(m, f"#{handle} yes")
     assert m.store.get_schedule(schedule.id).state != "active"
 

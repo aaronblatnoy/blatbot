@@ -580,12 +580,19 @@ def ask_answer(manager: Any, request: Any) -> str:
 
 
 def ask_text(req: Any, question: str, kind: str, owner: bool) -> str:
-    """The text Aaron gets for one ask."""
-    who = "Your" if owner else f"{(req.sender_name or req.sender or 'Someone')}'s"
-    q = " ".join(str(question or "").replace("—", ", ").split()).rstrip(".?!")
-    end = "?" if str(question or "").strip().endswith("?") else "."
-    if kind == "permission":
-        tail = f'Reply "#{req.id} yes" or "#{req.id} no".'
+    """The text Aaron gets for one ask, in the house format (ownertext.py)."""
+    from . import ownertext
+    q = " ".join(str(question or "").replace("\u2014", ", ").split())
+    if q and q[-1] not in ".?!":
+        q += "."
+    if owner:
+        head = f"Your task has a question \u00b7 #{req.id}"
+        facts = [("Task", ownertext.strip_group_tag(getattr(req, "summary", "") or ""))]
     else:
-        tail = f'Reply "#{req.id} <your answer>".'
-    return f"#{req.id} {who} task asks: {q}{end} {tail}"
+        group, tagged_from, _ = ownertext.split_group_tag(getattr(req, "original_message", "") or "")
+        who = ownertext.person(getattr(req, "sender_name", "") or tagged_from, getattr(req, "sender", ""))
+        head = f"{who}'s task has a question \u00b7 #{req.id}"
+        facts = [("Task", ownertext.strip_group_tag(getattr(req, "summary", "") or "")),
+                 ("Where", ownertext.where(getattr(req, "mode", ""), group))]
+    handle = ownertext.reply_handle(req.id, answer=kind != "permission")
+    return ownertext.compose("ask", head, facts=facts, body=q, handle=handle)

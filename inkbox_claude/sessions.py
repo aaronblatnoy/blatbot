@@ -1144,21 +1144,20 @@ class ContactSession:
         self._handoff_this_turn = True
         meta = self.reply_meta or {}
         contact = meta.get("contact") or {}
-        who = ""
-        if isinstance(contact, dict):
-            who = " ".join(str(contact.get(k) or "") for k in ("given_name", "family_name")).strip()
         sender = str(meta.get("sender") or self.chat_id)
-        who = f"{who} ({sender})" if who else sender
         wanted = summarize_tool_call(tool_name, input_data)
         snippet = re.sub(r"\s+", " ", self._inbound_text or "").strip()
         if len(snippet) > 400:
             snippet = snippet[:400] + "..."
-        text = (
-            f"[Blatbot] {who} via {self.mode} needs you.\n"
-            f"Blatbot wanted to: {wanted}\n"
-            f"Their message: {snippet}\n"
-            "I told them I'll confirm with you. Tell me here what to do."
-        )
+        from .gate import ownertext
+        name = ""
+        if isinstance(contact, dict):
+            name = " ".join(str(contact.get(k) or "") for k in ("given_name", "family_name")).strip()
+        text = ownertext.compose(
+            "ask", f"{ownertext.person(name, sender)} needs you",
+            facts=[("Where", ownertext.where(self.mode)), ("I wanted to", wanted)],
+            body=ownertext.quote(snippet),
+            tail="I told them I'll confirm with you. Tell me here what to do.")
         conv = self.cfg.approver_imessage_conversation_id
         try:
             if conv:
