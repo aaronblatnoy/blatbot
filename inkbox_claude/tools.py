@@ -17,7 +17,7 @@ import time
 import uuid
 from contextvars import ContextVar
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Awaitable, Callable, Dict, List, Optional, Tuple
 from urllib.parse import parse_qsl, urlencode, urlparse, urlunparse
 
 from .gate.wording import plain_dashes as _plain_dashes
@@ -317,6 +317,8 @@ def build_inkbox_mcp_server(
     client: Any,
     identity_handle: str,
     cfg: Optional[BridgeConfig] = None,
+    outbox_send: Optional[Callable[[str, str, str, Dict[str, Any]], Awaitable[Optional[Dict[str, Any]]]]] = None,
+    outbox_enabled: Optional[Callable[[], bool]] = None,
 ) -> Tuple[Any, List[str]]:
     """Build the in-process MCP server carrying the Inkbox tools.
 
@@ -387,19 +389,33 @@ def build_inkbox_mcp_server(
     )
     async def inkbox_send_email(args: Dict[str, Any]) -> Dict[str, Any]:
         target = str(args["to"])
+        subject = _plain_dashes(str(args.get("subject") or ""))
+        body = _plain_dashes(str(args.get("body") or ""))
 
         def _run():
             paths = args.get("attachment_paths") or []
             attachments = [file_to_email_attachment(str(p)) for p in paths] or None
             msg = _identity().send_email(
                 to=[target],
-                subject=_plain_dashes(str(args.get("subject") or "")),
-                body_text=_plain_dashes(str(args.get("body") or "")),
+                subject=subject,
+                body_text=body,
                 attachments=attachments,
             )
             return {"sent": True, "id": str(getattr(msg, "id", "")), "attachments": len(paths)}
 
         try:
+            if cfg.mode == "gate" and outbox_send is not None and (outbox_enabled is None or outbox_enabled()):
+                paths = args.get("attachment_paths") or []
+                attachments = await asyncio.to_thread(
+                    lambda: [file_to_email_attachment(str(p)) for p in paths] or None)
+                queued = await outbox_send(f"email:{target}", body, "email",
+                                           {"to": target, "subject": subject,
+                                            "attachments": attachments,
+                                            "_inkbox_tool": True})
+                if queued is not None:
+                    _mark_tool_delivery("email", target)
+                    return _result({"sent": True, "id": str(queued.get("id") or ""),
+                                    "attachments": len(paths)})
             result = await asyncio.to_thread(_run)
             _mark_tool_delivery("email", target)
             return _result(result)
@@ -455,6 +471,21 @@ def build_inkbox_mcp_server(
             return {"sent": True, "id": str(getattr(msg, "id", "")), "media": len(urls)}
 
         try:
+            if cfg.mode == "gate" and outbox_send is not None and (outbox_enabled is None or outbox_enabled()):
+                def _media():
+                    urls = [str(u) for u in (args.get("media_urls") or [])]
+                    for path in (args.get("media_paths") or []):
+                        urls.append(_upload_media_url(_identity(), str(path)))
+                    return urls
+                urls = await asyncio.to_thread(_media)
+                meta = ({"to": target} if target.startswith("+") else {"conversation_id": target})
+                meta["media_urls"] = urls
+                meta["_inkbox_tool"] = True
+                queued = await outbox_send(f"sms:{target}", text, "sms", meta)
+                if queued is not None:
+                    _mark_tool_delivery("sms", target)
+                    return _result({"sent": True, "id": str(queued.get("id") or ""),
+                                    "media": len(urls)})
             result = await asyncio.to_thread(_run)
             _mark_tool_delivery("sms", target)
             return _result(result)
@@ -517,6 +548,20 @@ def build_inkbox_mcp_server(
             return {"sent": True, "id": str(getattr(msg, "id", ""))}
 
         try:
+            if cfg.mode == "gate" and outbox_send is not None and (outbox_enabled is None or outbox_enabled()):
+                media_path = str(args.get("media_path") or "").strip()
+                urls = ([await asyncio.to_thread(_upload_media_url, _identity(), media_path)]
+                        if media_path else [])
+                recipient = to_list[0] if len(to_list or []) == 1 else to_list
+                meta = ({"conversation_id": conversation_id} if conversation_id
+                        else {"imessage_to": recipient})
+                meta["media_urls"] = urls
+                meta["_inkbox_tool"] = True
+                target = f"imessage:{conversation_id or ','.join(to_list or [])}"
+                queued = await outbox_send(target, text, "imessage", meta)
+                if queued is not None:
+                    _mark_tool_delivery("imessage", conversation_id)
+                    return _result({"sent": True, "id": str(queued.get("id") or "")})
             result = await asyncio.to_thread(_run)
             _mark_tool_delivery("imessage", conversation_id)
             return _result(result)

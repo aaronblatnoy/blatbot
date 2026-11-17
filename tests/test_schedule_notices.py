@@ -43,6 +43,8 @@ def make_manager(tmp_path):
                           approver_imessage_conversation_id=APPROVER_CONV)
     m = gm.GateSessionManager(cfg=cfg, send_fn=send_fn, mcp_server=None, identity_info={},
                               store_path=str(tmp_path / "gate.db"), exec_cwd=str(tmp_path))
+    # Notice wording here uses the old immediate transport timing.
+    m._outbox_enabled = lambda: False
     m.jev_agent = None
     m.caller = None
     m.executor = FakeExecutor()

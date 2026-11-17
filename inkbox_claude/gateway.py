@@ -871,7 +871,9 @@ class InkboxGateway:
         await asyncio.to_thread(self._patch_identity_objects)
 
         # Sessions get the Inkbox tools so Claude can message proactively.
-        server, tool_names = build_inkbox_mcp_server(self._inkbox, self.cfg.identity, self.cfg)
+        server, tool_names = build_inkbox_mcp_server(
+            self._inkbox, self.cfg.identity, self.cfg, outbox_send=self._outbox_tool_send,
+            outbox_enabled=self._gate_outbox_available)
         if self.cfg.mode == "gate":
             try:
                 from .gate.manager import GateSessionManager
@@ -1717,13 +1719,24 @@ class InkboxGateway:
             return False
         chat_id = str(meta.get("telegram_chat_id") or "")
         async def reply(message: str) -> None:
-            await telegram.send_message(chat_id, message)
-            self.sessions.store.add_message(self._inbox_record_id(event), "outbound",
-                                            message, "telegram")
+            await self._send_telegram_mode_reply(chat_id, message,
+                                                 record_id=self._inbox_record_id(event))
         return await self._maybe_handle_mode_command(
             event["body"], channel="telegram", is_commander=True,
             self_chat_id=event["chat_id"], self_label=str(meta.get("_inbox_self_label") or chat_id),
             reply=reply)
+
+    async def _send_telegram_mode_reply(self, chat_id: str, message: str, *,
+                                        record_id: str = "") -> None:
+        """Give a mode command the same delivery path as an ordinary reply."""
+        send = getattr(self.sessions, "send", None)
+        if send is not None:
+            await send(f"tg:{chat_id}", message, "telegram", {"telegram_chat_id": chat_id},
+                       chat_id=record_id or f"tg:{chat_id}", record=False, kind="reply")
+        else:
+            await telegram.send_message(chat_id, message)
+        if record_id:
+            self.sessions.store.add_message(record_id, "outbound", message, "telegram")
 
     def _inbox_enabled(self) -> bool:
         if getattr(getattr(self, "cfg", None), "mode", None) != "gate":
@@ -2255,7 +2268,7 @@ class InkboxGateway:
         handled = await self._maybe_handle_mode_command(
             text, channel="telegram", is_commander=is_commander,
             self_chat_id=f"tg:{chat_id}", self_label=u.get("group_title") or chat_id,
-            reply=lambda message: telegram.send_message(chat_id, message))
+            reply=lambda message: self._send_telegram_mode_reply(chat_id, message))
         if handled:
             return web.json_response({"ok": True, "mode_command": True})
         if u["is_group"]:
@@ -4617,6 +4630,20 @@ class InkboxGateway:
         except Exception:
             logger.debug("[bridge] typing indicator failed", exc_info=True)
 
+    def _gate_outbox_available(self) -> bool:
+        manager = self.sessions
+        return bool(self.cfg.mode == "gate" and manager is not None
+                    and getattr(manager, "_outbox_enabled", lambda: False)())
+
+    async def _outbox_tool_send(self, target: str, text: str, mode: str,
+                                meta: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+        """Put an agent's Inkbox send tool on the same path as a chat reply."""
+        manager = self.sessions
+        if not self._gate_outbox_available():
+            return None
+        result = await manager.send(target, text, mode, meta, record=False, kind="reply")
+        return result if isinstance(result, dict) else {"id": ""}
+
     async def send_to_contact(
         self, chat_id: str, content: str, mode: str, meta: Dict[str, Any]
     ) -> None:
@@ -4632,7 +4659,7 @@ class InkboxGateway:
             None
         """
         meta = meta or {}
-        if content.strip() == "[SILENT]":
+        if content.strip() == "[SILENT]" and not meta.get("_inkbox_tool"):
             logger.debug("[bridge] suppressing exact [SILENT] reply for %s", chat_id)
             return
         # External-event sessions have no human counterparty — ``chat_id`` is
@@ -4662,41 +4689,49 @@ class InkboxGateway:
             return
 
         if mode == "sms":
-            text = strip_markdown(content)
+            text = content if meta.get("_inkbox_tool") else strip_markdown(content)
             if len(text) > SMS_MAX_LENGTH:
                 raise ValueError(_message_too_long_reason("SMS", text, SMS_MAX_LENGTH))
             identity = await asyncio.to_thread(self._inkbox.get_identity, self.cfg.identity)
             kwargs: Dict[str, Any] = {"text": text}
+            if meta.get("media_urls"):
+                kwargs["media_urls"] = list(meta["media_urls"])
             conversation_id = str(meta.get("conversation_id") or "").strip()
-            if not conversation_id and str(chat_id).startswith("sms:"):
+            if not conversation_id and not meta.get("_inkbox_tool") and str(chat_id).startswith("sms:"):
                 conversation_id = str(chat_id).split(":", 1)[1]
             if conversation_id:
                 kwargs["conversation_id"] = conversation_id
             else:
                 kwargs["to"] = str(meta.get("to") or chat_id)
-            await asyncio.to_thread(identity.send_text, **kwargs)
+            msg = await asyncio.to_thread(identity.send_text, **kwargs)
+            return {"id": str(getattr(msg, "id", ""))} if meta.get("_inkbox_tool") else None
         elif mode == "imessage":
-            text = strip_markdown(content)
+            text = content if meta.get("_inkbox_tool") else strip_markdown(content)
             if len(text) > IMESSAGE_MAX_LENGTH:
                 raise ValueError(_message_too_long_reason("iMessage", text, IMESSAGE_MAX_LENGTH))
             identity = await asyncio.to_thread(self._inkbox.get_identity, self.cfg.identity)
             conversation_id = str(meta.get("conversation_id") or "").strip()
-            if not conversation_id and str(chat_id).startswith("imessage:"):
+            if not conversation_id and not meta.get("_inkbox_tool") and str(chat_id).startswith("imessage:"):
                 conversation_id = str(chat_id).split(":", 1)[1]
-            if not conversation_id:
+            if not conversation_id and not meta.get("imessage_to"):
                 raise ValueError(f"No iMessage conversation id for chat {chat_id}")
-            await asyncio.to_thread(
-                identity.send_imessage,
-                conversation_id=conversation_id,
-                text=text,
-            )
+            kwargs = {"text": text}
+            if conversation_id:
+                kwargs["conversation_id"] = conversation_id
+            else:
+                kwargs["to"] = meta["imessage_to"]
+            if meta.get("media_urls"):
+                kwargs["media_urls"] = list(meta["media_urls"])
+            msg = await asyncio.to_thread(identity.send_imessage, **kwargs)
+            return {"id": str(getattr(msg, "id", ""))} if meta.get("_inkbox_tool") else None
         else:  # email
             identity = await asyncio.to_thread(self._inkbox.get_identity, self.cfg.identity)
             subject = str(meta.get("subject") or "").strip()
-            reply_subject = subject if subject.lower().startswith("re:") else f"Re: {subject}" if subject else "From your Claude Code agent"
-            await asyncio.to_thread(
-                identity.send_email,
-                to=[str(meta.get("to") or chat_id)],
-                subject=reply_subject,
-                body_text=content,
-            )
+            reply_subject = (subject if meta.get("_inkbox_tool") or subject.lower().startswith("re:")
+                             else f"Re: {subject}" if subject else "From your Claude Code agent")
+            kwargs = {"to": [str(meta.get("to") or chat_id)],
+                      "subject": reply_subject, "body_text": content}
+            if meta.get("_inkbox_tool"):
+                kwargs["attachments"] = meta.get("attachments")
+            msg = await asyncio.to_thread(identity.send_email, **kwargs)
+            return {"id": str(getattr(msg, "id", ""))} if meta.get("_inkbox_tool") else None
