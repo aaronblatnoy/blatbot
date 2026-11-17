@@ -291,6 +291,8 @@ class TaskPicker:
                     "The pension filings database (public Department of Labor Form 5500 data): search pension "
                     "plans, read a plan's assets, managers and consultants, find a provider's client plans, "
                     "find lookalike plans, search plan events.",
+                    "The Definite Optimists brain (the startup's shared team memory): search it, list recent "
+                    "memories, add a memory.",
                 ],
                 "count_as_yes": [
                     "The sender asks for anything to be done, made, fetched, booked, moved, cancelled, sent, "
@@ -320,6 +322,8 @@ class TaskPicker:
                     "Server: 'what's running on black sky', 'is the gateway up', 'how much disk is left'.",
                     "Notes: 'what do my notes say about X', 'check the vault for Y', 'what did I write about Z', "
                     "'look it up in my second brain'.",
+                    "Definite Optimists brain: 'what does the DO brain say about X', 'check the team brain for "
+                    "Y', 'save to the Definite Optimists brain that Z'.",
                     "Social: 'what did we post last', 'how did the recruitment post do', 'how many followers', "
                     "'post this to instagram', 'draft a linkedin post about X'.",
                     "School: 'what's due this week', 'did I get a grade on X', 'any new announcements in Y', "
