@@ -19,6 +19,7 @@ from typing import Any, Dict, List, Optional
 from zoneinfo import ZoneInfo
 
 from . import cadence as cadence_module
+from . import settings
 from .scopes import READ_SCOPES, SCOPES, scope_for_tool, tools_for
 from .store import Request, Schedule, sha256
 
@@ -792,7 +793,15 @@ class ScheduleService:
                     raise ValueError(f"missing capability: {self._labels(missing)}")
                 self.store.update_schedule(schedule_id, state="active", consecutive_failures=0,
                                            failure_reset_at=now, retry_at=None, last_outcome="", revision=schedule.revision + 1)
-            return self.store.update_schedule(schedule_id, next_run=now, retry_at=None)
+            updated = self.store.update_schedule(schedule_id, next_run=now, retry_at=None)
+            gateway = getattr(self.manager, "gateway", None)
+            try:
+                if gateway is not None and settings.get("GATE_INBOX"):
+                    # A manual run waits behind the owner's current inbox turn.
+                    await self.tick(now=now)
+            except Exception as exc:
+                logger.warning("[schedules] run now will use the next scheduler pass: %s", exc)
+            return self.store.get_schedule(schedule_id) or updated
         if action == "stop":
             return self.store.update_schedule(schedule_id, state="ended", next_run=None,
                                               last_outcome="stopped")
@@ -934,13 +943,19 @@ class ScheduleService:
                                                           "usage_retry": schedule.retry_at is not None})
         next_run = cadence_module.next_run(schedule.cadence_kind, schedule.cadence, schedule.timezone, now)
         req = self.store.get_request(req.id)
-        self.store.create_schedule_run(schedule.id, req.id, now)
+        run_id = self.store.create_schedule_run(schedule.id, req.id, now)
         self.store.update_schedule(schedule.id, next_run=next_run, last_run=now, last_request_id=req.id,
                                    run_count=schedule.run_count + 1, retry_at=None)
         self.store.task_event(schedule.task_id, "request", f"Scheduled run: {schedule.title}",
                               chat_id=schedule.chat_id, request_id=req.id, state="running")
         logger.info("[schedules] %s fired: request #%s", schedule.id, req.id)
-        asyncio.create_task(self._run_fired(req))
+        # The occurrence is recorded before its event, so a later tick cannot
+        # reserve the same run again while the worker waits for this chat.
+        queue_timer = getattr(self.manager, "queue_timer", None)
+        if not (queue_timer and queue_timer(
+                schedule.chat_id, f"schedule:{schedule.id}:{schedule.next_run or now:.6f}",
+                {"schedule_id": schedule.id, "request_id": req.id, "run_id": run_id})):
+            asyncio.create_task(self._run_fired(req))
 
     async def _notify_held_skip_once(self, schedule: Schedule, running: Request, now: float) -> None:
         """A run parked waiting for the owner's yes (a held send) blocks every
@@ -961,33 +976,42 @@ class ScheduleService:
                                      'Say yes or no to that first.', kind="approval")
         self.store.set_state(running.id, running.state, status={**status, "held_skip_notified": True})
 
-    async def _run_fired(self, req: Request) -> None:
-        """manager.execute() runs detached (nothing here awaits it), so an exception
-        inside it would otherwise vanish: the request stays "running" forever (stale,
-        so later firings are skipped by request_running_for_schedule), the run row
-        this firing created stays blank, and the owner hears nothing. Catch it, log
-        it, and route it through finished() like any other outcome so the row is
-        filled in, the schedule's consecutive-failure count moves, and he gets a
-        notice."""
+    async def _run_fired(self, req: Request, *, raise_errors: bool = False) -> None:
+        """Execute the reserved request and record failures before the inbox finishes.
+
+        A raised error must still fill the run row, update the failure count, and
+        send the usual notice. The inbox also needs the error to mark its event failed.
+        """
         try:
             await self.manager.execute(req)
         except Exception as exc:
             logger.exception("[schedules] run #%s for schedule %s raised", req.id, req.schedule_id)
-            self.store.set_state(req.id, "failed", status={"error": str(exc)})
-            await self.finished(req, {"ok": False, "error": str(exc), "result_line": "",
-                                      "final_status": f"the run raised an exception: {exc}",
-                                      "denied": [], "note": "", "tool_calls": [],
-                                      "finished_at": time.time()})
+            run_row = self._run_row_for_request(req.schedule_id, req.id)
+            if not run_row or run_row.get("finished_at") is None:
+                self.store.set_state(req.id, "failed", status={"error": str(exc)})
+                await self.finished(req, {"ok": False, "error": str(exc), "result_line": "",
+                                          "final_status": f"the run raised an exception: {exc}",
+                                          "denied": [], "note": "", "tool_calls": [],
+                                          "finished_at": time.time()})
+            if raise_errors:
+                raise
+        else:
+            if raise_errors:
+                finished = self.store.get_request(req.id)
+                status = (finished.status or {}) if finished else {}
+                if status.get("ok") is False:
+                    raise RuntimeError(str(status.get("error") or "scheduled run failed"))
 
     # -- restart recovery --------------------------------------------------
-    async def interrupted(self, req: Request) -> None:
+    async def interrupted(self, req: Request, *, already_replied: bool = False) -> None:
         """A scheduled request stranded mid-run by a process restart. Recorded as its
         own outcome ('interrupted'), never routed through finished()/run_outcome: an
         interruption is not a failure of the model's work, so it must not count toward
         the three-strikes pause, and the schedule stays active with its next_run
         intact. Re-fired once immediately only when that next run is not already
         fairly close, or when there is no regular next run to wait for (a one-time
-        schedule, or a repeating one whose next_run was already consumed)."""
+        schedule, or a repeating one whose next_run was already consumed). A run
+        that already replied is closed silently and never re-fired."""
         if not req.schedule_id:
             return
         schedule = self.store.get_schedule(req.schedule_id)
@@ -1000,6 +1024,8 @@ class ScheduleService:
                                        result_line="", final_status="interrupted by a restart", denied=[],
                                        note="", changed=False, cost_usd=None)
         logger.info("[schedules] %s run #%s recorded as interrupted by a restart", schedule.id, run_id)
+        if already_replied:
+            return
         await self._notice(schedule, f"{schedule.title} was interrupted by a restart. "
                                       f"Next check {_shown(schedule.next_run, schedule.timezone)}.")
         if schedule.state != "active":

@@ -17,24 +17,29 @@ logger = logging.getLogger(__name__)
 class Inbox:
     def __init__(self, store: Any, session_factory: Callable[..., Any] | None = None,
                  record_id_for_event: Callable[[Dict[str, Any]], str] | None = None,
-                 command_handler: Callable[[Dict[str, Any]], Awaitable[bool]] | None = None):
+                 command_handler: Callable[[Dict[str, Any]], Awaitable[bool]] | None = None,
+                 timer_handler: Callable[[Dict[str, Any]], Awaitable[None]] | None = None,
+                 external_handler: Callable[[Dict[str, Any]], Awaitable[None]] | None = None):
         self.store = store
         self.session_factory = session_factory
         self.record_id_for_event = record_id_for_event
         self.command_handler = command_handler
+        self.timer_handler = timer_handler
+        self.external_handler = external_handler
         self.tasks: Dict[str, asyncio.Task] = {}
         self._wakes: Dict[str, asyncio.Event] = {}
         self._closed = False
 
     def submit(self, chat_id: str, source: str, source_event_id: str, mode: str,
-               body: str, meta: Dict[str, Any], session_factory: Callable[..., Any] | None = None) -> str:
+               body: str, meta: Dict[str, Any], session_factory: Callable[..., Any] | None = None,
+               kind: str = "message") -> str:
         if self._closed:
             raise RuntimeError("inbox is closed")
         if session_factory is None and self.session_factory is None:
             raise RuntimeError("inbox session factory is unavailable")
         # Provider ids are the durable dedup key. An absent id gets a fresh key.
         event_id = self.store.insert_inbox_event(chat_id, source, source_event_id or f"missing:{time.time_ns()}",
-                                                 mode, body, meta)
+                                                 mode, body, meta, kind=kind)
         if event_id is None:
             return "duplicate"
         try:
@@ -70,7 +75,14 @@ class Inbox:
                 except Exception as exc:
                     logger.warning("[inbox] settle setting unavailable; using 1 second: %s", exc)
                     settle = 1.0
-                delay = max(0.0, pending[-1]["created_at"] + settle - time.time())
+                # Timers and webhooks stand alone and do not wait for a message burst.
+                message_head = []
+                for event in pending:
+                    if event.get("kind", "message") != "message":
+                        break
+                    message_head.append(event)
+                settle_until = message_head[-1]["created_at"] + settle if message_head else 0.0
+                delay = max(0.0, settle_until - time.time())
                 if delay:
                     wake = self._wakes[chat_id]
                     wake.clear()
@@ -82,7 +94,12 @@ class Inbox:
                 pending = self.store.list_pending_inbox(chat_id)
                 if not pending:
                     continue
-                if pending[-1]["created_at"] + settle > time.time():
+                message_head = []
+                for event in pending:
+                    if event.get("kind", "message") != "message":
+                        break
+                    message_head.append(event)
+                if message_head and message_head[-1]["created_at"] + settle > time.time():
                     continue
                 batch = []
                 for event in pending:
@@ -92,6 +109,9 @@ class Inbox:
                         batch.append(event)
                 groups = []
                 for event in batch:
+                    if event.get("kind", "message") != "message":
+                        groups.append(([event], True))
+                        continue
                     try:
                         command = (bool(json.loads(event["meta_json"]).get("_inbox_mode_command"))
                                    or is_inbox_command(event["body"]))
@@ -114,14 +134,24 @@ class Inbox:
                     try:
                         meta = json.loads(newest["meta_json"])
                         body = "\n\n".join(event["body"] for event in events)
-                        handled = bool(self.command_handler and meta.get("_inbox_mode_command")
-                                       and await self.command_handler(newest))
-                        if not handled:
-                            session = self.session_factory(chat_id, newest["mode"], meta)
-                            if isinstance(session, GateSession):
-                                await session.handle_inbound(body, newest["mode"], meta, raise_errors=True)
-                            else:
-                                await session.handle_inbound(body, newest["mode"], meta)
+                        kind = newest.get("kind", "message")
+                        if kind == "timer":
+                            if self.timer_handler is None:
+                                raise RuntimeError("timer handler is unavailable")
+                            await self.timer_handler(newest)
+                        elif kind == "external":
+                            if self.external_handler is None:
+                                raise RuntimeError("external handler is unavailable")
+                            await self.external_handler(newest)
+                        else:
+                            handled = bool(self.command_handler and meta.get("_inbox_mode_command")
+                                           and await self.command_handler(newest))
+                            if not handled:
+                                session = self.session_factory(chat_id, newest["mode"], meta)
+                                if isinstance(session, GateSession):
+                                    await session.handle_inbound(body, newest["mode"], meta, raise_errors=True)
+                                else:
+                                    await session.handle_inbound(body, newest["mode"], meta)
                     except Exception as exc:
                         logger.warning("[inbox] chat %s turn failed: %s", chat_id, exc)
                         for event in events:

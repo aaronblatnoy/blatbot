@@ -40,6 +40,7 @@ CREATE TABLE IF NOT EXISTS inbox_events (
   chat_id TEXT NOT NULL,
   source TEXT NOT NULL,
   source_event_id TEXT NOT NULL,
+  kind TEXT NOT NULL DEFAULT 'message',
   mode TEXT NOT NULL,
   body TEXT NOT NULL,
   meta_json TEXT NOT NULL,
@@ -275,6 +276,7 @@ CREATE TABLE IF NOT EXISTS inbox_events (
   chat_id TEXT NOT NULL,
   source TEXT NOT NULL,
   source_event_id TEXT NOT NULL,
+  kind TEXT NOT NULL DEFAULT 'message',
   mode TEXT NOT NULL,
   body TEXT NOT NULL,
   meta_json TEXT NOT NULL,
@@ -986,6 +988,21 @@ class Store:
                 self._db.execute("ALTER TABLE tasks ADD COLUMN waiting_on TEXT NOT NULL DEFAULT ''")
             self._db.execute("CREATE INDEX IF NOT EXISTS requests_task_latest ON requests(task_id, id DESC)")
             self._db.commit()
+            # A failed inbox upgrade must still leave the gate able to take messages.
+            try:
+                if self._is_pg:
+                    have = {r["column_name"] for r in self._db.execute(
+                        "SELECT column_name FROM information_schema.columns "
+                        "WHERE table_schema=current_schema() AND table_name='inbox_events'")}
+                else:
+                    have = {r["name"] for r in self._db.execute("PRAGMA table_info(inbox_events)")}
+                if "kind" not in have:
+                    self._db.execute(
+                        "ALTER TABLE inbox_events ADD COLUMN kind TEXT NOT NULL DEFAULT 'message'")
+                self._db.commit()
+            except Exception as exc:
+                self._db.rollback()
+                logging.getLogger(__name__).warning("[inbox] kind upgrade unavailable: %s", exc)
             # A timer table failure must not prevent ordinary requests from starting.
             try:
                 self._db.executescript(FOLLOWUPS_SCHEMA_PG if self._is_pg else FOLLOWUPS_SCHEMA)
@@ -1408,12 +1425,13 @@ class Store:
 
     # -- durable inbound queue ------------------------------------------
     def insert_inbox_event(self, chat_id: str, source: str, source_event_id: str,
-                           mode: str, body: str, meta: Dict[str, Any]) -> Optional[int]:
+                           mode: str, body: str, meta: Dict[str, Any],
+                           kind: str = "message") -> Optional[int]:
         with self._lock:
             row = self._db.execute(
-                "INSERT INTO inbox_events(chat_id,source,source_event_id,mode,body,meta_json,created_at) "
-                "VALUES(?,?,?,?,?,?,?) ON CONFLICT(source,source_event_id) DO NOTHING RETURNING id",
-                (chat_id, source, source_event_id, mode, body, json.dumps(meta, default=str), time.time()),
+                "INSERT INTO inbox_events(chat_id,source,source_event_id,kind,mode,body,meta_json,created_at) "
+                "VALUES(?,?,?,?,?,?,?,?) ON CONFLICT(source,source_event_id) DO NOTHING RETURNING id",
+                (chat_id, source, source_event_id, kind, mode, body, json.dumps(meta, default=str), time.time()),
             ).fetchone()
             self._db.commit()
         return int(row["id"]) if row else None
@@ -1442,12 +1460,78 @@ class Store:
             )
             self._db.commit()
 
+    def requeue_failed_inbox_event(self, source: str, source_event_id: str) -> Optional[str]:
+        # A2A catch-up can retry a task that its registry still calls unfinished.
+        with self._lock:
+            row = self._db.execute(
+                "UPDATE inbox_events SET status='pending', attempts=0, error=NULL, "
+                "started_at=NULL, finished_at=NULL WHERE source=? AND source_event_id=? "
+                "AND status='failed' RETURNING chat_id", (source, source_event_id)
+            ).fetchone()
+            self._db.commit()
+        return str(row["chat_id"]) if row else None
+
     def inbox_counts(self) -> Dict[str, int]:
         counts = {s: 0 for s in ("pending", "running", "done", "failed")}
         with self._lock:
             rows = self._db.execute("SELECT status, COUNT(*) AS n FROM inbox_events GROUP BY status").fetchall()
         counts.update({r["status"]: int(r["n"]) for r in rows})
         return counts
+
+    def inbox_kind_counts(self) -> Dict[str, int]:
+        with self._lock:
+            rows = self._db.execute("SELECT kind, COUNT(*) AS n FROM inbox_events GROUP BY kind").fetchall()
+        return {r["kind"]: int(r["n"]) for r in rows}
+
+    def active_timer_request_ids(self) -> set[int]:
+        # Reserved schedule requests belong to the inbox until its event finishes.
+        with self._lock:
+            rows = self._db.execute(
+                "SELECT meta_json FROM inbox_events WHERE kind='timer' AND status IN ('pending','running')"
+            ).fetchall()
+        ids = set()
+        for row in rows:
+            try:
+                request_id = json.loads(row["meta_json"]).get("request_id")
+                if request_id:
+                    ids.add(int(request_id))
+            except (TypeError, ValueError):
+                continue
+        return ids
+
+    def active_timer_followup_ids(self) -> set[int]:
+        with self._lock:
+            rows = self._db.execute(
+                "SELECT meta_json FROM inbox_events WHERE kind='timer' AND status IN ('pending','running')"
+            ).fetchall()
+        ids = set()
+        for row in rows:
+            try:
+                followup_id = json.loads(row["meta_json"]).get("followup_id")
+                if followup_id:
+                    ids.add(int(followup_id))
+            except (TypeError, ValueError):
+                continue
+        return ids
+
+    def replied_timer_refs(self) -> Tuple[set[int], set[int]]:
+        """Timers whose interrupted event was closed because a reply already went out."""
+        with self._lock:
+            rows = self._db.execute(
+                "SELECT meta_json FROM inbox_events WHERE kind='timer' AND status='done' "
+                "AND error='interrupted after replying'"
+            ).fetchall()
+        requests, followups = set(), set()
+        for row in rows:
+            try:
+                meta = json.loads(row["meta_json"])
+                if meta.get("request_id"):
+                    requests.add(int(meta["request_id"]))
+                if meta.get("followup_id"):
+                    followups.add(int(meta["followup_id"]))
+            except (TypeError, ValueError):
+                continue
+        return requests, followups
 
     def recover_inbox_events(self, record_id_for_event: Optional[Callable[[Dict[str, Any]], str]] = None
                              ) -> List[Dict[str, Any]]:
@@ -3931,6 +4015,11 @@ class Store:
                 "SELECT * FROM followups WHERE status='pending' AND due_at<=? ORDER BY due_at, id",
                 (time.time() if now is None else now,)).fetchall()
         return [dict(r) for r in rows]
+
+    def get_followup(self, followup_id: int) -> Optional[Dict[str, Any]]:
+        with self._lock:
+            row = self._db.execute("SELECT * FROM followups WHERE id=?", (followup_id,)).fetchone()
+        return dict(row) if row else None
 
     def mark_followup_fired(self, followup_id: int) -> bool:
         with self._lock:

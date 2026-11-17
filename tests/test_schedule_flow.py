@@ -16,6 +16,7 @@ from types import SimpleNamespace
 import pytest
 
 from inkbox_claude.gate import manager as gm
+from inkbox_claude.gate.inbox import Inbox
 from inkbox_claude.gate.router import RouterOutput, ScheduleProposal
 from inkbox_claude.gate.store import Request, Store
 
@@ -81,6 +82,60 @@ async def _propose_via_manager(m, *, title="Team total watch",
 
 async def _afut(value):
     return value
+
+
+@pytest.mark.asyncio
+async def test_due_schedule_runs_from_its_inbox_event(tmp_path):
+    m, _sent = make_manager(tmp_path)
+    inbox = Inbox(m.store, lambda chat_id, _mode, _meta: m.get(chat_id),
+                  timer_handler=m.handle_timer_event)
+    m.gateway = SimpleNamespace(inbox=inbox)
+    try:
+        await _propose_via_manager(m, scopes=["web"])
+        proposed = m.store.schedules(states=["proposed"])[0]
+        schedule = await m.schedules.decide(proposed.id, True)
+        m.executor.results.append({"ok": True, "result_line": "Checked the team page",
+                                   "final_status": "checked", "note": "", "denied": [],
+                                   "tool_calls": ["mcp__fake__tool"], "held": False,
+                                   "started_at": time.time(), "finished_at": time.time(),
+                                   "cost_usd": None})
+        await m.schedules.tick(now=schedule.next_run)
+        for _ in range(50):
+            if m.store.inbox_counts()["done"]:
+                break
+            await asyncio.sleep(0.01)
+        assert m.store.inbox_kind_counts()["timer"] == 1
+        assert m.store.inbox_counts()["done"] == 1
+        assert m.store.last_schedule_run(schedule.id)["outcome"] == "complete"
+        assert len(m.executor.calls) == 1
+        m.executor.results.append({"ok": True, "result_line": "Checked again",
+                                   "final_status": "checked", "note": "", "denied": [],
+                                   "tool_calls": ["mcp__fake__tool"], "held": False,
+                                   "started_at": time.time(), "finished_at": time.time(),
+                                   "cost_usd": None})
+        await m.schedules.action(schedule.id, "run_now", owner=True)
+        for _ in range(50):
+            if m.store.inbox_counts()["done"] == 2:
+                break
+            await asyncio.sleep(0.01)
+        assert m.store.inbox_kind_counts()["timer"] == 2
+        assert m.store.inbox_counts()["done"] == 2
+        assert len(m.executor.calls) == 2
+        m.executor.results.append({"ok": False, "error": "could not check",
+                                   "result_line": "", "final_status": "could not check",
+                                   "note": "", "denied": [], "tool_calls": [], "held": False,
+                                   "started_at": time.time(), "finished_at": time.time(),
+                                   "cost_usd": None})
+        await m.schedules.action(schedule.id, "run_now", owner=True)
+        for _ in range(50):
+            if m.store.inbox_counts()["failed"]:
+                break
+            await asyncio.sleep(0.01)
+        assert m.store.inbox_counts()["failed"] == 1
+        assert m.store.last_schedule_run(schedule.id)["outcome"] == "failed"
+        assert m.store.get_schedule(schedule.id).consecutive_failures == 1
+    finally:
+        await inbox.close()
 
 
 @pytest.mark.asyncio

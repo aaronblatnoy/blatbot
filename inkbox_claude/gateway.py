@@ -895,8 +895,11 @@ class InkboxGateway:
                 from .gate.inbox import Inbox
                 if self._inbox_enabled():
                     self.inbox = Inbox(self.sessions.store, self._inbox_session,
-                                       self._inbox_record_id, self._inbox_mode_command)
-                    self.inbox.recover()
+                                       self._inbox_record_id, self._inbox_mode_command,
+                                       self.sessions.handle_timer_event, self._inbox_external_event)
+                    # Reclassify interrupted events before checking stranded requests.
+                    # Workers start only after that check, so a replay cannot race it.
+                    self.sessions.store.recover_inbox_events(self._inbox_record_id)
             except Exception as exc:
                 logger.warning("[inbox] startup failed: %s", exc)
                 self.inbox = None
@@ -913,7 +916,6 @@ class InkboxGateway:
                 on_send_rejected=self._note_send_rejection,
                 health_fn=self.health_report,
             )
-        await self._catch_up_a2a_tasks()
         await self._recover_hosted_call_completions()
         if self.sessions is not None and hasattr(self.sessions, "recover_interrupted"):
             # A run the last process died inside leaves someone watching a typing indicator
@@ -922,6 +924,12 @@ class InkboxGateway:
                 await self.sessions.recover_interrupted()
             except Exception:
                 logger.exception("[bridge] could not report interrupted runs")
+        if self.inbox is not None:
+            try:
+                self.inbox.recover()
+            except Exception as exc:
+                logger.warning("[inbox] replay failed; new events can still arrive: %s", exc)
+        await self._catch_up_a2a_tasks()
 
         logger.info(
             "[bridge] ready — %s / %s / %s → Claude Code in %s",
@@ -1667,6 +1675,11 @@ class InkboxGateway:
         except Exception as exc:
             logger.warning("[inbox] health count failed: %s", exc)
         report = {"ok": True, "identity": self.cfg.identity, "quota": quota, "inbox": counts}
+        if store is not None and hasattr(store, "inbox_kind_counts"):
+            try:
+                report["inbox_by_kind"] = store.inbox_kind_counts()
+            except Exception as exc:
+                logger.warning("[inbox] kind count failed: %s", exc)
         if store is not None and hasattr(store, "outbox_counts"):
             try:
                 report["outbox"] = store.outbox_counts()
@@ -1686,7 +1699,13 @@ class InkboxGateway:
 
     def _inbox_record_id(self, event: Dict[str, Any]) -> str:
         # The owner's messages are stored in one shared record across channels.
-        from .gate.manager import GateSession
+        from .gate.manager import GateSession, OWNER_THREAD
+        if event.get("kind") == "timer":
+            meta = json.loads(event["meta_json"])
+            if meta.get("schedule_id"):
+                # Schedule notices always land on the owner's shared record.
+                return OWNER_THREAD
+            return event["chat_id"]
         probe = GateSession(event["chat_id"], self.sessions)
         probe.mode = event["mode"]
         probe.reply_meta = json.loads(event["meta_json"])
@@ -1730,13 +1749,8 @@ class InkboxGateway:
                                mode: str, body: str, meta: Dict[str, Any]) -> str:
         if self._inbox_enabled():
             try:
-                if self.inbox is None:
-                    from .gate.inbox import Inbox
-                    self.inbox = Inbox(self.sessions.store, self._inbox_session,
-                                       self._inbox_record_id, self._inbox_mode_command)
-                    self.inbox.recover()
-                return self.inbox.submit(chat_id, source, source_event_id, mode, body, meta,
-                                         self._inbox_session)
+                return self._ensure_inbox().submit(chat_id, source, source_event_id, mode,
+                                                   body, meta, self._inbox_session)
             except Exception as exc:
                 logger.warning("[inbox] submit failed; handling directly: %s", exc)
         if meta.get("_inbox_mode_command"):
@@ -1746,6 +1760,40 @@ class InkboxGateway:
                 return "direct"
         await self.sessions.get(chat_id).handle_inbound(body, mode, meta)
         return "direct"
+
+    def _ensure_inbox(self) -> Any:
+        if self.inbox is None:
+            from .gate.inbox import Inbox
+            self.inbox = Inbox(self.sessions.store, self._inbox_session,
+                               self._inbox_record_id, self._inbox_mode_command,
+                               self.sessions.handle_timer_event, self._inbox_external_event)
+            self.inbox.recover()
+        return self.inbox
+
+    def _queue_external_event(self, chat_id: str, source_event_id: str,
+                              body: str, meta: Dict[str, Any]) -> bool:
+        if not self._inbox_enabled():
+            return False
+        try:
+            self._ensure_inbox().submit(chat_id, "external", source_event_id,
+                                        "external", body, meta, kind="external")
+            return True
+        except Exception as exc:
+            logger.warning("[inbox] external event unavailable; handling directly: %s", exc)
+            return False
+
+    async def _inbox_external_event(self, event: Dict[str, Any]) -> None:
+        meta = json.loads(event["meta_json"])
+        subtype = meta.get("event_type")
+        if subtype == "webhook":
+            await self._run_external_turn(event["chat_id"], event["body"],
+                                          str(meta["directive"]), raise_errors=True)
+        elif subtype == "a2a_inbound":
+            await self._run_a2a_turn(str(meta["registry_key"]), meta["data"], raise_errors=True)
+        elif subtype == "a2a_sent_update":
+            await self._run_sent_a2a_update(meta["data"], raise_errors=True)
+        else:
+            raise ValueError("external event type is missing")
 
     def _prune_dedup_ids(self) -> None:
         now = time.time()
@@ -3845,7 +3893,9 @@ class InkboxGateway:
         )
         # Run in the background so the webhook returns promptly; the turn can
         # take a while (the agent may call/message someone).
-        asyncio.create_task(self._run_external_turn(chat_id, prompt, directive))
+        if not self._queue_external_event(chat_id, f"webhook:{chat_id}", prompt,
+                                          {"event_type": "webhook", "directive": directive}):
+            asyncio.create_task(self._run_external_turn(chat_id, prompt, directive))
         return web.json_response({"ok": True})
 
     def _read_a2a_registry(self) -> Dict[str, Any]:
@@ -3928,49 +3978,59 @@ class InkboxGateway:
         if event_type == "a2a.sent_task.updated":
             delegation = find_a2a_delegation(task_id)
             session_key = str((delegation or {}).get("session_key") or "")
-            if self.sessions is not None and session_key:
-                parts = data.get("parts") if isinstance(data.get("parts"), list) else []
-                text = "\n".join(
-                    str(part.get("text"))
-                    for part in parts
-                    if isinstance(part, dict) and part.get("text")
-                )
-                prompt = (
-                    f"[inkbox:a2a_sent_task_updated task_id={task_id} "
-                    f"context_id={context_id} state={data.get('state') or 'unknown'}]\n"
-                    "An A2A task you delegated changed state. Use "
-                    "inkbox_a2a_check or inkbox_a2a_reply with the stored "
-                    f"Agent Card URL {(delegation or {}).get('card_url') or 'unknown'} "
-                    "if follow-up is needed."
-                )
-                if text:
-                    prompt = f"{prompt}\n\nRemote agent message:\n{text}"
-                await self.sessions.get(session_key).handle_inbound(
-                    prompt,
-                    "external",
-                    {
-                        "a2a_task_id": task_id,
-                        "a2a_context_id": context_id,
-                    },
-                )
-            else:
-                logger.info(
-                    "[bridge] outbound A2A task updated without a local session: %s",
-                    task_id,
-                )
+            update_id = str(envelope.get("id") or hashlib.sha256(
+                json.dumps(envelope, sort_keys=True, default=str).encode()).hexdigest())
+            if not self._queue_external_event(session_key or f"a2a:{task_id}",
+                                              f"a2a-sent:{task_id}:{update_id}", "",
+                                              {"event_type": "a2a_sent_update", "data": data}):
+                await self._run_sent_a2a_update(data)
             return web.json_response({"ok": True})
 
         key = f"{task_id}:{message_id}"
         if key in self._read_a2a_registry():
             return web.json_response({"ok": True, "deduped": True})
         self._write_a2a_registry(key, data, "queued")
-        self._track_a2a_job(task_id, key, data)
+        chat_id = f"a2a:{self._identity.id}:{context_id}"
+        if not self._queue_external_event(chat_id, f"a2a-inbound:{key}", "",
+                                          {"event_type": "a2a_inbound", "registry_key": key,
+                                           "data": data}):
+            self._track_a2a_job(task_id, key, data)
         return web.json_response({"ok": True})
+
+    async def _run_sent_a2a_update(self, data: Dict[str, Any],
+                                   *, raise_errors: bool = False) -> None:
+        task_id = str(data.get("task_id") or "")
+        context_id = str(data.get("context_id") or "")
+        delegation = find_a2a_delegation(task_id)
+        session_key = str((delegation or {}).get("session_key") or "")
+        if self.sessions is not None and session_key:
+            parts = data.get("parts") if isinstance(data.get("parts"), list) else []
+            text = "\n".join(str(part.get("text")) for part in parts
+                             if isinstance(part, dict) and part.get("text"))
+            prompt = (
+                f"[inkbox:a2a_sent_task_updated task_id={task_id} "
+                f"context_id={context_id} state={data.get('state') or 'unknown'}]\n"
+                "An A2A task you delegated changed state. Use "
+                "inkbox_a2a_check or inkbox_a2a_reply with the stored "
+                f"Agent Card URL {(delegation or {}).get('card_url') or 'unknown'} "
+                "if follow-up is needed."
+            )
+            if text:
+                prompt = f"{prompt}\n\nRemote agent message:\n{text}"
+            session = self.sessions.get(session_key)
+            meta = {"a2a_task_id": task_id, "a2a_context_id": context_id}
+            if raise_errors and self.cfg.mode == "gate":
+                await session.handle_inbound(prompt, "external", meta, raise_errors=True)
+            else:
+                await session.handle_inbound(prompt, "external", meta)
+        else:
+            logger.info("[bridge] outbound A2A task updated without a local session: %s", task_id)
 
     async def _run_a2a_turn(
         self,
         registry_key: str,
         data: Dict[str, Any],
+        *, raise_errors: bool = False,
     ) -> None:
         task_id = str(data["task_id"])
         context_id = str(data["context_id"])
@@ -4036,6 +4096,8 @@ class InkboxGateway:
             raise
         except Exception:
             logger.exception("[bridge] A2A turn failed: %s", task_id)
+            if raise_errors:
+                raise
 
     async def _catch_up_a2a_tasks(self) -> None:
         try:
@@ -4051,7 +4113,20 @@ class InkboxGateway:
                 if state in A2A_TERMINAL_STATES:
                     self._write_a2a_registry(key, data, "finalized")
                 else:
-                    self._track_a2a_job(task_id, key, data)
+                    chat_id = f"a2a:{self._identity.id}:{data['context_id']}"
+                    if not self._queue_external_event(chat_id, f"a2a-inbound:{key}", "",
+                                                      {"event_type": "a2a_inbound",
+                                                       "registry_key": key, "data": data}):
+                        self._track_a2a_job(task_id, key, data)
+                    else:
+                        try:
+                            replay = self.sessions.store.requeue_failed_inbox_event(
+                                "external", f"a2a-inbound:{key}")
+                            if replay and self.inbox is not None:
+                                self.inbox.wake(replay)
+                        except Exception as exc:
+                            logger.warning("[inbox] A2A catch-up unavailable; running directly: %s", exc)
+                            self._track_a2a_job(task_id, key, data)
 
             tasks = await asyncio.to_thread(
                 lambda: list(self._identity.iter_a2a_tasks(state="submitted"))
@@ -4069,7 +4144,8 @@ class InkboxGateway:
         except Exception:
             logger.exception("[bridge] A2A catch-up failed")
 
-    async def _run_external_turn(self, chat_id: str, prompt: str, directive: str) -> None:
+    async def _run_external_turn(self, chat_id: str, prompt: str, directive: str,
+                                 *, raise_errors: bool = False) -> None:
         try:
             # The directive rides on the session's system prompt (per-event
             # session, so it can never leak into a human conversation).
@@ -4083,6 +4159,8 @@ class InkboxGateway:
             )
         except Exception:
             logger.exception("[bridge] external-event turn failed: %s", chat_id)
+            if raise_errors:
+                raise
 
     # ------------------------------------------------------------------
     # Inbound: live calls (Inkbox STT/TTS text-frame bridge)

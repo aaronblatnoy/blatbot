@@ -2520,8 +2520,33 @@ class GateSessionManager:
             # land in) -- store.request_running_for_schedule treats an "approved" row as
             # still in flight forever, so a missed one here means every later firing of
             # that schedule silently skips. Non-schedule "approved" rows are left alone.
-            stranded = self.store.requests_in_state("running") + [
+            queued_timer_requests = self.store.active_timer_request_ids()
+            queued_followups = self.store.active_timer_followup_ids()
+            replied_requests, replied_followups = self.store.replied_timer_refs()
+            running = self.store.requests_in_state("running")
+            for req in running:
+                if (req.status or {}).get("followup_id") in queued_followups:
+                    # The inbox will retry this follow-up. Retire the partial
+                    # request without telling the chat it was lost.
+                    self.store.set_state(req.id, "failed", status={"ok": False,
+                                         "error": "interrupted; inbox will retry"})
+                elif req.id in replied_requests or (req.status or {}).get("followup_id") in replied_followups:
+                    # A reply went out before the crash. Close the partial run
+                    # without running it twice or sending another notice.
+                    self.store.set_state(req.id, "failed", status={"ok": False,
+                                         "error": "interrupted after replying"})
+                    if req.schedule_id:
+                        await self.schedules.interrupted(req, already_replied=True)
+                    elif (req.status or {}).get("followup_id"):
+                        self.store.finish_followup(int(req.status["followup_id"]),
+                                                   "Interrupted after replying.")
+            stranded = [r for r in running
+                        if r.id not in queued_timer_requests and
+                        r.id not in replied_requests and
+                        (r.status or {}).get("followup_id") not in queued_followups and
+                        (r.status or {}).get("followup_id") not in replied_followups] + [
                 r for r in self.store.requests_in_state("approved") if r.schedule_id
+                and r.id not in queued_timer_requests and r.id not in replied_requests
             ]
         except Exception:
             logger.exception("[gate] could not look for interrupted runs")
@@ -4066,6 +4091,39 @@ class GateSessionManager:
             except Exception:
                 logger.exception("schedule loop error")
 
+    def queue_timer(self, chat_id: str, source_event_id: str, meta: Dict[str, Any]) -> bool:
+        """Put a ready timer behind this chat's earlier events when the inbox is on."""
+        try:
+            if not _settings.get("GATE_INBOX"):
+                return False
+            gateway = getattr(self, "gateway", None)
+            if gateway is None:
+                raise RuntimeError("inbox is unavailable")
+            ensure = getattr(gateway, "_ensure_inbox", None)
+            inbox = ensure() if callable(ensure) else getattr(gateway, "inbox", None)
+            if inbox is None:
+                raise RuntimeError("inbox is unavailable")
+            inbox.submit(chat_id, "timer", source_event_id, "timer", "", meta, kind="timer")
+            return True
+        except Exception as exc:
+            logger.warning("[gate] timer inbox unavailable; running directly: %s", exc)
+            return False
+
+    async def handle_timer_event(self, event: Dict[str, Any]) -> None:
+        meta = json.loads(event["meta_json"])
+        if meta.get("schedule_id"):
+            req = self.store.get_request(int(meta["request_id"]))
+            if req is None:
+                raise ValueError("scheduled request is missing")
+            await self.schedules._run_fired(req, raise_errors=True)
+        elif meta.get("followup_id"):
+            row = self.store.get_followup(int(meta["followup_id"]))
+            if row is None:
+                raise ValueError("follow-up is missing")
+            await self._run_followup(row, raise_errors=True)
+        else:
+            raise ValueError("timer type is missing")
+
     async def _followup_loop(self) -> None:
         while True:
             await asyncio.sleep(30)
@@ -4074,13 +4132,16 @@ class GateSessionManager:
                     for row in self.store.due_followups():
                         # Claim before starting any work. A restart cannot repeat it.
                         if self.store.mark_followup_fired(row["id"]):
-                            asyncio.create_task(self._run_followup(row))
+                            if not self.queue_timer(row["chat_id"], f"followup:{row['id']}",
+                                                    {"followup_id": row["id"]}):
+                                asyncio.create_task(self._run_followup(row))
             except Exception as exc:
                 logger.warning("[gate] follow-up loop failed: %s", exc)
 
-    async def _run_followup(self, row: Dict[str, Any]) -> None:
+    async def _run_followup(self, row: Dict[str, Any], *, raise_errors: bool = False) -> None:
         from .hosttools import followup_time
         request = None
+        run_failed = False
         try:
             original = self.store.get_request(row["request_id"])
             if original is None:
@@ -4105,6 +4166,7 @@ class GateSessionManager:
             await self.execute(request, notify=False)
             finished = self.store.get_request(request.id)
             status = (finished.status or {}) if finished else {}
+            run_failed = status.get("ok") is False
             if finished and finished.state == "pending":
                 self.store.finish_followup(row["id"], "Waiting for confirmation.")
                 return
@@ -4139,3 +4201,7 @@ class GateSessionManager:
                                       state="open")
             except Exception as record_exc:
                 logger.warning("[gate] follow-up #%s failure recording failed: %s", row["id"], record_exc)
+            if raise_errors:
+                raise
+        if raise_errors and run_failed:
+            raise RuntimeError(str(status.get("error") or "follow-up run failed"))

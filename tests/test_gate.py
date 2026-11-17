@@ -1566,6 +1566,49 @@ def test_followup_continues_task_with_saved_scopes_and_only_reports_changes(tmp_
     assert all(req.scopes == ["host_read"] for req in followup_requests)
 
 
+def test_followup_timer_runs_from_inbox(tmp_path):
+    from inkbox_claude.gate.inbox import Inbox
+
+    m, sent = make_manager(tmp_path)
+    m.jev_agent = None
+    task = m.store.create_task("Check for a reply")
+    m.store.set_thread("imessage:person", "idle", mode="imessage",
+                       meta={"conversation_id": "person"})
+    original = m.store.create_request(
+        chat_id="imessage:person", sender="person", sender_name="Person", mode="imessage",
+        subject="", original_message="Ask", summary="Ask", scopes=["host_read"],
+        prompt="Ask", state="approved", task_id=task["id"])
+    followup_id, _pending = m.store.add_followup(task_id=task["id"], request_id=original.id,
+                                                 chat_id="imessage:person", requester="person",
+                                                 scopes=["host_read"], due_at=time.time() - 1,
+                                                 note="Check reply")
+    assert followup_id is not None
+
+    async def scenario():
+        inbox = Inbox(m.store, lambda chat_id, _mode, _meta: m.get(chat_id),
+                      timer_handler=m.handle_timer_event)
+        try:
+            row = m.store.get_followup(followup_id)
+            m.executor.result = {"ok": True, "changed": True, "summary": "They replied.",
+                                 "final_status": "They replied.",
+                                 "tool_calls": ["mcp__host__host_status"]}
+            assert m.store.mark_followup_fired(followup_id)
+            inbox.submit(row["chat_id"], "timer", f"followup:{followup_id}", "timer", "",
+                         {"followup_id": followup_id}, kind="timer")
+            for _ in range(50):
+                if m.store.inbox_counts()["done"]:
+                    break
+                await asyncio.sleep(0.01)
+            assert m.store.inbox_counts()["done"] == 1
+            assert m.store.get_followup(followup_id)["result"] == "They replied."
+            assert sent == [("imessage:person", "They replied.", "imessage",
+                             {"conversation_id": "person"})]
+        finally:
+            await inbox.close()
+
+    asyncio.run(scenario())
+
+
 def test_followup_setting_withholds_tools(monkeypatch):
     monkeypatch.setenv("GATE_FOLLOWUPS", "0")
     assert "mcp__host__set_followup" not in tools_for(["host_read"])
