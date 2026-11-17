@@ -47,6 +47,9 @@ def make_manager(tmp_path):
                           approver_imessage_conversation_id=APPROVER_CONV)
     m = gm.GateSessionManager(cfg=cfg, send_fn=send_fn, mcp_server=None, identity_info={},
                               store_path=str(tmp_path / "gate.db"), exec_cwd=str(tmp_path))
+    # These schedule tests assert the old immediate transport timing. Delivery
+    # through the dispatcher is covered separately from the schedule wording.
+    m._outbox_enabled = lambda: False
     m.jev_agent = None  # force the plain executor path regardless of env
     m.caller = None
     m.executor = FakeExecutor()

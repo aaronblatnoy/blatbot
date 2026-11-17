@@ -34,6 +34,7 @@ from . import graphmem
 
 logger = logging.getLogger(__name__)
 _MISSING = object()
+_OUTBOX_HELD = object()
 
 SendFn = Callable[[str, str, str, Dict[str, Any]], Awaitable[Any]]
 
@@ -2269,11 +2270,21 @@ class GateSessionManager:
         self._schedule_task: Optional[asyncio.Task] = None
         self._followup_task: Optional[asyncio.Task] = None
         self._outbox_task: Optional[asyncio.Task] = None
+        self._outbox_wake = asyncio.Event()
+        self._outbox_waiters: Dict[int, asyncio.Future] = {}
+        self._outbox_retry_policy: Dict[int, bool] = {}
+        self._outbox_payloads: Dict[int, Dict[str, Any]] = {}
+        self._outbox_target_tasks: Dict[str, asyncio.Task] = {}
+        self._outbox_dirty_targets: set[str] = set()
+        self._outbox_dispatch_lock = asyncio.Lock()
         if self._outbox_enabled():
             try:
                 interrupted = self.store.fail_interrupted_outbox()
                 if interrupted:
                     logger.warning("[gate] outbox marked %d interrupted sends failed; not retried", interrupted)
+                stale = self.store.fail_old_queued_outbox(time.time() - self._outbox_max_age())
+                if stale:
+                    logger.warning("[gate] outbox marked %d old queued sends failed", stale)
             except Exception as exc:
                 logger.warning("[gate] outbox startup recovery failed: %s", exc)
         try:
@@ -2305,6 +2316,8 @@ class GateSessionManager:
             self._followup_task.cancel()
         if self._outbox_task:
             self._outbox_task.cancel()
+        for task in self._outbox_target_tasks.values():
+            task.cancel()
 
     # -- approver channel ----------------------------------------------------
     @property
@@ -2323,26 +2336,34 @@ class GateSessionManager:
     async def send(self, target: str, text: str, mode: str, meta: Dict[str, Any], *,
                    chat_id: str = "", role: str = "notice", reply_to: Optional[int] = None,
                    record: bool = True, kind: str = "reply",
-                   retry_on_failure: bool = True) -> None:
-        """Save a message before delivery, then use the same channel as before.
+                   retry_on_failure: bool = True) -> Any:
+        """Save a message and wait for the dispatcher to deliver it.
         Callers that write their own reply record pass record=False."""
         text = wording.plain_dashes(text)
+        result = None
         if not self._outbox_enabled() or mode == "voice":
-            await self.send_fn(target, text, mode, meta)
+            result = await self.send_fn(target, text, mode, meta)
         else:
             row_id = None
             try:
                 row_id = self.store.add_outbox(chat_id or self._threads_for(target)[0], target,
                                                mode, text, meta, kind)
-                if kind in OUTBOX_PROACTIVE_KINDS and self._proactive_limit() > 0:
-                    recent = self.store.recent_outbox_sends(target, time.time() - 3600, mode)
-                    sent = [row for row in recent if row["kind"] in OUTBOX_PROACTIVE_KINDS
-                            and row["last_error"] != "duplicate suppressed"]
-                    if len(sent) >= self._proactive_limit() or self.store.has_held_outbox(target, mode):
-                        self.store.hold_outbox(row_id)
-                        return
-                if not self.store.claim_outbox(row_id):
-                    return
+                loop = asyncio.get_running_loop()
+                if self._outbox_task is None or self._outbox_task.done() or self._outbox_task.get_loop() is not loop:
+                    # A manager made outside a running loop still needs its worker.
+                    self._outbox_wake = asyncio.Event()
+                    self._outbox_dispatch_lock = asyncio.Lock()
+                    self._outbox_target_tasks = {}
+                    self._outbox_task = loop.create_task(self._outbox_loop())
+                waiter = loop.create_future()
+                self._outbox_waiters[row_id] = waiter
+                self._outbox_retry_policy[row_id] = retry_on_failure
+                self._outbox_payloads[row_id] = {
+                    "id": row_id, "target": target, "text": text, "mode": mode,
+                    "meta_json": json.dumps(meta), "kind": kind,
+                }
+                self._outbox_dirty_targets.add(target)
+                self._outbox_wake.set()
             except Exception as exc:
                 logger.warning("[gate] outbox unavailable, sending directly: %s", exc)
                 if row_id is not None:
@@ -2350,19 +2371,28 @@ class GateSessionManager:
                         self.store.abandon_outbox(row_id)
                     except Exception:
                         pass
-                await self.send_fn(target, text, mode, meta)
+                result = await self.send_fn(target, text, mode, meta)
             else:
-                await self._deliver_outbox(row_id, retry_on_failure=retry_on_failure,
-                                           row={"target": target, "text": text, "mode": mode,
-                                                "meta_json": json.dumps(meta), "kind": kind,
-                                                "attempts": 1})
+                # The dispatcher always answers. This ceiling only stops a turn from hanging
+                # forever if it somehow does not; the row stays with the dispatcher, so
+                # nothing is sent twice. A timeout raised by the channel itself comes
+                # through the waiter untouched.
+                finished, _ = await asyncio.wait({waiter}, timeout=90)
+                if not finished:
+                    self._outbox_waiters.pop(row_id, None)
+                    logger.warning("[gate] outbox row %s got no delivery result in 90 s", row_id)
+                    raise TimeoutError("the message was queued but its delivery was not confirmed")
+                result = waiter.result()
+                if result is _OUTBOX_HELD:
+                    return None
         if not record:
-            return      # the caller writes its own line, with the turn's reply_to and role
+            return result      # the caller writes its own line, with the turn's reply_to and role
         for cid in self._threads_for(target, chat_id):
             try:
                 self.store.add_message(cid, "outbound", text, mode, reply_to=reply_to, role=role)
             except Exception:
                 logger.debug("[gate] could not record an outbound on %s", cid, exc_info=True)
+        return result
 
     @staticmethod
     def _outbox_enabled() -> bool:
@@ -2374,6 +2404,13 @@ class GateSessionManager:
             return max(0, int(os.getenv("OUTBOX_PROACTIVE_PER_HOUR", "6")))
         except ValueError:
             return 6
+
+    @staticmethod
+    def _outbox_max_age() -> float:
+        try:
+            return max(0.0, float(os.getenv("OUTBOX_MAX_AGE_SECONDS", "600")))
+        except ValueError:
+            return 600.0
 
     @staticmethod
     def _outbox_transient(exc: Exception) -> bool:
@@ -2435,45 +2472,155 @@ class GateSessionManager:
 
     async def _outbox_loop(self) -> None:
         while True:
-            await asyncio.sleep(15)
             try:
                 await self._dispatch_outbox()
             except Exception as exc:
                 logger.warning("[gate] outbox dispatcher failed: %s", exc)
+                # If the store cannot be read, waiting callers still need a reply.
+                for row_id in list(self._outbox_waiters):
+                    try:
+                        row = self._outbox_payloads.get(row_id)
+                        active = self._outbox_target_tasks.get(row["target"]) if row else None
+                        if row and (active is None or active.done()):
+                            await self._fallback_outbox(row)
+                    except Exception as fallback_exc:
+                        logger.warning("[gate] outbox fallback failed: %s", fallback_exc)
+            try:
+                await asyncio.wait_for(self._outbox_wake.wait(), timeout=15)
+            except asyncio.TimeoutError:
+                pass
+            self._outbox_wake.clear()
+
+    def _finish_outbox(self, row_id: int, result: Any = None, error: Optional[Exception] = None) -> None:
+        self._outbox_retry_policy.pop(row_id, None)
+        self._outbox_payloads.pop(row_id, None)
+        waiter = self._outbox_waiters.pop(row_id, None)
+        if waiter is not None and not waiter.done():
+            if error is not None:
+                waiter.set_exception(error)
+            else:
+                waiter.set_result(result)
+
+    async def _fallback_outbox(self, row: Dict[str, Any]) -> None:
+        """Keep a broken queue from silencing an otherwise available channel."""
+        try:
+            self.store.abandon_outbox(row["id"])
+        except Exception:
+            pass
+        try:
+            result = await self.send_fn(row["target"], row["text"], row["mode"],
+                                        json.loads(row["meta_json"] or "{}"))
+        except Exception as exc:
+            self._finish_outbox(row["id"], error=exc)
+        else:
+            self._finish_outbox(row["id"], result=result)
 
     async def _dispatch_outbox(self) -> None:
-        for row in self.store.due_outbox(time.time()):
-            if row["kind"] in OUTBOX_PROACTIVE_KINDS and self._proactive_limit() > 0:
-                recent = self.store.recent_outbox_sends(row["target"], time.time() - 3600, row["mode"])
-                if sum(r["kind"] in OUTBOX_PROACTIVE_KINDS and r["last_error"] != "duplicate suppressed"
-                       for r in recent) >= self._proactive_limit() or self.store.has_held_outbox(row["target"], row["mode"]):
-                    self.store.hold_outbox(row["id"])
+        async with self._outbox_dispatch_lock:
+            rows = self.store.due_outbox(time.time())
+            recipients: Dict[str, List[Dict[str, Any]]] = {}
+            for row in rows:
+                recipients.setdefault(row["target"], []).append(row)
+            held: Dict[str, List[str]] = {}
+            for target, mode in self.store.held_recipients():
+                held.setdefault(target, []).append(mode)
+            # Keep scanning while a slow channel send is in progress. One task owns
+            # each person until that person's queued and held sends are done.
+            for target in recipients.keys() | held.keys():
+                active = self._outbox_target_tasks.get(target)
+                if active is not None and not active.done():
                     continue
-            if self.store.claim_outbox(row["id"]):
-                try:
-                    await self._deliver_outbox(row["id"])
-                except Exception as exc:
-                    logger.warning("[gate] outbox send %s failed: %s", row["id"], exc)
-        for target, mode in self.store.held_recipients():
+                self._outbox_dirty_targets.discard(target)
+                task = asyncio.create_task(self._dispatch_target_and_held(
+                    target, recipients.get(target, []), held.get(target, [])))
+                self._outbox_target_tasks[target] = task
+                task.add_done_callback(lambda done, who=target: self._outbox_target_done(who, done))
+
+    def _outbox_target_done(self, target: str, task: asyncio.Task) -> None:
+        if self._outbox_target_tasks.get(target) is task:
+            self._outbox_target_tasks.pop(target, None)
+        progressed = False
+        if not task.cancelled():
             try:
-                await self._dispatch_held(target, mode)
+                progressed = task.result()
+            except Exception as exc:
+                logger.warning("[gate] outbox delivery for %s failed: %s", target, exc)
+        if progressed or target in self._outbox_dirty_targets:
+            self._outbox_wake.set()
+
+    async def _dispatch_target_and_held(self, target: str, rows: List[Dict[str, Any]],
+                                        modes: List[str]) -> bool:
+        completed = await self._dispatch_target(rows)
+        held_sent = await self._dispatch_held_target(target, modes)
+        if len(rows) >= 100 and completed:
+            self._outbox_wake.set()
+        return bool(completed or held_sent)
+
+    async def _dispatch_target(self, rows: List[Dict[str, Any]]) -> int:
+        completed = 0
+        for row in rows:
+            row_id = row["id"]
+            try:
+                # A paced message is still saved, but its caller is free to continue.
+                if row["kind"] in OUTBOX_PROACTIVE_KINDS and self._proactive_limit() > 0:
+                    recent = self.store.recent_outbox_sends(row["target"], time.time() - 3600, row["mode"])
+                    if sum(r["kind"] in OUTBOX_PROACTIVE_KINDS and r["last_error"] != "duplicate suppressed"
+                           for r in recent) >= self._proactive_limit() or self.store.has_held_outbox(row["target"], row["mode"]):
+                        if self.store.hold_outbox(row_id):
+                            self._finish_outbox(row_id, result=_OUTBOX_HELD)
+                            completed += 1
+                        continue
+                claimed = self.store.claim_outbox(row_id)
+            except Exception as exc:
+                logger.warning("[gate] outbox unavailable, sending directly: %s", exc)
+                await self._fallback_outbox(row)
+                completed += 1
+                continue
+            if not claimed:
+                # An older retry or another worker owns this person's next send.
+                break
+            try:
+                result = await self._deliver_outbox(
+                    row_id, retry_on_failure=self._outbox_retry_policy.get(row_id, True))
+            except Exception as exc:
+                self._finish_outbox(row_id, error=exc)
+                logger.warning("[gate] outbox send %s failed: %s", row_id, exc)
+                completed += 1
+                if self.store.get_outbox(row_id)["status"] == "queued":
+                    break  # A queued retry must go before later messages to this person.
+            else:
+                self._finish_outbox(row_id, result=result)
+                completed += 1
+        return completed
+
+    async def _dispatch_held_target(self, target: str, modes: List[str]) -> bool:
+        sent = False
+        for mode in modes:
+            try:
+                sent = await self._dispatch_held(target, mode) or sent
             except Exception as exc:
                 logger.warning("[gate] held outbox delivery failed: %s", exc)
+        return sent
 
-    async def _dispatch_held(self, target: str, mode: str) -> None:
+    async def _dispatch_held(self, target: str, mode: str) -> bool:
         recent = self.store.recent_outbox_sends(target, time.time() - 3600, mode)
         if self._proactive_limit() > 0 and sum(
                 row["kind"] in OUTBOX_PROACTIVE_KINDS and row["last_error"] != "duplicate suppressed"
                 for row in recent) >= self._proactive_limit():
-            return
+            return False
         sent_texts = {row["text"] for row in self.store.recent_outbox_sends(target, time.time() - 600, mode)
                       if row["last_error"] != "duplicate suppressed"}
         held = self.store.held_outbox(target, mode)
         if any(row["not_before"] > time.time() for row in held):
-            return      # Wait for the oldest failed batch so all held words stay together.
-        claimed = [row for row in held if self.store.claim_outbox(row["id"], "held")]
+            return False      # Wait for the oldest failed batch so all held words stay together.
+        claimed = []
+        for row in held:
+            if not self.store.claim_outbox(row["id"], "held",
+                                           allow_prior_sending=bool(claimed)):
+                break
+            claimed.append(row)
         if not claimed:
-            return
+            return False
         fresh = []
         for row in claimed:
             if row["text"] in sent_texts:
@@ -2482,7 +2629,7 @@ class GateSessionManager:
                 fresh.append(row)
         claimed = fresh
         if not claimed:
-            return
+            return True
         text = "\n\n".join(row["text"] for row in claimed)
         try:
             result = await self.send_fn(target, text, mode, json.loads(claimed[0]["meta_json"] or "{}"))
@@ -2498,6 +2645,7 @@ class GateSessionManager:
             provider_id = (result.get("message_id") or result.get("id")) if isinstance(result, dict) else None
             for row in claimed:
                 self.store.set_outbox_state(row["id"], "sent", provider_message_id=str(provider_id) if provider_id else None)
+        return True
 
     def _threads_for(self, target: str, chat_id: str = "") -> List[str]:
         """Where an outbound belongs. The caller's record when it named one, the owner's

@@ -1582,12 +1582,17 @@ class Store:
             row = self._db.execute("SELECT * FROM outbox WHERE id=?", (row_id,)).fetchone()
             return dict(row) if row else None
 
-    def claim_outbox(self, row_id: int, status: str = "queued") -> bool:
-        """Only one worker may own a send, including across processes."""
+    def claim_outbox(self, row_id: int, status: str = "queued", *,
+                     allow_prior_sending: bool = False) -> bool:
+        """Only one worker may own a send, and earlier sends to that person go first."""
         with self._lock:
             cur = self._db.execute(
                 "UPDATE outbox SET status='sending', attempts=attempts+1 "
-                "WHERE id=? AND status=? AND not_before<=?", (row_id, status, time.time()))
+                "WHERE id=? AND status=? AND not_before<=? "
+                "AND (?=1 OR NOT EXISTS (SELECT 1 FROM outbox AS earlier "
+                "WHERE earlier.target=outbox.target AND earlier.id<outbox.id "
+                "AND earlier.status IN ('queued','sending'))) ",
+                (row_id, status, time.time(), int(allow_prior_sending)))
             self._db.commit()
             return cur.rowcount == 1
 
@@ -1621,20 +1626,33 @@ class Store:
         with self._lock:
             rows = self._db.execute(
                 "SELECT * FROM outbox WHERE status='queued' AND not_before<=? "
-                "ORDER BY not_before,id LIMIT ?", (now, limit)).fetchall()
+                "AND NOT EXISTS (SELECT 1 FROM outbox AS earlier "
+                "WHERE earlier.target=outbox.target AND earlier.id<outbox.id "
+                "AND earlier.status IN ('queued','sending')) "
+                "ORDER BY id LIMIT ?", (now, limit)).fetchall()
             return [dict(row) for row in rows]
+
+    def fail_old_queued_outbox(self, cutoff: float) -> int:
+        """A reply waiting through a long outage is stale, so leave it for review."""
+        with self._lock:
+            cur = self._db.execute(
+                "UPDATE outbox SET status='failed',last_error='too old to send after restart' "
+                "WHERE status='queued' AND created_at<?", (cutoff,))
+            self._db.commit()
+            return cur.rowcount
 
     def held_outbox(self, target: str, mode: str) -> List[Dict[str, Any]]:
         with self._lock:
             rows = self._db.execute(
                 "SELECT * FROM outbox WHERE status='held' AND target=? AND mode=? "
-                "ORDER BY created_at,id", (target, mode)).fetchall()
+                "ORDER BY id", (target, mode)).fetchall()
             return [dict(row) for row in rows]
 
     def held_recipients(self) -> List[Tuple[str, str]]:
         with self._lock:
             rows = self._db.execute(
-                "SELECT DISTINCT target,mode FROM outbox WHERE status='held'").fetchall()
+                "SELECT target,mode FROM outbox WHERE status='held' "
+                "GROUP BY target,mode ORDER BY MIN(id)").fetchall()
             return [(row["target"], row["mode"]) for row in rows]
 
     def has_held_outbox(self, target: str, mode: str) -> bool:

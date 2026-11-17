@@ -1003,7 +1003,11 @@ def test_jev_first_builds_request_from_task_not_router(tmp_path):
                                  request=RouterRequest(prompt="paraphrase", scopes=["calendar"], summary="router's idea"))
     async def go():
         await m.get("aaron").handle_inbound("close the tamid form pls", "imessage", approver_meta())
-        await asyncio.sleep(0.05)
+        # The reply now passes through the outbox worker, so wait for delivery.
+        for _ in range(100):
+            if any(text == "On it." for _, text, *_ in sent):
+                break
+            await asyncio.sleep(0.01)
     asyncio.run(go())
     r = m.store.get_request(1)
     assert r.summary == "Close the TAMID application form"      # the task title, not DeepSeek's line
@@ -2505,3 +2509,100 @@ def test_a_router_access_command_is_answered_by_code(tmp_path):
                                               approver_meta()))
     assert [t for _, t, *_ in sent] == ["Corgi teammate: nobody but you."]
     assert m.store.get_request(1) is None
+
+
+@pytest.mark.asyncio
+async def test_outbox_dispatches_in_order_per_person_and_parallel_across_people(tmp_path):
+    m, _ = make_manager(tmp_path)
+    started = asyncio.Event()
+    release = asyncio.Event()
+    delivered = []
+
+    async def deliver(target, text, mode, meta):
+        if target == "sms:a" and text == "first":
+            started.set()
+            await release.wait()
+        delivered.append((target, text))
+        return {"id": text}
+
+    m.send_fn = deliver
+    first = asyncio.create_task(m.send("sms:a", "first", "sms", {}))
+    await asyncio.wait_for(started.wait(), 1)
+    second = asyncio.create_task(m.send("sms:a", "second", "sms", {}))
+    other = asyncio.create_task(m.send("sms:b", "other", "sms", {}))
+    assert await asyncio.wait_for(other, 1) == {"id": "other"}
+    assert ("sms:a", "second") not in delivered
+    release.set()
+    assert await asyncio.wait_for(first, 1) == {"id": "first"}
+    assert await asyncio.wait_for(second, 1) == {"id": "second"}
+    assert [text for target, text in delivered if target == "sms:a"] == ["first", "second"]
+    assert m.store.outbox_counts()["sent"] == 3
+    await m.close_all()
+
+
+@pytest.mark.asyncio
+async def test_outbox_restart_sends_fresh_rows_and_fails_old_ones(tmp_path):
+    path = str(tmp_path / "gate.db")
+    store = Store(path)
+    old = store.add_outbox("a", "sms:a", "sms", "old", {}, "reply")
+    fresh = store.add_outbox("b", "sms:b", "sms", "fresh", {}, "reply")
+    with store._lock:
+        store._db.execute("UPDATE outbox SET created_at=? WHERE id=?", (time.time() - 700, old))
+        store._db.commit()
+    sent = []
+
+    async def deliver(target, text, mode, meta):
+        sent.append(text)
+
+    cfg = SimpleNamespace(deepseek_api_key="x", deepseek_model="m", claude_model="sonnet",
+                          approver_imessage_conversation_id=APPROVER_CONV)
+    m = gm.GateSessionManager(cfg=cfg, send_fn=deliver, mcp_server=None, identity_info={},
+                              store_path=path, exec_cwd=str(tmp_path))
+    async def fresh_sent():
+        while m.store.get_outbox(fresh)["status"] != "sent":
+            await asyncio.sleep(0.01)
+    await asyncio.wait_for(fresh_sent(), 1)
+    assert sent == ["fresh"]
+    assert m.store.get_outbox(old)["last_error"] == "too old to send after restart"
+    await m.close_all()
+
+
+@pytest.mark.asyncio
+async def test_outbox_returns_first_send_error_and_retries_in_background(tmp_path):
+    m, _ = make_manager(tmp_path)
+    failure = TimeoutError("channel timed out")
+    calls = 0
+
+    async def deliver(target, text, mode, meta):
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            raise failure
+        return {"id": "delivered"}
+
+    m.send_fn = deliver
+    with pytest.raises(TimeoutError) as caught:
+        await m.send("sms:a", "hello", "sms", {})
+    assert caught.value is failure
+    row = m.store.recent_outbox(time.time() - 60)[0]
+    assert row["status"] == "queued" and row["attempts"] == 1
+    m.store.set_outbox_state(row["id"], "queued", not_before=0)
+    m._outbox_wake.set()
+    async def retried():
+        while m.store.get_outbox(row["id"])["status"] != "sent":
+            await asyncio.sleep(0.01)
+    await asyncio.wait_for(retried(), 1)
+    assert calls == 2
+    await m.close_all()
+
+
+@pytest.mark.asyncio
+async def test_outbox_pacing_returns_when_message_is_held(tmp_path, monkeypatch):
+    monkeypatch.setenv("OUTBOX_PROACTIVE_PER_HOUR", "1")
+    m, sent = make_manager(tmp_path)
+    await m.send("sms:a", "first", "sms", {}, kind="proactive")
+    assert await asyncio.wait_for(m.send("sms:a", "second", "sms", {}, kind="proactive"), 1) is None
+    assert [text for _, text, *_ in sent] == ["first"]
+    assert m.store.outbox_counts()["held"] == 1
+    assert [row["text"] for row in m.store.history("sms:a") if row["kind"] == "outbound"] == ["first"]
+    await m.close_all()

@@ -820,3 +820,28 @@ def test_send_imessage_rejects_duplicate_recipients():
 
     assert "distinct" in data["error"]
     assert client.identity.sent_imessages == []
+
+
+@pytest.mark.asyncio
+async def test_gate_message_tools_hand_delivery_to_outbox():
+    client = _FakeClient()
+    queued = []
+
+    async def outbox_send(target, text, mode, meta):
+        queued.append((target, text, mode, meta))
+        return {"id": "queued-message"}
+
+    server, _ = tools_mod.build_inkbox_mcp_server(
+        client, "claude-agent", BridgeConfig(mode="gate"), outbox_send=outbox_send)
+    registered = {tool._inkbox_tool_name: tool for tool in server["tools"]}
+    for name, args in (
+        ("inkbox_send_email", {"to": "ada@example.com", "subject": "Hi", "body": "hello"}),
+        ("inkbox_send_sms", {"to": "+15551112222", "text": "hello"}),
+        ("inkbox_send_imessage", {"conversation_id": "conv-1", "text": "hello"}),
+    ):
+        result = await registered[name](args)
+        assert json.loads(result["content"][0]["text"])["id"] == "queued-message"
+    assert [row[2] for row in queued] == ["email", "sms", "imessage"]
+    assert client.identity.sent_emails == []
+    assert client.identity.sent_texts == []
+    assert client.identity.sent_imessages == []
