@@ -82,6 +82,9 @@ def request_access(args: Dict[str, Any], manager: Any, request: Any) -> str:
             return "Aaron already refused that access for this task. Finish with what you have."
         if any(n not in choices for n in names):
             manager.task_note(request, "rejected", "An access request used an unknown name and was refused.")
+            if any(w in str(n).lower() for n in names for w in ("telegram", "send", "message", "post")):
+                return ("Sending needs no access. Call send_message: to is a person's name or a group chat's "
+                        "name (Telegram groups included), and it goes out on the right surface.")
             return "Unknown access name. Valid names: " + ", ".join(choices)
         why = " ".join(str(args.get("why") or "").replace("—", ", ").split())[:500].strip()
         if not why:

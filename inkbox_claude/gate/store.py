@@ -1484,7 +1484,18 @@ class Store:
             if g["title"].strip().lower() == needle:
                 return g
         matches = [g for g in groups if needle in g["title"].strip().lower()]
-        return matches[0] if len(matches) == 1 else None
+        if len(matches) == 1:
+            return matches[0]
+        if matches:
+            return None
+        # A title is typed by people and often misspelt ("FellowSIp of the Ring"), and the
+        # name asked for is the correct spelling. Take the one clearly closest title.
+        import difflib
+        scored = sorted(((difflib.SequenceMatcher(None, needle, g["title"].strip().lower()).ratio(), i, g)
+                         for i, g in enumerate(groups)), reverse=True)
+        if scored and scored[0][0] >= 0.8 and (len(scored) == 1 or scored[0][0] - scored[1][0] >= 0.1):
+            return scored[0][2]
+        return None
 
     # -- durable inbound queue ------------------------------------------
     def insert_inbox_event(self, chat_id: str, source: str, source_event_id: str,
