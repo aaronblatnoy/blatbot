@@ -127,6 +127,12 @@ class ScheduleProposal(BaseModel):
     # deterministic capabilities_for(), which manager.py's schedule block calls.
     scopes: List[str] = Field(default_factory=list)
     start_now: bool = False
+    # When he said when it starts ("starting 9am today"): the ISO local datetime of
+    # the first run. Code anchors the cadence on it; null when he named no start.
+    start_at: Optional[str] = None
+    # When he said what ends it ("until he gives us his email"): that condition in
+    # plain words, people named. This makes it a follow-up that stops itself.
+    stop_when: Optional[str] = None
 
     @field_validator("cadence_kind")
     @classmethod
@@ -248,7 +254,7 @@ class Router:
             "Available task scopes (choose the minimal set):\n"
             f"{scope_lines}\n\n"
             "Respond with ONLY a JSON object, no prose, of the form:\n"
-            '{"reasoning": string or null, "reply": string or null, "request": null or {"prompt": string, "scopes": [string], "summary": string, "counterpart": string or null}, "schedule": null or {"title": string, "prompt": string, "cadence_kind": "once"|"every"|"daily"|"weekdays"|"weekly"|"cron", "cadence": object, "timezone": IANA timezone or null, "report_every_time": true|false|null, "until": ISO date or null, "scopes": [string], "start_now": true|false}, "schedule_command": null or {"action": "list"|"last"|"change"|"pause"|"resume"|"run_now"|"stop"|"add_capability"|"approve"|"reject", "target": string or null, "changes": object}, "access_command": null or {"action": string, "person": string or null, "role": string or null, "abilities": string or null, "chat": string or null, "mode": string or null, "setting": string or null, "value": string or null}}\n'
+            '{"reasoning": string or null, "reply": string or null, "request": null or {"prompt": string, "scopes": [string], "summary": string, "counterpart": string or null}, "schedule": null or {"title": string, "prompt": string, "cadence_kind": "once"|"every"|"daily"|"weekdays"|"weekly"|"cron", "cadence": object, "timezone": IANA timezone or null, "report_every_time": true|false|null, "until": ISO date or null, "scopes": [string], "start_now": true|false, "start_at": ISO local datetime or null, "stop_when": string or null}, "schedule_command": null or {"action": "list"|"last"|"change"|"pause"|"resume"|"run_now"|"stop"|"add_capability"|"approve"|"reject", "target": string or null, "changes": object}, "access_command": null or {"action": string, "person": string or null, "role": string or null, "abilities": string or null, "chat": string or null, "mode": string or null, "setting": string or null, "value": string or null}}\n'
             "- reply: what to send back to the sender now, or null to send nothing.\n"
             "- request.counterpart: the email (preferred), phone, or full name of the person the task is\n"
             "  about, when it concerns someone other than the sender; null otherwise.\n"
@@ -335,6 +341,13 @@ class Router:
             "    by itself.\n"
             "  - schedule.start_now: true only when he said to start it now / run the first check\n"
             "    immediately; otherwise false.\n"
+            "  - schedule.start_at: when he said when it starts (\"starting 9am today\", \"from tomorrow at 8\"),\n"
+            "    the ISO local datetime of the first run; otherwise null. Never move it earlier.\n"
+            "  - schedule.stop_when: when he said what ends it (\"until he gives us his email\", \"until she\n"
+            "    replies\"), that condition in plain words with people named (\"Stanley gives his email\");\n"
+            "    otherwise null. A date he ends it on goes in until instead.\n"
+            "  - A schedule set up in a group chat posts in that group itself; that needs no scope. Never\n"
+            "    suggest an iMessage, SMS or email scope for it unless he asked for that channel.\n"
             "  Schedule scopes, with the plain words Aaron will see for each:\n"
             f"{schedule_scope_lines}\n"
             "- SCHEDULE COMMANDS: only when Aaron is asking about or managing a schedule that ALREADY "

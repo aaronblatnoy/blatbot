@@ -278,6 +278,136 @@ def scopes_named(text: str) -> List[str]:
 
 
 # ---------------------------------------------------------------------------
+# What his own words say about when it starts, what ends it, and where it posts.
+# Read in code from the message itself, so a stated start or stop condition holds
+# even when the router leaves its field empty.
+# ---------------------------------------------------------------------------
+
+# The routing tag the bridge puts in front of a group message ("[telegram group:
+# <room> | from: <name> | ...]"). Never part of what he said.
+_GROUP_TAG_RE = re.compile(r"^\s*\[(?:telegram|imessage|sms) group:[^\]]*\]\s*")
+
+
+def strip_group_tag(text: str) -> str:
+    """`text` without the bridge's group routing tag, trimmed."""
+    return _GROUP_TAG_RE.sub("", text or "", count=1).strip()
+
+
+_DAY_WORDS = r"(today|tomorrow|tonight)"
+_START_RE = re.compile(
+    r"\b(?:starting|start(?:ing)?\s+at|beginning|begin(?:ning)?\s+at|from)\s+(?:at\s+)?"
+    + _DAY_WORDS + r"?\s*(?:at\s+)?(noon|midnight|\d{1,2})(?::(\d{2}))?\s*(a\.?m\.?|p\.?m\.?)?(?![\w])"
+    + r"(?:\s+" + _DAY_WORDS + r")?", re.I)
+
+
+def parse_start(text: str, timezone_name: Optional[str], now: Optional[float] = None) -> Optional[float]:
+    """The first-run time he stated ("starting 9am today", "start at 7:30 tomorrow"),
+    as epoch seconds, or None when he stated none or it has already passed. A bare
+    hour with no am/pm is its next occurrence; "from" counts only with am/pm or
+    minutes, so "from 2 people" is never a time."""
+    body = strip_group_tag(text)
+    tz = ZoneInfo(timezone_name or "America/New_York")
+    now_dt = datetime.fromtimestamp(time.time() if now is None else now, tz)
+    for m in _START_RE.finditer(body):
+        day = (m.group(1) or m.group(5) or "").lower()
+        hour_text, minute_text, suffix = m.group(2).lower(), m.group(3), (m.group(4) or "").lower().replace(".", "")
+        if m.group(0).lower().startswith("from") and not (suffix or minute_text or hour_text in ("noon", "midnight")):
+            continue
+        if hour_text == "noon":
+            hour, suffix = 12, "pm"
+        elif hour_text == "midnight":
+            hour, suffix = 0, "am"
+        else:
+            hour = int(hour_text)
+        minute = int(minute_text) if minute_text else 0
+        if hour > 23 or minute > 59:
+            continue
+        if suffix == "pm" and hour < 12:
+            hour += 12
+        elif suffix == "am" and hour == 12:
+            hour = 0
+        if day == "tonight" and not suffix and hour < 12:
+            hour += 12
+        base = now_dt + timedelta(days=1) if day == "tomorrow" else now_dt
+        hours = [hour] if (suffix or hour >= 12 or hour == 0) else [hour, hour + 12]
+        choices = [base.replace(hour=h, minute=minute, second=0, microsecond=0) for h in hours]
+        if not day:
+            choices += [c + timedelta(days=1) for c in choices]
+        future = sorted(c for c in choices if c > now_dt)
+        if future:
+            return future[0].timestamp()
+    return None
+
+
+_UNTIL_RE = re.compile(r"\buntil\s+(.+?)\s*(?:[.!?;\n]|$)", re.I)
+_DATE_START_RE = re.compile(
+    r"^(?:\d|today\b|tomorrow\b|tonight\b|noon\b|midnight\b|next\b|this\b|end\b|the end\b|"
+    r"(?:mon|tues?|wed(?:nes)?|thu(?:rs)?|fri|sat(?:ur)?|sun)(?:day)?\b|"
+    r"(?:jan|feb|mar|apr|jun|jul|aug|sept?|oct|nov|dec)[a-z]*\b|may\s+\d)", re.I)
+
+
+def parse_stop_when(text: str) -> Optional[str]:
+    """The condition he said ends it ("until he gives us his email" -> "he gives us
+    his email"), or None. An end date or time ("until Friday", "until 5pm") is not a
+    condition; that is `until`."""
+    m = _UNTIL_RE.search(strip_group_tag(text))
+    if not m:
+        return None
+    cond = " ".join(m.group(1).split())
+    if not cond or _DATE_START_RE.match(cond):
+        return None
+    return cond
+
+
+def follow_up_prompt(prompt: str, stop_when: str) -> str:
+    """The schedule's prompt with its stop condition stated as the first check of
+    every run, so the run itself ends the follow-up with STATUS: STOP."""
+    return (f"{prompt.rstrip()}\n\nThis is a follow-up that ends when: {stop_when}. Before sending anything, "
+            "read the recent conversation: if that has happened, or Aaron has said to stop, send nothing, "
+            "say what happened in the RESULT line, and end with STATUS: STOP.")
+
+
+_GROUP_SEND_SCOPES = ("imessage_send", "sms_send", "email_send")
+
+
+def origin_meta(schedule_or_origin: Any) -> Dict[str, Any]:
+    """The reply meta captured where a schedule was set up (origin_chat_id JSON)."""
+    raw = schedule_or_origin if isinstance(schedule_or_origin, str) else \
+        str(getattr(schedule_or_origin, "origin_chat_id", "") or "")
+    if not raw.startswith("{"):
+        return {}
+    try:
+        import json
+        return dict((json.loads(raw) or {}).get("meta") or {})
+    except Exception:
+        return {}
+
+
+def group_title(schedule: Any) -> Optional[str]:
+    """The group chat a schedule was set up in, or None when it was not a group."""
+    meta = origin_meta(schedule)
+    if meta.get("conversation_kind") != "group":
+        return None
+    return str(meta.get("group_title") or "").strip() or "this"
+
+
+def group_scopes(scopes: Iterable[str], said_text: str, prompt: str, meta: Optional[Dict[str, Any]]) -> List[str]:
+    """Scopes for a schedule set up in a group chat. Its runs post in that group
+    with send_message, which needs no scope, so an iMessage, SMS or email scope is
+    kept only when his own words or the prompt's tool names call for it; a Telegram
+    group also gets reading Telegram, to see the replies. Unchanged outside a group."""
+    scopes = list(scopes)
+    meta = meta or {}
+    if meta.get("conversation_kind") != "group":
+        return scopes
+    asked = set(_said_scopes(strip_group_tag(said_text))) | set(_prompt_tool_scopes(prompt))
+    kept = {s for s in scopes if s not in _GROUP_SEND_SCOPES or s in asked}
+    if meta.get("telegram_chat_id") and "telegram_read" in SCOPES:
+        kept.add("telegram_read")
+    return [name for name in SCOPES if name in kept]
+
+
+# ---------------------------------------------------------------------------
 # Report-every-time default (item 4): a digest hears every time by default, a
 # watch only on change, unless the router states a value explicitly (that
 # check happens in the caller -- this function is only ever consulted when no
@@ -351,6 +481,19 @@ def _format_time(when: Optional[float], timezone_name: str) -> str:
     return f"{dt.strftime('%A, %B %-d')}, {clock}"
 
 
+def stop_condition(schedule: Any) -> Optional[str]:
+    """The condition that ends a follow-up, as stored in its cadence, or None."""
+    cadence = getattr(schedule, "cadence", None) or {}
+    stop = str(cadence.get("stop_when") or "").strip() if isinstance(cadence, dict) else ""
+    return stop or None
+
+
+def is_follow_up(schedule: Any) -> bool:
+    """A follow-up (the article's deadline the agent sets for itself): it ends on
+    its own condition, and Aaron hears from it only when it ends."""
+    return str(getattr(schedule, "report_mode", "") or "") == "end"
+
+
 def _until_text(schedule: Any) -> str:
     return _format_time(schedule.until, schedule.timezone).replace(" today", "").replace(" tomorrow", "")
 
@@ -367,14 +510,31 @@ def format_proposal(schedule: Any) -> str:
     when = f"{_cadence_text(schedule)}, starting {_first_run_text(schedule)}"
     if getattr(schedule, "until", None):
         when += f", until {_until_text(schedule)}"
+    stop = stop_condition(schedule)
+    follow_up = is_follow_up(schedule)
+    ends = ""
+    if stop:
+        ends = stop
+        if follow_up and schedule.cadence_kind != "once":
+            ends += f", or it gives up after {getattr(schedule, 'max_runs', 20)} tries"
+    does: List[str] = []
+    group = group_title(schedule)
+    if group:
+        does.append(f"post in the {group} group")
+    if schedule.scopes:
+        does.append(labels(schedule.scopes))
     # Belt and suspenders: manager.py refuses to propose a schedule with no
     # capabilities at all, but this must never read "It will: ." if that guard is
     # ever bypassed (an edit path, a test).
-    will = labels(schedule.scopes) if schedule.scopes else "not be able to use any tools"
-    hears = "every time it runs" if schedule.report_every_time else "only when something changed or it could not finish"
+    will = " and ".join(does) if does else "not be able to use any tools"
+    if follow_up:
+        hears = "only when it ends"
+    else:
+        hears = ("every time it runs" if schedule.report_every_time
+                 else "only when something changed or it could not finish")
     return ownertext.compose(
         "ask", f'Set up "{schedule.title}"?',
-        facts=[("When", when), ("It will", will), ("You hear from it", hears)],
+        facts=[("When", when), ("Stops when", ends), ("It will", will), ("You hear from it", hears)],
         handle="Reply yes to start, or tell me what to change.")
 
 

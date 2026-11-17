@@ -90,6 +90,13 @@ def next_run(cadence_kind: str, cadence: Dict[str, Any], timezone_name: str,
     validate(cadence_kind, cadence)
     tz = _zone(timezone_name)
     cadence = cadence or {}
+    # A start he stated ("starting Monday") for a clock-time cadence: nothing fires
+    # before it. An `every` cadence carries its stated start as its anchor instead.
+    not_before = cadence.get("not_before")
+    if not_before is not None and cadence_kind not in ("once", "every"):
+        floor = float(not_before) - 1.0
+        if after is None or after < floor:
+            after = floor
     if cadence_kind == "once":
         at = _parse_once_at(cadence["at"])
         if at.tzinfo is None:

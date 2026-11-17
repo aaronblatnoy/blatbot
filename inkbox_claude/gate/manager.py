@@ -1759,9 +1759,12 @@ class GateSession:
             # Permission is chosen with no probability judgment at all: scopes he
             # named, scopes his own words name by synonym, scopes the prompt names
             # its own tools by, and the router's suggestion -- never Jev.
+            said = schedprop.strip_group_tag(message)
             try:
                 scopes = schedprop.capabilities_for(
-                    out.schedule.prompt, [], out.schedule.scopes, message)
+                    out.schedule.prompt, [], out.schedule.scopes, said)
+                # Set up in a group: its runs post in that group, which needs no scope.
+                scopes = schedprop.group_scopes(scopes, said, out.schedule.prompt, self.reply_meta)
             except schedprop.UnknownScopes as exc:
                 out.request = None
                 out.schedule = None
@@ -1783,6 +1786,18 @@ class GateSession:
                 out.request = None
                 out.schedule = None
                 return await self.send_to_sender(str(exc), role="answer")
+            # A start or stop he stated is read from his own words first, then from the
+            # router's fields: "starting 9am today" must never become "starting 1:45 AM".
+            start_at = schedprop.parse_start(body, out.schedule.timezone)
+            if start_at is None and out.schedule.start_at:
+                try:
+                    start_dt = datetime.fromisoformat(out.schedule.start_at.strip())
+                    if start_dt.tzinfo is None:
+                        start_dt = start_dt.replace(tzinfo=ZoneInfo(out.schedule.timezone or "America/New_York"))
+                    start_at = start_dt.timestamp()
+                except (ValueError, TypeError):
+                    start_at = None
+            stop_when = (out.schedule.stop_when or "").strip() or schedprop.parse_stop_when(body)
             try:
                 await self.m.schedules.propose(
                     owner=True, chat_id=self.record_id, task_id=int(task["id"]),
@@ -1790,7 +1805,8 @@ class GateSession:
                     cadence_kind=out.schedule.cadence_kind, cadence=out.schedule.cadence,
                     timezone=out.schedule.timezone, report_every_time=out.schedule.report_every_time,
                     until=until_epoch, scopes=scopes, start_now=out.schedule.start_now,
-                    auto_start=starts_unasked(out.schedule.cadence_kind, scopes),
+                    auto_start=starts_unasked(out.schedule.cadence_kind, scopes) and not stop_when,
+                    start_at=start_at, stop_when=stop_when or None,
                     origin_mode=self.mode,
                     origin_chat_id=json.dumps({"chat_id": self.chat_id, "meta": self.reply_meta or {}}),
                 )
@@ -2780,7 +2796,13 @@ class GateSessionManager:
                                 kind=kind)
             else:
                 await self.send_fn(target, text, mode, {"conversation_id": conv})
-        return self.store.add_message(OWNER_THREAD, "outbound", text, mode, role="notice",
+        # Said in a group chat, it is written down in that group's own record, so a
+        # bare "yes" there finds the proposal it answers.
+        record = OWNER_THREAD
+        schedule_chat = str(getattr(schedule, "chat_id", "") or "")
+        if sent and meta.get("conversation_kind") == "group" and schedule_chat and schedule_chat != OWNER_THREAD:
+            record = schedule_chat
+        return self.store.add_message(record, "outbound", text, mode, role="notice",
                                       schedule_id=getattr(schedule, "id", None))
 
     _outage_notified: Dict[str, float] = {}
@@ -3511,7 +3533,16 @@ class GateSessionManager:
         if await self.handle_task_command(session, text):
             return True
         pending = self.store.pending()
-        t = text.strip()
+        # In a group the bridge puts its routing tag in front of what he wrote; a
+        # command is read from his own words. A bare yes/no there answers only what
+        # is open in that group, never a pending request from another chat.
+        from . import schedprop
+        t = schedprop.strip_group_tag(text)
+        if (session.reply_meta or {}).get("conversation_kind") == "group":
+            here = getattr(session, "record_id", None) or getattr(session, "chat_id", "")
+            explicit = re.match(r"^\s*#?(\d+)\b", t)
+            if not explicit:
+                pending = [p for p in pending if p.chat_id == here]
         m = re.match(r"^\s*#?(\d+)\s*[:\-]?\s*(.*)$", t, re.S)
         req: Optional[Request] = None
         rest = t
