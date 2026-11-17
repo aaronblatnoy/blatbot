@@ -163,14 +163,14 @@ async def test_full_flow_propose_approve_fire_complete_notice(tmp_path):
 
     proposal_text = sent[-1][1]
     assert proposal_text == (
-        f'Set up "{schedule.title}": every 4 hours, starting '
+        f'\u25c6 Set up "{schedule.title}"?\n\nWhen: every 4 hours, starting '
         + proposal_text.split("starting ", 1)[1]
     )  # sanity: the exact string is asserted in full just below, against the live schedule
     first_run = schedule.next_run or time.time()
     from inkbox_claude.gate import schedprop
-    expected = (f'Set up "{schedule.title}": every 4 hours, starting '
-               + schedprop._first_run_text(schedule) + '. It will read public web pages. '
-               'You hear from it only when something changed or it could not finish. '
+    expected = (f'\u25c6 Set up "{schedule.title}"?\n\nWhen: every 4 hours, starting '
+               + schedprop._first_run_text(schedule) + '\nIt will: read public web pages\n'
+               'You hear from it: only when something changed or it could not finish\n\n'
                'Reply yes to start, or tell me what to change.')
     assert proposal_text == expected
 
@@ -193,7 +193,7 @@ async def test_full_flow_propose_approve_fire_complete_notice(tmp_path):
     run = m.store.last_schedule_run(schedule.id)
     assert run["outcome"] == "complete"
     notice = sent[-1][1]
-    assert notice.startswith(f"{schedule.title}: total went from $4,027.39 to $4,922.45")
+    assert notice.startswith(f"\u25f7 {schedule.title}\n\nTotal went from $4,027.39 to $4,922.45.")
     assert "Next check" in notice
 
 
@@ -264,7 +264,7 @@ async def test_failed_run_notice_has_retry_countdown(tmp_path):
     await asyncio.sleep(0)
 
     notice = sent[-1][1]
-    assert "I will try again at" in notice
+    assert "\n\nNext try: " in notice
     assert "pause it" not in notice  # first miss: no pause warning yet
 
 
@@ -284,7 +284,7 @@ async def test_three_consecutive_incomplete_runs_pause_it(tmp_path):
         current = m.store.get_schedule(schedule.id)
 
     assert current.state == "paused"
-    assert "paused after three" in sent[-1][1]
+    assert "is paused\n\nThree runs in a row could not finish." in sent[-1][1]
 
 
 @pytest.mark.asyncio
@@ -301,7 +301,7 @@ async def test_status_stop_ends_schedule_with_notice(tmp_path):
     await asyncio.sleep(0)
 
     assert m.store.get_schedule(schedule.id).state == "ended"
-    assert "the team disbanded" in sent[-1][1]
+    assert "has ended\n\nThe team disbanded." in sent[-1][1]
     assert "will not run again" in sent[-1][1]
 
 
@@ -461,7 +461,7 @@ async def test_guard_stop_during_a_run_sends_no_next_run_line_and_nothing_refire
     assert stopped.state == "ended"
     assert stopped.next_run is None
     notice = sent[-1][1]
-    assert "last thing it saw" in notice
+    assert "Last thing it saw" in notice
     assert "Next check" not in notice
 
     before = len(m.store.due_schedules(time.time() + 365 * 24 * 3600))

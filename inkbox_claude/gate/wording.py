@@ -932,7 +932,9 @@ def schedules_global_line(paused: bool, *, was: Optional[bool] = None) -> str:
 
 def hold_line(ask: str, request_id: int) -> str:
     """The question and its numbered handle: "Delete the interns role? ... Reply "#417 yes" ..."."""
-    return f'{ask}\nReply "#{request_id} yes" to do it or "#{request_id} no" to leave it alone.'
+    from . import ownertext
+    return ownertext.compose("ask", f"Needs your yes \u00b7 #{request_id}", body=ask,
+                             handle=ownertext.reply_handle(request_id))
 
 
 def _names(names: List[str]) -> str:

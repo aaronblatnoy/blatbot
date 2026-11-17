@@ -215,5 +215,15 @@ def notice_line(person: Dict[str, Any], told: Optional[Dict[str, Any]]) -> str:
     return line
 
 
+def notice_text(lines: List[str]) -> str:
+    """The one text about People records, in the house format (ownertext.py): one
+    line per person, as bullets when there is more than one."""
+    from . import ownertext
+    head = "Added to People" if all(" is in People" in ln for ln in lines) else "People updated"
+    body = lines[0] if len(lines) == 1 else ownertext.bullets(lines)
+    return ownertext.compose("people", head, body=body,
+                             tail="Nothing needed from you.")
+
+
 def told_json(person: Dict[str, Any]) -> str:
     return json.dumps(state_of(person), sort_keys=True)

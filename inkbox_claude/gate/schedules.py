@@ -240,6 +240,21 @@ def _title_for_sentence(title: str) -> str:
     return (title or "").rstrip(".!?:;,")
 
 
+def _ot():
+    """ownertext, imported late (it is a leaf module, but schedules is imported early)."""
+    from . import ownertext
+    return ownertext
+
+
+def _sentence(text: str) -> str:
+    """A clause as a sentence of its own: capital first letter, closing full stop."""
+    t = " ".join(str(text or "").split())
+    if not t:
+        return ""
+    t = t[0].upper() + t[1:]
+    return t if t[-1] in ".!?" else t + "."
+
+
 def _shown(ts: Optional[float], timezone_name: str) -> str:
     """"2:30 PM", with the day added when it is not today, in the schedule's zone."""
     if ts is None:
@@ -355,6 +370,9 @@ def _insert_before_reply_yes(text: str, extra: str) -> str:
     idx = text.rfind(marker)
     if idx == -1:
         return f"{text} {extra}".strip()
+    if text[:idx].endswith("\n\n"):
+        # The house format (ownertext.py) puts the reply line in its own paragraph.
+        return f"{text[:idx]}{extra}\n\n{text[idx:]}"
     return f"{text[:idx]}{extra} {text[idx:]}"
 
 
@@ -590,8 +608,9 @@ class ScheduleService:
                 updated = self.store.update_schedule(schedule.id, state="ended", next_run=None,
                                                      last_outcome="its time passed before it was approved")
                 logger.info("[schedules] %s once-proposal expired: its time passed", schedule.id)
-                await self._notice(updated, f"{updated.title} was never approved and its time has passed, "
-                                            "so it did not run.")
+                await self._notice(updated, _ot().compose(
+                    "timer", f"{_title_for_sentence(updated.title)} did not run",
+                    body="It was never approved and its time has passed."))
                 continue
             if now - schedule.updated_at < max_age:
                 continue
@@ -599,7 +618,9 @@ class ScheduleService:
                 updated = self.store.update_schedule(schedule.id, state="ended", next_run=None,
                                                      last_outcome="not approved in time")
                 logger.info("[schedules] %s proposal expired unanswered", schedule.id)
-                await self._notice(updated, f"{updated.title} was not approved in time, so it was not set up.")
+                await self._notice(updated, _ot().compose(
+                    "timer", f"{_title_for_sentence(updated.title)} was not set up",
+                    body="It was not approved in time."))
                 continue
             if revert.get("state") == "active":
                 next_run = cadence_module.next_run(schedule.cadence_kind, schedule.cadence,
@@ -608,14 +629,18 @@ class ScheduleService:
                     schedule.id, prompt=revert["prompt"], scopes=revert["scopes"], state="active",
                     next_run=next_run, notes=[], last_outcome="an edit expired unanswered; kept as it was")
                 logger.info("[schedules] %s edit proposal expired; reverted to the previous version", schedule.id)
-                await self._notice(updated, f"{updated.title}: that change expired unanswered, so I kept it as it was.")
+                await self._notice(updated, _ot().compose(
+                    "timer", f"{_title_for_sentence(updated.title)} is unchanged",
+                    body="That change expired unanswered, so I kept it as it was."))
             elif revert.get("state") == "paused":
                 updated = self.store.update_schedule(
                     schedule.id, prompt=revert["prompt"], scopes=revert["scopes"], state="paused",
                     next_run=None, notes=[],
                     last_outcome="an edit expired unanswered and could not resume automatically")
                 logger.info("[schedules] %s edit proposal expired; left paused", schedule.id)
-                await self._notice(updated, f"{updated.title} is paused: that change expired unanswered.")
+                await self._notice(updated, _ot().compose(
+                    "failed", f"{_title_for_sentence(updated.title)} is paused",
+                    body="That change expired unanswered."))
             else:
                 # The pre-edit snapshot was itself "proposed" -- he never said yes to
                 # this schedule even once, so there is nothing approved to revert to
@@ -624,7 +649,9 @@ class ScheduleService:
                 updated = self.store.update_schedule(schedule.id, state="ended", next_run=None,
                                                      last_outcome="never approved; expired unanswered")
                 logger.info("[schedules] %s edit proposal expired; never approved, ended", schedule.id)
-                await self._notice(updated, f"{updated.title} was not approved in time, so it was not set up.")
+                await self._notice(updated, _ot().compose(
+                    "timer", f"{_title_for_sentence(updated.title)} was not set up",
+                    body="It was not approved in time."))
 
     async def held(self, req: Request, status: Dict[str, Any]) -> None:
         """A scheduled run's call is parked for the owner's yes. Record the run's
@@ -678,7 +705,8 @@ class ScheduleService:
         if schedule.cadence_kind == "once":
             changes.update(state="ended", next_run=None)
         updated = self.store.update_schedule(schedule.id, **changes)
-        await self._notice(updated, f"{updated.title}: {outcome}")
+        await self._notice(updated, _ot().compose("timer", _title_for_sentence(updated.title),
+                                                  body=_sentence(outcome)))
 
     def _record_held_outcome(self, schedule_id: int, request_id: Optional[int], *, outcome: str,
                              result_line: str, final_status: str) -> None:
@@ -915,7 +943,9 @@ class ScheduleService:
             updated = self.store.update_schedule(schedule.id, state="ended", next_run=None,
                                                  last_outcome="reached its end date")
             logger.info("[schedules] %s ended: reached its end date", schedule.id)
-            await self._notice(updated, f"{updated.title} has reached its end date and will not run again.")
+            await self._notice(updated, _ot().compose(
+                "timer", f"{_title_for_sentence(updated.title)} has ended",
+                body="It reached its end date and will not run again."))
             return
         running = self.store.request_running_for_schedule(schedule.id)
         if running is not None:
@@ -972,8 +1002,12 @@ class ScheduleService:
         what = ", ".join(str(a) for a in about) if about else \
             str(confirm.get("tool", "")).split("__")[-1].replace("_", " ") or "do that"
         when = _shown(running.updated_at, schedule.timezone)
-        await self._notice(schedule, f'{schedule.title} is waiting for your yes to {what} since {when}. '
-                                     'Say yes or no to that first.', kind="approval")
+        from . import ownertext
+        await self._notice(schedule, ownertext.compose(
+            "held", f"{_title_for_sentence(schedule.title)} is waiting for your yes",
+            facts=[("To", what), ("Since", when)],
+            body="It skipped a run while it waits. Say yes or no to that first.",
+            handle=ownertext.reply_handle(running.id)), kind="approval")
         self.store.set_state(running.id, running.state, status={**status, "held_skip_notified": True})
 
     async def _run_fired(self, req: Request, *, raise_errors: bool = False) -> None:
@@ -1026,8 +1060,9 @@ class ScheduleService:
         logger.info("[schedules] %s run #%s recorded as interrupted by a restart", schedule.id, run_id)
         if already_replied:
             return
-        await self._notice(schedule, f"{schedule.title} was interrupted by a restart. "
-                                      f"Next check {_shown(schedule.next_run, schedule.timezone)}.")
+        await self._notice(schedule, _ot().compose(
+            "failed", f"{_title_for_sentence(schedule.title)} was interrupted by a restart",
+            tail=f"Next check: {_shown(schedule.next_run, schedule.timezone)}"))
         if schedule.state != "active":
             return
         refire = schedule.cadence_kind == "once" or schedule.next_run is None
@@ -1123,9 +1158,11 @@ class ScheduleService:
             updated = self.store.update_schedule(schedule.id, retry_at=retry,
                                                  next_run=retry if retry is not None else schedule.next_run,
                                                  last_outcome=classification["failure_reason"])
-            await self._notice(updated, f"{schedule.title}: {classification['failure_reason']}. "
-                               + (f"Wait, auto-retrying at {_shown(retry, schedule.timezone)}."
-                                  if retry is not None else "Waiting for the next scheduled run."))
+            await self._notice(updated, _ot().compose(
+                "failed", f"{_title_for_sentence(schedule.title)} could not finish",
+                body=_sentence(classification["failure_reason"]),
+                tail=(f"Next try: {_shown(retry, schedule.timezone)}, automatically"
+                      if retry is not None else "Waiting for the next scheduled run.")))
             return True
         if note:
             self.store.update_schedule(schedule.id, last_note=note)
@@ -1151,8 +1188,9 @@ class ScheduleService:
                                                  last_outcome=result_line or "stopped itself",
                                                  consecutive_failures=0)
             logger.info("[schedules] %s ended: STATUS: STOP", schedule.id)
-            await self._notice(updated, f"{updated.title}: {result_line or 'it stopped itself.'} "
-                                        "It will not run again.")
+            await self._notice(updated, _ot().compose(
+                "timer", f"{_title_for_sentence(updated.title)} has ended",
+                body=_sentence(result_line or "it stopped itself"), tail="It will not run again."))
             return True
         if failures >= 3:
             updated = self.store.update_schedule(schedule.id, state="paused", next_run=None,
@@ -1215,19 +1253,26 @@ class ScheduleService:
         return "it did not give a reason"
 
     def notice_text(self, schedule: Schedule, run: Dict[str, Any], next_run: Optional[float]) -> str:
+        """A schedule run's notice in the house format (ownertext.py): what happened to
+        which schedule on the first line, then why, then what he can say."""
+        from . import ownertext
         title = _title_for_sentence(schedule.title)
         if run.get("paused"):
-            return (f'{title} is paused after three runs that could not finish. '
-                    f'{failure_reason(run)}. Run now when it is fixed.')
+            return ownertext.compose(
+                "failed", f"{title} is paused",
+                body=f"Three runs in a row could not finish. {_sentence(failure_reason(run))}",
+                tail='Say "run now" when it is fixed.')
         outcome = run.get("outcome")
         result_line = run.get("result_line") or ""
         if outcome == "complete":
-            text = f"{title}: {result_line or self._shown_text(run)}"
+            facts = []
             if schedule.cadence_kind != "once" and next_run is not None:
-                text += f" Next check {_shown(next_run, schedule.timezone)}."
-            return text
+                facts.append(("Next check", _shown(next_run, schedule.timezone)))
+            return ownertext.compose("timer", title, body=_sentence(result_line or self._shown_text(run)),
+                                     tail="\n".join(f"{k}: {v}" for k, v in facts))
         if outcome == "incomplete" and not run.get("denied"):
-            return f"{title} could not finish: {failure_reason(run)}. Run now."
+            return ownertext.compose("failed", f"{title} could not finish",
+                                     body=_sentence(failure_reason(run)), tail='Say "run now" to try again.')
         if outcome == "incomplete":
             scope_names: List[str] = []
             for item in run.get("denied") or []:
@@ -1240,11 +1285,16 @@ class ScheduleService:
                 # offer back ("let it do part of this" names nothing real);
                 # the vague-approval phrase add_capability already understands
                 # is the only sound recovery to suggest.
-                return (f'{title} could not finish: it is not allowed to do part of this. '
-                        f'{result_line} Say "let it do that" and I will run it again, or "stop it".')
+                return ownertext.compose(
+                    "failed", f"{title} could not finish",
+                    body=f"It is not allowed to do part of this. {_sentence(result_line)}".strip(),
+                    tail='Say "let it do that" and I will run it again, or "stop it".')
             labels = self._labels(sorted(scope_names))
-            return (f"{title} could not finish: it is not allowed to {labels}. {result_line} "
-                    f'Say "let it {labels}" and I will run it again, or "stop it".')
+            return ownertext.compose(
+                "failed", f"{title} could not finish",
+                body=(_sentence(result_line) if "not allowed" in result_line.lower()
+                      else f"It is not allowed to {labels}. {_sentence(result_line)}".strip()),
+                tail=f'Say "let it {labels}" and I will run it again, or "stop it".')
         if outcome == "blocked":
             reason = self._blocked_reason(run)
             match = self._capability_match(str(run.get("needs") or "")) or self._capability_match(result_line)
@@ -1253,12 +1303,13 @@ class ScheduleService:
                 fix = f'Say "let it {self._labels([match])}" and I will run it now, or "stop it".'
             else:
                 fix = 'Tell me where to find it or what to change, or say "stop it".'
-            return f"{title} could not run: {reason}. {fix} I won't retry on my own."
+            return ownertext.compose("failed", f"{title} could not run",
+                                     body=f"{_sentence(reason)} I won't retry on my own.", tail=fix)
         if outcome == "failed":
             when = _shown(next_run, schedule.timezone) if next_run is not None else "soon"
             reason = self._failure_reason(run)
-            text = f"{title} could not finish: {reason}. I will try again at {when}."
+            tail = f"Next try: {when}"
             if schedule.consecutive_failures == 2:
-                text += " One more miss and I will pause it."
-            return text
-        return f"{title}: {result_line}"
+                tail += "\nOne more miss and I will pause it."
+            return ownertext.compose("failed", f"{title} could not finish", body=_sentence(reason), tail=tail)
+        return ownertext.compose("timer", title, body=_sentence(result_line))

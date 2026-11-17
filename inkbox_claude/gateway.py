@@ -4275,9 +4275,10 @@ class InkboxGateway:
                     logger.error("[bridge] GPT-Live unavailable for call %s; refusing the call (no fallback)", call_id)
                     notify = getattr(self.sessions, "send_to_approver", None)
                     if callable(notify):
-                        asyncio.create_task(notify(
-                            f"[Blatbot] Could not answer a call from {remote or 'an unknown number'}: "
-                            f"the GPT-Live voice service did not connect ({last_exc})."))
+                        from .gate import ownertext
+                        asyncio.create_task(notify(ownertext.compose(
+                            "failed", f"Could not answer a call from {remote or 'an unknown number'}",
+                            body="The GPT-Live voice service did not connect, so the call was not answered.")))
                     return None
                 logger.warning("[bridge] falling back to Realtime for call %s (INKBOX_VOICE_FALLBACK=realtime)", call_id)
             return await open_inkbox_realtime_bridge(config=rt_config, meta=meta)
