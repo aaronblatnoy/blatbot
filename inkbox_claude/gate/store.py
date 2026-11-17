@@ -1792,6 +1792,43 @@ class Store:
                 "FROM outbox ORDER BY id DESC LIMIT ?", (int(limit),)).fetchall()
         return [dict(r) for r in rows]
 
+    def console_memory_stats(self, days: int = 14) -> Dict[str, Any]:
+        """Read-only counts of what Blatbot holds, for the console's Memory page: stored
+        messages (by kind, by day, distinct chats), sends reported back (sent outbox rows
+        by kind), and task progress (tasks by state, the latest few, ledger entries)."""
+        since = time.time() - days * 86400
+        with self._lock:
+            by_kind = self._db.execute("SELECT kind,COUNT(*) AS n FROM messages GROUP BY kind").fetchall()
+            chats = self._db.execute("SELECT COUNT(DISTINCT chat_id) AS n FROM messages").fetchone()
+            span = self._db.execute("SELECT MIN(created_at) AS first,MAX(created_at) AS last FROM messages").fetchone()
+            recent = self._db.execute("SELECT created_at FROM messages WHERE created_at>=?", (since,)).fetchall()
+            sent = self._db.execute(
+                "SELECT kind,COUNT(*) AS n FROM outbox WHERE status='sent' GROUP BY kind").fetchall()
+            task_states = self._db.execute("SELECT state,COUNT(*) AS n FROM tasks GROUP BY state").fetchall()
+            latest = self._db.execute(
+                "SELECT id,title,state,updated_at FROM tasks ORDER BY updated_at DESC LIMIT 8").fetchall()
+            ledger = self._db.execute("SELECT COUNT(*) AS n FROM task_events").fetchone()
+        per_day = [0] * days
+        start = since
+        for row in recent:
+            index = int((float(row["created_at"]) - start) // 86400)
+            if 0 <= index < days:
+                per_day[index] += 1
+        return {
+            "messages": {
+                "by_kind": {str(r["kind"]): int(r["n"]) for r in by_kind},
+                "chats": int((chats or {})["n"] or 0) if chats else 0,
+                "first_at": (span["first"] if span else None), "last_at": (span["last"] if span else None),
+                "per_day": per_day,
+            },
+            "sent_by_kind": {str(r["kind"]): int(r["n"]) for r in sent},
+            "tasks": {
+                "by_state": {str(r["state"]): int(r["n"]) for r in task_states},
+                "latest": [dict(r) for r in latest],
+                "ledger_entries": int(ledger["n"] or 0) if ledger else 0,
+            },
+        }
+
     def console_followups(self, limit: int = 100) -> List[Dict[str, Any]]:
         """Pending timers first (soonest due), then the most recent finished ones."""
         if not getattr(self, "followups_available", True):

@@ -350,6 +350,14 @@ async def get_followups(request: web.Request) -> web.StreamResponse:
     return _json(api.followups_view(_manager(request).store, _limit(request, 100, 1000)))
 
 
+async def get_memory(request: web.Request) -> web.StreamResponse:
+    return _json(api.memory_view(request.app["console.gateway"], _manager(request).store))
+
+
+async def get_pages(request: web.Request) -> web.StreamResponse:
+    return _json(api.pages_view(_limit(request, 200, 1000)))
+
+
 async def get_events(request: web.Request) -> web.StreamResponse:
     _manager(request)
     return await events.event_stream(request)
@@ -435,6 +443,8 @@ def register(app: web.Application, gateway: Any) -> None:
     app.router.add_get("/console/api/inbox", _endpoint(get_inbox))
     app.router.add_get("/console/api/outbox", _endpoint(get_outbox))
     app.router.add_get("/console/api/followups", _endpoint(get_followups))
+    app.router.add_get("/console/api/memory", _endpoint(get_memory))
+    app.router.add_get("/console/api/pages", _endpoint(get_pages))
     app.router.add_get("/console/api/settings", _endpoint(get_settings))
     app.router.add_post("/console/api/settings", _endpoint(post_settings, mutation=True))
     app.router.add_get("/console/api/groups", _endpoint(get_groups))
@@ -451,6 +461,7 @@ def register(app: web.Application, gateway: Any) -> None:
         "/console/api/requests/decide", "/console/api/tasks", "/console/api/health",
         "/console/api/settings", "/console/api/groups", "/console/api/groups/mode",
         "/console/api/inbox", "/console/api/outbox", "/console/api/followups",
+        "/console/api/memory", "/console/api/pages",
     ):
         app.router.add_route("OPTIONS", path, _options)
     app.router.add_route("OPTIONS", "/console/events", _options)

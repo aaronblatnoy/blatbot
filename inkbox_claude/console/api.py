@@ -1253,7 +1253,7 @@ def _chat_labeler(store: Store) -> Callable[[str], str]:
     return label
 
 
-_INBOX_KIND_WORDS = {"message": "Message", "timer": "Follow-up timer", "webhook": "Webhook",
+_INBOX_KIND_WORDS = {"message": "Message", "timer": "Timer", "webhook": "Webhook",
                      "schedule": "Schedule", "approval": "Your answer"}
 
 
@@ -1313,6 +1313,108 @@ def followups_view(store: Store, limit: int = 100) -> Dict[str, Any]:
         })
     pending = sum(1 for r in rows if r["status"] == "pending")
     return {"available": bool(getattr(store, "followups_available", True)), "pending": pending, "rows": rows}
+
+
+def _standing_path(gateway: Any) -> Path:
+    cfg = getattr(gateway, "cfg", None)
+    configured = str(getattr(cfg, "gate_standing_path", "") or "").strip()
+    if configured:
+        return Path(configured)
+    from ..config import state_dir
+    return Path(os.getenv("GATE_STANDING_PATH") or (state_dir() / "standing.md"))
+
+
+def _instructions_view(path: Path) -> Dict[str, Any]:
+    try:
+        text = path.read_text("utf-8")
+        updated = path.stat().st_mtime
+    except OSError:
+        return {"available": False, "paragraphs": [], "words": 0, "updated_at": None}
+    paragraphs = [" ".join(p.split()) for p in re.split(r"\n\s*\n", text) if p.strip()]
+    return {"available": True, "paragraphs": [p[:600] for p in paragraphs[:40]],
+            "paragraph_count": len(paragraphs), "words": len(text.split()), "updated_at": updated}
+
+
+def _vault_notes_view(root: Optional[Path] = None, recent: int = 8) -> Dict[str, Any]:
+    from ..gate import vaultscopes
+    root = root or vaultscopes.vault_dir()
+    if not root.is_dir():
+        return {"available": False, "total": 0, "sections": [], "recent": []}
+    sections: Dict[str, int] = {}
+    files: List[tuple] = []
+    for path in root.rglob("*.md"):
+        rel = path.relative_to(root)
+        if any(part.startswith(".") for part in rel.parts):
+            continue
+        section = rel.parts[0] if len(rel.parts) > 1 else "Loose notes"
+        sections[section] = sections.get(section, 0) + 1
+        try:
+            files.append((path.stat().st_mtime, path.stem, section))
+        except OSError:
+            continue
+    files.sort(reverse=True)
+    return {
+        "available": True, "total": sum(sections.values()),
+        "sections": [{"name": name, "count": n} for name, n in sorted(sections.items(), key=lambda kv: -kv[1])],
+        "recent": [{"title": title, "section": section, "updated_at": mtime} for mtime, title, section in files[:recent]],
+    }
+
+
+def memory_view(gateway: Any, store: Store, *, notes_root: Optional[Path] = None) -> Dict[str, Any]:
+    """What Blatbot holds between runs, read-only: the user's standing instructions, the
+    vault notes it may read, stored messages, what it reported back, task progress, and the
+    state of its long-term graph memory. Counts and titles only, except the instructions."""
+    stats = store.console_memory_stats()
+    pending_writes = 0
+    try:
+        pending_writes = graphmem._queue.qsize()
+    except Exception:  # noqa: BLE001 - a count is optional
+        pending_writes = 0
+    return {
+        "instructions": _instructions_view(_standing_path(gateway)),
+        "notes": _vault_notes_view(notes_root),
+        "messages": stats["messages"],
+        "reported": {"by_kind": {_OUTBOX_KIND_WORDS.get(k, k.title()): n for k, n in stats["sent_by_kind"].items()},
+                     "total": sum(stats["sent_by_kind"].values())},
+        "tasks": {**stats["tasks"], "latest": [
+            {**t, "title": " ".join(str(t.get("title") or "").split())[:200]} for t in stats["tasks"]["latest"]]},
+        "graph": {"enabled": graphmem.enabled(), "pending_writes": pending_writes,
+                  "recall_seconds": graphmem.RECALL_TIMEOUT, "max_facts": graphmem.MAX_FACTS},
+    }
+
+
+def pages_view(limit: int = 200) -> Dict[str, Any]:
+    """The formatted web pages Blatbot has published for long answers, newest first, from
+    the sidecar files next to each page. Read-only; expired pages are left out."""
+    import json as _json
+    from ..gate import pages as pages_mod
+    now = time.time()
+    rows: List[Dict[str, Any]] = []
+    try:
+        directory = pages_mod.pages_dir()
+        metas = list(directory.glob("*.json"))
+    except OSError:
+        metas = []
+    base = pages_mod.public_base()
+    for meta in metas:
+        try:
+            info = _json.loads(meta.read_text("utf-8"))
+        except (OSError, ValueError):
+            continue
+        token = meta.stem
+        if not pages_mod.TOKEN_RE.match(token) or float(info.get("expires") or 0) <= now:
+            continue
+        page = meta.with_suffix(".html")
+        try:
+            size = page.stat().st_size
+        except OSError:
+            continue
+        path = f"{pages_mod.PAGE_PATH_PREFIX}{token}"
+        rows.append({"title": str(info.get("title") or "Untitled page"), "created_at": info.get("created"),
+                     "expires_at": info.get("expires"), "bytes": size,
+                     "url": f"{base}{path}" if base else path})
+    rows.sort(key=lambda r: -(float(r["created_at"] or 0)))
+    return {"audience": pages_mod.audience(), "days": pages_mod._ttl_days(), "pages": rows[:limit]}
 
 
 def _tail_errors(path: Path, *, max_bytes: int = 64 * 1024, limit: int = 30) -> List[str]:
