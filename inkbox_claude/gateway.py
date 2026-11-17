@@ -1894,6 +1894,9 @@ class InkboxGateway:
         failed judgment says nothing rather than barging into the humans' conversation."""
         u = self._telegram_known_name(u)
         chat_id = u["chat_id"]
+        if u.get("for_other_bot") or telegram.for_other_bot(u.get("text") or ""):
+            self._telegram_overhear(u)
+            return
         picker = getattr(self.sessions, "task_picker", None) if self.sessions else None
         if picker is None:
             logger.debug("[bridge] telegram group: no judge available, staying quiet")
@@ -2271,6 +2274,15 @@ class InkboxGateway:
             reply=lambda message: self._send_telegram_mode_reply(chat_id, message))
         if handled:
             return web.json_response({"ok": True, "mode_command": True})
+        if u["is_group"] and u.get("for_other_bot"):
+            # Aimed at a different bot (an @handle that is not ours, and we are not named).
+            # Not ours to judge, answer, file as a task or ask Aaron about: it is heard and
+            # filed in the room's record, nothing more. No judgment service is consulted, so
+            # this holds when they are all down.
+            self._telegram_overhear(u)
+            logger.info("[bridge] telegram group: addressed to another bot; ignored (%s): %s",
+                        u["name"] or u["from_id"], u["text"])
+            return web.json_response({"ok": True, "other_bot": True})
         if u["is_group"]:
             # A chat tuned to "silent" never replies, and "mention" only replies when
             # addressed -- resolved and checked before Jev or the model ever runs, so
