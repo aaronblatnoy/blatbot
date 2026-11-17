@@ -7,7 +7,7 @@ import os
 import re
 import time
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Callable, Dict, List, Optional
 
 from ..gate.scopes import SCOPES, SCOPE_SYSTEM
 from ..gate.store import Request, Store, TaskRequired, role_names
@@ -119,7 +119,67 @@ def _request_model(request: Request) -> Dict[str, Any]:
         "created_at": request.created_at,
         "updated_at": request.updated_at,
         "revision": request.revision,
+        "outcome": run_outcome(request),
     }
+
+
+_SURFACE_WORDS = {"telegram": "Telegram", "imessage": "iMessage", "sms": "text", "text": "text",
+                  "email": "email", "voice": "phone"}
+
+
+def _surface_word(mode: Any) -> str:
+    return _SURFACE_WORDS.get(str(mode or "").lower(), str(mode or ""))
+
+
+def run_outcome(request: Request) -> Optional[Dict[str, Any]]:
+    """How a run ended, in plain words: sent where, stayed quiet, or asked Aaron (and
+    what it asked). None until a run has recorded a status. Reads only status_json."""
+    status = request.status or {}
+    if not status:
+        return None
+    sends = [{"to": str(s.get("to") or ""), "surface": _surface_word(s.get("surface")),
+              "requester": bool(s.get("requester"))} for s in (status.get("sends") or []) if isinstance(s, dict)]
+    deferred = status.get("deferred") or {}
+    ask = status.get("ask") or {}
+    confirm = status.get("confirm") or {}
+    access = status.get("access_request") or {}
+    kind = str(status.get("outcome") or "")
+    out: Dict[str, Any] = {"kind": kind or "none", "sends": sends, "text": ""}
+    if ask.get("question"):
+        out["kind"] = "asked"
+        out["ask"] = {"question": str(ask.get("question")),
+                      "kind": "permission" if ask.get("kind") == "permission" else "input"}
+        out["text"] = f"Asked you: {ask.get('question')}"
+    elif confirm:
+        about = ", ".join(str(a) for a in (confirm.get("about") or []) if a)
+        out["kind"] = "asked"
+        if confirm.get("kind") == "destructive":
+            out["text"] = "Asked your yes before changing or deleting something"
+        else:
+            out["text"] = f"Asked your yes before sending to {about}" if about else "Asked your yes before sending"
+        out["ask"] = {"question": out["text"], "kind": "permission"}
+    elif access.get("scopes") or deferred.get("kind") == "access":
+        scopes = access.get("scopes") or (deferred.get("input") or {}).get("access") or []
+        out["kind"] = "asked"
+        out["text"] = "Asked you for access" + (f": {', '.join(str(x) for x in scopes)}" if scopes else "")
+        out["ask"] = {"question": out["text"], "kind": "permission"}
+    elif sends:
+        parts = []
+        for s in sends:
+            who = s["to"] or "someone"
+            parts.append(f"{who} on {s['surface']}" if s["surface"] else who)
+        out["kind"] = "sent"
+        out["text"] = "Sent to " + ", ".join(parts)
+    elif kind == "quiet":
+        reason = str(status.get("quiet_reason") or "").strip()
+        out["text"] = "Stayed quiet" + (f": {reason}" if reason else "")
+    elif request.state == "failed":
+        out["kind"] = "failed"
+        out["text"] = "Did not finish"
+    elif kind == "none" or not kind:
+        out["kind"] = "none"
+        out["text"] = "Replied with its closing text" if request.state == "done" else ""
+    return out
 
 
 def people(store: Store) -> List[Dict[str, Any]]:
@@ -744,8 +804,19 @@ async def retry_request_endpoint(manager: Any, payload: Dict[str, Any]) -> Dict[
     return {"ok": True, "id": new_req.id, "needs_approval": not approved, "message": message}
 
 
+def _task_runs(requests_: List[Request]) -> List[Dict[str, Any]]:
+    return [{"id": r.id, "state": r.state, "summary": r.summary or "", "created_at": r.created_at,
+             "outcome": run_outcome(r)} for r in requests_]
+
+
 def tasks(store: Store) -> List[Dict[str, Any]]:
-    return [dict(row) for row in store.recent_tasks(limit=50)]
+    rows = [dict(row) for row in store.recent_tasks(limit=50) if row]
+    by_task = store.console_task_requests([row.get("id") for row in rows])
+    for row in rows:
+        runs = _task_runs(by_task.get(int(row["id"]), []))
+        row["runs"] = runs[:10]
+        row["outcome"] = next((r["outcome"] for r in runs if r["outcome"] and r["outcome"].get("text")), None)
+    return rows
 
 
 # ---------------------------------------------------------------------------
@@ -1145,7 +1216,103 @@ async def approve_schedule(manager: Any, payload: Dict[str, Any]) -> Dict[str, A
 def task(store: Store, task_id: int) -> Optional[Dict[str, Any]]:
     # The ledger is shown whole. The limit is only a guard against a runaway table.
     row = store.task_with_events(int(task_id), limit=100000)
-    return dict(row) if row else None
+    if not row:
+        return None
+    out = dict(row)
+    out["runs"] = _task_runs(store.console_task_requests([int(task_id)]).get(int(task_id), []))
+    return out
+
+
+# ---------------------------------------------------------------------------
+# Inbox, outbox and follow-up timers: read only views of the always-on loop.
+# ---------------------------------------------------------------------------
+
+def _chat_labeler(store: Store) -> Callable[[str], str]:
+    groups = {g["chat_id"]: g["title"] for g in store.known_group_chats()}
+    names = store.console_chat_names()
+    people_cache: Dict[str, str] = {}
+
+    def label(key: str) -> str:
+        key = str(key or "")
+        if key == "owner":
+            return "Aaron"
+        if key.startswith("person:"):
+            pid = key.split(":", 1)[1]
+            if pid not in people_cache:
+                shown = _person_display(store, pid)
+                people_cache[pid] = "" if shown == pid else shown
+            return people_cache[pid]
+        if key in groups:
+            return groups[key]
+        if key in names:
+            return names[key]
+        bare = key.split(":", 1)[1] if ":" in key else key
+        if bare in names:
+            return names[bare]
+        return ""
+    return label
+
+
+_INBOX_KIND_WORDS = {"message": "Message", "timer": "Follow-up timer", "webhook": "Webhook",
+                     "schedule": "Schedule", "approval": "Your answer"}
+
+
+def inbox_view(store: Store, limit: int = 200) -> Dict[str, Any]:
+    label = _chat_labeler(store)
+    rows = store.console_inbox(limit)
+    lanes: Dict[str, Dict[str, Any]] = {}
+    for r in rows:
+        lane = str(r.get("lane") or r.get("chat_id") or "")
+        entry = lanes.setdefault(lane, {"lane": lane, "label": label(lane) or label(str(r.get("chat_id") or "")) or "Someone",
+                                        "counts": {k: 0 for k in ("pending", "running", "done", "failed")},
+                                        "last_at": 0.0, "events": []})
+        status = str(r.get("status") or "")
+        entry["counts"][status] = entry["counts"].get(status, 0) + 1
+        entry["last_at"] = max(entry["last_at"], float(r.get("created_at") or 0))
+        kind = str(r.get("kind") or "message")
+        entry["events"].append({
+            "id": r["id"], "status": status, "kind": kind, "kind_label": _INBOX_KIND_WORDS.get(kind, kind.title()),
+            "surface": _surface_word(r.get("mode")), "where": label(str(r.get("chat_id") or "")),
+            "preview": " ".join(str(r.get("preview") or "").split()), "attempts": r.get("attempts") or 0,
+            "error": r.get("error") or "", "created_at": r.get("created_at"),
+            "started_at": r.get("started_at"), "finished_at": r.get("finished_at"),
+        })
+    ordered = sorted(lanes.values(), key=lambda e: (-(e["counts"]["pending"] + e["counts"]["running"]), -e["last_at"]))
+    return {"counts": store.inbox_counts(), "lanes": ordered}
+
+
+_OUTBOX_KIND_WORDS = {"reply": "Reply", "schedule": "Schedule", "proactive": "On its own",
+                      "approval": "Approval ask", "notice": "Notice"}
+
+
+def outbox_view(store: Store, limit: int = 200) -> Dict[str, Any]:
+    label = _chat_labeler(store)
+    rows = []
+    for r in store.console_outbox(limit):
+        kind = str(r.get("kind") or "reply")
+        rows.append({
+            "id": r["id"], "status": str(r.get("status") or ""), "kind": kind,
+            "kind_label": _OUTBOX_KIND_WORDS.get(kind, kind.title()),
+            "to": label(str(r.get("chat_id") or "")) or str(r.get("target") or "Someone"), "surface": _surface_word(r.get("mode")),
+            "preview": " ".join(str(r.get("preview") or "").split()), "attempts": r.get("attempts") or 0,
+            "error": r.get("last_error") or "", "not_before": r.get("not_before") or 0,
+            "created_at": r.get("created_at"), "sent_at": r.get("sent_at"),
+        })
+    return {"counts": store.outbox_counts(), "rows": rows}
+
+
+def followups_view(store: Store, limit: int = 100) -> Dict[str, Any]:
+    label = _chat_labeler(store)
+    rows = []
+    for r in store.console_followups(limit):
+        rows.append({
+            "id": r["id"], "task_id": r.get("task_id"), "request_id": r.get("request_id"),
+            "status": str(r.get("status") or ""), "note": r.get("note") or "",
+            "for": label(str(r.get("chat_id") or "")) or str(r.get("requester") or "Someone"), "due_at": r.get("due_at"),
+            "created_at": r.get("created_at"), "fired_at": r.get("fired_at"), "result": r.get("result") or "",
+        })
+    pending = sum(1 for r in rows if r["status"] == "pending")
+    return {"available": bool(getattr(store, "followups_available", True)), "pending": pending, "rows": rows}
 
 
 def _tail_errors(path: Path, *, max_bytes: int = 64 * 1024, limit: int = 30) -> List[str]:
@@ -1182,7 +1349,16 @@ def health(gateway: Any, store: Store) -> Dict[str, Any]:
         "last_restart": started_at,
         "interrupted_runs": store.interrupted_request_count(),
         "recent_errors": _tail_errors(state_dir / "gateway.log"),
+        "inbox": _safe_counts(store, "inbox_counts"),
+        "outbox": _safe_counts(store, "outbox_counts"),
     }
+
+
+def _safe_counts(store: Store, name: str) -> Dict[str, int]:
+    try:
+        return dict(getattr(store, name)())
+    except Exception:
+        return {}
 
 
 # ---------------------------------------------------------------------------
