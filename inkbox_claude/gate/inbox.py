@@ -38,17 +38,31 @@ class Inbox:
         if session_factory is None and self.session_factory is None:
             raise RuntimeError("inbox session factory is unavailable")
         # Provider ids are the durable dedup key. An absent id gets a fresh key.
+        lane = self.lane_for(chat_id, mode, meta)
         event_id = self.store.insert_inbox_event(chat_id, source, source_event_id or f"missing:{time.time_ns()}",
-                                                 mode, body, meta, kind=kind)
+                                                 mode, body, meta, kind=kind, lane=lane)
         if event_id is None:
             return "duplicate"
         try:
-            self.wake(chat_id, session_factory)
+            self.wake(lane, session_factory)
         except Exception:
             # The gateway handles this delivery directly if a worker cannot start.
             self.store.finish_inbox_event(event_id, "failed", "inbox worker could not start")
             raise
         return "queued"
+
+    def lane_for(self, chat_id: str, mode: str, meta: Dict[str, Any]) -> str:
+        """Which inbox an event belongs to. One inbox per person: the owner's messages
+        on every surface, and timers on his thread, resolve to the same record and so
+        share one worker. Anything that cannot be resolved keeps its own chat."""
+        try:
+            if self.record_id_for_event is not None:
+                return str(self.record_id_for_event({
+                    "chat_id": chat_id, "mode": mode,
+                    "meta_json": json.dumps(meta, default=str)}) or chat_id)
+        except Exception as exc:
+            logger.warning("[inbox] could not resolve the inbox for %s; using the chat: %s", chat_id, exc)
+        return chat_id
 
     def wake(self, chat_id: str, session_factory: Callable[..., Any] | None = None) -> None:
         if session_factory is not None:
@@ -119,7 +133,8 @@ class Inbox:
                         logger.warning("[inbox] command check failed; handling normally: %s", exc)
                         command = False
                     if (not groups or command or groups[-1][1] or
-                            groups[-1][0][-1]["mode"] != event["mode"]):
+                            groups[-1][0][-1]["mode"] != event["mode"] or
+                            groups[-1][0][-1]["chat_id"] != event["chat_id"]):
                         groups.append(([event], command))
                     else:
                         groups[-1][0].append(event)
@@ -147,7 +162,9 @@ class Inbox:
                             handled = bool(self.command_handler and meta.get("_inbox_mode_command")
                                            and await self.command_handler(newest))
                             if not handled:
-                                session = self.session_factory(chat_id, newest["mode"], meta)
+                                # The lane may hold several of this person's chats; a turn
+                                # runs in, and replies to, the chat its own events came from.
+                                session = self.session_factory(newest["chat_id"], newest["mode"], meta)
                                 if isinstance(session, GateSession):
                                     await session.handle_inbound(body, newest["mode"], meta, raise_errors=True)
                                 else:
@@ -179,7 +196,7 @@ class Inbox:
     def recover(self) -> None:
         for event in self.store.recover_inbox_events(self.record_id_for_event):
             logger.info("[inbox] replaying event %s in chat %s", event["id"], event["chat_id"])
-            self.wake(event["chat_id"])
+            self.wake(event.get("lane") or event["chat_id"])
 
     async def close(self) -> None:
         self._closed = True

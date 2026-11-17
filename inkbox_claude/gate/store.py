@@ -999,6 +999,14 @@ class Store:
                 if "kind" not in have:
                     self._db.execute(
                         "ALTER TABLE inbox_events ADD COLUMN kind TEXT NOT NULL DEFAULT 'message'")
+                if "lane" not in have:
+                    # One inbox per person: the lane is the record a chat is written to, so
+                    # the owner's iMessage, Telegram and email, and timers on his thread,
+                    # share one worker. Older rows keep their chat as their lane.
+                    self._db.execute("ALTER TABLE inbox_events ADD COLUMN lane TEXT NOT NULL DEFAULT ''")
+                    self._db.execute("UPDATE inbox_events SET lane=chat_id WHERE lane=''")
+                    self._db.execute(
+                        "CREATE INDEX IF NOT EXISTS inbox_events_lane ON inbox_events(lane, status, id)")
                 self._db.commit()
             except Exception as exc:
                 self._db.rollback()
@@ -1426,20 +1434,22 @@ class Store:
     # -- durable inbound queue ------------------------------------------
     def insert_inbox_event(self, chat_id: str, source: str, source_event_id: str,
                            mode: str, body: str, meta: Dict[str, Any],
-                           kind: str = "message") -> Optional[int]:
+                           kind: str = "message", lane: str = "") -> Optional[int]:
         with self._lock:
             row = self._db.execute(
-                "INSERT INTO inbox_events(chat_id,source,source_event_id,kind,mode,body,meta_json,created_at) "
-                "VALUES(?,?,?,?,?,?,?,?) ON CONFLICT(source,source_event_id) DO NOTHING RETURNING id",
-                (chat_id, source, source_event_id, kind, mode, body, json.dumps(meta, default=str), time.time()),
+                "INSERT INTO inbox_events(chat_id,lane,source,source_event_id,kind,mode,body,meta_json,created_at) "
+                "VALUES(?,?,?,?,?,?,?,?,?) ON CONFLICT(source,source_event_id) DO NOTHING RETURNING id",
+                (chat_id, lane or chat_id, source, source_event_id, kind, mode, body,
+                 json.dumps(meta, default=str), time.time()),
             ).fetchone()
             self._db.commit()
         return int(row["id"]) if row else None
 
-    def list_pending_inbox(self, chat_id: str) -> List[Dict[str, Any]]:
+    def list_pending_inbox(self, lane: str) -> List[Dict[str, Any]]:
+        """Pending events of one person's inbox (its lane), oldest first."""
         with self._lock:
             rows = self._db.execute(
-                "SELECT * FROM inbox_events WHERE chat_id=? AND status='pending' ORDER BY id", (chat_id,)
+                "SELECT * FROM inbox_events WHERE lane=? AND status='pending' ORDER BY id", (lane,)
             ).fetchall()
         return [dict(r) for r in rows]
 
