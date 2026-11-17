@@ -1,7 +1,7 @@
 # Gondroid: Aaron's professional assistant, a second instance of this gateway with its own
-# database, its own long-term memory graph and its own scope registry. Deployed on black-sky
+# database and its own scope registry; its memory is the Definite Optimists brain. Deployed on black-sky
 # as the Coolify application "gondroid" (Definite Optimists team). Nothing here is shared
-# with Blatbot: separate Postgres, separate Neo4j + Graphiti, separate state volume.
+# with Blatbot: separate Postgres, separate state volume, its own Inkbox identity and brain key.
 # Secrets come from the Coolify application's environment, never from this file.
 services:
   gondroid:
@@ -11,7 +11,6 @@ services:
     restart: unless-stopped
     depends_on:
       - postgres
-      - graphiti
     ports:
       - "8772:8772"
     environment:
@@ -35,8 +34,9 @@ services:
       - GATE_EXECUTOR_FALLBACK=claude
       - CLAUDE_MODEL=sonnet
       - CLAUDE_PROJECT_DIR=/data/exec
-      - GRAPHITI_URL=http://graphiti:8000
-      - GRAPHITI_GROUP=gondroid
+      - DO_BRAIN_MCP_URL=${DO_BRAIN_MCP_URL:-https://definite-optimists-brain.aaronblatnoy.workers.dev/mcp}
+      - DO_BRAIN_KEY=${DO_BRAIN_KEY:-}
+      - INKBOX_VOICE_STACK=${INKBOX_VOICE_STACK:-inkbox_tts_stt}
       - CLAUDE_CODE_OAUTH_TOKEN=${CLAUDE_CODE_OAUTH_TOKEN}
       - DEEPSEEK_API_KEY=${DEEPSEEK_API_KEY}
       - TYPESAFE_API_KEY=${TYPESAFE_API_KEY}
@@ -62,29 +62,6 @@ services:
       timeout: 5s
       retries: 10
 
-  neo4j:
-    image: neo4j:5.26
-    restart: unless-stopped
-    environment:
-      - NEO4J_AUTH=neo4j/${GONDROID_NEO4J_PASSWORD}
-    volumes:
-      - gondroid-neo4j:/data
-
-  graphiti:
-    build:
-      context: .
-      dockerfile: deploy/gondroid/graphiti/Dockerfile
-    restart: unless-stopped
-    depends_on:
-      - neo4j
-    environment:
-      - GRAPH_URI=bolt://neo4j:7687
-      - GRAPH_USER=neo4j
-      - GRAPH_PASSWORD=${GONDROID_NEO4J_PASSWORD}
-      - MODEL_NAME=gpt-4.1-mini
-      - OPENAI_API_KEY=${OPENAI_API_KEY}
-
 volumes:
   gondroid-data:
   gondroid-pg:
-  gondroid-neo4j:
