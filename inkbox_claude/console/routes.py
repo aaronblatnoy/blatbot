@@ -424,8 +424,7 @@ def register(app: web.Application, gateway: Any) -> None:
     app.router.add_get("/console/api/roles/summary", _endpoint(get_roles_summary))
     app.router.add_post("/console/api/roles/set_level", _endpoint(post_roles_set_level, mutation=True))
     app.router.add_post("/console/api/roles/set_send", _endpoint(post_roles_set_send, mutation=True))
-    app.router.add_post("/console/api/roles/set_notes",
-        "/console/api/roles/set_memory", "/console/api/knowledge", _endpoint(post_roles_set_notes, mutation=True))
+    app.router.add_post("/console/api/roles/set_notes", _endpoint(post_roles_set_notes, mutation=True))
     app.router.add_post("/console/api/roles/set_memory", _endpoint(post_roles_set_memory, mutation=True))
     app.router.add_get("/console/api/knowledge", _endpoint(get_knowledge))
     app.router.add_get("/console/api/roles/who_can", _endpoint(get_roles_who_can))
