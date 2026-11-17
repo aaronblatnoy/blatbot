@@ -10,21 +10,32 @@ Everything here fails open. With GRAPHITI_URL unset, or the service down or slow
 writes are dropped with one log line and reads return "", and the gate behaves
 exactly as it did before this module existed.
 
-Who may read what: each chat's messages are stored under that chat's own group, and
-readable_groups() decides which groups one reader's turn may search, from the same
-people, roles and contacts records that gate everything else:
+One shared graph: every message from every chat is written to the same Graphiti group
+(SHARED_GROUP), so a person or thing is one node however many chats it came up in. The chat
+a message came from stays on its episode: the episode is named `msg-<message id>` (the
+stored message row, whose chat_id says where it was said) and its source description names
+the chat too.
 
-  in a group chat           that group only, whoever is talking, Aaron included: other
-                            people are present (checked first);
-  owner (the approver)      every group, in his own chats;
+Who may read what is decided per fact, by provenance: a fact is shown to a reader only if at
+least one of the messages it was learned from was said in a chat that reader may read.
+readable_groups() decides those chats (as group_for() keys) from the same people, roles and
+contacts records that gate everything else:
+
+  in a group chat           that group's own conversation only, whoever is talking, Aaron
+                            included: other people are present (checked first);
+  owner (the approver)      every chat, in his own chats;
   a person on record        their current chat, plus every direct chat that resolves to the
                             same person (iMessage, Telegram, email, voice), plus what their
                             role or their own record grants with `memory:` entries
                             (`memory:all`, `memory:groups`, `memory:chat:<chat id>`);
-  anyone else, or any error the current chat's group only (fails closed).
+  anyone else, or any error the current chat only (fails closed).
 
-The groups are sent to Graphiti as `group_ids`, and every returned fact is checked against
-them again by its own `group_id`.
+search() asks the shared group for more facts than it needs, maps each fact's episodes to
+message ids and those to chats (Store.message_chats, registered through set_chat_lookup),
+and keeps only facts with a supporting message from a readable chat. A fact with no
+resolvable episode, or any error on the way, gives a non-owner reader nothing. Only edge
+facts ever reach a reader; entity summaries, which now blend what several chats said, are
+never returned by the search and are stripped from anything a non-owner gets.
 """
 
 from __future__ import annotations
@@ -39,12 +50,16 @@ import threading
 import time
 import urllib.request
 from datetime import datetime, timezone
-from typing import Any, Dict, List, Optional
+from typing import Any, Callable, Dict, List, Optional
 
 logger = logging.getLogger(__name__)
 
 MAX_EPISODE_CHARS = 6000      # a long task result is clipped; the head carries the outcome
 MAX_FACTS = 12
+SHARED_GROUP = "blatbot"      # the one Graphiti group every chat's messages are written to
+FETCH_FACTOR = 5              # a non-owner search over-fetches, then keeps only facts from readable chats
+MAX_FETCH = 80
+FACT_KEYS = ("uuid", "name", "fact", "group_id", "valid_at", "invalid_at", "created_at", "expired_at", "episodes")
 RECALL_TIMEOUT = 4.0          # seconds a turn will wait for memory before going on without it (owner search spans every group: ~1.3 s cold, seen over 2 s)
 WRITE_TIMEOUT = 20.0
 QUEUE_LIMIT = 5000
@@ -67,7 +82,9 @@ def enabled() -> bool:
 
 
 def group_for(chat_id: str) -> str:
-    """Graphiti group ids allow letters, digits, dashes and underscores only."""
+    """A chat's memory key: what the read rule hands out and what a fact's provenance is
+    compared against. (Each chat was once its own Graphiti group under this name; since the
+    graph became one shared group it only names the chat.)"""
     return "blatbot_" + (re.sub(r"[^A-Za-z0-9_-]", "_", str(chat_id or "")) or "unknown")
 
 
@@ -203,7 +220,7 @@ def episode(chat_id: str, kind: str, text: str, mode: str = "", created_at: Opti
     if len(body) > MAX_EPISODE_CHARS:
         body = body[:MAX_EPISODE_CHARS] + " [clipped]"
     ts = datetime.fromtimestamp(time.time() if created_at is None else created_at, tz=timezone.utc).isoformat()
-    return {"group_id": group_for(chat_id), "messages": [{
+    return {"group_id": SHARED_GROUP, "messages": [{
         "content": body, "role_type": role_type, "role": role, "timestamp": ts,
         "name": f"msg-{message_id}" if message_id else f"msg-{int(time.time() * 1000)}",
         "source_description": f"{name} conversation, chat {chat_id}" + (f", over {mode}" if mode else ""),
@@ -245,25 +262,74 @@ def record(chat_id: str, kind: str, text: str, mode: str = "", created_at: Optio
         _log_error("write", exc)
 
 
+_chat_lookup: Optional[Callable[[List[int]], Dict[int, str]]] = None
+_chat_cache: Dict[int, str] = {}
+CHAT_CACHE_LIMIT = 50000
+
+
+def set_chat_lookup(fn: Optional[Callable[[List[int]], Dict[int, str]]]) -> None:
+    """How message ids map to the chat they were said in (the store registers
+    Store.message_chats). Without one, a non-owner search returns nothing."""
+    global _chat_lookup
+    _chat_lookup = fn
+    _chat_cache.clear()
+
+
+def _episode_ids(fact: Dict[str, Any]) -> List[int]:
+    return message_ids([fact])
+
+
+def _chats_of(ids: List[int]) -> Dict[int, str]:
+    """Message id -> chat id, for the ids that resolve. Raises when there is no lookup."""
+    out = {i: _chat_cache[i] for i in ids if i in _chat_cache}
+    missing = [i for i in ids if i not in out]
+    if missing:
+        if _chat_lookup is None:
+            raise RuntimeError("no message-to-chat lookup registered")
+        got = _chat_lookup(missing) or {}
+        found = {i: str(got[i]) for i in missing if got.get(i)}
+        out.update(found)
+        if len(_chat_cache) + len(found) > CHAT_CACHE_LIMIT:
+            _chat_cache.clear()
+        _chat_cache.update(found)   # a message never moves chats, so this never goes stale
+    return out
+
+
+def readable_by(facts: List[Dict[str, Any]], allowed: Any) -> List[Dict[str, Any]]:
+    """The facts at least one of whose supporting messages was said in a chat whose
+    group_for() key is in `allowed`. Each kept fact is cut down to the edge's own fields."""
+    allowed = set(allowed or [])
+    if not allowed:
+        return []
+    facts = [f for f in facts if f.get("group_id") == SHARED_GROUP]
+    chats = _chats_of(sorted({i for f in facts for i in _episode_ids(f)}))
+    return [{k: f[k] for k in FACT_KEYS if k in f} for f in facts
+            if any(i in chats and group_for(chats[i]) in allowed for i in _episode_ids(f))]
+
+
 def search(query: str, chat_id: str, is_approver: bool, max_facts: int = MAX_FACTS,
            timeout: float = RECALL_TIMEOUT, groups: Any = _ALL) -> List[Dict[str, Any]]:
     """Facts matching the query that this reader may see. Blocking; [] on any failure.
-    `groups` is readable_groups()'s answer (None = all); left out, the owner reads all
-    and everyone else their own chat."""
+    `groups` is readable_groups()'s answer (None = every chat); left out, the owner reads
+    every chat and everyone else their own chat."""
     q = " ".join(str(query or "").split())[:1000]
     if not enabled() or not q:
         return []
     if groups is _ALL:
         groups = None if is_approver else [group_for(chat_id)]
+    if groups is not None and not groups:
+        return []
     try:
-        res = _post("/search", {"query": q, "max_facts": max_facts, "group_ids": groups}, timeout)
-        facts = (res or {}).get("facts") or []
-        # Second check: the search was already limited to these groups; a fact from any
-        # other group, or one that does not say which group it came from, is dropped.
-        allowed = None if groups is None else set(groups)
-        return [f for f in facts if isinstance(f, dict) and str(f.get("fact") or "").strip()
-                and (allowed is None or f.get("group_id") in allowed)]
-    except Exception as exc:  # noqa: BLE001
+        fetch = max_facts if groups is None else max(max_facts, min(max_facts * FETCH_FACTOR, MAX_FETCH))
+        res = _post("/search", {"query": q, "max_facts": fetch, "group_ids": [SHARED_GROUP]}, timeout)
+        facts = [f for f in ((res or {}).get("facts") or [])
+                 if isinstance(f, dict) and str(f.get("fact") or "").strip()]
+        if groups is None:
+            return facts[:max_facts]
+        # Provenance check: the search covers every chat, so each fact is kept only when a
+        # message it was learned from was said in a chat this reader may read.
+        return readable_by(facts, groups)[:max_facts]
+    except Exception as exc:  # noqa: BLE001 - fails closed: no facts
         _log_error("search", exc)
         return []
 

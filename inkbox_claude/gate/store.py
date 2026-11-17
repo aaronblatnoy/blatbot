@@ -857,6 +857,9 @@ class Store:
             self._db = sqlite3.connect(path, check_same_thread=False)
             self._db.row_factory = sqlite3.Row
         self._lock = threading.Lock()
+        # Long-term memory is one shared graph; a fact's readers are decided by the chats
+        # its supporting messages came from, which only this store knows.
+        graphmem.set_chat_lookup(self.message_chats)
         self.followups_available = True
         # The commander's two verified handles. Set once by the manager via
         # set_approver_handles() after it reads the environment/config; the
@@ -3798,6 +3801,18 @@ class Store:
                         "group": meta.get("conversation_kind") == "group" or bool(meta.get("group_title")),
                         "owner": bool(meta.get("owner"))})
         return out
+
+    def message_chats(self, message_ids: List[int]) -> Dict[int, str]:
+        """The chat each stored message was written in, by message id. Long-term memory
+        uses it to tell which chats a remembered fact was learned from."""
+        ids = list(dict.fromkeys(int(i) for i in message_ids))[:5000]
+        if not ids:
+            return {}
+        marks = ",".join("?" for _ in ids)
+        with self._lock:
+            rows = self._db.execute(
+                f"SELECT id, chat_id FROM messages WHERE id IN ({marks})", ids).fetchall()
+        return {int(r["id"]): str(r["chat_id"]) for r in rows if r["chat_id"]}
 
     def memory_group_chats(self) -> List[str]:
         """The group chats (several people in one room) that have a thread here."""
