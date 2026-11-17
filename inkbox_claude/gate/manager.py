@@ -3931,6 +3931,11 @@ class GateSessionManager:
             # His own notes were attached to this run's prompt and the answer came from
             # them: nothing needed looking up, so no tool call is the right outcome.
             return status
+        if not req.scopes and not req.schedule_id and not (req.status or {}).get("followup_id"):
+            # Nothing was granted to look anything up with: the ask is thinking (names,
+            # a draft, an estimate) and the words are the work. Insisting on a tool here
+            # threw away finished answers and reported them as failures.
+            return status
         logger.warning("[gate] #%s reported success with no tool call; insisting it runs", req.id)
         insist = (context + "\n\n--- THIS RUN ---\nThe last attempt returned without using a tool and "
                   "said the work was already done. It was not. Whatever the record above says was "
@@ -4600,19 +4605,34 @@ class GateSessionManager:
         # Someone else's request: short status to Aaron, and the router may
         # tell the sender the outcome -- except on failure, which is always
         # wording.py's own text, never the router's rewrite of it.
+        # Aaron is in this group himself and reads the result there: a copy in his own
+        # thread is noise.
+        in_room = self.owner_in_group(session)
         if not ok:
             if told_already:
                 same_limit = wording.same_limit_message(status)
-                await self.send_to_approver(self.result_notice(req, title, "", ok=False, same_limit=True),
-                                            kind="notice")
+                if not in_room:
+                    await self.send_to_approver(self.result_notice(req, title, "", ok=False, same_limit=True),
+                                                kind="notice")
                 await session.notify_failure(same_limit, note, inbound_id=req.inbound_id)
             else:
-                await self.send_to_approver(self.result_notice(req, title, message, ok=False), kind="notice")
+                if not in_room:
+                    await self.send_to_approver(self.result_notice(req, title, message, ok=False), kind="notice")
                 await session.notify_failure(message, note, inbound_id=req.inbound_id)
+            if meanwhile:
+                # Someone was told "I will pick that up when this finishes". It has
+                # finished, so pick it up.
+                logger.info("[gate] #%s failed with %d message(s) received meanwhile; handling the latest",
+                            req.id, len(meanwhile))
+                try:
+                    await session.handle_followup(meanwhile[-1]["text"], inbound_id=meanwhile[-1]["id"])
+                except Exception:
+                    logger.exception("[gate] follow-up after #%s failed", req.id)
             session.typing_stop()
             return ""
         try:
-            await self.send_to_approver(self.result_notice(req, title, message, ok=ok), kind="notice")
+            if not in_room:
+                await self.send_to_approver(self.result_notice(req, title, message, ok=ok), kind="notice")
             await session.notify_after_request(note, inbound_id=req.inbound_id)
         finally:
             session.typing_stop()
