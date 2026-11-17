@@ -31,6 +31,7 @@ from . import wording
 from . import peopleindex
 from . import accesscmd, admincmd
 from . import graphmem
+from . import knowledge
 from . import outcomes
 from . import ownertext
 
@@ -328,14 +329,27 @@ class GateSession:
             return name
         return ""
 
+    def in_group(self) -> bool:
+        """This turn arrived in a room with several people in it (gate/knowledge.py)."""
+        return knowledge.meta_is_group(self.reply_meta or {})
+
+    def reads_all_tasks(self) -> bool:
+        """Whether this turn's ledger may show every task. Aaron in his own chats only: in a
+        group, whoever speaks, the ledger shows the tasks that group itself worked on, since
+        everything the turn reads can end up in a reply the whole group sees."""
+        return self.is_approver() and not self.in_group()
+
+    def ledger_person(self) -> str:
+        """Whose own tasks join the ledger: the sender's in a direct chat, nobody's in a group."""
+        return "" if self.in_group() else self._sender()
+
     def memory_groups(self) -> Optional[List[str]]:
         """The long-term memory groups this turn's reader may search (None = all, owner only).
         The rule lives in graphmem.readable_groups; this only hands it who is asking."""
         meta = self.reply_meta or {}
         return graphmem.readable_groups(
             self.m.store, self.record_id, is_approver=self.is_approver(),
-            is_group=meta.get("conversation_kind") == "group" or bool(meta.get("group_title")),
-            handles=self.handles())
+            is_group=knowledge.meta_is_group(meta), handles=self.handles())
 
     def thread_key(self) -> str:
         """The email thread this message belongs to. Prefers the RFC reply chain
@@ -497,7 +511,7 @@ class GateSession:
             if plan.get("lookup") in ("live", "any"):
                 planned = True
                 text = plan.get("text") or ""
-                participant = text if text in emails and self.is_approver() else None
+                participant = text if text in emails and self.reads_all_tasks() else None
                 q = TaskQuery(text=None if participant else (text or None), participant=participant,
                               states=["live"] if plan["lookup"] == "live" else None, limit=10)
         if not planned:
@@ -506,7 +520,8 @@ class GateSession:
             if isinstance(q, BaseException):
                 q = None
         self._found_task_ids = []
-        if q is None and in_view.strip() in ("", "(no tasks on record)") and not self.is_approver():
+        if (q is None and in_view.strip() in ("", "(no tasks on record)") and not self.is_approver()
+                and not self.in_group()):
             # Nobody on record for this sender: that is exactly when to search for them by name.
             from .router import TaskQuery
             q = TaskQuery(text=(self._sender_name() or "").strip() or None, states=["live"], limit=10)
@@ -519,8 +534,13 @@ class GateSession:
                                       created_within_days=tq.created_within_days, has_participants=tq.has_participants,
                                       chat_id=self.record_id if tq.this_conversation else "",
                                       date_from=tq.date_from, date_to=tq.date_to, limit=min(tq.limit, 3))
-            if self.is_approver():
+            if self.reads_all_tasks():
                 kw["participant"] = tq.participant or ""
+            elif self.in_group():
+                # A group sees the tasks it worked on itself, never anyone's own tasks.
+                kw["chat_id"] = self.record_id
+                kw["participant"] = ""
+                kw["has_participants"] = None
             else:
                 thread_ids = self.m.store.task_ids_for_thread(self.thread_key())
                 if thread_ids:
@@ -569,7 +589,8 @@ class GateSession:
                     if task:
                         candidates.append(task)
             return candidates
-        approver = self.is_approver()
+        approver = self.reads_all_tasks()
+        group = self.in_group()
         score: Dict[int, float] = {}
         order: List[int] = []
 
@@ -578,7 +599,7 @@ class GateSession:
                 order.append(tid)
             score[tid] = score.get(tid, 0.0) + pts
 
-        if not approver:
+        if not approver and not group:
             for t in self.m.store.tasks_for_person(self._sender(), open_only=False, limit=6):
                 add(int(t["id"]), 3.0)
         for i, tid in enumerate(self.m.store.task_ids_for_chat(self.record_id)):
@@ -601,7 +622,9 @@ class GateSession:
         if words:
             try:
                 kw: Dict[str, Any] = {"text": " OR ".join(words), "limit": 10}
-                if not approver:
+                if group:
+                    kw["chat_id"] = self.record_id
+                elif not approver:
                     kw["participant"] = self._sender()
                 for t in self.m.store.query_tasks(**kw)["tasks"]:
                     add(int(t["id"]), 2.0)
@@ -610,6 +633,10 @@ class GateSession:
         for tid in self._found_task_ids:
             add(tid, 2.0)
         ranked = sorted(order, key=lambda tid: -score[tid])
+        if group:
+            # Names in the message can match anyone's tasks; a group keeps only its own.
+            own = set(self.m.store.task_ids_for_chat(self.record_id, limit=200))
+            ranked = [tid for tid in ranked if tid in own]
         out: List[Dict[str, Any]] = []
         for tid in ranked[:25]:
             t = self.m.store.task_with_events(tid, limit=4)
@@ -954,6 +981,9 @@ class GateSession:
         picker = self.m.task_picker
         if picker is None or out.request is None or not hasattr(picker, "judge_vault_tree"):
             return
+        if self.in_group():
+            # A group's runs get no vault notes up front, whoever asked (gate/knowledge.py).
+            return
         res = result if result is not None else await picker.judge_vault_tree(
             prompt=out.request.prompt, summary=out.request.summary)
         chosen = res.get("scopes")
@@ -976,11 +1006,25 @@ class GateSession:
             out.request.scopes = merged
             out.request.knowledge_notes = list(res.get("notes") or [])
 
+    def apply_knowledge_rule(self, out: RouterOutput) -> None:
+        """The last step before a request is stored: in a group, whoever asked, no vault
+        scope is kept (gate/knowledge.py). The run can still ask for one exact folder,
+        which only Aaron's yes grants."""
+        if out.request is None or not self.in_group():
+            return
+        dropped = knowledge.group_dropped(out.request.scopes or [])
+        if dropped:
+            out.request.scopes = knowledge.strip_for_group(out.request.scopes or [])
+            logger.info("[gate %s] group chat: dropped %s (a group gets no vault notes unasked)",
+                        self.chat_id, dropped)
+        if getattr(out.request, "knowledge_notes", None):
+            out.request.knowledge_notes = []
+
     def prepare_task_index(self, history: List[Dict[str, Any]], message: str) -> Dict[str, Any]:
         from .ledger import render_index, continuation_id
         start = time.monotonic()
         result = self.m.store.ledger_index(
-            is_approver=self.is_approver(), person=self._sender(), chat_id=self.record_id,
+            is_approver=self.reads_all_tasks(), person=self.ledger_person(), chat_id=self.record_id,
             thread_ids=self.m.store.task_ids_for_thread(self.thread_key()))
         entries = result["tasks"]
         index = render_index(entries)
@@ -1127,7 +1171,7 @@ class GateSession:
         if hasattr(self, "_ledger_memory"):
             return self._ledger_memory
         # Synchronous callers have no message to judge. Keep a bounded metadata fallback.
-        result = self.m.store.ledger_index(is_approver=self.is_approver(), person=self._sender(),
+        result = self.m.store.ledger_index(is_approver=self.reads_all_tasks(), person=self.ledger_person(),
                                           chat_id=self.record_id,
                                           thread_ids=self.m.store.task_ids_for_thread(self.thread_key()))
         return "\n\n".join(self.m.store.task_memory_for_task(t["id"])
@@ -1841,6 +1885,7 @@ class GateSession:
                 return await self.send_to_sender(out.reply, role="ack")
             return False
         assert task is not None
+        self.apply_knowledge_rule(out)
         # Someone Aaron has trusted for exactly these scopes does not need him woken up.
         # Anyone else, and any scope outside what they were given, still waits for his yes.
         trusted = False
@@ -3266,8 +3311,9 @@ class GateSessionManager:
         except Exception as exc:
             logger.warning("[gate] #%s could not read role access: %s", req.id, exc)
             role_scopes = set()
-        covered = [s for s in wanted if s in role_scopes or
-                   (_owner_request(self, req) and s not in EXPLICIT_ONLY_SCOPES)]
+        in_group = knowledge.chat_is_group(self.store, req.chat_id)
+        covered = [s for s in wanted if not (in_group and knowledge.is_vault_scope(s)) and (
+                   s in role_scopes or (_owner_request(self, req) and s not in EXPLICIT_ONLY_SCOPES))]
         uncovered = [s for s in wanted if s not in covered]
         if covered:
             self.store.set_scopes(req.id, list(req.scopes) + covered)
@@ -3797,14 +3843,15 @@ class GateSessionManager:
         `read` field scopes.yaml gives each scope (exposed as scopes.READ_SCOPES);
         where a scope carries no such field it is treated as not read-only.
 
-        vault_read (the WHOLE vault of Aaron's own notes) is excluded from the
-        auto-add: it is never granted on its own just for being read-only, only
-        when the run was actually refused it -- the vault can hold anything he has
-        ever written down, so a blanket "permission for everything" must not open
-        all of it as a side effect of a run that never asked for it."""
+        Every vault scope -- vault_read (the WHOLE vault of Aaron's own notes) and
+        each vault:<folder> -- is excluded from the auto-add: none is granted just
+        for being read-only, only when the run was actually refused that exact one.
+        The vault can hold anything he has ever written down, so a blanket
+        "permission for everything" must not open it, folder by folder, as a side
+        effect of a run that never asked for it (gate/knowledge.py)."""
         denied = set(wording.denied_scopes(status))
         granted = [sc for sc in SCOPES if sc in denied or
-                  (wording.truly_read_only(sc) and sc != "vault_read"
+                  (wording.truly_read_only(sc) and not knowledge.blanket_excluded(sc)
                    and sc not in EXPLICIT_ONLY_SCOPES)]
         return [sc for sc in granted if sc not in (req.scopes or [])]
 

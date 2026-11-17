@@ -38,10 +38,15 @@ REQUEST_ACCESS_SCHEMA = {"type": "object", "required": ["access", "why"], "prope
 def access_choices(request: Any) -> Dict[str, str]:
     from .scopes import SCOPES, LABELS, BLATBOT_ADMIN_SCOPE
     refused = set((request.status or {}).get("access_refused") or [])
+    # A vault folder can be asked for by name ("read your notes in Projects / Corgi"); the
+    # ask goes to Aaron unless the person's own role already holds that folder (never in a
+    # group). Memory grants are not askable: memory_read already reaches every conversation
+    # this person may see, and anything wider is set by Aaron on the Permissions page.
     return {name: LABELS.get(name) or str(spec.get("description") or name)
             for name, spec in SCOPES.items()
             if name not in (request.scopes or []) and name not in refused and name != BLATBOT_ADMIN_SCOPE
-            and not name.startswith(("vault:", "memory:"))}
+            and not name.startswith("memory:")
+            and not (name.startswith("vault:") and "vault_read" in (request.scopes or []))}
 
 
 def access_description(request: Any) -> str:
@@ -96,7 +101,10 @@ def request_access(args: Dict[str, Any], manager: Any, request: Any) -> str:
                 handles = session.handles() if session._sender() == request.sender else [request.sender]
                 role_scopes = set(manager.store.trust_for(handles).get("scopes") or [])
                 owner = bool(manager._is_owner_request(fresh))
-                if all(n in role_scopes or (owner and n not in EXPLICIT_ONLY_SCOPES) for n in names):
+                from .knowledge import chat_is_group, is_vault_scope
+                in_group = chat_is_group(manager.store, request.chat_id)
+                if all(not (in_group and is_vault_scope(n)) and (
+                        n in role_scopes or (owner and n not in EXPLICIT_ONLY_SCOPES)) for n in names):
                     manager.store.set_scopes(request.id, list(fresh.scopes) + names)
                     status["access_ask_count"] = int(status.get("access_ask_count") or 0) + 1
                     status["access_granted"] = names

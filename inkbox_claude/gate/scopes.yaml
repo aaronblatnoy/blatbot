@@ -628,8 +628,8 @@ scopes:
   vault_read:
     description: 'search and read Aaron''s second brain (his Obsidian vault of personal notes on projects, people,
       decisions, preferences, daily notes). Read-only; cannot add or change a note. Not Drive, not the web.'
-    label: read your notes
-    ask: 'read your notes'
+    label: read all of your notes
+    ask: 'read all of your notes'
     synonyms:
     - my notes
     - my vault

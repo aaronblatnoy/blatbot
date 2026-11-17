@@ -1380,7 +1380,41 @@ def memory_view(gateway: Any, store: Store, *, notes_root: Optional[Path] = None
             {**t, "title": " ".join(str(t.get("title") or "").split())[:200]} for t in stats["tasks"]["latest"]]},
         "graph": {"enabled": graphmem.enabled(), "pending_writes": pending_writes,
                   "recall_seconds": graphmem.RECALL_TIMEOUT, "max_facts": graphmem.MAX_FACTS},
+        "access": memory_access(store),
     }
+
+
+def memory_access(store: Store) -> List[Dict[str, Any]]:
+    """Who can read each part of what Blatbot keeps, in plain words, from the live roles."""
+    try:
+        view = knowledge_access(store)
+    except Exception:  # noqa: BLE001 - the page still shows its counts
+        return []
+    others = [p for p in view["people"] if not p["you"]]
+    note_readers = [p for p in others if p["notes"]["level"] != "none"]
+    mem_readers = [p for p in others if p["memory"]["level"] != "own"]
+
+    def who(rows: List[Dict[str, Any]], what: Callable[[Dict[str, Any]], str]) -> List[Dict[str, str]]:
+        groups: Dict[str, List[str]] = {}
+        for r in rows:
+            groups.setdefault(what(r), []).append(r["name"])
+        return [{"reach": k, "people": ", ".join(v), "count": str(len(v))} for k, v in groups.items()]
+
+    return [
+        {"part": "Instructions", "readers": "You set them. Every run follows them.", "who": []},
+        {"part": "User notes", "readers": ("You. " + (f"{len(note_readers)} other " + _plural(len(note_readers), "person", "people")
+                                                         + " through a role." if note_readers else "Nobody else."))
+                                           + " Never in a group chat.",
+         "who": who(note_readers, lambda r: ", ".join(r["notes"]["folders"]) or r["notes"]["text"])},
+        {"part": "Graph memory", "readers": "You, everywhere but group chats. Everyone else: their own conversations"
+                                            + (f"; {len(mem_readers)} reach further." if mem_readers else ".")
+                                            + " A group chat: its own conversation.",
+         "who": who(mem_readers, lambda r: r["memory"]["text"])},
+        {"part": "Past messages", "readers": "Each chat sees its own history. You see every chat.", "who": []},
+        {"part": "Reported", "readers": "What went to each person stays in their chat.", "who": []},
+        {"part": "Task progress", "readers": "You see every task in your own chats. Others see tasks they are on. "
+                                             "A group sees tasks it worked on.", "who": []},
+    ]
 
 
 def pages_view(limit: int = 200) -> Dict[str, Any]:
@@ -1588,8 +1622,8 @@ def _ask_for(scope_name: str) -> str:
     if scope_name in _SCOPE_ASK:
         return _SCOPE_ASK[scope_name]
     if scope_name.startswith("vault:"):
-        folder = scope_name.split(":", 1)[1].replace("/", " / ")
-        return f"read your notes on {folder}"
+        from ..gate.knowledge import folder_title
+        return f"read your notes in {folder_title(scope_name, SCOPES)}"
     return SCOPES.get(scope_name, {}).get("description") or scope_name
 
 
@@ -1711,6 +1745,28 @@ def _notes_view(held: set) -> Dict[str, Any]:
     return {"level": level, "folders": folders, "text": text}
 
 
+MEMORY_LEVELS = (("own", "Own conversations"), ("groups", "Plus every group chat"), ("all", "Every conversation"))
+
+
+def _memory_access_view(held: set, label: Optional[Callable[[str], str]] = None) -> Dict[str, Any]:
+    """What one role or person reaches in Blatbot's long-term memory, in plain words. Their
+    own conversations always; `memory:groups` adds every group chat, `memory:all` every
+    conversation Blatbot has had (Aaron's included), `memory:chat:<id>` one named chat."""
+    grants = sorted(s for s in held if graphmem.is_memory_scope(s))
+    low = {g.lower() for g in grants}
+    chats = [g.split(":", 2)[2] for g in grants if g.lower().startswith("memory:chat:")]
+    names = [(label(c) if label else "") or "one other chat" for c in chats]
+    if "memory:all" in low:
+        level, text = "all", "Every conversation, yours included."
+    elif "memory:groups" in low:
+        level, text = "groups", "Their own conversations and every group chat."
+    else:
+        level, text = "own", "Their own conversations only."
+    if names and level != "all":
+        text = text[:-1] + ", plus " + _join_phrases(names) + "."
+    return {"level": level, "text": text, "chats": names}
+
+
 def _person_can_text(scope_names: List[str]) -> str:
     phrases = [_ask_for(s) for s in sorted(set(scope_names))]
     if not phrases:
@@ -1772,6 +1828,7 @@ def roles_summary(store: Store) -> Dict[str, Any]:
     English, with no raw scope name anywhere in the payload."""
     sets_by_system = _system_scope_sets()
     people_rows = store.trusted()
+    label = _chat_labeler(store)
     out_roles: List[Dict[str, Any]] = []
     for row in store.roles():
         name = row["name"]
@@ -1788,6 +1845,10 @@ def roles_summary(store: Store) -> Dict[str, Any]:
             if sv["send"]:
                 phrases.append(sv["send_label"])
         notes = _notes_view(held)
+        memory = _memory_access_view(held, label)
+        if name in LOCKED_ROLES:
+            notes = {**notes, "level": "all", "text": "All notes."}
+            memory = {"level": "all", "text": "Every conversation.", "chats": []}
         if notes["level"] == "all":
             phrases.append("read all of your notes")
         elif notes["level"] == "some":
@@ -1803,6 +1864,7 @@ def roles_summary(store: Store) -> Dict[str, Any]:
             "can_text": _role_can_text(name, phrases),
             "systems": systems_view,
             "notes": notes,
+            "memory": memory,
             "actions": _role_actions(name),
         })
 
@@ -1821,6 +1883,7 @@ def roles_summary(store: Store) -> Dict[str, Any]:
         "roles": out_roles,
         "systems": systems_payload,
         "note_folders": note_folders,
+        "memory_levels": [{"value": v, "label": l} for v, l in MEMORY_LEVELS],
         "sources": _roles_summary_sources(store),
     }
 
@@ -1929,6 +1992,85 @@ def roles_set_notes(store: Store, payload: Dict[str, Any]) -> Dict[str, Any]:
     result = _role_by_name(store, name)
     result["affects_text"] = _affects_text(_role_row(store, name), store)
     return result
+
+
+def roles_set_memory(store: Store, payload: Dict[str, Any]) -> Dict[str, Any]:
+    """Set how far a role's members reach in long-term memory: own conversations, plus
+    every group chat, or every conversation. One-chat grants (memory:chat:<id>) stay."""
+    name = _required_text(payload.get("role"), "role").lower()
+    level = _required_text(payload.get("level"), "level")
+    if name in LOCKED_ROLES:
+        raise ValidationError(_LOCKED_ROLE_MSG)
+    row = _role_row(store, name)
+    if level not in {v for v, _ in MEMORY_LEVELS}:
+        raise ValidationError(_UNKNOWN_LEVEL)
+    held = {s for s in (row.get("scopes") or []) if s.lower() not in ("memory:all", "memory:groups")}
+    if level in ("all", "groups"):
+        held.add(f"memory:{level}")
+    store.set_role(name, sorted(held), row.get("note") or "")
+    events.publish("permissions.changed", {"kind": "role", "name": name, "memory": level})
+    result = _role_by_name(store, name)
+    result["affects_text"] = _affects_text(_role_row(store, name), store)
+    return result
+
+
+KNOWLEDGE_RULES = [
+    {"title": "You", "text": "Every note and every conversation, in your own chats."},
+    {"title": "Someone else", "text": "Their own conversations, plus the note folders and memory their roles grant."},
+    {"title": "A group chat", "text": "That group's own conversation only, whoever is talking, you included. "
+                                      "No notes, no other chat, no task from outside the group."},
+    {"title": "Asking for more", "text": "A run can ask for one note folder by name. It waits for your yes, "
+                                         "except in a direct chat with someone whose role already holds that folder."},
+    {"title": "Approve everything", "text": "Never opens a note folder by itself."},
+    {"title": "Writing", "text": "Each conversation is filed under its own chat. Nothing writes to your notes."},
+]
+
+
+def knowledge_access(store: Store) -> Dict[str, Any]:
+    """Who reads Aaron's notes and Blatbot's memory, per person: the union of their
+    roles' grants and their own, in plain words (gate/knowledge.py holds the rule)."""
+    roles_by_name = {r["name"]: set(r.get("scopes") or []) for r in store.roles()}
+    label = _chat_labeler(store)
+    people: Dict[str, Dict[str, Any]] = {}
+    for row in store.trusted():
+        pid = row.get("person_id") or ""
+        if not pid or pid in people:
+            continue
+        people[pid] = {"person_id": pid, "name": row.get("person") or "",
+                       "roles": role_names(row.get("role")), "own": set(row.get("scopes") or [])}
+    commander = store.commander_person_id()
+    out: List[Dict[str, Any]] = []
+    for pid, p in people.items():
+        held = set(p["own"])
+        for rn in p["roles"]:
+            held |= roles_by_name.get(rn, set())
+        is_you = pid == commander or "commander" in p["roles"]
+        if is_you:
+            notes = {"level": "all", "text": "All notes.", "folders": []}
+            memory = {"level": "all", "text": "Every conversation.", "chats": []}
+        else:
+            notes = _notes_view(held)
+            memory = _memory_access_view(held, label)
+        from_roles = [rn for rn in p["roles"] if any(knowledge_scope(s) for s in roles_by_name.get(rn, set()))]
+        out.append({"person_id": pid, "name": p["name"], "you": is_you,
+                    "roles": [rn.capitalize() for rn in p["roles"]],
+                    "notes": {"level": notes["level"], "text": notes["text"],
+                              "folders": [f["label"] for f in notes.get("folders", []) if f.get("on")]},
+                    "memory": memory,
+                    "own_grant": bool([s for s in p["own"] if knowledge_scope(s)]),
+                    "via": [rn.capitalize() for rn in from_roles]})
+    rank = {"all": 0, "groups": 1, "some": 1, "own": 2, "none": 3}
+    out.sort(key=lambda r: (not r["you"], rank.get(r["notes"]["level"], 3), rank.get(r["memory"]["level"], 3),
+                            r["name"].lower()))
+    reach = [r for r in out if not r["you"] and (r["notes"]["level"] != "none" or r["memory"]["level"] != "own")]
+    return {"rules": KNOWLEDGE_RULES, "people": out,
+            "counts": {"people": len(out), "reach_notes": sum(1 for r in out if not r["you"] and r["notes"]["level"] != "none"),
+                       "reach_memory": sum(1 for r in out if not r["you"] and r["memory"]["level"] != "own"),
+                       "beyond_own": len(reach)}}
+
+
+def knowledge_scope(name: str) -> bool:
+    return str(name).startswith("vault") or graphmem.is_memory_scope(name)
 
 
 def roles_who_can(store: Store, q: str) -> Dict[str, Any]:
