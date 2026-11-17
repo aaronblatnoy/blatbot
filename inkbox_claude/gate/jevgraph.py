@@ -630,7 +630,7 @@ async def run(agent: "ja.JevAgent", req: Any, context: str = "") -> Dict[str, An
         return {"ok": False, "error": "prompt hash mismatch; refused to run", "tool_calls": []}
     judge, prose = ja.Judge(), ja.Prose(agent.router)
     started = time.time()
-    allowed = ja.tools_for(req.scopes)
+    allowed = [t for t in ja.tools_for(req.scopes) if t not in ja.OUTCOME_TOOLS]
     if req.schedule_id:
         allowed = [t for t in allowed if t not in ("mcp__host__set_followup", "mcp__host__cancel_followup", "mcp__host__request_access")]
     if (req.status or {}).get("followup_id"):

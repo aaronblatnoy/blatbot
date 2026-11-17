@@ -1085,6 +1085,9 @@ class ScheduleService:
             changed = bool(reported_changed)
         else:
             changed = (prev.get("result_line"), prev.get("note")) != (result_line, note)
+        # The run already posted its own message where this schedule reports, or chose to
+        # send nothing (gate/outcomes.py): a successful run then gets no second notice.
+        told_itself = complete and (bool(status.get("answered_requester")) or status.get("outcome") == "quiet")
         run_id = run_row["id"] if run_row else self.store.create_schedule_run(schedule.id, req.id, finished_at)
         self.store.finish_schedule_run(run_id, finished_at=finished_at, complete=complete, outcome=outcome,
                                        result_line=result_line, final_status=final_status, denied=denied,
@@ -1106,7 +1109,7 @@ class ScheduleService:
             run_dict = {"outcome": outcome, "result_line": result_line, "final_status": final_status,
                        "denied": denied, "note": note, "changed": changed, "cost_usd": status.get("cost_usd"),
                        "needs": str(status.get("needs") or ""), "error": status.get("error")}
-            send = (not complete) or schedule.report_every_time or changed
+            send = ((not complete) or schedule.report_every_time or changed) and not told_itself
             if send:
                 await self._notice(schedule, self.notice_text(schedule, run_dict, None))
             return True
@@ -1164,7 +1167,10 @@ class ScheduleService:
             extra.update(state="ended", next_run=None)
         updated = self.store.update_schedule(schedule.id, consecutive_failures=failures,
                                              last_outcome=result_line, **extra)
-        send = (not complete) or schedule.report_every_time or changed
+        send = ((not complete) or schedule.report_every_time or changed) and not told_itself
+        if told_itself:
+            logger.info("[schedules] %s run #%s %s; no notice added", schedule.id, run_id,
+                        "posted its own message" if status.get("answered_requester") else "chose to send nothing")
         if send:
             await self._notice(updated, self.notice_text(updated, run_dict, updated.next_run))
         return True

@@ -49,6 +49,18 @@ def delivery_line(origin_mode: str, origin_chat_id: str) -> str:
             "that you cannot post there.")
 
 
+def delivery_line_for_send(origin_mode: str, origin_chat_id: str) -> str:
+    """Where this schedule reports, for a run that sends its own message (GATE_RUN_OUTCOMES):
+    send_message to "requester" posts there. Empty when the schedule has no chat of its own."""
+    old = delivery_line(origin_mode, origin_chat_id)
+    if not old:
+        return ""
+    where = old[len("WHERE YOUR RESULT GOES: the gateway posts your RESULT in "):].split(". If this schedule", 1)[0]
+    return (f"WHERE YOUR RESULT GOES: this schedule reports to {where}. send_message with to \"requester\" "
+            "posts there. If this schedule asks you to post, send or say something there, send it that way, "
+            "written in full exactly as it should appear, and do not report that you cannot post there.")
+
+
 def build_prompt(prompt: str, started_at: float, timezone: str, note: Optional[str] = None,
                  delivery: str = "") -> str:
     """The user prompt text for one scheduled run: the start-time line, then the

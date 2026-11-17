@@ -194,6 +194,62 @@ SCHEDULE_EXECUTOR_SYSTEM = (
     "CHANGED is always the last line."
 )
 
+# How a run ends when GATE_RUN_OUTCOMES is on (gate/outcomes.py). The article's three
+# endings: the run sends a message, decides nothing needs sending, or asks Aaron with a
+# deferred call. These replace the old rule that the gateway delivers the run's status.
+RUN_ENDINGS = (
+    "HOW THIS RUN ENDS. Every run ends in exactly one of three ways, and you choose it:\n"
+    "1. SEND. Call send_message. To give the person who asked their answer, call send_message with to "
+    "\"requester\" and the whole answer as text: it goes back on the surface they wrote from, and it is the "
+    "only thing they will see, so write it for them, complete, in plain words. To message anyone else use "
+    "send_message with to \"aaron\", a person's name or a group chat's name; the surface they use with Blatbot "
+    "is picked for you, or pass surface (imessage, telegram, sms, email). where_to_reach shows where someone "
+    "can be reached. Use send_message, not the inkbox_send tools. A message to anyone but the person who "
+    "asked or Aaron may pause for Aaron's yes; that is expected.\n"
+    "2. NOTHING TO SEND. When there is nothing worth telling anyone, call nothing_to_send with the reason.\n"
+    "3. ASK AARON. When an essential detail is missing, or a decision only Aaron can make is needed, call "
+    "ask_aaron (kind \"input\" for a detail or a choice, \"permission\" for a yes or no) instead of stopping "
+    "with \"missing X\" or guessing. That includes anything only Aaron would know (his choice, his preference, "
+    "a fact about him or his plans that no tool of yours holds): ask him, never report it as unknown. When the "
+    "message says something needs Aaron's permission first, ask with kind \"permission\" before doing it; an "
+    "earlier answer in the task record or conversation is not his answer for this task. The run pauses and "
+    "continues with his answer. For access to a system you were not given, call request_access instead.\n"
+    "If the work itself failed and cannot be finished, do not send: end with STATUS: FAILED and what failed, "
+    "and the person is told in plain words for you. After choosing, end with one short plain line for the "
+    "record and make the very last line exactly STATUS: OK or STATUS: FAILED."
+)
+
+EXECUTOR_SYSTEM_OUTCOMES = (
+    "You are running ONE approved task for Blatbot, Executive Assistant to Aaron Blatnoy. "
+    "You are given the sender's message verbatim, the recent conversation, and the task's record. "
+    "Read them and do what the message calls for using only the tools you have, then stop. If the work needs "
+    "a system or tool you were not given, call request_access with exactly what it needs and one sentence "
+    "saying why: asking is expected and safe, it only asks, and whether it is granted is decided for you by "
+    "this person's own permissions or by Aaron. Never give up on a step, or look for another route to the "
+    "same thing, without asking first. Do not send anything the message and task record do not call for. "
+    "When something must be found in a document, sheet, calendar or inbox: search, open the most likely "
+    "result, and if it is not the right one open the next likely ones or search again with different words "
+    "before concluding it does not exist.\n"
+    + RUN_ENDINGS + "\n"
+    + EXECUTOR_SYSTEM.split("Finish with a short plain-text status")[0].split("put it in your final status.\n", 1)[1]
+    .replace("your closing status is exactly those lines, nothing added",
+             "the message you send is exactly those lines, nothing added")
+)
+
+SCHEDULE_RUN_ENDINGS = (
+    "HOW THIS RUN ENDS. Choose one of three ways:\n"
+    "1. SEND. When this run has something to tell, call send_message with to \"requester\": it posts in the "
+    "chat this schedule reports to (see WHERE YOUR RESULT GOES), or to Aaron when it has no chat of its own. "
+    "Write the message in full, exactly as it should appear. To message Aaron, a person or a group chat by "
+    "name, use send_message with their name; a send to anyone but Aaron or this schedule's own chat waits for "
+    "Aaron's yes. Use send_message, not the inkbox_send tools.\n"
+    "2. NOTHING TO SEND. Start quiet: when nothing changed since the previous run's NOTE, or there is nothing "
+    "this schedule was asked to tell, call nothing_to_send with the reason and send nothing.\n"
+    "3. A send that needs Aaron's yes pauses on its own; that is expected.\n"
+    "If the work failed, do not send: use STATUS: FAILED or BLOCKED below and Aaron is told. Whatever you "
+    "choose, still end with the closing lines below; RESULT is the record of this run.\n"
+)
+
 _PHONE_SHAPE_RE = re.compile(r"^\+?[\d\s\-()]{7,20}$")
 
 
@@ -349,9 +405,16 @@ class Executor:
             scoped_allowed = [t for t in scoped_allowed if t != "mcp__host__request_access"]
         if req.schedule_id:
             scoped_allowed = [t for t in scoped_allowed if t not in
-                              ("mcp__host__set_followup", "mcp__host__cancel_followup", "mcp__host__request_access")]
+                              ("mcp__host__set_followup", "mcp__host__cancel_followup", "mcp__host__request_access",
+                               "mcp__host__ask_aaron")]
         if (req.status or {}).get("followup_id"):
-            scoped_allowed = [t for t in scoped_allowed if t != "mcp__host__request_access"]
+            scoped_allowed = [t for t in scoped_allowed if t not in ("mcp__host__request_access", "mcp__host__ask_aaron")]
+        if req.mode == "voice":
+            # A live call speaks the run's result to the caller; it keeps ending that way.
+            from .outcomes import ALL_TOOLS as _outcome_tools
+            scoped_allowed = [t for t in scoped_allowed if t not in _outcome_tools]
+        run_outcomes = bool(_setting("GATE_RUN_OUTCOMES")) and "mcp__host__send_message" in scoped_allowed
+        outcome_log: Dict[str, Any] = {"sends": [], "quiet": None}
         pages_ok = bool(scoped_allowed) and not req.schedule_id and pages.allowed_for(bool(from_owner))
         if pages_ok:
             scoped_allowed = list(scoped_allowed) + ["mcp__host__make_page"]
@@ -489,7 +552,11 @@ class Executor:
                                             getattr(old, "message", ""))
 
         if req.schedule_id:
-            system_append = SCHEDULE_EXECUTOR_SYSTEM + f"\nNow: {now_line()}. Resolve 'today', 'tomorrow', weekday names and relative dates from this.\n"
+            system_append = (SCHEDULE_EXECUTOR_SYSTEM if not run_outcomes else
+                             SCHEDULE_EXECUTOR_SYSTEM.replace(
+                                 "The gateway delivers your result to Aaron: NEVER "
+                                 "text, iMessage or email him with it yourself unless the schedule's own prompt asks you to message him; "
+                                 "put it in RESULT instead.\n", "\n" + SCHEDULE_RUN_ENDINGS)) + f"\nNow: {now_line()}. Resolve 'today', 'tomorrow', weekday names and relative dates from this.\n"
             delivery = ""
             try:
                 sched = self.manager.store.get_schedule(req.schedule_id) if self.manager is not None else None
@@ -498,9 +565,12 @@ class Executor:
                                                       getattr(sched, "origin_chat_id", ""))
             except Exception:
                 logger.warning("[gate] #%s could not read where its schedule reports", req.id)
+            if run_outcomes and delivery:
+                delivery = schedrun.delivery_line_for_send(getattr(sched, "origin_mode", ""),
+                                                           getattr(sched, "origin_chat_id", ""))
             prompt_text = schedrun.build_prompt(req.prompt, started_at, timezone, note, delivery)
         else:
-            system_append = EXECUTOR_SYSTEM + f"\nNow: {now_line()}. Resolve 'today', 'tomorrow', weekday names and relative dates from this.\n"
+            system_append = (EXECUTOR_SYSTEM_OUTCOMES if run_outcomes else EXECUTOR_SYSTEM) + f"\nNow: {now_line()}. Resolve 'today', 'tomorrow', weekday names and relative dates from this.\n"
             prompt_text = continuation or req.prompt
         if pages_ok:
             system_append += "\n" + pages.PAGE_GUIDANCE
@@ -527,7 +597,7 @@ class Executor:
         memory_groups = graphmem.groups_for_request(getattr(self.manager, "store", None), req, bool(from_owner))
         host_server = hosttools.sdk_server(vault_prefixes=vault_prefixes, manager=self.manager,
                                            is_commander=bool(from_owner), memory_groups=memory_groups,
-                                           request=req)
+                                           request=req, outcome_log=outcome_log)
         mcp_servers = self._mcp_servers_for(scoped_allowed, host_server)
         logger.info("[gate] #%s mcp servers: %s", req.id, sorted(mcp_servers.keys()))
         saved_session = resume_session
@@ -704,6 +774,16 @@ class Executor:
                 out["session_saved_at"] = time.time()
             if (req.status or {}).get("access_granted"):
                 out["access_granted"] = list(req.status["access_granted"])
+            if run_outcomes:
+                # Which of the three ways this run ended (gate/outcomes.py). A deferred call
+                # below overrides it; "none" is the safety net, where the closing text is
+                # delivered as before.
+                sends = list(outcome_log.get("sends") or [])
+                out["sends"] = sends
+                out["answered_requester"] = any(s.get("requester") for s in sends)
+                out["outcome"] = ("sent" if sends else "quiet" if outcome_log.get("quiet") else "none")
+                if outcome_log.get("quiet"):
+                    out["quiet_reason"] = outcome_log["quiet"]
             pending = getattr(result, "deferred_tool_use", None) if native_defer else None
             if pending is not None:
                 kind = native_holds.get(pending.id, "")
@@ -713,7 +793,12 @@ class Executor:
                                        "session_id": session_id or ""}
                     out["held"] = True
                     out["ok"] = False
-                    if kind in ("send", "destructive"):
+                    if run_outcomes or kind == "ask":
+                        out["outcome"] = "deferred"
+                    if kind == "ask":
+                        out["ask"] = {"question": str(pending.input.get("question") or ""),
+                                      "kind": str(pending.input.get("kind") or "input")}
+                    elif kind in ("send", "destructive"):
                         from .jevagent import recipients_of
                         about = ([", ".join(recipients_of(pending.input)) or "(no recipient in the call)"]
                                  if kind == "send" else [req.summary or req.original_message])
