@@ -1,5 +1,5 @@
-"""Long-term graph memory: off by default, fails open, and keeps each chat's facts
-to that chat unless the reader is the owner."""
+"""Long-term graph memory: off by default, fails open, one shared graph for every chat,
+and each fact read back only where one of the messages it came from may be read."""
 
 import asyncio
 
@@ -25,7 +25,9 @@ def test_group_id_is_safe():
 def test_episode_shape_and_clip():
     e = graphmem.episode("owner", "inbound", "x" * 9000, "telegram", created_at=0, message_id=7)
     m = e["messages"][0]
-    assert e["group_id"] == "blatbot_owner"
+    assert e["group_id"] == graphmem.SHARED_GROUP == "blatbot"
+    assert graphmem.episode("tg:-5", "inbound", "hi")["group_id"] == "blatbot"
+    assert "chat tg:-5" in graphmem.episode("tg:-5", "inbound", "hi")["messages"][0]["source_description"]
     assert m["role_type"] == "user" and m["name"] == "msg-7"
     assert m["content"].endswith("[clipped]") and len(m["content"]) < 6100
     assert m["timestamp"].startswith("1970-01-01")
@@ -44,9 +46,10 @@ def test_non_owner_reads_only_their_own_chat(monkeypatch):
     monkeypatch.setattr(graphmem, "_post", fake_post)
     graphmem.search("what does Sam prefer", "tg:5", False)
     graphmem.search("what does Sam prefer", "owner", True)
-    assert sent[0] == ("/search", {"query": "what does Sam prefer", "max_facts": graphmem.MAX_FACTS,
-                                   "group_ids": ["blatbot_tg_5"]})
-    assert sent[1][1]["group_ids"] is None
+    # One shared graph: both search it; the non-owner over-fetches, then filters by provenance.
+    assert sent[0][1]["group_ids"] == ["blatbot"] and sent[0][1]["max_facts"] > graphmem.MAX_FACTS
+    assert sent[1] == ("/search", {"query": "what does Sam prefer", "max_facts": graphmem.MAX_FACTS,
+                                   "group_ids": ["blatbot"]})
 
 
 def test_recall_renders_and_fails_open(monkeypatch):
@@ -216,22 +219,47 @@ def test_conflicting_handles_fall_back_to_own_chat(tmp_path):
     assert _groups(store, "im-ann", ["+12015550111", "+13475550122"]) == ["blatbot_im-ann"]
 
 
-def test_search_sends_groups_and_drops_facts_from_other_groups(monkeypatch):
+def test_search_keeps_only_facts_learned_in_a_readable_chat(monkeypatch):
     monkeypatch.setenv("GRAPHITI_URL", "http://graph.test")
     sent = []
 
     def fake_post(path, payload, timeout):
         sent.append(payload)
-        return {"facts": [{"fact": "mine", "group_id": "blatbot_a"},
-                          {"fact": "theirs", "group_id": "blatbot_z"},
-                          {"fact": "no group"}]}
+        return {"facts": [
+            {"fact": "mine", "group_id": "blatbot", "episodes": ["msg-1"], "summary": "blend"},
+            {"fact": "theirs", "group_id": "blatbot", "episodes": ["msg-2", "msg-3"]},
+            {"fact": "both", "group_id": "blatbot", "episodes": ["msg-3", "msg-4"]},
+            {"fact": "unknown message", "group_id": "blatbot", "episodes": ["msg-99"]},
+            {"fact": "no episodes", "group_id": "blatbot", "episodes": []},
+            {"fact": "other graph", "group_id": "elsewhere", "episodes": ["msg-1"]},
+        ]}
+
+    asked = []
+
+    def lookup(ids):
+        asked.append(list(ids))
+        return {1: "a", 2: "z", 3: "z", 4: "b"}
 
     monkeypatch.setattr(graphmem, "_post", fake_post)
+    graphmem.set_chat_lookup(lookup)
     out = graphmem.search("q", "a", False, groups=["blatbot_a", "blatbot_b"])
-    assert sent[0]["group_ids"] == ["blatbot_a", "blatbot_b"]
-    assert [f["fact"] for f in out] == ["mine"]
-    # The owner (all groups) keeps every fact.
-    assert len(graphmem.search("q", "owner", True, groups=None)) == 3
+    assert sent[0]["group_ids"] == ["blatbot"]
+    assert [f["fact"] for f in out] == ["mine", "both"]
+    assert "summary" not in out[0]
+    # Message chats are cached: a second search asks for nothing already known.
+    graphmem.search("q", "a", False, groups=["blatbot_a"])
+    assert asked[1] == [99]
+    # The owner (every chat) keeps every fact.
+    assert len(graphmem.search("q", "owner", True, groups=None)) == 6
+    # No lookup, a failing lookup, or no readable chat: a non-owner gets nothing.
+    graphmem.set_chat_lookup(None)
+    assert graphmem.search("q", "a", False, groups=["blatbot_a"]) == []
+    graphmem.set_chat_lookup(lambda ids: 1 / 0)
+    assert graphmem.search("q", "a", False, groups=["blatbot_a"]) == []
+    graphmem.set_chat_lookup(lookup)
+    assert graphmem.search("q", "a", False, groups=[]) == []
+    graphmem.set_chat_lookup(None)
+
 
 
 def test_roles_accept_only_well_formed_memory_entries(tmp_path):
