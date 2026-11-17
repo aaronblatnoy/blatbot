@@ -500,7 +500,7 @@ async def send_message(args: Dict[str, Any], manager: Any, request: Any,
     if log is not None:
         log.setdefault("sends", []).append({"to": dest["who"], "surface": dest["mode"],
                                             "requester": bool(dest["requester"]),
-                                            "target": dest["target"]})
+                                            "target": dest["target"], "text": text[:600]})
     logger.info("[outcomes] #%s sent to %s%s", request.id, describe(dest),
                 " (the person who asked)" if dest["requester"] else "")
     if held:

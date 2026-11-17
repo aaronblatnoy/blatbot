@@ -3150,8 +3150,11 @@ class GateSessionManager:
             if chosen == "quiet" and not status.get("answered_requester"):
                 logger.info("[gate] #%s chose to send nothing: %s", req.id, status.get("quiet_reason") or "")
             elif not from_aaron:
-                # Someone else's request: Aaron approved it, so he still hears how it went.
-                await self.send_to_approver(f"[Blatbot #{req.id} {'done' if ok else 'FAILED'}] {title}\n{message}",
+                # Someone else's request: Aaron approved it, so he still hears how it went,
+                # in the words that actually went out rather than the run's note to itself.
+                said = "\n".join(f"Sent to {s.get('to')} on {outcomes.SURFACE_WORDS.get(s.get('surface'), s.get('surface'))}: "
+                                 f"{s.get('text') or ''}" for s in status.get("sends") or [])
+                await self.send_to_approver(f"[Blatbot #{req.id} {'done' if ok else 'FAILED'}] {title}\n{said or message}",
                                             kind="notice")
         finally:
             session.typing_stop()
