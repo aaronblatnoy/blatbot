@@ -38,7 +38,7 @@ class Inbox:
         if session_factory is None and self.session_factory is None:
             raise RuntimeError("inbox session factory is unavailable")
         # Provider ids are the durable dedup key. An absent id gets a fresh key.
-        lane = self.lane_for(chat_id, mode, meta)
+        lane = self.lane_for(chat_id, mode, meta, kind)
         event_id = self.store.insert_inbox_event(chat_id, source, source_event_id or f"missing:{time.time_ns()}",
                                                  mode, body, meta, kind=kind, lane=lane)
         if event_id is None:
@@ -51,18 +51,41 @@ class Inbox:
             raise
         return "queued"
 
-    def lane_for(self, chat_id: str, mode: str, meta: Dict[str, Any]) -> str:
+    def lane_for(self, chat_id: str, mode: str, meta: Dict[str, Any], kind: str = "message") -> str:
         """Which inbox an event belongs to. One inbox per person: the owner's messages
         on every surface, and timers on his thread, resolve to the same record and so
-        share one worker. Anything that cannot be resolved keeps its own chat."""
+        share one worker. Anyone else's direct chats, and timers on them, share the inbox
+        of the one person on record their handles name, so a person writing on two
+        surfaces is still handled one event at a time. Anything that cannot be resolved
+        keeps its own chat."""
+        lane = chat_id
         try:
             if self.record_id_for_event is not None:
-                return str(self.record_id_for_event({
-                    "chat_id": chat_id, "mode": mode,
+                lane = str(self.record_id_for_event({
+                    "chat_id": chat_id, "mode": mode, "kind": kind,
                     "meta_json": json.dumps(meta, default=str)}) or chat_id)
         except Exception as exc:
             logger.warning("[inbox] could not resolve the inbox for %s; using the chat: %s", chat_id, exc)
-        return chat_id
+            return chat_id
+        if lane != chat_id or not settings.get("GATE_PERSON_INBOX"):
+            return lane
+        try:
+            route_meta = dict(meta or {})
+            route_mode = mode
+            if kind != "message" or not (route_meta.get("sender") or route_meta.get("telegram_user_id")):
+                # A timer carries no sender; the chat it belongs to does.
+                route = self.store.thread_route(chat_id) or {}
+                route_meta, route_mode = dict(route.get("meta") or {}), str(route.get("mode") or "")
+            if route_meta.get("conversation_kind") == "group" or route_meta.get("group_title"):
+                return lane     # a group is everyone in it, not one person
+            probe = GateSession(chat_id, None)  # type: ignore[arg-type]
+            probe.mode, probe.reply_meta = route_mode, route_meta
+            found = self.store.resolve_handles(probe.handles())
+            if found.get("person_id") and not found.get("conflict"):
+                return f"person:{found['person_id']}"
+        except Exception as exc:
+            logger.warning("[inbox] could not find the person for %s; using the chat: %s", chat_id, exc)
+        return lane
 
     def wake(self, chat_id: str, session_factory: Callable[..., Any] | None = None) -> None:
         if session_factory is not None:

@@ -1358,6 +1358,28 @@ class Store:
             return None
         return {"mode": r["mode"], "meta": json.loads(r["meta_json"])}
 
+    def thread_routes(self, chat_ids: List[str]) -> List[Dict[str, Any]]:
+        """The channel and reply meta of several threads, most recently used first, so a
+        message to a person can go out on the surface they last used with Blatbot."""
+        ids = [c for c in dict.fromkeys(str(c) for c in chat_ids or []) if c]
+        if not ids:
+            return []
+        marks = ",".join("?" for _ in ids)
+        with self._lock:
+            rows = self._db.execute(
+                f"SELECT chat_id, mode, meta_json, updated_at FROM threads WHERE chat_id IN ({marks}) "
+                "ORDER BY updated_at DESC", ids).fetchall()
+        out: List[Dict[str, Any]] = []
+        for r in rows:
+            try:
+                meta = json.loads(r["meta_json"] or "{}")
+            except Exception:
+                meta = {}
+            out.append({"chat_id": str(r["chat_id"]), "mode": str(r["mode"] or ""),
+                        "meta": meta if isinstance(meta, dict) else {},
+                        "updated_at": float(r["updated_at"] or 0)})
+        return out
+
     # -- per-chat response mode (natural | mention | silent), see roommode.py -----
     def get_response_mode(self, chat_id: str) -> str:
         """The mode explicitly set on this chat, or "" when it was never set. Callers

@@ -325,7 +325,7 @@ async def telegram_read_chat(args: Dict[str, Any]) -> str:
 
 def sdk_server(*, vault_prefixes: Optional[List[str]] = None, manager: Any = None,
                is_commander: bool = False, memory_groups: Optional[List[str]] = [],
-               request: Any = None) -> Any:  # noqa: B006
+               request: Any = None, outcome_log: Optional[Dict[str, Any]] = None) -> Any:  # noqa: B006
     """The same tool as an in-process MCP server for the Claude Code executor.
 
     vault_prefixes bounds vault_search/vault_read/vault_list to the vault-relative
@@ -344,6 +344,25 @@ def sdk_server(*, vault_prefixes: Optional[List[str]] = None, manager: Any = Non
     memory_groups is which long-term memory groups memory_search may read for this
     request (graphmem.groups_for_request): None every group, [] none (the default)."""
     from claude_agent_sdk import create_sdk_mcp_server, tool
+    from . import outcomes
+
+    # How a run ends (gate/outcomes.py). outcome_log is the executor's record of what this
+    # run sent or decided, read back when the run finishes.
+    @tool("send_message", outcomes.SEND_MESSAGE_DESCRIPTION, outcomes.SEND_MESSAGE_SCHEMA)
+    async def _send_message(args: Dict[str, Any]) -> Dict[str, Any]:
+        return {"content": [{"type": "text", "text": await outcomes.send_message(args, manager, request, outcome_log)}]}
+
+    @tool("nothing_to_send", outcomes.NOTHING_TO_SEND_DESCRIPTION, outcomes.NOTHING_TO_SEND_SCHEMA)
+    async def _nothing_to_send(args: Dict[str, Any]) -> Dict[str, Any]:
+        return {"content": [{"type": "text", "text": outcomes.nothing_to_send(args, manager, request, outcome_log)}]}
+
+    @tool("where_to_reach", outcomes.WHERE_TO_REACH_DESCRIPTION, outcomes.WHERE_TO_REACH_SCHEMA)
+    async def _where_to_reach(args: Dict[str, Any]) -> Dict[str, Any]:
+        return {"content": [{"type": "text", "text": outcomes.where_to_reach(args, manager, request)}]}
+
+    @tool("ask_aaron", outcomes.ASK_AARON_DESCRIPTION, outcomes.ASK_AARON_SCHEMA)
+    async def _ask_aaron(args: Dict[str, Any]) -> Dict[str, Any]:
+        return {"content": [{"type": "text", "text": outcomes.ask_answer(manager, request)}]}
 
     @tool("host_status", DESCRIPTION, SCHEMA)
     async def _host_status(args: Dict[str, Any]) -> Dict[str, Any]:
@@ -435,6 +454,7 @@ def sdk_server(*, vault_prefixes: Optional[List[str]] = None, manager: Any = Non
         return {"content": [{"type": "text", "text": await pages.publish_page(args, pages.allowed_for(is_commander))}]}
 
     tools = [_make_page, _host_status, _set_followup, _cancel_followup, _request_access,
+             _send_message, _nothing_to_send, _where_to_reach, _ask_aaron,
              _vault_search, _vault_read, _vault_list, _memory_search,
              _telegram_find_chats, _telegram_list_chats, _telegram_read_chat,
              _admin_list_settings, _admin_get_setting, _admin_set_setting,

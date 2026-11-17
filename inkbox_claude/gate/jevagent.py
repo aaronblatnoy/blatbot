@@ -40,6 +40,7 @@ import httpx
 
 from .scopes import ORG_ACCOUNT, OWNER_ACCOUNT, TOOL_DESCRIPTIONS, TOOL_PURPOSE, blocks_requester_send, sends_to_requester, tools_for
 from . import hosttools
+from .outcomes import ALL_TOOLS as OUTCOME_TOOLS
 from . import graphmem
 from .store import Request, sha256
 from .taskpick import TYPESAFE_URL
@@ -869,7 +870,9 @@ class JevAgent:
         if sha256(req.prompt) != req.prompt_sha256:
             return {"ok": False, "error": "prompt hash mismatch; refused to run", "tool_calls": []}
         judge, prose = Judge(), Prose(self.router)
-        allowed = tools_for(req.scopes)
+        # The Jev agent ends by returning its findings; how a Claude run ends
+        # (gate/outcomes.py) is not offered to it, so its result is delivered as before.
+        allowed = [t for t in tools_for(req.scopes) if t not in OUTCOME_TOOLS]
         if req.schedule_id:
             allowed = [t for t in allowed if t not in ("mcp__host__set_followup", "mcp__host__cancel_followup", "mcp__host__request_access")]
         if (req.status or {}).get("followup_id"):

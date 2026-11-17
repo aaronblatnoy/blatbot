@@ -31,6 +31,7 @@ from . import wording
 from . import peopleindex
 from . import accesscmd, admincmd
 from . import graphmem
+from . import outcomes
 
 logger = logging.getLogger(__name__)
 _MISSING = object()
@@ -89,6 +90,8 @@ def is_inbox_command(text: str) -> bool:
     return bool(
         low in (_YES | _NO | {"tasks", "task list", "open tasks", "what's open", "whats open"})
         or re.match(r"^#?\d+\s*[:\-]?\s*(?:yes|no|y|n|ok|approve|run|go|deny|reject|drop|cancel|edit\s*:.*)$", t, re.I | re.S)
+        # "#12 <anything>" may be his answer to a run's question (ask_aaron).
+        or re.match(r"^#\d+\s*[:\-]?\s*\S.*$", t, re.S)
         or re.match(r"^t\d+\s*[:\-]?\s*(?:done|close|closed|reopen|open|note\s*:.*)$", t, re.I | re.S)
         or re.match(r"^edit\s*:.+", t, re.I | re.S)
         or wording.is_try_again(t) or wording.is_send_what_you_have(t)
@@ -3102,6 +3105,58 @@ class GateSessionManager:
         else:
             await self.send_to_approver(full_text, kind="approval")
 
+    async def handle_ask(self, req: Request, status: Dict[str, Any]) -> None:
+        """A run asked Aaron something (ask_aaron, always deferred). Park the request with
+        its saved session and text him the question; his "#id <answer>" comes back
+        through the inbox to decide_request, which resumes that same call with it."""
+        ask = status.get("ask") or {}
+        fresh = self.store.get_request(req.id) or req
+        before = dict(fresh.status or {})
+        saved = {**before, **status, "ask_count": int(before.get("ask_count") or 0) + 1}
+        saved.pop("deferred_decision", None)
+        self.store.set_state(req.id, "pending", status=saved, raw_output=status.get("raw"))
+        self.store.set_thread(req.chat_id, "awaiting_aaron")
+        question = " ".join(str(ask.get("question") or "").split())
+        kind = "permission" if ask.get("kind") == "permission" else "input"
+        owner = _owner_request(self, req)
+        self.task_note(req, "request", f"Asked Aaron: {question}", state="waiting_aaron")
+        await self.send_to_approver(outcomes.ask_text(req, question, kind, owner), kind="approval")
+        if not owner:
+            try:
+                await self.get(req.chat_id).send_to_sender(HANDOFF_LINE, role="access_wait")
+            except Exception as exc:
+                logger.warning("[gate] #%s could not send the waiting notice: %s", req.id, exc)
+
+    async def _ended_by_its_own_choice(self, req: Request, status: Dict[str, Any], session: "GateSession",
+                                       title: str, message: str, from_aaron: bool) -> bool:
+        """The run itself chose how it ended (gate/outcomes.py). True when that choice
+        already covered the person who asked, so nothing more is delivered to them: it
+        answered them with send_message, or it decided nothing needed sending. A run that
+        chose none of the three is the safety net, and its closing text is delivered as
+        before so nobody is left in silence."""
+        chosen = status.get("outcome")
+        if chosen is None or not outcomes.enabled():
+            return False
+        if chosen == "none":
+            logger.info("[gate] #%s ended without choosing how (no send, no nothing_to_send, no ask); "
+                        "delivering its closing text", req.id)
+            return False
+        if not (status.get("answered_requester") or chosen == "quiet"):
+            logger.info("[gate] #%s sent to others but did not answer the person who asked; "
+                        "delivering its closing text", req.id)
+            return False
+        ok = bool(status.get("ok"))
+        try:
+            if chosen == "quiet" and not status.get("answered_requester"):
+                logger.info("[gate] #%s chose to send nothing: %s", req.id, status.get("quiet_reason") or "")
+            elif not from_aaron:
+                # Someone else's request: Aaron approved it, so he still hears how it went.
+                await self.send_to_approver(f"[Blatbot #{req.id} {'done' if ok else 'FAILED'}] {title}\n{message}",
+                                            kind="notice")
+        finally:
+            session.typing_stop()
+        return True
+
     async def handle_access_ask(self, req: Request, status: Dict[str, Any]) -> Optional[str]:
         """Grant what this sender already has, then park only the remaining access for Aaron."""
         if status.get("deferred"):
@@ -3189,8 +3244,14 @@ class GateSessionManager:
             status = {"ok": False, "error": "no confirmed call on record", "summary": "no confirmed call on record", "raw": "", "tool_calls": []}
         else:
             # He has read it and said yes. That exact call runs, once, and nothing else.
-            caller = self.jev_agent or self.caller
-            status = await caller.perform(c["tool"], c["args"])
+            if c["tool"] == outcomes.SEND_TOOL:
+                said = await outcomes.send_message(c["args"], self, req)
+                sent = said.startswith(("Sent to", "Queued for"))
+                status = {"ok": sent, "summary": said, "raw": said, "tool_calls": [c["tool"]],
+                          **({} if sent else {"error": said})}
+            else:
+                caller = self.jev_agent or self.caller
+                status = await caller.perform(c["tool"], c["args"])
         ok = bool(status.get("ok"))
         self.store.set_state(req.id, "done" if ok else "failed", status=status, raw_output=status.get("raw"))
         self.store.set_thread(req.chat_id, "idle")
@@ -3249,6 +3310,26 @@ class GateSessionManager:
             return await self.schedules.decide_proposal(req, decision, note)
         d = (decision or "").strip().lower()
         deferred = (req.status or {}).get("deferred") or {}
+        if deferred.get("kind") == "ask":
+            # Aaron's answer to a run's question. Whatever he wrote after "#id" is the
+            # answer; a yes or no is the answer to a permission ask.
+            answer = (" ".join(note.split()) if d in ("answer", "edit") else
+                      "yes" if d in _YES or d in ("yes", "approve") else
+                      "no" if d in _NO or d in ("no", "stop", "decline") else " ".join(str(decision or "").split()))
+            if not answer:
+                return {"ok": False, "error": f"#{req.id} needs an answer", "state": req.state}
+            status = dict(req.status or {})
+            status["deferred_decision"] = {"id": deferred["id"], "allow": True, "answer": answer}
+            self.task_note(req, "approved", f"Aaron answered: {answer}", state="running")
+            self.store.set_state(req.id, "approved", status=status)
+            fresh = self.store.get_request(req.id) or req
+            saved_session = deferred.get("session_id") or ""
+            saved_at = float(status.get("session_saved_at") or 0)
+            if (saved_at and time.time() - saved_at >
+                    float(_settings.get("SESSION_MAX_AGE_HOURS")) * 3600):
+                saved_session = ""
+            asyncio.create_task(self.execute(fresh, continuation="continue", resume_session=saved_session))
+            return {"ok": True, "state": "approved", "error": ""}
         if deferred and d != "edit":
             if d not in ("yes", "y", "ok", "approve", "run", "go",
                          "no", "n", "stop", "drop", "reject", "decline"):
@@ -3411,6 +3492,14 @@ class GateSessionManager:
                     f'or one of {len(pending)} pending things?', role="answer")
                 return True
         if req is not None:
+            # A run's question to him (ask_aaron): any text after "#id" is his answer. Every
+            # other kind of pending request keeps "yes", "no" and "edit: ..." as they were.
+            if ((req.status or {}).get("deferred") or {}).get("kind") == "ask" and rest:
+                out = await self.decide_request(req.id, "answer", actor="Aaron",
+                                                source=session.mode or "imessage", note=rest)
+                if not out.get("ok") and out.get("error"):
+                    await self.send_to_approver(out["error"])
+                return True
             # Parsing stops here: what the words mean is decided in one place, so a text and a
             # click in the console cannot drift apart.
             low = rest.lower()
@@ -3984,6 +4073,14 @@ class GateSessionManager:
         if the fast timeout path already told the person something in the meantime."""
         fresh = self.store.get_request(req.id)
         req = fresh or req
+        if status.get("deferred") and status["deferred"].get("kind") == "ask":
+            try:
+                await self.handle_ask(req, status)
+                return
+            except Exception as exc:
+                logger.warning("[gate] #%s ask could not be sent: %s", req.id, exc)
+                status = {**status, "ok": False, "error": "the question for Aaron could not be sent"}
+                status.pop("deferred", None)
         if status.get("deferred") and status["deferred"].get("kind") == "access":
             try:
                 next_prompt = await self.handle_access_ask(req, status)
@@ -4038,6 +4135,10 @@ class GateSessionManager:
         self.task_note(req, "done" if ok else "failed", f"{req.summary} -> {result}",
                        state="done" if ok else "failed")
         session = self.get(req.chat_id)
+        if (not (req.status or {}).get("followup_id") and
+                await self._ended_by_its_own_choice(req, status, session, title, message,
+                                                    self._is_owner_request(req))):
+            return
         previous_kind = getattr(session, "_outbox_kind", "reply")
         session._outbox_kind = "late_result"
         try:
@@ -4081,8 +4182,14 @@ class GateSessionManager:
         self.store.set_state(req.id, "running", status=saved)
         fresh = self.store.get_request(req.id) or req
         model = await self._pick_model(fresh)
+        again = ""
+        if deferred.get("kind") == "ask" and decision.get("answer"):
+            # The saved run is gone, so the task starts over with his answer in hand.
+            again = (f"{fresh.prompt}\n\nYou already asked Aaron: {(deferred.get('input') or {}).get('question') or ''}\n"
+                     f"Aaron said: {decision['answer']}\nUse that answer; do not ask it again.")
         return await self.executor.run(fresh, context=context, model=model,
-                                       from_owner=_owner_request(self, fresh), resume_session="")
+                                       from_owner=_owner_request(self, fresh), resume_session="",
+                                       continuation=again)
 
     async def execute(self, req: Request, notify: bool = True, *, continuation: str = "",
                       resume_session: Optional[str] = None) -> str:
@@ -4154,6 +4261,16 @@ class GateSessionManager:
                 status = {"ok": False, "error": "could not continue the saved call", "tool_calls": []}
             if status is None:
                 return ""
+        if status.get("deferred") and status["deferred"].get("kind") == "ask":
+            session.typing_stop()
+            try:
+                await self.handle_ask(req, status)
+                return "I'm checking with Aaron and will get back to you."
+            except Exception as exc:
+                # Nobody is left waiting on a question that never went out.
+                logger.warning("[gate] #%s ask could not be sent: %s", req.id, exc)
+                status = {**status, "ok": False, "error": "the question for Aaron could not be sent"}
+                status.pop("deferred", None)
         if status.get("deferred") and status["deferred"].get("kind") == "access":
             session.typing_stop()
             try:
@@ -4255,6 +4372,8 @@ class GateSessionManager:
                 return wording.same_limit_message(status)
             return message
         from_aaron = self._is_owner_request(req)
+        if await self._ended_by_its_own_choice(req, status, session, title, message, from_aaron):
+            return ""
         # Item C1: a request born from a call by the owner's own number, with voice not
         # trusted as the approver, is approved later on text -- by the time this runs,
         # the session for req.chat_id (the call's own chat_id) no longer reads as a live
@@ -4476,6 +4595,13 @@ class GateSessionManager:
             result = str(status.get("result_line") or status.get("final_status") or
                          status.get("summary") or status.get("error") or "").strip()
             self.store.finish_followup(row["id"], result, failed=not bool(status.get("ok")))
+            if outcomes.enabled() and status.get("ok") and (
+                    status.get("answered_requester") or status.get("outcome") == "quiet"):
+                # It answered the chat itself, or chose to stay quiet: nothing more goes out.
+                if status.get("outcome") == "quiet" and not status.get("sends"):
+                    self.store.task_event(row["task_id"], "note", "Follow-up found nothing to send.",
+                                          chat_id=row["chat_id"], request_id=request.id, state="open")
+                return
             if status.get("ok") and (status.get("changed") is False or re.search(
                     r"\b(nothing changed|no change|nothing to report|no update)\b", result, re.I)):
                 self.store.task_event(row["task_id"], "note", "Follow-up found nothing changed.",

@@ -7,6 +7,7 @@ from typing import Any, Dict, Iterable
 from .jevagent import is_destructive, is_outbound_message, recipients_of
 from .scopes import blocks_requester_send, scope_for_tool
 from . import hosttools
+from . import outcomes
 
 
 # Claude Code's own bookkeeping, not an action on anything: ToolSearch only loads the
@@ -34,7 +35,40 @@ def decide(req: Any, name: str, args: Dict[str, Any], allowed: Iterable[str], *,
                     f'Call request_access with access ["{scope}"] and one sentence saying why. '
                     "Then stop and say you are waiting. Do not try another route to the same data.", "scope")
         return "deny", f"{name} is outside this task's scope; do not retry it.", "scope"
+    if name in (outcomes.QUIET_TOOL, outcomes.REACH_TOOL):
+        # Ending quietly and looking up where someone can be reached touch nothing.
+        return "allow", "", ""
+    if name == outcomes.ASK_TOOL:
+        status = req.status or {}
+        if not outcomes.ask_enabled():
+            return "deny", "Asking Aaron is off. Finish with what you have and say plainly what is missing.", "ask"
+        if int(status.get("ask_count") or 0) >= outcomes.ASK_LIMIT:
+            return "deny", "You have already asked Aaron twice for this task. Finish with what you have.", "ask"
+        if not str(args.get("question") or "").strip():
+            return "deny", "Give the question in one or two plain sentences.", "ask"
+        if args.get("kind") not in ("permission", "input"):
+            return "deny", 'kind must be "permission" (a yes or no) or "input" (a detail or a choice).', "ask"
+        # Always deferred: the run ends here with its session saved, Aaron is texted the
+        # question, and his answer resumes this exact call (manager.handle_ask).
+        return "defer", "Asking Aaron.", "ask"
+    if name == outcomes.SEND_TOOL:
+        try:
+            dest = outcomes.resolve(manager, req, args.get("to"), args.get("surface"))
+        except ValueError:
+            # The tool itself says what was wrong with the address; nothing is sent.
+            return "allow", "", ""
+        if dest.get("requester") or dest.get("owner"):
+            # Answering the person who asked, or telling Aaron himself, needs no sign-off.
+            return "allow", "", ""
+        if req.schedule_id or confirm_sends:
+            return "defer", f"Ask Aaron before sending to {outcomes.describe(dest)}.", "send"
+        return "allow", "", ""
     if blocks_requester_send(req, name, args, protected):
+        if outcomes.SEND_TOOL in allowed_set:
+            # One way to answer the person who asked, so it is recorded as the answer and
+            # the gateway does not answer them a second time.
+            return ("deny", 'Answer the person who asked with send_message, to "requester". It goes '
+                    "back on the surface they wrote from.", "requester")
         return "deny", "Do not message the requester; the gateway delivers your result. Put the answer in your final status and stop.", "requester"
     if name == "mcp__host__request_access":
         if int((req.status or {}).get("access_ask_count") or 0) >= 2:

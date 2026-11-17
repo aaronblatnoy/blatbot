@@ -330,6 +330,13 @@ def tools_for(scopes: List[str]) -> List[str]:
                 out += [t for t in ("mcp__host__set_followup", "mcp__host__cancel_followup") if t not in out]
             if get_setting("GATE_ACCESS_ASKS") and "mcp__host__request_access" not in out:
                 out.append("mcp__host__request_access")
+            # Every run with any scope can end the article's three ways: send a message,
+            # decide nothing needs sending, or ask Aaron (gate/outcomes.py).
+            if get_setting("GATE_RUN_OUTCOMES"):
+                out += [t for t in ("mcp__host__send_message", "mcp__host__nothing_to_send",
+                                    "mcp__host__where_to_reach") if t not in out]
+            if get_setting("GATE_ASK_AARON") and "mcp__host__ask_aaron" not in out:
+                out.append("mcp__host__ask_aaron")
         except Exception as exc:
             logging.getLogger(__name__).warning("[gate] follow-up tools unavailable: %s", exc)
     return out
