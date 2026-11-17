@@ -25,6 +25,7 @@ where_things_live:
   vault; the two can both apply. Neither is live state: for what is true now, read the system itself.'
 - 'US pension and benefit plans, their Form 5500 filings, plan assets, trustees, investment managers, consultants
   and other service providers: the pension filings database (public Department of Labor data). Not the public web.'
+- "The Definite Optimists startup's shared team memory (what the team and its agents have written down about the company, its plans, people, decisions and how things were set up): the Definite Optimists brain. Not Blatbot's own long-term memory of conversations, not Aaron's vault, not the public web."
 systems:
   long_term_memory:
     description: 'Blatbot''s long-term memory: a graph of dated facts from every past conversation it has had,
@@ -291,6 +292,15 @@ systems:
     - corgi_github_read
     leaves: {}
 
+  definite_optimists_brain:
+    description: "The Definite Optimists brain: the startup's one shared team memory, a graph of dated facts that the team's people and agents add (the company, its plans, customers, people, decisions, how things were set up). Searching it and adding to it. Not Blatbot's own memory of past conversations, not Aaron's vault, not Corgi."
+    always:
+    - do_brain_read
+    leaves:
+      do_brain_write:
+        question: "Save something new to the Definite Optimists brain (a fact, decision, note or update for the team to remember)."
+        grants:
+        - do_brain_write
 scopes:
   calendar:
     description: 'TAMID calendar: read and write the club''s Google Calendar (org@example.org; interviews, club
@@ -1270,3 +1280,26 @@ scopes:
     - mcp__vercel-corgi__vercel_get_deployment
     - mcp__vercel-corgi__vercel_get_deployment_log_summary
     - mcp__vercel-corgi__vercel_list_domains
+  do_brain_read:
+    description: "search and read the Definite Optimists brain, the startup's shared team memory (facts the team and its agents saved, with who added each). Read-only. Not Blatbot's own memory of conversations, not the vault."
+    label: search the Definite Optimists brain
+    ask: search the Definite Optimists brain
+    synonyms:
+    - definite optimists
+    - do brain
+    - team brain
+    - startup brain
+    read: true
+    tools:
+    - mcp__do-brain__search_memory
+    - mcp__do-brain__recent_memories
+  do_brain_write:
+    description: "add a memory to the Definite Optimists brain, the startup's shared team memory. Adds only; cannot change or delete what is there. Saved as added by Blatbot."
+    label: save to the Definite Optimists brain
+    ask: save to the Definite Optimists brain
+    synonyms:
+    - remember this for the team
+    - add to the do brain
+    read: false
+    tools:
+    - mcp__do-brain__add_memory
