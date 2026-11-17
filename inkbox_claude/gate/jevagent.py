@@ -24,6 +24,7 @@ Configuration:
 
 from __future__ import annotations
 
+from inkbox_claude.instance import ASSISTANT as _ASSISTANT, ASSISTANT_UPPER as _ASSISTANT_UPPER, ASSISTANT_EMAIL as _ASSISTANT_EMAIL, SERVER_NAME as _SERVER_NAME  # noqa: F401
 import asyncio
 import contextlib
 import json
@@ -507,9 +508,9 @@ class Prose:
 
     async def write(self, instruction: str, facts: Dict[str, Any]) -> str:
         self.calls += 1
-        sys_p = ("You write short pieces of text for Blatbot, Executive Assistant to Aaron Blatnoy. "
+        sys_p = (f"You write short pieces of text for {_ASSISTANT}, Executive Assistant to Aaron Blatnoy. "
                  "Use only the facts given. No emojis. No em dashes. Sign emails exactly:\n"
-                 "Best,\nBlatbot\nExecutive Assistant to Aaron Blatnoy\n"
+                 f"Best,\n{_ASSISTANT}\nExecutive Assistant to Aaron Blatnoy\n"
                  "Never mention how you work or any tooling. Output only the requested text.")
         user = f"FACTS:\n{json.dumps(facts, ensure_ascii=False, default=str, indent=1)}\n\nWRITE:\n{instruction}"
         raw = await self.router._chat([{"role": "system", "content": sys_p}, {"role": "user", "content": user}],

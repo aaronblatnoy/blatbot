@@ -1,0 +1,90 @@
+# Gondroid: Aaron's professional assistant, a second instance of this gateway with its own
+# database, its own long-term memory graph and its own scope registry. Deployed on black-sky
+# as the Coolify application "gondroid" (Definite Optimists team). Nothing here is shared
+# with Blatbot: separate Postgres, separate Neo4j + Graphiti, separate state volume.
+# Secrets come from the Coolify application's environment, never from this file.
+services:
+  gondroid:
+    build:
+      context: .
+      dockerfile: deploy/gondroid/Dockerfile
+    restart: unless-stopped
+    depends_on:
+      - postgres
+      - graphiti
+    ports:
+      - "8772:8772"
+    environment:
+      - INKBOX_MODE=gate
+      - INKBOX_BRIDGE_HOST=0.0.0.0
+      - INKBOX_BRIDGE_PORT=8772
+      - INKBOX_OFFLINE=${INKBOX_OFFLINE:-0}
+      - INKBOX_IDENTITY=${INKBOX_IDENTITY:-gondroid}
+      - INKBOX_API_KEY=${INKBOX_API_KEY:-}
+      - INKBOX_BASE_URL=${INKBOX_BASE_URL:-https://inkbox.ai}
+      - INKBOX_SIGNING_KEY=${INKBOX_SIGNING_KEY:-}
+      - ASSISTANT_NAME=Gondroid
+      - ASSISTANT_EMAIL=${ASSISTANT_EMAIL:-gondroid@inkboxmail.com}
+      - SERVER_NAME=black-sky
+      - OWNER_NAME=Aaron Blatnoy
+      - OWNER_FIRST_NAME=Aaron
+      - GATE_DB_PATH=postgresql://gondroid:${GONDROID_PG_PASSWORD}@postgres:5432/gondroid
+      - GATE_PG_URL=postgresql://gondroid:${GONDROID_PG_PASSWORD}@postgres:5432/gondroid
+      - GATE_SCOPES_FILE=/etc/gondroid/scopes.yaml
+      - GATE_EXECUTOR=claude
+      - GATE_EXECUTOR_FALLBACK=claude
+      - CLAUDE_MODEL=sonnet
+      - CLAUDE_PROJECT_DIR=/data/exec
+      - GRAPHITI_URL=http://graphiti:8000
+      - GRAPHITI_GROUP=gondroid
+      - CLAUDE_CODE_OAUTH_TOKEN=${CLAUDE_CODE_OAUTH_TOKEN}
+      - DEEPSEEK_API_KEY=${DEEPSEEK_API_KEY}
+      - TYPESAFE_API_KEY=${TYPESAFE_API_KEY}
+      - OPENAI_API_KEY=${OPENAI_API_KEY}
+      - TELEGRAM_BOT_TOKEN=${TELEGRAM_BOT_TOKEN:-}
+      - TELEGRAM_WEBHOOK_SECRET=${TELEGRAM_WEBHOOK_SECRET:-}
+      - GATE_APPROVER_TELEGRAM_ID=${GATE_APPROVER_TELEGRAM_ID:-}
+    volumes:
+      - gondroid-data:/data
+
+  postgres:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      - POSTGRES_USER=gondroid
+      - POSTGRES_DB=gondroid
+      - POSTGRES_PASSWORD=${GONDROID_PG_PASSWORD}
+    volumes:
+      - gondroid-pg:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U gondroid -d gondroid"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+
+  neo4j:
+    image: neo4j:5.26
+    restart: unless-stopped
+    environment:
+      - NEO4J_AUTH=neo4j/${GONDROID_NEO4J_PASSWORD}
+    volumes:
+      - gondroid-neo4j:/data
+
+  graphiti:
+    build:
+      context: .
+      dockerfile: deploy/gondroid/graphiti/Dockerfile
+    restart: unless-stopped
+    depends_on:
+      - neo4j
+    environment:
+      - GRAPH_URI=bolt://neo4j:7687
+      - GRAPH_USER=neo4j
+      - GRAPH_PASSWORD=${GONDROID_NEO4J_PASSWORD}
+      - MODEL_NAME=gpt-4.1-mini
+      - OPENAI_API_KEY=${OPENAI_API_KEY}
+
+volumes:
+  gondroid-data:
+  gondroid-pg:
+  gondroid-neo4j:

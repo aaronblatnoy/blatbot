@@ -10,6 +10,7 @@ bot. Every send still goes through the permission hook and the outbox.
 
 from __future__ import annotations
 
+from inkbox_claude.instance import ASSISTANT as _ASSISTANT, ASSISTANT_UPPER as _ASSISTANT_UPPER, ASSISTANT_EMAIL as _ASSISTANT_EMAIL, SERVER_NAME as _SERVER_NAME  # noqa: F401
 import json
 import logging
 import re
@@ -57,12 +58,12 @@ def ask_enabled() -> bool:
 
 
 SEND_MESSAGE_DESCRIPTION = (
-    "SEND A MESSAGE. This is how a run delivers anything to anyone, on any surface Blatbot has: "
+    f"SEND A MESSAGE. This is how a run delivers anything to anyone, on any surface {_ASSISTANT} has: "
     "iMessage, text message, email or Telegram. to is \"requester\" (the person who asked, answered on "
     "the surface they wrote from: this is how you give them your answer), \"aaron\", a person's name, or a "
     "group chat's name. surface is optional (imessage, telegram, sms, email): without it the surface they "
-    "last used with Blatbot is picked. subject is for email only. The answer says where it went. "
-    "Posting in a Telegram group Blatbot is in is done here too: to is the group's name. It needs no extra "
+    f"last used with {_ASSISTANT} is picked. subject is for email only. The answer says where it went. "
+    f"Posting in a Telegram group {_ASSISTANT} is in is done here too: to is the group's name. It needs no extra "
     "access; the telegram_* tools only read Aaron's personal account and have nothing to do with sending."
 )
 SEND_MESSAGE_SCHEMA = {"type": "object", "required": ["to", "text"], "properties": {
@@ -429,7 +430,7 @@ def resolve(manager: Any, req: Any, to: Any, surface: Any = None) -> Dict[str, A
                         titles = [g["title"] for g in manager.store.known_group_chats()][:12]
                     except Exception:
                         titles = []
-                    known = (" Group chats Blatbot can post in: " + "; ".join(titles) + "."
+                    known = (f" Group chats {_ASSISTANT} can post in: " + "; ".join(titles) + "."
                              if titles else "")
                     raise ValueError(f'No person or group chat called "{name}" is on record.{known} '
                                      "Use one of those names exactly, or a person's name.")
@@ -482,7 +483,7 @@ async def send_message(args: Dict[str, Any], manager: Any, request: Any,
             meta["subject"] = subject
             meta["_inkbox_tool"] = True
         elif meta.get("_inkbox_tool") and not meta.get("subject"):
-            meta["subject"] = "A message from Blatbot"
+            meta["subject"] = f"A message from {_ASSISTANT}"
     kind = ("schedule" if request.schedule_id else
             "proactive" if (request.status or {}).get("followup_id") else "reply")
     try:

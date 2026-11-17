@@ -9,6 +9,7 @@ reach of a mis-click.
 
 from __future__ import annotations
 
+from inkbox_claude.instance import ASSISTANT as _ASSISTANT, ASSISTANT_UPPER as _ASSISTANT_UPPER, ASSISTANT_EMAIL as _ASSISTANT_EMAIL, SERVER_NAME as _SERVER_NAME  # noqa: F401
 import logging
 import os
 import threading
@@ -86,7 +87,7 @@ KNOBS: List[Dict[str, Any]] = [
      "help": "Save a call while it waits for your answer, then continue that same run."},
     {"name": "GATE_AUTO_MODE", "kind": "bool", "default": True, "group": "Safety",
      "label": "Use Claude Code auto mode",
-     "help": "Let Claude Code screen risky actions on top of Blatbot's own permissions."},
+     "help": f"Let Claude Code screen risky actions on top of {_ASSISTANT}'s own permissions."},
     {"name": "SESSION_MAX_AGE_HOURS", "kind": "number", "default": 24, "min": 0,
      "max": 8760, "step": 1, "group": "Engine",
      "label": "Hours to keep a saved session",

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from inkbox_claude.instance import ASSISTANT as _ASSISTANT, ASSISTANT_UPPER as _ASSISTANT_UPPER, ASSISTANT_EMAIL as _ASSISTANT_EMAIL, SERVER_NAME as _SERVER_NAME  # noqa: F401
 import os
 from typing import Any, Dict, Iterable
 
@@ -80,7 +81,7 @@ def decide(req: Any, name: str, args: Dict[str, Any], allowed: Iterable[str], *,
     if name not in allowed_set and reads_own_output(name, args, read_dirs):
         return "allow", "", ""
     if name.startswith("mcp__host__admin_") and not from_owner:
-        return "deny", "Only Aaron, as the verified commander, can change Blatbot's own settings.", "commander_only"
+        return "deny", f"Only Aaron, as the verified commander, can change {_ASSISTANT}'s own settings.", "commander_only"
     if name not in allowed_set:
         scope = scope_for_tool(name)
         refused = set((req.status or {}).get("access_refused") or [])

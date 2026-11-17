@@ -7,6 +7,7 @@ is pushed onto a thread.
 
 from __future__ import annotations
 
+from inkbox_claude.instance import ASSISTANT as _ASSISTANT, ASSISTANT_UPPER as _ASSISTANT_UPPER, ASSISTANT_EMAIL as _ASSISTANT_EMAIL, SERVER_NAME as _SERVER_NAME  # noqa: F401
 import asyncio
 import dataclasses
 import json
@@ -711,7 +712,7 @@ def build_inkbox_mcp_server(
 
     @tool(
         "inkbox_list_emails",
-        "List recent emails in THIS agent's own Inkbox mailbox (blatbot@inkboxmail.com), "
+        f"List recent emails in THIS agent's own Inkbox mailbox ({_ASSISTANT_EMAIL}), "
         "newest first: direction, from, to, subject, date, id, and a short snippet. "
         "Use this to answer 'who emailed you' or 'what is in your inbox'. Pass "
         "inbound_only=true to see only mail received. Use inkbox_get_email for a full body.",

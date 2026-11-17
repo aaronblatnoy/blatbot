@@ -11,6 +11,7 @@ nothing here ever returns it.
 
 from __future__ import annotations
 
+from inkbox_claude.instance import ASSISTANT as _ASSISTANT, ASSISTANT_UPPER as _ASSISTANT_UPPER, ASSISTANT_EMAIL as _ASSISTANT_EMAIL, SERVER_NAME as _SERVER_NAME  # noqa: F401
 import re
 
 from typing import Any, Dict, List, Optional
@@ -30,7 +31,7 @@ _TOOL_SYSTEM_NAMES: Dict[str, str] = {
     "coolify": "Coolify",
     "coolify-vox": "the Vox Coolify instance",
     "playwright": "the web",
-    "inkbox": "Blatbot's own inbox",
+    "inkbox": f"{_ASSISTANT}'s own inbox",
     "host": "the server",
     "advancedmd": "AdvancedMD",
     "availity": "Availity",

@@ -26,6 +26,7 @@ The bridge exposes the same ``run()`` / ``close()`` surface as
 
 from __future__ import annotations
 
+from inkbox_claude.instance import ASSISTANT as _ASSISTANT, ASSISTANT_UPPER as _ASSISTANT_UPPER, ASSISTANT_EMAIL as _ASSISTANT_EMAIL, SERVER_NAME as _SERVER_NAME  # noqa: F401
 import asyncio
 import json
 import logging
@@ -68,7 +69,7 @@ CONTEXT_TURNS = 8
 
 
 LIVE_PERSONA = (
-    "You are Blatbot, Aaron Blatnoy's assistant, answering his assistant line. You're warm and easy to talk "
+    f"You are {_ASSISTANT}, Aaron Blatnoy's assistant, answering his assistant line. You're warm and easy to talk "
     "to, like someone who's glad the person called. Match the caller: mirror their energy, pace and mood. If "
     "they're upbeat and joking, loosen up and joke back. If they're brisk and busy, be quick and to the point. "
     "If they're tired, stressed or annoyed, be calm and on their side. Friendly by default, never flat, stiff "
@@ -160,7 +161,7 @@ def build_live_instructions(meta: RealtimeCallMeta, additional: str = "") -> str
     lines += [
         "This is a live phone call and it is yours to run: chat, react to what they say, ask what you need "
         "to ask, and follow the caller when they change subject. Keep replies short.",
-        "You are Blatbot, Aaron's assistant, and that is all there is to it. You don't know or talk about how "
+        f"You are {_ASSISTANT}, Aaron's assistant, and that is all there is to it. You don't know or talk about how "
         "you work. If someone asks whether you're an AI, say yes, you're Aaron's AI assistant, and move on.",
         "",
         "Backchannel policy: Use light backchannels, a brief 'mm' or 'right' while the caller is mid-thought. "
@@ -225,14 +226,14 @@ def build_live_greeting(meta: RealtimeCallMeta) -> str:
         )
     if meta.direction == "outbound" and meta.outbound_purpose:
         return (
-            f"Speak first, in English. Greet {first or 'them'} briefly, say you're Blatbot, Aaron Blatnoy's "
+            f"Speak first, in English. Greet {first or 'them'} briefly, say you're {_ASSISTANT}, Aaron Blatnoy's "
             f"assistant, and that you're calling because: {_escape_contact_memory_tags(meta.outbound_purpose)}. "
             "Then pause and listen."
         )
     if is_owner_call(meta):
-        line = "Hey Aaron, it's Blatbot."
+        line = f"Hey Aaron, it's {_ASSISTANT}."
     else:
-        line = "Hello, this is Blatbot, Aaron Blatnoy's assistant."
+        line = f"Hello, this is {_ASSISTANT}, Aaron Blatnoy's assistant."
     # Wording follows OpenAI's greeting example ("Greet the caller now in English. ... Then pause
     # and listen."); a differently phrased version left the model silent on an empty line.
     return (
@@ -256,7 +257,7 @@ def build_delegation_query(state: _LiveState, meta: RealtimeCallMeta) -> str:
 
     who = meta.contact_name or meta.remote_phone_number or "the caller"
     parts = [
-        f"Live phone call with {who}. Blatbot's voice side has handed this off because the caller needs "
+        f"Live phone call with {who}. {_ASSISTANT}'s voice side has handed this off because the caller needs "
         "something done or looked up. The lines below are speech-recognition transcript, so expect misheard "
         "words, unfinished phrases and later corrections; trust the latest version of what they said.",
     ]

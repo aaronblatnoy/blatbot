@@ -10,6 +10,7 @@ survive bridge restarts.
 
 from __future__ import annotations
 
+from inkbox_claude.instance import ASSISTANT as _ASSISTANT, ASSISTANT_UPPER as _ASSISTANT_UPPER, ASSISTANT_EMAIL as _ASSISTANT_EMAIL, SERVER_NAME as _SERVER_NAME  # noqa: F401
 import asyncio
 import json
 import logging
@@ -1134,7 +1135,7 @@ class ContactSession:
 
     HANDOFF_NOTE = (
         "Thanks! I'll confirm that with Aaron and get back to you shortly.\n\n"
-        "Blatbot\nExecutive Assistant to Aaron Blatnoy"
+        f"{_ASSISTANT}\nExecutive Assistant to Aaron Blatnoy"
     )
 
     async def _handoff_to_approver(self, tool_name: str, input_data: Dict[str, Any]) -> None:

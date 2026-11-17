@@ -40,6 +40,7 @@ never returned by the search and are stripped from anything a non-owner gets.
 
 from __future__ import annotations
 
+from inkbox_claude.instance import GRAPHITI_GROUP as _GRAPHITI_GROUP, ASSISTANT as _ASSISTANT, ASSISTANT_UPPER as _ASSISTANT_UPPER, ASSISTANT_EMAIL as _ASSISTANT_EMAIL, SERVER_NAME as _SERVER_NAME  # noqa: F401
 import asyncio
 import json
 import logging
@@ -56,7 +57,7 @@ logger = logging.getLogger(__name__)
 
 MAX_EPISODE_CHARS = 6000      # a long task result is clipped; the head carries the outcome
 MAX_FACTS = 12
-SHARED_GROUP = "blatbot"      # the one Graphiti group every chat's messages are written to
+SHARED_GROUP = _GRAPHITI_GROUP  # the one Graphiti group (GRAPHITI_GROUP, default "blatbot") every chat's messages are written to
 FETCH_FACTOR = 12             # a non-owner search over-fetches, then keeps only facts from readable chats
 MAX_FETCH = 150               # ~1.5 s at 150 on black-sky, inside RECALL_TIMEOUT
 FACT_KEYS = ("uuid", "name", "fact", "group_id", "valid_at", "invalid_at", "created_at", "expired_at", "episodes")
@@ -208,7 +209,7 @@ def episode(chat_id: str, kind: str, text: str, mode: str = "", created_at: Opti
             message_id: Optional[int] = None, assistant_name: str = "", speaker: str = "") -> Dict[str, Any]:
     """One stored message as the request body Graphiti's POST /messages takes."""
     role_type = {"inbound": "user", "outbound": "assistant"}.get(kind, "system")
-    name = assistant_name or os.getenv("ASSISTANT_NAME") or "Blatbot"
+    name = assistant_name or os.getenv("ASSISTANT_NAME") or _ASSISTANT
     owner = os.getenv("OWNER_NAME") or "the owner"
     if role_type == "assistant":
         role = name

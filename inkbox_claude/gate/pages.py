@@ -10,6 +10,7 @@ and attributes before it is stored, and it is served with a strict Content-Secur
 
 from __future__ import annotations
 
+from inkbox_claude.instance import ASSISTANT as _ASSISTANT, ASSISTANT_UPPER as _ASSISTANT_UPPER, ASSISTANT_EMAIL as _ASSISTANT_EMAIL, SERVER_NAME as _SERVER_NAME  # noqa: F401
 import html as _html
 import json
 import logging
@@ -239,7 +240,7 @@ CSP = ("default-src 'none'; style-src 'unsafe-inline'; img-src 'none'; script-sr
 
 def _title(title: str) -> str:
     t = re.sub(r"\s+", " ", (title or "").strip())[:MAX_TITLE_CHARS]
-    return t or "Blatbot"
+    return t or _ASSISTANT
 
 
 def render_page(title: str, body_html: str, created: float) -> str:
@@ -252,7 +253,7 @@ def render_page(title: str, body_html: str, created: float) -> str:
         "<meta name=\"robots\" content=\"noindex,nofollow,noarchive\">"
         "<meta name=\"referrer\" content=\"no-referrer\">"
         f"<title>{t}</title><style>{CSS}</style></head><body><div class=\"wrap\">"
-        f"<header><div class=\"brand\">Blatbot</div><h1>{t}</h1><time datetime=\"{iso}\">{when}</time></header>"
+        f"<header><div class=\"brand\">{_ASSISTANT}</div><h1>{t}</h1><time datetime=\"{iso}\">{when}</time></header>"
         f"<main>{body_html}</main></div></body></html>\n"
     )
 

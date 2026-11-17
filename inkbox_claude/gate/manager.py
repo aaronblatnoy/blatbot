@@ -8,6 +8,7 @@ Interface the gateway uses:
 
 from __future__ import annotations
 
+from inkbox_claude.instance import OWNER_NAME as _OWNER_NAME, ASSISTANT as _ASSISTANT, ASSISTANT_UPPER as _ASSISTANT_UPPER, ASSISTANT_EMAIL as _ASSISTANT_EMAIL, SERVER_NAME as _SERVER_NAME  # noqa: F401
 import asyncio
 import json
 import logging
@@ -43,7 +44,7 @@ SendFn = Callable[[str, str, str, Dict[str, Any]], Awaitable[Any]]
 
 HANDOFF_LINE = (
     "Thanks! I'll confirm that with Aaron and get back to you shortly.\n\n"
-    "Blatbot\nExecutive Assistant to Aaron Blatnoy"
+    f"{_ASSISTANT}\nExecutive Assistant to Aaron Blatnoy"
 )
 _MODE_LABEL = {
     "imessage": "iMessage", "sms": "text", "email": "email",
@@ -120,7 +121,7 @@ def _log_answer_path(request_id: Optional[int], path: str, started: float) -> No
 
 
 DEFAULT_VOICE_VOCABULARY = (
-    "Blatbot (BLAT-bot, this assistant). Add the names, places and terms your callers use, with pronunciation "
+    f"{_ASSISTANT} (BLAT-bot, this assistant). Add the names, places and terms your callers use, with pronunciation "
     "hints, by setting GATE_VOICE_VOCABULARY."
 )
 
@@ -175,7 +176,7 @@ def _parse_until(until_text: Optional[str], timezone_name: Optional[str]) -> Opt
 
 
 OWNER_THREAD = "owner"   # the one thread for the person the assistant works for
-OWNER_NAME = "Aaron Blatnoy"
+OWNER_NAME = _OWNER_NAME
 
 
 class GateSession:
@@ -2992,7 +2993,7 @@ class GateSessionManager:
         who = ownertext.person(session._sender_name() or tagged_from, session._sender())
         subject = str(meta.get("subject") or "").strip()
         return ownertext.compose(
-            "fyi", f"{who} wrote to Blatbot",
+            "fyi", f"{who} wrote to {_ASSISTANT}",
             facts=[("Where", ownertext.where(session.mode, group)), ("Subject", subject)],
             body=ownertext.quote(message, limit=0),
             tail=("Nothing needed from you. I answer in the group only when it is meant for me."
@@ -4041,7 +4042,7 @@ class GateSessionManager:
                 logger.exception("[gate] jev quota fallback failed for request #%s", req.id)
         reset_time = quota_status.get("reset_time")
         when = f" until {reset_time}" if reset_time else " until it resets"
-        message = f"Blatbot's model quota is exhausted{when}; try again after that."
+        message = f"{_ASSISTANT}'s model quota is exhausted{when}; try again after that."
         return {
             **quota_status,
             "ok": False,

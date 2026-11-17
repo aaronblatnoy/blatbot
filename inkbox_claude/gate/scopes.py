@@ -4,6 +4,7 @@ applied by Claude Code on top of every scope and cannot be widened here."""
 
 from __future__ import annotations
 
+from inkbox_claude.instance import ASSISTANT as _ASSISTANT, ASSISTANT_UPPER as _ASSISTANT_UPPER, ASSISTANT_EMAIL as _ASSISTANT_EMAIL, SERVER_NAME as _SERVER_NAME  # noqa: F401
 import os
 import logging
 from typing import Any, Dict, List, Optional
@@ -148,7 +149,7 @@ _SERVER_HOME = {
     "coolify": "the BLACK-SKY COOLIFY (Aaron's self-hosted PaaS: deployed apps, services, databases, deployments, logs)",
     "coolify-vox": "the VOX COOLIFY instance (a second self-hosted PaaS)",
     "playwright": "the PUBLIC WEB in a headless browser (only for things outside Aaron's own systems)",
-    "inkbox": "BLATBOT's OWN INKBOX (its mailbox, phone line, iMessage and address book)",
+    "inkbox": f"{_ASSISTANT_UPPER}'s OWN INKBOX (its mailbox, phone line, iMessage and address book)",
     "host": "the BLACK-SKY SERVER itself",
 }
 _VERBS = {
@@ -390,11 +391,11 @@ def blocks_requester_send(req, tool_name: str, args: dict, protected: list) -> b
 # descriptions. Tools not listed fall back to the server's description.
 TOOL_PURPOSE: Dict[str, str] = {
     "mcp__host__rows_where": "COUNT OR FILTER ROWS of a result ALREADY GATHERED (a sheet read, a calendar list, search hits) by a text they contain, optionally within one column. Exact counts; the matching rows come back. Use it after a read, never instead of one.",
-    "mcp__host__memory_search": "SEARCH BLATBOT'S LONG-TERM MEMORY (a graph of dated facts from every past conversation, any channel): who someone is, what they asked for, what was agreed, decided or done, and when. Use it to look back past the recent conversation. Read-only; not Aaron's written notes and not live state.",
+    "mcp__host__memory_search": f"SEARCH {_ASSISTANT_UPPER}'S LONG-TERM MEMORY (a graph of dated facts from every past conversation, any channel): who someone is, what they asked for, what was agreed, decided or done, and when. Use it to look back past the recent conversation. Read-only; not Aaron's written notes and not live state.",
     "mcp__host__vault_search": "SEARCH AARON'S SECOND BRAIN (his Obsidian vault of notes) for notes containing every word of a query: what he has written down about a project, a person, a decision, a preference. Read-only.",
     "mcp__host__vault_read": "READ ONE VAULT NOTE IN FULL by the path vault_search or vault_list printed, or by title. Read-only.",
     "mcp__host__vault_list": "LIST THE NOTES in Aaron's vault, all or under one folder (Projects, Areas, Daily, Reference, Inbox, Archive). Read-only.",
-    "mcp__host__host_status": "WHAT IS RUNNING ON BLACK-SKY (the server Blatbot runs on): containers, services, uptime, disk, memory, GPUs. Read-only.",
+    "mcp__host__host_status": f"WHAT IS RUNNING ON BLACK-SKY (the server {_ASSISTANT} runs on): containers, services, uptime, disk, memory, GPUs. Read-only.",
     # web
     "mcp__playwright__browser_search": "SEARCH THE PUBLIC WEB (last resort for facts that live OUTSIDE Aaron's own systems): a person's LinkedIn or employer, an outside organization's leadership, an article, a public page. Not for anything that lives in TAMID/SJBA sheets, forms, rosters, calendars or inboxes; use those tools first.",
     "mcp__playwright__browser_navigate": "OPEN A PUBLIC WEB PAGE by URL in the browser (a search result, a profile, an article). Only for things online; follow with browser_snapshot or browser_find to read it.",
@@ -432,12 +433,12 @@ TOOL_PURPOSE: Dict[str, str] = {
     "mcp__stern-drive__get_gmail_message_content": "READ ONE EMAIL in Aaron's Stern inbox in full, by message id.",
     "mcp__stern-drive__send_gmail_message": "SEND AN EMAIL from Aaron's Stern account to someone else.",
     # Inkbox (Blatbot's own mailbox, phone, contacts)
-    "mcp__inkbox__inkbox_get_contact": "LOOK UP A CONTACT in Blatbot's address book by name, email or phone: returns their email, phone and notes. First stop for 'what is X's email / number'.",
-    "mcp__inkbox__inkbox_list_contacts": "LIST Blatbot's contacts (names, emails, phones).",
-    "mcp__inkbox__inkbox_list_emails": "LIST recent emails in Blatbot's own mailbox.",
-    "mcp__inkbox__inkbox_send_email": "SEND AN EMAIL from Blatbot's mailbox to someone else.",
-    "mcp__inkbox__inkbox_send_sms": "SEND A TEXT (SMS) from Blatbot's number to someone else.",
-    "mcp__inkbox__inkbox_send_imessage": "SEND AN IMESSAGE from Blatbot's line to someone else.",
+    "mcp__inkbox__inkbox_get_contact": f"LOOK UP A CONTACT in {_ASSISTANT}'s address book by name, email or phone: returns their email, phone and notes. First stop for 'what is X's email / number'.",
+    "mcp__inkbox__inkbox_list_contacts": f"LIST {_ASSISTANT}'s contacts (names, emails, phones).",
+    "mcp__inkbox__inkbox_list_emails": f"LIST recent emails in {_ASSISTANT}'s own mailbox.",
+    "mcp__inkbox__inkbox_send_email": f"SEND AN EMAIL from {_ASSISTANT}'s mailbox to someone else.",
+    "mcp__inkbox__inkbox_send_sms": f"SEND A TEXT (SMS) from {_ASSISTANT}'s number to someone else.",
+    "mcp__inkbox__inkbox_send_imessage": f"SEND AN IMESSAGE from {_ASSISTANT}'s line to someone else.",
     # site admin
     "mcp__tamid-admin__tamid_list_board_members": "TAMID BOARD ROSTER from the website: every board member with name, title, email, bio.",
     "mcp__tamid-admin__tamid_list_members": "TAMID MEMBER ROSTER from the website: club members with names and emails.",

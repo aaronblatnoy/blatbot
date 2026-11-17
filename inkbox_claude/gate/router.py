@@ -6,6 +6,7 @@ Output schema (strict JSON):
 
 from __future__ import annotations
 
+from inkbox_claude.instance import ASSISTANT as _ASSISTANT, ASSISTANT_UPPER as _ASSISTANT_UPPER, ASSISTANT_EMAIL as _ASSISTANT_EMAIL, SERVER_NAME as _SERVER_NAME  # noqa: F401
 import asyncio
 import os
 from datetime import datetime
@@ -287,8 +288,8 @@ class Router:
             "  if they have hung up. Never state an action is done until the ledger shows it done.\n"
             "  Speech recognition mangles proper nouns. Read phone messages charitably: 'tommy', 'tamid',\n"
             "  'to meet' near club talk means TAMID; 'S J B A' means SJBA; 'blat bot', 'black bot' means\n"
-            "  Blatbot; match misheard personal names to the closest name in TASK MEMORY or the history.\n"
-            "- IDENTITY: to everyone you write to, you are Blatbot, Aaron's assistant, and nothing else.\n"
+            f"  {_ASSISTANT}; match misheard personal names to the closest name in TASK MEMORY or the history.\n"
+            f"- IDENTITY: to everyone you write to, you are {_ASSISTANT}, Aaron's assistant, and nothing else.\n"
             "  Never mention how you work or what runs behind you: no model or company names, no tools,\n"
             "  requests, scopes, routing, ledgers or approvals machinery. Say it as a person would: you\n"
             "  will check with Aaron, you did it, you could not do it. (Messages to Aaron himself may be\n"
@@ -512,7 +513,7 @@ class Router:
         return RouterOutput(reply=None, request=None)
 
     ACTION_SYSTEM = (
-        "You decide one thing for Blatbot, Aaron Blatnoy's assistant. Behind it are a computer, a web "
+        f"You decide one thing for {_ASSISTANT}, Aaron Blatnoy's assistant. Behind it are a computer, a web "
         "browser, Aaron's accounts (mail, calendars, drives, notes, websites, school site, servers) and a "
         "coding agent. Read the conversation and the new message and answer: should the assistant now go "
         "and DO something with those tools (look up, fetch, check, find out, search the web or a website, "
@@ -543,7 +544,7 @@ class Router:
         return value if isinstance(value, bool) else None
 
     GROUP_SYSTEM = (
-        "You are Blatbot, Aaron Blatnoy's assistant, sitting in a group chat. The newest message did not "
+        f"You are {_ASSISTANT}, Aaron Blatnoy's assistant, sitting in a group chat. The newest message did not "
         "name you. Decide whether you should answer it. Answer yes when it is a follow-up to something you "
         "just said or did, or a request or question that the assistant is plainly meant to pick up (for "
         "example Aaron telling you to look something up). Answer no for chatter between the people in the "
@@ -556,7 +557,7 @@ class Router:
         group judgment gave no answer (its service is failing). None on any failure, which
         keeps the old behaviour: stay quiet."""
         who = f"{sender} (the person you work for)" if from_principal else sender
-        user = (f"Your name here: {bot_name or 'Blatbot'}\nGroup: {group}\n\n"
+        user = (f"Your name here: {bot_name or _ASSISTANT}\nGroup: {group}\n\n"
                 f"Conversation so far:\n{(recent or '(none)')[-4000:]}\n\n"
                 f"New message from {who}:\n{message}")
         try:
@@ -570,7 +571,7 @@ class Router:
 
     async def phrase(self, instruction: str, facts: Dict[str, Any]) -> str:
         """Plain prose from given facts, no JSON, no decisions: the writer as a typewriter."""
-        sys_p = ("You write short plain-text messages for Blatbot, Aaron Blatnoy's assistant. Say only what the "
+        sys_p = (f"You write short plain-text messages for {_ASSISTANT}, Aaron Blatnoy's assistant. Say only what the "
                  "facts support. No markdown, no emojis, no em dashes, no lists, no ids or links unless asked.")
         user = f"{instruction}\n\nFACTS (JSON):\n{json.dumps(facts, ensure_ascii=False, default=str)}"
         return (await self._chat([{"role": "system", "content": sys_p}, {"role": "user", "content": user}],

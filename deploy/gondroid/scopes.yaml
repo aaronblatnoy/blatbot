@@ -1,0 +1,148 @@
+# Gondroid's scope registry: the professional instance starts with its own mailbox, contacts,
+# the public web and its own long-term memory. Nothing personal (no TAMID, Brightspace, Stern,
+# personal Drive or Gmail, Telegram account, vault, server or Coolify). Add scopes here as
+# professional systems are connected.
+version: 1
+where_things_live:
+- 'What happened in earlier conversations with Gondroid, on any channel (who someone is, what they asked for, what
+  was agreed, decided, sent or done, and when): Gondroid''s long-term memory. It is not live state: for what is
+  true now, read the system itself.'
+- 'The public web is only for things outside Aaron''s systems: other organizations, people''s public profiles,
+  articles, general facts.'
+- A task that only reads never needs a write capability; a task that changes something needs the write capability
+  of that system, not a browser.
+systems:
+  long_term_memory:
+    description: 'Gondroid''s long-term memory: a graph of dated facts from every past conversation it has had,
+      on any channel (who someone is, what they asked for, what was agreed, decided, sent or done, and when).
+      For looking back past the recent conversation. Not a live system.'
+    requires: graphiti
+    always:
+    - memory_read
+    leaves: {}
+  blatbot_inkbox:
+    description: 'Gondroid''s own mailbox, phone line and address book: its email, SMS and iMessage threads, sending
+      a message to a third party, contact records and notes.'
+    always: []
+    leaves:
+      inkbox_read:
+        question: Read Gondroid's own email, text or iMessage threads.
+        grants:
+        - inbox_read
+      contacts:
+        question: Look up, create or update a contact or its notes in Gondroid's address book.
+        grants:
+        - contacts
+      send_email:
+        question: Send an email to someone other than the requester.
+        grants:
+        - email_send
+      send_sms:
+        question: Send an SMS text to someone other than the requester.
+        grants:
+        - sms_send
+      send_imessage:
+        question: Send an iMessage to someone other than the requester.
+        grants:
+        - imessage_send
+  public_web:
+    description: 'The public internet, for facts that live OUTSIDE Aaron''s own systems: another organization''s
+      site, a person''s public profile, an article, a general fact.'
+    always:
+    - web
+    leaves: {}
+scopes:
+  inbox_read:
+    description: read Gondroid's own Inkbox mailbox (list recent inbound/outbound emails, read one by id) and its
+      SMS/iMessage threads
+    label: read its own email and texts
+    ask: 'read its own email and texts'
+    synonyms:
+    - check its email
+    - check its messages
+    - check its inbox
+    read: true
+    tools:
+    - mcp__inkbox__inkbox_list_emails
+    - mcp__inkbox__inkbox_get_email
+    - mcp__inkbox__inkbox_list_text_conversations
+    - mcp__inkbox__inkbox_get_text_conversation
+    - mcp__inkbox__inkbox_list_imessage_conversations
+    - mcp__inkbox__inkbox_get_imessage_conversation
+  email_send:
+    description: send email from Gondroid's own Inkbox mailbox and read that mailbox
+    label: send email from its own account
+    ask: 'send email as itself'
+    synonyms:
+    - send email
+    - send an email
+    - email them
+    read: false
+    tools:
+    - mcp__inkbox__inkbox_send_email
+    - mcp__inkbox__inkbox_list_emails
+    - mcp__inkbox__inkbox_get_email
+  imessage_send:
+    description: send iMessages from Gondroid's line and read its iMessage threads
+    label: send iMessages
+    ask: 'send iMessages as itself'
+    synonyms:
+    - send an imessage
+    read: false
+    tools:
+    - mcp__inkbox__inkbox_send_imessage
+    - mcp__inkbox__inkbox_list_imessage_conversations
+    - mcp__inkbox__inkbox_get_imessage_conversation
+  sms_send:
+    description: send SMS from Gondroid's number and read its text threads
+    label: send text messages
+    ask: 'send text messages as itself'
+    synonyms:
+    - send a text
+    - send an sms
+    read: false
+    tools:
+    - mcp__inkbox__inkbox_send_sms
+    - mcp__inkbox__inkbox_list_text_conversations
+    - mcp__inkbox__inkbox_get_text_conversation
+  contacts:
+    description: look up, create, or update Inkbox address-book contacts and their notes
+    label: look up and edit contacts
+    ask: 'look up and edit contacts'
+    synonyms:
+    - edit contacts
+    - look up a contact
+    - update a contact
+    - create a contact
+    read: true
+    tools:
+    - mcp__inkbox__inkbox_lookup_contact
+    - mcp__inkbox__inkbox_list_contacts
+    - mcp__inkbox__inkbox_get_contact
+    - mcp__inkbox__inkbox_create_contact
+    - mcp__inkbox__inkbox_update_contact
+  web:
+    description: search the public web, only when the answer lives OUTSIDE Aaron's own systems (a person's public
+      profile or employer, another organization, news, a public page).
+    label: search the public web
+    ask: 'search the public web'
+    synonyms:
+    - look it up online
+    - search the web
+    - google it
+    read: true
+    tools:
+    - WebSearch
+  memory_read:
+    description: 'look back through Gondroid''s long-term memory of past conversations (dated facts about people,
+      requests, agreements, decisions and what was done). Read-only. Each person only reaches what they may see:
+      their own conversations, unless their role grants more; Aaron reaches all of it.'
+    label: look back through past conversations
+    ask: 'look back through past conversations'
+    synonyms:
+    - what did we say
+    - earlier conversation
+    - long-term memory
+    read: true
+    tools:
+    - mcp__host__memory_search

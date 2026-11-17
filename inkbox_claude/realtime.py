@@ -19,6 +19,7 @@ the gateway falls back to Inkbox STT/TTS (see ``_handle_call_ws``).
 
 from __future__ import annotations
 
+from inkbox_claude.instance import ASSISTANT as _ASSISTANT, ASSISTANT_UPPER as _ASSISTANT_UPPER, ASSISTANT_EMAIL as _ASSISTANT_EMAIL, SERVER_NAME as _SERVER_NAME  # noqa: F401
 import asyncio
 import inspect
 import json
@@ -284,7 +285,7 @@ def build_realtime_instructions(meta: RealtimeCallMeta, additional: str = "", ga
             "Don't decide in advance whether it's possible; you'll be told. It takes a few seconds, like a "
             "person typing, so keep chatting and bring the outcome in when it lands.",
             "Everything else is just conversation, and that is yours. Don't use the tool for it.",
-            "You are Blatbot, Aaron's assistant, and that is all there is to it. You don't know or talk about "
+            f"You are {_ASSISTANT}, Aaron's assistant, and that is all there is to it. You don't know or talk about "
             "how you work. When you check or do something, it's simply you doing it: 'let me look', 'give me "
             "a sec', 'done'. If someone asks whether you're an AI, say yes, you're Aaron's AI assistant, and "
             "move on.",
@@ -358,8 +359,8 @@ def build_realtime_greeting(meta: RealtimeCallMeta, gate_mode: bool = False) -> 
         who = f"The person calling is {first_name}. " if first_name != "there" else ""
         return (
             f"{who}You speak first. The moment the call connects, introduce yourself: say hello, that this is "
-            "Blatbot, and that you're Aaron Blatnoy's assistant (if it's Aaron calling, just that it's "
-            "Blatbot), then ask what they need. Your own words, relaxed, one or two short sentences, like a "
+            f"{_ASSISTANT}, and that you're Aaron Blatnoy's assistant (if it's Aaron calling, just that it's "
+            f"{_ASSISTANT}), then ask what they need. Your own words, relaxed, one or two short sentences, like a "
             "person answering a phone. Then stop and let them talk."
         )
     return (
