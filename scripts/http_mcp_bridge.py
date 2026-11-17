@@ -18,7 +18,9 @@ AUTH = os.environ.get("MCP_BRIDGE_AUTH", "")
 
 
 def post(msg: dict):
-    headers = {"Content-Type": "application/json", "Accept": "application/json, text/event-stream"}
+    # A named User-Agent: Cloudflare (the brain's public Worker) refuses the bare Python-urllib one (error 1010).
+    headers = {"Content-Type": "application/json", "Accept": "application/json, text/event-stream",
+               "User-Agent": "inkbox-claude-mcp-bridge/1.0"}
     if AUTH:
         headers["Authorization"] = AUTH
     req = urllib.request.Request(URL, data=json.dumps(msg).encode(), headers=headers, method="POST")
