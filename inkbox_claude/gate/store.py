@@ -1773,6 +1773,64 @@ class Store:
             self._db.commit()
             return cur.rowcount == 1
 
+    # -- console views (read only) ----------------------------------------
+    def console_inbox(self, limit: int = 200) -> List[Dict[str, Any]]:
+        """Newest inbox events with a short preview of the text, for the console."""
+        with self._lock:
+            rows = self._db.execute(
+                "SELECT id,chat_id,lane,source,kind,mode,status,attempts,error,created_at,"
+                "started_at,finished_at,substr(body,1,240) AS preview "
+                "FROM inbox_events ORDER BY id DESC LIMIT ?", (int(limit),)).fetchall()
+        return [dict(r) for r in rows]
+
+    def console_outbox(self, limit: int = 200) -> List[Dict[str, Any]]:
+        """Newest outbox rows with a short preview of the text, for the console."""
+        with self._lock:
+            rows = self._db.execute(
+                "SELECT id,chat_id,target,mode,kind,status,attempts,last_error,not_before,"
+                "created_at,sent_at,substr(text,1,240) AS preview "
+                "FROM outbox ORDER BY id DESC LIMIT ?", (int(limit),)).fetchall()
+        return [dict(r) for r in rows]
+
+    def console_followups(self, limit: int = 100) -> List[Dict[str, Any]]:
+        """Pending timers first (soonest due), then the most recent finished ones."""
+        if not getattr(self, "followups_available", True):
+            return []
+        with self._lock:
+            pending = self._db.execute(
+                "SELECT * FROM followups WHERE status='pending' ORDER BY due_at, id").fetchall()
+            done = self._db.execute(
+                "SELECT * FROM followups WHERE status<>'pending' ORDER BY id DESC LIMIT ?",
+                (int(limit),)).fetchall()
+        return [dict(r) for r in pending] + [dict(r) for r in done]
+
+    def console_chat_names(self, limit: int = 3000) -> Dict[str, str]:
+        """chat_id -> the name of the last person who asked something there."""
+        with self._lock:
+            rows = self._db.execute(
+                "SELECT chat_id,sender_name FROM requests WHERE sender_name IS NOT NULL "
+                "AND sender_name<>'' ORDER BY id DESC LIMIT ?", (int(limit),)).fetchall()
+        names: Dict[str, str] = {}
+        for r in rows:
+            names.setdefault(str(r["chat_id"]), str(r["sender_name"]))
+        return names
+
+    def console_task_requests(self, task_ids: List[int]) -> Dict[int, List[Request]]:
+        """Every request of the given tasks, newest first, keyed by task id."""
+        ids = [int(t) for t in task_ids if t is not None]
+        if not ids:
+            return {}
+        with self._lock:
+            rows = self._db.execute(
+                "SELECT id,task_id FROM requests WHERE task_id IN (" + ",".join("?" * len(ids)) + ") "
+                "ORDER BY id DESC", tuple(ids)).fetchall()
+        out: Dict[int, List[Request]] = {}
+        for r in rows:
+            req = self.get_request(int(r["id"]))
+            if req is not None:
+                out.setdefault(int(r["task_id"]), []).append(req)
+        return out
+
     def fail_interrupted_outbox(self) -> int:
         """A crashed send may already have reached its channel, so never repeat it."""
         with self._lock:

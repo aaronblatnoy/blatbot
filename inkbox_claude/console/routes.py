@@ -331,6 +331,25 @@ async def get_health(request: web.Request) -> web.StreamResponse:
     return _json(api.health(request.app["console.gateway"], manager.store))
 
 
+def _limit(request: web.Request, default: int, cap: int) -> int:
+    try:
+        return max(1, min(cap, int(request.query.get("limit", default))))
+    except ValueError:
+        raise api.ValidationError("limit must be an integer") from None
+
+
+async def get_inbox(request: web.Request) -> web.StreamResponse:
+    return _json(api.inbox_view(_manager(request).store, _limit(request, 200, 1000)))
+
+
+async def get_outbox(request: web.Request) -> web.StreamResponse:
+    return _json(api.outbox_view(_manager(request).store, _limit(request, 200, 1000)))
+
+
+async def get_followups(request: web.Request) -> web.StreamResponse:
+    return _json(api.followups_view(_manager(request).store, _limit(request, 100, 1000)))
+
+
 async def get_events(request: web.Request) -> web.StreamResponse:
     _manager(request)
     return await events.event_stream(request)
@@ -413,6 +432,9 @@ def register(app: web.Application, gateway: Any) -> None:
     app.router.add_get("/console/api/schedules/{id}/repair", _endpoint(get_schedule_repair))
     app.router.add_post("/console/api/schedules/repair", _endpoint(post_schedules_repair, mutation=True))
     app.router.add_get("/console/api/health", _endpoint(get_health))
+    app.router.add_get("/console/api/inbox", _endpoint(get_inbox))
+    app.router.add_get("/console/api/outbox", _endpoint(get_outbox))
+    app.router.add_get("/console/api/followups", _endpoint(get_followups))
     app.router.add_get("/console/api/settings", _endpoint(get_settings))
     app.router.add_post("/console/api/settings", _endpoint(post_settings, mutation=True))
     app.router.add_get("/console/api/groups", _endpoint(get_groups))
@@ -428,6 +450,7 @@ def register(app: web.Application, gateway: Any) -> None:
         "/console/api/scopes", "/console/api/scopes/breakdown", "/console/api/requests",
         "/console/api/requests/decide", "/console/api/tasks", "/console/api/health",
         "/console/api/settings", "/console/api/groups", "/console/api/groups/mode",
+        "/console/api/inbox", "/console/api/outbox", "/console/api/followups",
     ):
         app.router.add_route("OPTIONS", path, _options)
     app.router.add_route("OPTIONS", "/console/events", _options)
