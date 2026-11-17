@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 from typing import Any, Dict, Iterable
 
 from .jevagent import is_destructive, is_outbound_message, recipients_of
@@ -15,13 +16,68 @@ from . import outcomes
 # any other. Refusing it leaves a run unable to see the tools it was given.
 HARNESS_TOOLS = frozenset({"ToolSearch"})
 
+# Claude Code's built-in file readers. They are in no scope: a run may use them only on
+# the files its own tools wrote for it (run_read_dirs), never anywhere else on the box.
+FILE_READ_TOOLS = frozenset({"Read", "Grep", "Glob"})
+
+# Where the Playwright MCP writes page snapshots it could not return inline (page-*.yml).
+PLAYWRIGHT_OUTPUT_DIR = os.path.join(os.path.expanduser("~"), ".playwright-mcp")
+
+
+def run_read_dirs(hook_input: Dict[str, Any], allowed: Iterable[str]) -> list[str]:
+    """The directories holding this run's own tool output.
+
+    Claude Code spills a tool result too large to return into
+    <transcript dir>/<session id>/tool-results/ and tells the model to Read or Grep it
+    there; the Playwright MCP does the same with ~/.playwright-mcp. Both are output of a
+    tool the run already holds, so reading them back is part of using that tool."""
+    dirs: list[str] = []
+    transcript = str(hook_input.get("transcript_path") or "")
+    session_id = str(hook_input.get("session_id") or "")
+    if transcript and session_id and os.path.basename(transcript) == f"{session_id}.jsonl":
+        dirs.append(os.path.join(os.path.dirname(transcript), session_id, "tool-results"))
+    if any(str(t).startswith("mcp__playwright__") for t in allowed):
+        dirs.append(PLAYWRIGHT_OUTPUT_DIR)
+    return dirs
+
+
+def _inside(path: str, dirs: Iterable[str]) -> bool:
+    if not path or not os.path.isabs(path):
+        return False
+    real = os.path.realpath(path)
+    for d in dirs:
+        root = os.path.realpath(d)
+        if real == root or real.startswith(root + os.sep):
+            return True
+    return False
+
+
+def reads_own_output(name: str, args: Dict[str, Any], dirs: Iterable[str]) -> bool:
+    """True when a built-in Read/Grep/Glob touches only the run's own tool output."""
+    dirs = list(dirs)
+    if name not in FILE_READ_TOOLS or not dirs:
+        return False
+    if name == "Read":
+        return _inside(str(args.get("file_path") or ""), dirs)
+    # Grep and Glob without a path search the working directory: not the run's output.
+    if not _inside(str(args.get("path") or ""), dirs):
+        return False
+    if name == "Glob":
+        pattern = str(args.get("pattern") or "")
+        if pattern.startswith("/") or ".." in pattern.replace("\\", "/").split("/"):
+            return False
+    return True
+
 
 def decide(req: Any, name: str, args: Dict[str, Any], allowed: Iterable[str], *,
            from_owner: bool, protected: list[str], manager: Any,
-           confirm_sends: bool, owner_handle: Any) -> tuple[str, str, str]:
+           confirm_sends: bool, owner_handle: Any,
+           read_dirs: Iterable[str] = ()) -> tuple[str, str, str]:
     """Return (allow, deny, or defer), a plain reason, and the hold kind."""
     allowed_set = set(allowed)
     if name in HARNESS_TOOLS:
+        return "allow", "", ""
+    if name not in allowed_set and reads_own_output(name, args, read_dirs):
         return "allow", "", ""
     if name.startswith("mcp__host__admin_") and not from_owner:
         return "deny", "Only Aaron, as the verified commander, can change Blatbot's own settings.", "commander_only"
