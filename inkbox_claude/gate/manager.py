@@ -846,7 +846,7 @@ class GateSession:
                 out.request = RouterRequest(
                     prompt=self.build_task_prompt(body, prior, task),
                     scopes=["web"],
-                    summary=str(task.get("title") or wording.fallback_title_from_message(message)),
+                    summary=(ownertext.strip_group_tag(task.get("title") or "") or wording.fallback_title_from_message(message)),
                     counterpart=emails[0] if (approver and emails) else None)
                 await self.jev_scopes(out, strict=True)
                 await self.jev_knowledge(out)
@@ -2003,7 +2003,8 @@ class GateSession:
         req, created = self.m.store.create_request_once(
             chat_id=self.chat_id, sender=self._sender(), sender_name=self._sender_name(), mode=self.mode,
             subject=str(self.reply_meta.get("subject") or ""), original_message=body,
-            summary=out.request.summary, scopes=out.request.scopes, prompt=out.request.prompt,
+            summary=ownertext.strip_group_tag(out.request.summary) or out.request.summary,
+            scopes=out.request.scopes, prompt=out.request.prompt,
             state="approved" if (approver or trusted) else "pending", task_id=task["id"],
             inbound_id=self.inbound_id,
         )
@@ -2526,6 +2527,12 @@ class GateSessionManager:
         request (runguard) to anyone but Aaron is not sent but held for his exact yes
         (GATE_HOLD_SENDS_TO_OTHERS); hold_exempt is for the short holding notice only."""
         text = wording.plain_dashes(text)
+        if mode != "email":
+            # The name-and-title signature is for email only. The gateway strips it at
+            # send too; stripping here keeps the outbox row, the held copy and the
+            # recorded message identical to what actually goes out.
+            from ..signoff import strip_signoff
+            text = strip_signoff(text)
         if self._is_owner_target(target, meta):
             # Aaron, 2026-11-18: no decorative symbols in anything Blatbot sends him.
             text = chatreply.ORNAMENT_RE.sub("", text).replace(" \n", "\n")
@@ -3000,12 +3007,26 @@ class GateSessionManager:
         here = str(origin.chat_id or "")
         return bool(here) and here in (str(target or ""), str(chat_id or ""))
 
-    @staticmethod
-    def _recipient_label(target: str, meta: Dict[str, Any]) -> str:
+    def _recipient_label(self, target: str, meta: Dict[str, Any]) -> str:
+        """Who a message goes to, by name only: the group title or the person's name.
+        A chat id, a UUID or a provider handle is never shown; a phone number or email
+        address only when no name is known at all."""
         contact = meta.get("contact") if isinstance(meta.get("contact"), dict) else {}
         name = str(meta.get("group_title") or meta.get("name") or contact.get("name") or "").strip()
+        if not name:
+            try:
+                route = self.store.thread_route(str(target)) or {}
+                rmeta = dict(route.get("meta") or {})
+                name = str(rmeta.get("group_title") or rmeta.get("name") or "").strip()
+            except Exception:
+                name = ""
+        if name:
+            return " ".join(name.split())
         address = str(meta.get("to") or meta.get("conversation_id") or target).strip()
-        return f"{name} ({address})" if name and name != address else address
+        address = address.split(":", 1)[-1] if re.match(r"^[a-z_]+:", address) else address
+        if chatreply.UUID_RE.search(address) or chatreply.HEX_ID_RE.search(address):
+            return "someone"
+        return address
 
     async def hold_message(self, origin: Request, target: str, text: str, mode: str,
                            meta: Dict[str, Any], *, chat_id: str = "", kind: str = "reply") -> Request:
@@ -3031,11 +3052,11 @@ class GateSessionManager:
             state="pending", task_id=self.store.task_id_for_request(origin.id), bypass_dedupe=True)
         self.store.set_state(req.id, "pending", status={"held_message": held})
         logger.info("[gate] #%s: %s message to %s held for Aaron as #%s", origin.id, mode, target, req.id)
-        facts = [("Channel", mode), ("To", label), ("From", f"#{origin.id}")]
+        facts = [("To", label), ("On", ownertext.SURFACE.get(str(mode or "").lower(), str(mode or "")))]
         if files:
             facts.append(("Attachments", ", ".join(files)))
         await self.send_to_approver(ownertext.compose(
-            "held", f"Held for your yes (#{req.id})", facts=facts,
+            "held", "A message waiting for your yes", facts=facts,
             body=f"Nothing has been sent. This is exactly what would go out:\n\n{text}",
             handle=ownertext.reply_handle(req.id)), kind="approval")
         return req
@@ -3352,7 +3373,7 @@ class GateSessionManager:
         # title and (via the "else by its request summary" rule two lines down, when the
         # router proposed none) the request's own summary.
         fallback = wording.fallback_title_from_message(message)
-        summary = (req.summary if req else "") or fallback or "Untitled task"
+        summary = ownertext.strip_group_tag(req.summary if req else "") or fallback or "Untitled task"
         sender = session._sender()
         sender_name = session._sender_name() or sender
         approver = session.is_approver()
@@ -3378,7 +3399,8 @@ class GateSessionManager:
             if found:
                 chosen = found[0]
         if chosen is None:
-            title = (out.task_title or "").strip() or summary
+            # Only the person's own words: never the group marker or its policy lines.
+            title = ownertext.strip_group_tag((out.task_title or "").strip() or summary) or fallback
             if title == "Untitled task" and fallback:
                 title = fallback
             chosen = self.store.create_task(title)
@@ -3518,7 +3540,7 @@ class GateSessionManager:
         if c.get("kind") == "send":
             # Not a summary of a message: the message. He approves the words that will go out.
             full_text = ownertext.compose(
-                "held", f"Held for your yes (#{req.id})",
+                "held", "A message waiting for your yes",
                 facts=[("Schedule", schedule_title)],
                 body=f"Nothing has been sent. This is what would go out:\n\n{_draft_text(shown)}",
                 handle=ownertext.reply_handle(req.id))

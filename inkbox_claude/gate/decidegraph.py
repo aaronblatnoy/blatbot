@@ -24,7 +24,7 @@ from typing import Any, Dict, List, Optional, TypedDict
 from langchain_core.runnables import RunnableConfig
 from langgraph.graph import END, START, StateGraph
 
-from . import wording
+from . import ownertext, wording
 
 logger = logging.getLogger(__name__)
 
@@ -243,7 +243,7 @@ async def build_request(state: DecideState, config: RunnableConfig) -> Dict[str,
     req = RouterRequest(
         prompt=s.build_task_prompt(state["body"], state["prior"], task),
         scopes=["web"],
-        summary=str(task.get("title") or wording.fallback_title_from_message(state["message"])),
+        summary=(ownertext.strip_group_tag(task.get("title") or "") or wording.fallback_title_from_message(state["message"])),
         counterpart=emails[0] if (s.is_approver() and emails) else None)
     return {"request": req}
 

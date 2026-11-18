@@ -460,7 +460,8 @@ _PATTERNS: List[Tuple[str, re.Pattern]] = [(a, re.compile(p, re.I)) for a, p in 
 def clean(text: str) -> str:
     """The message without a group tag line, a leading "blatbot," or @mention, and
     trailing punctuation or "please"."""
-    t = _TAG_RE.sub("", str(text or ""), count=1)
+    from .ownertext import strip_group_tag
+    t = _TAG_RE.sub("", strip_group_tag(text), count=1)
     t = " ".join(t.replace("’", "'").split())
     t = _LEAD_RE.sub("", t)
     return _TAIL_RE.sub("", t).strip()
