@@ -3205,6 +3205,9 @@ class GateSessionManager:
         meta = session.reply_meta or {}
         if meta.get("conversation_kind") != "group":
             return False
+        own = re.sub(r"\D", "", str(getattr(self, "approver_phone", "") or ""))[-10:]
+        if own and any(re.sub(r"\D", "", str(n))[-10:] == own for n in (meta.get("participants") or [])):
+            return True
         first = OWNER_NAME.split()[0].lower()
         try:
             names = self.store._group_member_names(session.record_id)
@@ -3232,8 +3235,12 @@ class GateSessionManager:
                   "comes as its own text."))
 
     async def notify_inbound(self, session: GateSession, body: str) -> None:
+        meta = session.reply_meta or {}
+        if meta.get("conversation_kind") == "group" or knowledge.meta_is_group(meta):
+            # Group chatter is never copied to Aaron. He hears about a group only
+            # when something needs his yes, which comes as its own text.
+            return
         if self.owner_in_group(session):
-            # He is in that group and already sees the message there.
             return
         try:
             await self.send_to_approver(self.fyi_text(session, body), kind="notice")

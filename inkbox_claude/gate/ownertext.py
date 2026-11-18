@@ -46,6 +46,18 @@ SURFACE = {
 }
 
 _GROUP_TAG_RE = re.compile(r"^\s*\[(telegram|imessage|sms|whatsapp) group:([^\]]*)\]\s*", re.I)
+# The Inkbox-native group marker ("[inkbox:group_whatsapp conversation_id=... from=...
+# group='...' participants=... | ...]") and the fixed policy lines that follow it. Both
+# are for the run. Aaron is never shown them, or the phone numbers inside them.
+_NATIVE_TAG_RE = re.compile(r"^\s*\[inkbox:group_(?:whatsapp|imessage|sms)\b([^\]]*)\]\s*", re.I)
+_NATIVE_GROUP_RE = re.compile(r"""\bgroup=(?:'([^']*)'|"([^"]*)")""")
+_NATIVE_FROM_RE = re.compile(r"\bfrom=(\S+)")
+_NATIVE_POLICY_STARTS = (
+    "Group WhatsApp response policy:", "Group iMessage response policy:", "Group SMS response policy:",
+    "Reply only when the latest message clearly addresses",
+    "Treat ordinary group chatter as context only.",
+    "If no visible reply is warranted, return exactly [SILENT].",
+)
 _DASH_RE = re.compile(r"[ \t]*[—―][ \t]*")
 _EN_DASH_SPACED_RE = re.compile(r"[ \t]+–[ \t]+")
 _SPACES_RE = re.compile(r"[ \t]+")
@@ -80,6 +92,15 @@ def split_group_tag(text: object) -> Tuple[str, str, str]:
     for the run, never for Aaron. Returns (group title, sender name, the message alone);
     the first two are "" when the text carries no note."""
     raw = str(text or "")
+    native = _NATIVE_TAG_RE.match(raw)
+    if native:
+        inner = native.group(1)
+        g = _NATIVE_GROUP_RE.search(inner)
+        f = _NATIVE_FROM_RE.search(inner)
+        rest = [ln for ln in raw[native.end():].split("\n")]
+        while rest and (not rest[0].strip() or rest[0].strip().startswith(_NATIVE_POLICY_STARTS)):
+            rest.pop(0)
+        return (g.group(1) or g.group(2) or "").strip() if g else "", f.group(1) if f else "", "\n".join(rest).strip()
     m = _GROUP_TAG_RE.match(raw)
     if not m:
         return "", "", raw.strip()

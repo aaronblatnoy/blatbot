@@ -290,7 +290,8 @@ _GROUP_TAG_RE = re.compile(r"^\s*\[(?:telegram|imessage|sms|whatsapp) group:[^\]
 
 def strip_group_tag(text: str) -> str:
     """`text` without the bridge's group routing tag, trimmed."""
-    return _GROUP_TAG_RE.sub("", text or "", count=1).strip()
+    from . import ownertext
+    return _GROUP_TAG_RE.sub("", ownertext.strip_group_tag(text or ""), count=1).strip()
 
 
 _DAY_WORDS = r"(today|tomorrow|tonight)"

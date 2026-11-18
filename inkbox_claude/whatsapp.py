@@ -240,6 +240,7 @@ async def _receive_once(gateway, envelope: Dict[str, Any]):
         "contact_memories": memories,
         "conversation_kind": "group" if group else "direct",
         "message_id": message_id,
+        "participants": [str(n) for n in participants] if group else [],
     }
     if group:
         if group_name:
