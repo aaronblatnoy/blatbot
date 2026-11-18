@@ -1071,3 +1071,12 @@ def health_line(data: Dict[str, Any], *, pending: int) -> str:
              f"{errors} recent error" + ("" if errors == 1 else "s"),
              f"{pending} waiting on you"]
     return "; ".join(parts) + "."
+
+
+def group_role_skipped(names: List[str]) -> str:
+    return "Skipped (no unique person in People): " + _names(names) + "."
+
+
+def hold_group_role(title: str, role: str, names: List[str], skipped: List[str]) -> str:
+    ask = f"Give the {role} role to {_names(names)} in {title}? These are the members found in stored chat history."
+    return ask + ("\n" + group_role_skipped(skipped) if skipped else "")

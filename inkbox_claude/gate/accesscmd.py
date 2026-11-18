@@ -485,6 +485,10 @@ def match(text: str, store: Any) -> Optional[Dict[str, Optional[str]]]:
         if person is not None and (_norm(person) in _PRONOUNS or not person):
             continue
         if action in ("add_role", "remove_role", "set_role"):
+            # A group-wide ask belongs to admincmd's held group command (or its
+            # contextual translator), never to the single-person path.
+            if re.search(r"\beveryone\b", person or "", re.I):
+                continue
             if resolve_role(store, g.get("role") or "") is None:
                 continue
         elif action in ("grant", "revoke"):

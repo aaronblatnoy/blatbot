@@ -1777,6 +1777,29 @@ class GateSession:
                 logger.info("[gate %s] access command: %s", self.chat_id, access["action"])
                 reply = accesscmd.handle(self.m.store, SimpleNamespace(**access), here=self._here())
                 return await self.send_to_sender(chatreply.finish(reply), role="answer")
+            if not self.in_group():
+                from . import adminphrase
+                if adminphrase.relevant(body):
+                    from types import SimpleNamespace
+                    phrases = await adminphrase.translate(
+                        body, self.m.store.history(self.record_id, limit=8), self.m.store,
+                        model_call=getattr(self.m.router, "_chat", None))
+                    replies = []
+                    for phrase in phrases:
+                        admin = admincmd.match(phrase, self.m.store)
+                        access = accesscmd.match(phrase, self.m.store) if admin is None else None
+                        if admin is not None:
+                            ctx = SimpleNamespace(store=self.m.store, chat_id=self.record_id, here=self._here(),
+                                                  manager=self.m, session=self,
+                                                  directory_client=getattr(self.m, "directory_client", None))
+                            replies.append(await admincmd.handle(ctx, admin))
+                        elif access is not None:
+                            replies.append(accesscmd.handle(self.m.store, SimpleNamespace(**access), here=self._here()))
+                    if replies:
+                        reply = "\n\n".join(replies)
+                        # Keep every result and approval handle in a multi-command reply.
+                        return await self.send_to_sender(
+                            chatreply.finish(reply, cap=max(14, len(reply.splitlines()))), role="answer")
         if not system_note and not approver and admincmd.refuse_for_non_owner(body, self.m.store):
             # Someone else using one of Aaron's admin phrases ("delete the interns role",
             # "show pending requests"): one plain refusal, nothing changed, and no router or
