@@ -98,6 +98,9 @@ _PATTERNS: List[Any] = [(a, re.compile(p, re.I)) for a, p in [
     ("schedule_report", r"^(?P<how>report every (?:time|run)|only report changes) (?:for|on) (?:the )?(?P<target>.+?)(?: schedule| job)?$"),
     ("role_notes", r"^set (?:the )?(?P<role>.+?) role'?s? notes? (?:access )?to (?P<level>none|nothing|all|everything)$"),
     ("role_memory", r"^set (?:the )?(?P<role>.+?) role'?s? memory (?:access )?to (?P<level>own|their own|own chats|groups|group chats|all|everything)$"),
+    ("group_role", r"^add everyone in (?P<group>.+?) to (?:be )?(?:the |an? )?(?P<role>.+?)(?: role)?$"),
+    ("group_role", r"^make everyone in (?P<group>.+?) (?:an?|the) (?P<role>.+?)(?: role)?$"),
+    ("group_role", r"^give everyone in (?P<group>.+?) (?:the|an?) (?P<role>.+?) role$"),
     ("role_create", r"^(?:create|make|add|start) (?:me )?(?:a |an |a new |an new |the )?(?:new )?role (?:called|named|for) " + _NAME_RE + r"$"),
     ("role_create", r"^(?:create|make|add) (?:a |an )?(?:new )?" + _NAME_RE + r" role$"),
     ("role_create", r"^new role[: ] ?" + _NAME_RE + r"$"),
@@ -210,7 +213,15 @@ def match(text: str, store: Any) -> Optional[Dict[str, Any]]:
             if found is None:
                 continue
             return {"action": "schedule_do", "sact": {"run": "run_now", "fix": "repair"}.get(sact, sact), "target": g.get("target")}
+        if action == "group_role":
+            group = store.find_group_chat_by_name(g["group"])
+            role = accesscmd.resolve_role(store, g["role"])
+            if group is None or role is None:
+                continue
+            return {"action": action, "group": group, "role": role}
         if action == "role_create":
+            if re.search(r"\beveryone\b| to be ", t, re.I):
+                continue
             name = (g.get("name") or "").strip()
             if not name or name.lower() in ("new", "a", "an", "the") or " role" in name.lower():
                 continue
@@ -545,6 +556,27 @@ async def apply_hold(manager: Any, hold: Dict[str, Any]) -> str:
     store = manager.store
     kind, pl = hold.get("kind"), hold.get("payload") or {}
     try:
+        if kind == "group_role":
+            if pl["role"] == accesscmd.COMMANDER_ROLE:
+                return wording.COMMANDER_NOT_FROM_CHAT
+            if not any(r["name"] == pl["role"] for r in store.roles()):
+                return wording.role_unknown(pl["role"], [r["name"] for r in store.roles()])
+            replies = []
+            for saved in pl["people"]:
+                person = store.get_person(saved["id"])
+                if person is None:
+                    replies.append(wording.person_not_found(saved["display"]))
+                    continue
+                old_roles, old_scopes = accesscmd._effective(store, person)
+                held = role_names(person.get("role"))
+                if pl["role"] not in held:
+                    held.append(pl["role"])
+                console_api.update_person_endpoint(store, {"id": person["id"], "role": ", ".join(held)})
+                replies.append(accesscmd.person_line(store, store.get_person(person["id"]),
+                                                    old_roles=old_roles, old_scopes=old_scopes))
+            if pl.get("skipped"):
+                replies.append(wording.group_role_skipped(pl["skipped"]))
+            return "\n".join(replies)
         if kind == "role_delete":
             name = pl["role"]
             members = [m.get("person") or "" for m in console_api._role_members(store, name)]
@@ -609,6 +641,29 @@ def role_rename(store: Any, role_text: str, new_text: str) -> str:
         return wording.change_refused(str(exc))
     return _role_state(store, new)[:-1] + f" (was called {name}).\n" + wording.undo_line(
         f"rename the {new} role to {name}")
+
+
+def group_role(ctx: Any, group: Dict[str, Any], role: str) -> str:
+    if role == accesscmd.COMMANDER_ROLE:
+        return wording.COMMANDER_NOT_FROM_CHAT
+    people, skipped = [], []
+    seen = set()
+    for member in ctx.store._group_member_names(group["chat_id"]):
+        matches = accesscmd.find_people(ctx.store, member)
+        if len(matches) != 1:
+            skipped.append(member)
+            continue
+        person = matches[0]
+        if person["id"] not in seen:
+            seen.add(person["id"])
+            people.append({"id": person["id"], "display": person["display"]})
+    if not people:
+        return wording.change_refused("no group members could be resolved to one person in People") + (
+            "\n" + wording.group_role_skipped(skipped) if skipped else "")
+    payload = {"role": role, "people": sorted(people, key=lambda p: p["id"]), "skipped": sorted(skipped)}
+    return open_hold(ctx, "group_role", payload,
+                     ask=wording.hold_group_role(group["title"], role, [p["display"] for p in payload["people"]],
+                                                payload["skipped"]))
 
 
 def role_delete(ctx: Any, role_text: str) -> str:
@@ -967,6 +1022,7 @@ async def handle(ctx: Any, cmd: Dict[str, Any]) -> str:
     if action == "guide":
         return guide_for(cmd.get("area") or "overview", store, getattr(ctx, "manager", None))
     sync_actions = {
+        "group_role": lambda: group_role(ctx, cmd["group"], cmd["role"]),
         "role_rename": lambda: role_rename(store, cmd.get("role") or "", cmd.get("name") or ""),
         "role_delete": lambda: role_delete(ctx, cmd.get("role") or ""),
         "role_add": lambda: role_scopes(ctx, cmd.get("role") or "", cmd.get("abilities") or "", add=True),

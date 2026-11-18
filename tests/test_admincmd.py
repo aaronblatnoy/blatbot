@@ -698,3 +698,119 @@ def test_a_fired_follow_up_is_claimed_once_and_cannot_be_snoozed_after(tmp_path)
     assert store.snooze_followup(fid, time.time() + 3600) is None
     reopened = Store(str(tmp_path / "gate.db"))
     assert reopened.get_followup(fid)["status"] == "fired", "the claim survives a restart"
+
+
+@pytest.mark.parametrize("phrase", [
+    "add everyone in Board chat to the corgi teammate role",
+    "make everyone in Board chat a corgi teammate",
+    "give everyone in Board chat the corgi teammate role",
+    "add everyone in Board chat to be a corgi teammate role",
+])
+def test_group_role_hold_freezes_named_people(tmp_path, monkeypatch, phrase):
+    store = make_store(tmp_path)
+    seed(store)
+    monkeypatch.setattr(store, "find_group_chat_by_name", lambda name: (
+        {"chat_id": "board", "title": "Board chat"} if name == "Board chat" else None))
+    members = ["Stanley Rabkin", "Unknown Member"]
+    monkeypatch.setattr(store, "_group_member_names", lambda chat: members)
+    cmd = admincmd.match(phrase, store)
+    assert cmd["action"] == "group_role"
+    reply = run(admincmd.handle(ctx_for(store), cmd))
+    assert "Stanley Rabkin" in reply and "Unknown Member" in reply and "Skipped" in reply
+    assert accesscmd.find_people(store, "Stanley")[0]["role"] == "general"
+    hold = store.pending()[0].status["admin_hold"]
+    store.set_trust("telegram:222", person="Dana Scully", role="general")
+    members.append("Dana Scully")
+    calls = []
+    real_update = console_api.update_person_endpoint
+    def update(s, payload):
+        calls.append(payload)
+        return real_update(s, payload)
+    monkeypatch.setattr(console_api, "update_person_endpoint", update)
+    result = run(admincmd.apply_hold(SimpleNamespace(store=store), hold))
+    assert len(calls) == 1 and "Stanley Rabkin" in result
+    assert "corgi teammate" in accesscmd.find_people(store, "Stanley")[0]["role"]
+    assert accesscmd.find_people(store, "Dana")[0]["role"] == "general"
+
+
+def test_group_role_and_role_create_do_not_claim_missing_targets(tmp_path):
+    store = make_store(tmp_path)
+    seed(store)
+    assert admincmd.match("add everyone in Nowhere to the corgi teammate role", store) is None
+    assert admincmd.match("add everyone in that gc to be a TAMID board role", store) is None
+    assert admincmd.match("add interns to be advisors role", store) is None
+
+
+def test_adminphrase_catalogue_covers_all_actions():
+    from inkbox_claude.gate import adminphrase
+    assert {a for a, _ in admincmd._PATTERNS + accesscmd._PATTERNS} <= adminphrase.CATALOGUE.keys()
+
+
+@pytest.mark.parametrize("response,expected", [
+    ('["list roles", "list roles"]', ["list roles"]), ('[]', []),
+    ('{"command":"list roles"}', []), ('[12]', []), ('not json', []),
+])
+def test_adminphrase_injectable_call(tmp_path, response, expected):
+    from inkbox_claude.gate import adminphrase
+    store = make_store(tmp_path)
+    seed(store)
+    calls = []
+    async def model(messages, **kwargs):
+        calls.append(messages)
+        assert "that gc" in messages[1]["content"]
+        assert "Board chat" in messages[1]["content"]
+        assert "corgi teammate" in messages[1]["content"]
+        return response
+    assert run(adminphrase.translate("change that gc mode", [{"text": "Board chat"}], store,
+                                     model_call=model)) == expected
+    assert len(calls) == 1
+
+
+def test_adminphrase_dispatch_joins_and_drops_unmatched(tmp_path):
+    m, sent = make_manager(tmp_path)
+    seed(m.store)
+    calls = []
+    async def model(*args, **kwargs):
+        calls.append(args)
+        return '["create a role called interns", "not a command", "create a role called advisors"]'
+    m.router._chat = model
+    aaron(m, "can we set up roles for interns plus advisors")
+    assert len(calls) == 1 and not m.router.calls
+    assert "interns:" in last_text(sent) and "\n\nadvisors:" in last_text(sent)
+    assert {"interns", "advisors"} <= {r["name"] for r in m.store.roles()}
+
+
+def test_adminphrase_timeout_and_provider_error_fall_through(tmp_path, monkeypatch):
+    from inkbox_claude.gate import adminphrase
+    store = make_store(tmp_path)
+    async def model(*args, **kwargs):
+        raise RuntimeError("offline")
+    assert run(adminphrase.translate("roles for the board", [], store, model_call=model)) == []
+    async def timeout(coro, *, timeout):
+        assert timeout == 8.0
+        coro.close()
+        raise asyncio.TimeoutError
+    monkeypatch.setattr(adminphrase.asyncio, "wait_for", timeout)
+    assert run(adminphrase.translate("roles for the board", [], store, model_call=model)) == []
+
+
+def test_adminphrase_unmatched_output_uses_usual_router(tmp_path):
+    m, sent = make_manager(tmp_path)
+    async def model(*args, **kwargs):
+        return '["not a command"]'
+    m.router._chat = model
+    aaron(m, "are roles something you understand")
+    assert m.router.calls
+
+
+def test_contextual_group_role_reaches_translator(tmp_path):
+    m, sent = make_manager(tmp_path)
+    seed(m.store)
+    assert accesscmd.match("make everyone in that gc a corgi teammate", m.store) is None
+    calls = []
+    async def model(*args, **kwargs):
+        calls.append(args)
+        return '[]'
+    m.router._chat = model
+    aaron(m, "add everyone in that gc to be a corgi teammate role")
+    assert len(calls) == 1 and m.router.calls
