@@ -1869,6 +1869,19 @@ class GateSession:
                 if kind == "declined_or_cancelled" and conf >= 0.5 and running.id not in self.m._stop_asked:
                     self.m._stop_asked.add(running.id)
                     return await self.send_to_sender(wording.ask_stop_line(running.id), role="answer")
+            steer = False
+            if (approver or self._is_owner_person()) and not wording.is_progress_question(body):
+                # Steering, by code: a new instruction from him while a request runs stops
+                # that request and this message is done instead, read with the chat so far.
+                # In his own chat every such message steers; in a group only one that opens
+                # with the assistant's name, so talking to other people there changes nothing.
+                steer = (not self.in_group()) or wording.addressed_to_assistant(body)
+            if steer:
+                logger.info("[gate %s] steered: stopping #%s for a new instruction", self.chat_id, running.id)
+                await self.m.stop_request(running)
+                await self.send_to_sender(wording.steered_line(running.id, runguard.sent(running.id)), role="ack")
+                running = None
+        if running is not None:
             t = self._peek_task(RouterOutput(task=f"T{self.m.store.task_id_for_request(running.id)}"))
             if t:
                 self._ensure_inbound_on_task(t, body)
