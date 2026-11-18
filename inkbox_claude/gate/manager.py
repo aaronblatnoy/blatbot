@@ -1673,6 +1673,48 @@ class GateSession:
         title = " ".join(str((self.reply_meta or {}).get("group_title") or "").split())
         return self.chat_id, title or "This chat"
 
+    PLAIN_TALK_TIMEOUT_S = 20.0
+
+    async def _group_plain_talk(self, body: str) -> bool:
+        """Group plain talk. Someone who is not Aaron says something in a group that the
+        room's mode already let through: one model call with NO tools wired at all
+        (Router.plain_talk posts messages only), seeing only the voice instructions, the
+        room note and this room's own recent messages. A plain reply goes out with no
+        approval; the sentinel, an error or a timeout returns False and the turn carries
+        on exactly as before. Returns whether a reply was sent."""
+        if self.is_approver() or self._is_owner_person() or not self.in_group() or self.mode == "voice":
+            return False
+        if not bool(_settings.get("GATE_GROUP_PLAIN_TALK")):
+            return False
+        if not (body or "").strip():
+            return False
+        # A run already going in this room, or a check-in on one, is the existing flow's to answer.
+        if self.m.store.running_for_thread(self.chat_id) is not None or wording.is_fixed_progress_phrase(body):
+            return False
+        sentinel = Router.PLAIN_TALK_SENTINEL
+        try:
+            recent = [m for m in self.m.store.history(self.record_id, limit=20)
+                      if m.get("kind") in ("inbound", "outbound")]
+            reply = await asyncio.wait_for(
+                self.m.router.plain_talk(room=self.room, history=recent[:-1], message=body,
+                                         sender=self._sender_name() or ""),
+                timeout=self.PLAIN_TALK_TIMEOUT_S)
+        except Exception as exc:  # noqa: BLE001  (timeout or provider error: the usual flow takes it)
+            logger.warning("[gate %s] plain talk failed (%s); using the usual flow", self.chat_id,
+                           type(exc).__name__)
+            return False
+        reply = wording.plain_dashes(" ".join(str(reply or "").split()))
+        if not reply or reply == sentinel or sentinel in reply:
+            logger.info("[gate %s] plain talk: needs Aaron; using the usual flow", self.chat_id)
+            return False
+        sent = await self.send_to_sender(reply, role="answer")
+        if sent:
+            logger.info("[gate %s] plain talk: replied in the room without approval (inbound #%s, %d words)",
+                        self.chat_id, self.inbound_id, len(reply.split()))
+            self.m.store.add_message(self.record_id, "system",
+                                     "Plain talk: answered in the room without Aaron's approval, no tools used.")
+        return sent
+
     async def _route_and_act(self, body: str, system_note: Optional[str] = None) -> bool:
         approver = self.is_approver()
         if not system_note and approver:
@@ -1694,6 +1736,8 @@ class GateSession:
                 logger.info("[gate %s] access command: %s", self.chat_id, access["action"])
                 reply = accesscmd.handle(self.m.store, SimpleNamespace(**access), here=self._here())
                 return await self.send_to_sender(reply, role="answer")
+        if not system_note and await self._group_plain_talk(body):
+            return True
         history = self.m.store.thread_history(self.thread_key(), exclude_chat=self.record_id) + \
             self.m.store.history(self.record_id, limit=20)
         if system_note:

@@ -34,6 +34,12 @@ KNOBS: List[Dict[str, Any]] = [
      "label": "Bar for speaking in a group unprompted",
      "help": "In a group chat, how sure it must be that a message not naming it is still its "
              "to answer. Lower means it joins in more; higher means it stays out unless named."},
+    {"name": "GATE_GROUP_PLAIN_TALK", "kind": "bool", "default": True, "group": "Speaking",
+     "label": "Chat in groups without asking me",
+     "help": "In a group chat, answer plain conversation from someone else straight away, with no "
+             "tools and nothing beyond what the room can already see. Anything that needs a tool, "
+             "a lookup, memory or an action still goes through your yes. Turn this off to handle "
+             "group messages the usual way."},
     {"name": "GATE_ACTIONABLE_MIN", "kind": "number", "default": 0.4, "min": 0.0, "max": 1.0,
      "step": 0.05, "group": "Speaking",
      "label": "Bar for acting without asking what you meant",
