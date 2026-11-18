@@ -3426,8 +3426,37 @@ class Store:
             ).fetchall()
         return [{"id": int(r["id"]), "text": r["text"]} for r in rows]
 
+    def cancel_request(self, rid: int, *, by: str = "aaron") -> None:
+        """Aaron stopped this request. It goes to the same state a declined request
+        is in ('rejected'), flagged cancelled, and set_state never moves it out again:
+        nothing resumes, retries or finishes it after this."""
+        req = self.get_request(rid)
+        status = dict((req.status if req is not None else None) or {})
+        status.update({"cancelled": True, "cancelled_by": by, "cancelled_at": time.time(),
+                       "cancelled_from": req.state if req is not None else ""})
+        with self._lock:
+            self._db.execute("UPDATE requests SET state='rejected', status_json=?, updated_at=? WHERE id=?",
+                             (json.dumps(status), time.time(), rid))
+            self._db.commit()
+            tid = self._db.execute("SELECT task_id FROM requests WHERE id=?", (rid,)).fetchone()
+        if tid and tid["task_id"]:
+            self.reindex_task(int(tid["task_id"]))
+
+    def request_cancelled(self, rid: int) -> bool:
+        with self._lock:
+            row = self._db.execute("SELECT state, status_json FROM requests WHERE id=?", (rid,)).fetchone()
+        if row is None or row["state"] != "rejected":
+            return False
+        try:
+            return bool(json.loads(row["status_json"] or "{}").get("cancelled"))
+        except (TypeError, ValueError):
+            return False
+
     def set_state(self, rid: int, state: str, *, status: Optional[Dict[str, Any]] = None,
                   raw_output: Optional[str] = None) -> None:
+        if state != "rejected" and self.request_cancelled(rid):
+            logger.warning("[store] request #%s was stopped by Aaron; not moving it to %r", rid, state)
+            return
         with self._lock:
             self._db.execute(
                 "UPDATE requests SET state=?, status_json=COALESCE(?,status_json), "

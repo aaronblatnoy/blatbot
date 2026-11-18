@@ -460,6 +460,10 @@ class Executor:
             allowed = [t for t in allowed if not _out(t, {})]
 
         async def can_use(tool_name: str, input_data: Dict[str, Any], context: Any):
+            from . import runguard
+            if runguard.is_cancelled(req.id):
+                denied_steps.append({"tool": tool_name, "args": dict(input_data or {}), "ok": False, "denied": "stopped"})
+                return PermissionResultDeny(message=runguard.refusal(req.id), interrupt=True)
             if native_defer:
                 return PermissionResultDeny(message=f"The tool call was not checked by {_ASSISTANT}. Stop and report what could not be done.")
             if tool_name not in allowed_set:
@@ -512,6 +516,8 @@ class Executor:
                 # Enforced, not just prompted: the gateway delivers the result to whoever asked.
                 return PermissionResultDeny(message="Do not message the requester; the gateway delivers your "
                                                     "result. Put the answer in your final status and stop.")
+            if is_outbound_message(tool_name, input_data or {}):
+                runguard.record_sent(f"{tool_name.split('__')[-1]} to {', '.join(recipients_of(input_data or {})) or 'unknown'}", req.id)
             return PermissionResultAllow()
 
         native_holds: Dict[str, str] = {}
@@ -521,6 +527,10 @@ class Executor:
             nonlocal native_defer
             name = str(input_data.get("tool_name") or "")
             args = input_data.get("tool_input") or {}
+            from . import runguard
+            if runguard.is_cancelled(req.id):
+                denied_steps.append({"tool": name, "args": dict(args), "ok": False, "denied": "stopped"})
+                return permhook.hook_result("deny", runguard.refusal(req.id))
             try:
                 decision_record = (req.status or {}).get("deferred_decision") or {}
                 pending_record = (req.status or {}).get("deferred") or {}
@@ -545,6 +555,10 @@ class Executor:
                     native_holds[tool_use_id] = kind
                 elif decision == "deny":
                     denied_steps.append({"tool": name, "args": dict(args), "ok": False, "denied": kind})
+                elif decision == "allow":
+                    from .jevagent import is_outbound_message as _out, recipients_of as _recips
+                    if _out(name, args):
+                        runguard.record_sent(f"{name.split('__')[-1]} to {', '.join(_recips(args)) or 'unknown'}", req.id)
                 return permhook.hook_result(decision, reason)
             except Exception as exc:
                 logger.warning("[gate] #%s permission hook failed: %s", req.id, exc)

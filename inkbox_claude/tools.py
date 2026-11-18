@@ -96,8 +96,21 @@ A2A_TURN_CONTEXT: ContextVar[Optional[Dict[str, Any]]] = ContextVar(
 )
 
 
+def _stopped_error() -> Optional[Dict[str, Any]]:
+    """A send made for a request Aaron has stopped is refused before any provider I/O."""
+    from .gate import runguard
+    if runguard.is_cancelled():
+        return _error(runguard.refusal())
+    return None
+
+
 def _mark_tool_delivery(mode: str, target: str) -> None:
     """Tell the active session that this tool already delivered its reply."""
+    try:
+        from .gate import runguard
+        runguard.record_sent(f"{mode} to {target}")
+    except Exception:  # noqa: BLE001
+        pass
     session = CURRENT_SESSION.get()
     mark = getattr(session, "mark_tool_delivery", None)
     if callable(mark):
@@ -391,6 +404,9 @@ def build_inkbox_mcp_server(
         {"to": str, "subject": str, "body": str, "attachment_paths": list},
     )
     async def inkbox_send_email(args: Dict[str, Any]) -> Dict[str, Any]:
+        stopped = _stopped_error()
+        if stopped is not None:
+            return stopped
         target = str(args["to"])
         subject = _plain_dashes(str(args.get("subject") or ""))
         body = _plain_dashes(str(args.get("body") or ""))
@@ -435,6 +451,9 @@ def build_inkbox_mcp_server(
         {"to": str, "text": str, "media_paths": list, "media_urls": list},
     )
     async def inkbox_send_sms(args: Dict[str, Any]) -> Dict[str, Any]:
+        stopped = _stopped_error()
+        if stopped is not None:
+            return stopped
         text = _plain_dashes(str(args.get("text") or ""))
         target = str(args.get("to") or "").strip()
         blocked = _hosted_sms_preflight(target)
@@ -509,6 +528,9 @@ def build_inkbox_mcp_server(
         {"conversation_id": str, "to": list, "text": str, "media_path": str},
     )
     async def inkbox_send_imessage(args: Dict[str, Any]) -> Dict[str, Any]:
+        stopped = _stopped_error()
+        if stopped is not None:
+            return stopped
         text = _plain_dashes(str(args.get("text") or ""))
         conversation_id = str(args.get("conversation_id") or "").strip()
         to_list = _normalize_imessage_recipients(args.get("to"))
@@ -582,6 +604,9 @@ def build_inkbox_mcp_server(
         {"conversation_id": str, "to": str, "text": str},
     )
     async def inkbox_send_whatsapp(args: Dict[str, Any]) -> Dict[str, Any]:
+        stopped = _stopped_error()
+        if stopped is not None:
+            return stopped
         from . import whatsapp as _wa
         text = _plain_dashes(str(args.get("text") or ""))
         conversation_id = str(args.get("conversation_id") or "").strip()

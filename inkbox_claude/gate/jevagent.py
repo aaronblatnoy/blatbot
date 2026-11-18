@@ -314,6 +314,11 @@ class ToolBox:
         return self._schemas.get(name, {"description": "", "schema": {}})
 
     async def call(self, name: str, args: Dict[str, Any]) -> Any:
+        from . import runguard
+        rid = getattr(self._request, "id", None) or runguard.current()
+        if rid is not None and runguard.is_cancelled(rid):
+            # Aaron stopped this request: no further call of any kind is made for it.
+            raise RuntimeError(runguard.refusal(rid))
         if name == "mcp__host__request_access":
             return hosttools.request_access(args, self._manager, self._request)
         if name == "mcp__host__set_followup":

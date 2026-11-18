@@ -35,6 +35,7 @@ from . import graphmem
 from . import knowledge
 from . import outcomes
 from . import ownertext
+from . import runguard
 
 logger = logging.getLogger(__name__)
 _MISSING = object()
@@ -1210,6 +1211,8 @@ class GateSession:
             if t is not None:
                 self.m.store.task_event(t["id"], "inbound", body, chat_id=self.record_id)
             try:
+                if self.mode != "voice" and await self._maybe_stop_running(body):
+                    return
                 if self.is_approver() and self.mode != "voice" and await self.m.handle_approver_command(self, body):
                     return
                 if self.mode != "voice" and await self.m.handle_followup_phrase(self, body):
@@ -1675,6 +1678,36 @@ class GateSession:
 
     PLAIN_TALK_TIMEOUT_S = 20.0
 
+    def _running_to_stop(self, request_id: Optional[int]) -> Optional[Request]:
+        """The running request a stop from Aaron means: the one he named, else the one
+        running on this thread, else (in his own chat) the only one running anywhere."""
+        if request_id is not None:
+            req = self.m.store.get_request(request_id)
+            return req if req is not None and req.state in ("approved", "running") and not req.schedule_id else None
+        req = self.m.store.running_for_thread(self.chat_id)
+        if req is not None:
+            return req
+        if self.is_approver():
+            running = [r for r in self.m.store.requests_in_state("running") if not r.schedule_id]
+            if len(running) == 1:
+                return running[0]
+        return None
+
+    async def _maybe_stop_running(self, body: str) -> bool:
+        """Aaron's exact stop words while one of his approved requests runs: stop it now,
+        by code, before any lookup or model sees the message."""
+        if not (self.is_approver() or self._is_owner_person()):
+            return False
+        matched, request_id = wording.parse_stop(body)
+        if not matched:
+            return False
+        req = self._running_to_stop(request_id)
+        if req is None:
+            return False
+        line = await self.m.stop_request(req)
+        await self.send_to_sender(line, role="answer")
+        return True
+
     async def _group_plain_talk(self, body: str) -> bool:
         """Group plain talk. Someone who is not Aaron says something in a group that the
         room's mode already let through: one model call with NO tools wired at all
@@ -1788,6 +1821,17 @@ class GateSession:
             # second request here is what made the assistant answer twice.
             logger.info("[gate %s] request #%s still running; not starting another for this message",
                         self.chat_id, running.id)
+            if approver or self._is_owner_person():
+                event = (preflight or {}).get("event") or {}
+                kind = event.get("raw_kind") or event.get("kind")
+                conf = float(event.get("kind_conf") or 0.0)
+                if kind == "declined_or_cancelled" and conf >= 0.8:
+                    logger.info("[gate %s] judged a cancellation (%.2f); stopping #%s", self.chat_id, conf, running.id)
+                    line = await self.m.stop_request(running)
+                    return await self.send_to_sender(line, role="answer")
+                if kind == "declined_or_cancelled" and conf >= 0.5 and running.id not in self.m._stop_asked:
+                    self.m._stop_asked.add(running.id)
+                    return await self.send_to_sender(wording.ask_stop_line(running.id), role="answer")
             t = self._peek_task(RouterOutput(task=f"T{self.m.store.task_id_for_request(running.id)}"))
             if t:
                 self._ensure_inbound_on_task(t, body)
@@ -2349,6 +2393,12 @@ class GateSessionManager:
             str(os.getenv("GATE_ROUTER_DEFINES_REQUEST") or "").strip().lower() in ("1", "true", "yes")
         logger.info("[gate] task picker: %s", "jev (TypeSafe)" if self.task_picker else "router")
         self.approver_conv = cfg.approver_imessage_conversation_id
+        # Aaron can stop a running request: the asyncio task each top-level run is on,
+        # by request id, and the requests he has already been asked "stop #N?" about.
+        self._run_tasks: Dict[int, asyncio.Task] = {}
+        self._stop_asked: set = set()
+        runguard.reset()
+        runguard.set_store_check(self.store.request_cancelled)
         self.approver_phone = str(getattr(cfg, "approver_phone", "") or "")
         self.approver_telegram_id = _tg.approver_id()
         # The commander role's one legitimate assignment: tell the store the owner's two
@@ -2456,6 +2506,13 @@ class GateSessionManager:
         """Save a message and wait for the dispatcher to deliver it.
         Callers that write their own reply record pass record=False."""
         text = wording.plain_dashes(text)
+        running_for = runguard.current()
+        if running_for is not None and runguard.is_cancelled(running_for):
+            # A send made on behalf of a request Aaron has stopped: refused, right here,
+            # whatever produced it.
+            logger.warning("[gate] refused a %s send to %s: request #%s was stopped by Aaron",
+                           mode, target, running_for)
+            return None
         result = None
         if not self._outbox_enabled() or mode == "voice":
             result = await self.send_fn(target, text, mode, meta)
@@ -2501,6 +2558,8 @@ class GateSessionManager:
                 result = waiter.result()
                 if result is _OUTBOX_HELD:
                     return None
+        if running_for is not None and mode != "voice":
+            runguard.record_sent(f"{mode} to {target}", running_for)
         if not record:
             return result      # the caller writes its own line, with the turn's reply_to and role
         for cid in self._threads_for(target, chat_id):
@@ -3428,6 +3487,9 @@ class GateSessionManager:
     async def perform_confirmed(self, req: Request) -> None:
         """The owner said yes: run exactly the stored call, then finish the request."""
         c = (req.status or {}).get("confirm") or {}
+        if runguard.is_cancelled(req.id):
+            logger.info("[gate] #%s was stopped by Aaron; not performing its held call", req.id)
+            return
         self.store.set_state(req.id, "running")
         if not c:
             status = {"ok": False, "error": "no confirmed call on record", "summary": "no confirmed call on record", "raw": "", "tool_calls": []}
@@ -3474,6 +3536,12 @@ class GateSessionManager:
         req = self.store.get_request(int(request_id))
         if req is None:
             return {"ok": False, "error": f"no request #{request_id}", "state": ""}
+        if req.state in ("approved", "running") and not req.schedule_id and \
+                (decision or "").strip().lower() in ("no", "n", "stop", "cancel", "abort", "drop", "reject", "decline"):
+            # "#520 no" while #520 runs: stop it, from a text or the console alike.
+            line = await self.stop_request(req, by=actor)
+            await self.send_to_approver(line)
+            return {"ok": True, "state": "rejected", "error": ""}
         if req.state not in ("pending",):
             # Someone already answered this one. Say so rather than acting again.
             return {"ok": False, "error": f"#{req.id} is already {req.state}", "state": req.state}
@@ -4400,7 +4468,51 @@ class GateSessionManager:
     async def execute(self, req: Request, notify: bool = True, *, continuation: str = "",
                       resume_session: Optional[str] = None) -> str:
         """Run an approved request. With notify=False the caller delivers the
-        result itself (a live phone call reads it aloud) and gets it back."""
+        result itself (a live phone call reads it aloud) and gets it back.
+
+        The run is bound to its request id (runguard) so every send and write made for
+        it can check, right before acting, that Aaron has not stopped it; the top-level
+        task is remembered so stop_request() can cancel it outright."""
+        if runguard.is_cancelled(req.id):
+            logger.info("[gate] #%s was stopped by Aaron; not running it", req.id)
+            return ""
+        token = runguard.bind(req.id)
+        task = asyncio.current_task()
+        outer = req.id not in self._run_tasks and task is not None
+        if outer:
+            self._run_tasks[req.id] = task  # type: ignore[assignment]
+        try:
+            return await self._execute(req, notify, continuation=continuation,
+                                       resume_session=resume_session)
+        finally:
+            runguard.unbind(token)
+            if outer and self._run_tasks.get(req.id) is task:
+                self._run_tasks.pop(req.id, None)
+
+    async def stop_request(self, req: Request, *, by: str = "aaron") -> str:
+        """Aaron said stop. Mark it cancelled first (every later send or write for it is
+        refused from this instant), cancel the task it runs on, and return the one line
+        for him: stopped, and what had already gone out, if anything."""
+        runguard.cancel(req.id)
+        self.store.cancel_request(req.id, by=by)
+        self.store.set_thread(req.chat_id, "idle")
+        task = self._run_tasks.pop(req.id, None)
+        if task is not None and task is not asyncio.current_task() and not task.done():
+            task.cancel()
+        try:
+            self.get(req.chat_id).typing_stop()
+        except Exception:
+            logger.debug("[gate] typing stop after #%s failed", req.id, exc_info=True)
+        try:
+            self.task_note(req, "rejected", f"Aaron stopped it while it ran: {req.summary}", state="open")
+        except Exception:
+            logger.debug("[gate] could not note the stop of #%s", req.id, exc_info=True)
+        sent = runguard.sent(req.id)
+        logger.warning("[gate] #%s stopped by %s while %s; already sent: %s", req.id, by, req.state, sent or "nothing")
+        return wording.stopped_line(req.id, sent)
+
+    async def _execute(self, req: Request, notify: bool = True, *, continuation: str = "",
+                       resume_session: Optional[str] = None) -> str:
         self.store.set_state(req.id, "running")
         # The revision this run started from, as _fire recorded it on the request's own
         # status -- the `req` object here can be the one created before _fire wrote that
@@ -4459,6 +4571,10 @@ class GateSessionManager:
                 slow_ack.cancel()
             if not notify:
                 session.typing_stop()
+        if runguard.is_cancelled(req.id):
+            # Aaron stopped it while the executor ran: nothing is recorded, phrased or sent.
+            session.typing_stop()
+            return ""
         if status.get("resume_failed") and (req.status or {}).get("deferred_decision"):
             try:
                 status = await self._fallback_deferred(req, context)

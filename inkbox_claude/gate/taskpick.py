@@ -982,7 +982,7 @@ class TaskPicker:
         wo, wc = a["waiting_on"].get("choice"), float(a["waiting_on"].get("confidence") or 0)
         res = float(a["resolves_task"].get("noul") or 0)
         logger.info("event judgment: kind=%s (%.2f) waiting_on=%s (%.2f) resolves=%.2f", kind, kc, wo, wc, res)
-        return {"kind": kind if kc >= self.min_confidence else None, "kind_conf": kc,
+        return {"kind": kind if kc >= self.min_confidence else None, "kind_conf": kc, "raw_kind": kind,
                 "waiting_on": wo if wc >= self.min_confidence else None, "resolves_task": res, "reason": "ok"}
 
     async def plan_lookup(self, *, message: str, history: List[Dict[str, Any]], sender_label: str,
