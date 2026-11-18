@@ -87,6 +87,15 @@ _PATTERNS: List[Any] = [(a, re.compile(p, re.I)) for a, p in [
     ("request_dismiss", r"^(?:dismiss|clear) (?:request )?#?(?P<id>\d+)$"),
     ("systems_show", r"^(?:show (?:me )?(?:your |the )?)?(?:scopes|systems|tools|connections)$"),
     ("systems_show", r"^what (?:systems|tools|apps) (?:can you use|do you have|are you connected to)$"),
+    # Console parity, second pass (2026-11-18): the rest of the routes by text.
+    ("task_show", r"^(?:show |open |pull up )?(?:me )?(?:the )?(?:task|t) ?#?(?P<id>\d+)$"),
+    ("roles_summary", r"^(?:who can do what|roles summary|summary of (?:the |my |your )?roles|what can each role do)$"),
+    ("roles_who_can", r"^which roles? (?:can|may|is allowed to|are allowed to) (?P<q>.+)$"),
+    ("followups_show", r"^(?:what |which )?(?:follow[- ]?ups?|timers) (?:are )?(?:due|coming up|pending)(?: today| soon)?$"),
+    ("followup_cancel", r"^(?:cancel|stop|drop|delete) (?:the )?(?:follow[- ]?up|timer) #?(?P<id>\d+)$"),
+    ("followup_snooze", r"^(?:snooze|push back|delay|postpone) (?:the )?(?:follow[- ]?up|timer) #?(?P<id>\d+)"
+                        r"(?: (?:by|for) (?P<amount>\d+|an?|one) (?P<unit>minutes?|mins?|hours?|hrs?|days?|weeks?))?$"),
+    ("schedule_report", r"^(?P<how>report every (?:time|run)|only report changes) (?:for|on) (?:the )?(?P<target>.+?)(?: schedule| job)?$"),
     ("role_notes", r"^set (?:the )?(?P<role>.+?) role'?s? notes? (?:access )?to (?P<level>none|nothing|all|everything)$"),
     ("role_memory", r"^set (?:the )?(?P<role>.+?) role'?s? memory (?:access )?to (?P<level>own|their own|own chats|groups|group chats|all|everything)$"),
     ("role_create", r"^(?:create|make|add|start) (?:me )?(?:a |an |a new |an new |the )?(?:new )?role (?:called|named|for) " + _NAME_RE + r"$"),
@@ -114,9 +123,12 @@ _PATTERNS: List[Any] = [(a, re.compile(p, re.I)) for a, p in [
     ("contact_add", r"^add (?:the |a )?(?:(?P<kind>email|e-mail|phone|number|telegram|imessage|sms|handle)(?: address| number)? )?" + _VALUE + r" to (?P<person>.+)$"),
     ("contact_move", r"^move (?:the |a )?(?:(?P<kind>email|e-mail|phone|number|telegram|imessage|sms|handle)(?: address| number)? )?" + _VALUE + r" from (?P<person>.+?) to (?P<to>.+)$"),
     ("contact_remove", r"^(?:remove|delete|take off) (?:the |a )?(?:(?P<kind>email|e-mail|phone|number|telegram|imessage|sms|handle)(?: address| number)? )?" + _VALUE + r" (?:from|off) (?P<person>.+)$"),
+    ("contact_update", r"^(?:change|update|replace) (?P<person>.+?)'s (?:(?P<kind>email|e-mail|phone|number|telegram|imessage|sms|handle)(?: address| number)? )?(?:from )?"
+     + _VALUE + r" (?:to|with) " + _VALUE.replace("?P<value>", "?P<new>") + r"$"),
     ("person_note", r"^(?:set|change|update) (?P<person>.+?)'s note to (?P<note>.+)$"),
     ("person_create", r"^add (?P<name>[A-Za-z][A-Za-z'.\- ]{1,40}?) to (?:the )?(?:people|people list|contacts)$"),
     ("person_create", r"^(?:add|create|make) (?:a |an )?(?:new )?person (?:called |named )?(?P<name>[A-Za-z][A-Za-z'.\- ]{1,40})$"),
+    ("schedule_rename", r"^rename (?:the )?(?P<target>.+?) (?:schedule|job) to (?P<name>.+)$"),
     ("person_rename", r"^rename (?:the )?(?:person )?(?P<person>.+?) to (?P<name>.+)$"),
     ("groups_list", r"^(?:list|show)(?: me)?(?: all)?(?: of)?(?: the| my| your)? group ?chats$"),
     ("groups_list", r"^what (?:groups|group chats|rooms) are you in\??$"),
@@ -126,7 +138,7 @@ _PATTERNS: List[Any] = [(a, re.compile(p, re.I)) for a, p in [
     ("outbox_retry", r"^retry outbox #?(?P<id>\d+)$"),
     ("outbox_list", r"^outbox$"),
     ("health", r"^(?:health|health check|how are you doing|how(?:'s| is) blatbot(?: doing)?|are you ok(?:ay)?|are you healthy)\??$"),
-    ("schedule_do", r"^(?P<sact>pause|resume|stop) (?:the )?(?P<target>.+?)(?: schedule| job)?$"),
+    ("schedule_do", r"^(?P<sact>pause|resume|stop|repair|fix) (?:the )?(?P<target>.+?)(?: schedule| job)?$"),
     ("schedule_do", r"^(?P<sact>run) (?:the )?(?P<target>.+?)(?: schedule| job)? now$"),
     ("roles_list", r"^(?:list|show|what are)(?: me)?(?: all)?(?: the| my| your)? roles\??$"),
     ("roles_list", r"^what roles (?:are there|do (?:we|you|i) have|exist)\??$"),
@@ -179,13 +191,14 @@ def match(text: str, store: Any) -> Optional[Dict[str, Any]]:
                 continue
         if action in ("role_level", "role_send", "role_unsend") and _resolve_system(g.get("system") or "") is None:
             continue
-        if action == "person_rename" and (g.get("person") or "").lower().endswith(" role"):
+        if action == "person_rename" and (g.get("person") or "").lower().endswith((" role", " schedule", " job")):
             continue
-        if action in ("person_merge", "person_remove", "person_rename", "person_note", "contact_add",
+        if action in ("person_merge", "person_remove", "person_rename", "person_note", "contact_add", "contact_update",
                       "contact_remove", "contact_move"):
             if _norm_person_word(g.get("person")) in accesscmd._PRONOUNS or not g.get("person"):
                 continue
-        if action == "schedule_runs" and _one_schedule(store, g.get("target") or "") is None:
+        if action in ("schedule_runs", "schedule_rename", "schedule_report") and _one_schedule(
+                store, g.get("target") or "") is None:
             continue
         if action == "person_show":
             if _norm_person_word(g.get("person")) in accesscmd._PRONOUNS or not accesscmd.find_people(
@@ -196,13 +209,36 @@ def match(text: str, store: Any) -> Optional[Dict[str, Any]]:
             found = _one_schedule(store, g.get("target") or "")
             if found is None:
                 continue
-            return {"action": "schedule_do", "sact": {"run": "run_now"}.get(sact, sact), "target": g.get("target")}
+            return {"action": "schedule_do", "sact": {"run": "run_now", "fix": "repair"}.get(sact, sact), "target": g.get("target")}
         if action == "role_create":
             name = (g.get("name") or "").strip()
             if not name or name.lower() in ("new", "a", "an", "the") or " role" in name.lower():
                 continue
         return {"action": action, **g}
     return None
+
+
+# Phrases anyone might say in ordinary conversation ("help", "how are you doing", "who
+# is Sean", "what do you remember"). From someone other than Aaron these go on to the
+# usual flow, where that person's own role decides what any run may touch. Every other
+# admin phrase from a non-owner gets one plain refusal (refuse_for_non_owner).
+_CONVERSATIONAL = {"guide", "health", "home_show", "person_show", "memory_show", "inbox_show",
+                   "followups_show", "tasks_show", "pages_show"}
+_CONVERSATIONAL_ACCESS = {"show_person"}
+
+
+def refuse_for_non_owner(text: str, store: Any) -> bool:
+    """True when a non-owner's message is one of the owner-only admin phrases, so the
+    caller answers with a refusal instead of routing it."""
+    try:
+        cmd = match(text, store)
+        if cmd is not None:
+            return cmd["action"] not in _CONVERSATIONAL
+        access = accesscmd.match(text, store)
+        return access is not None and access.get("action") not in _CONVERSATIONAL_ACCESS
+    except Exception:  # noqa: BLE001 - a matcher error never blocks an ordinary message
+        logger.exception("[admin] non-owner phrase check failed")
+        return False
 
 
 # ---------------------------------------------------------------------------
@@ -274,6 +310,8 @@ def guide_roles(store: Any) -> str:
         f"what can the {sample} role do",
         f"rename the {sample} role to volunteers",
         f"delete the {sample} role",
+        "who can do what",
+        "which roles can read the TAMID calendar",
     ]
     return wording.guide("roles", state, examples)
 
@@ -295,6 +333,7 @@ def guide_people(store: Any) -> str:
     name = next((p["display"] for p in people if not accesscmd._is_commander(store, p)), "Sean Parnell")
     return wording.guide("people", [f"{len(people)} people on the list"], [
         "show people", f"what can {name} do", f"add the email sean@example.com to {name}",
+        f"change {name}'s email from sean@example.com to sean@corgi.nyc",
         f"rename {name} to {name} Jr", f"set {name}'s role to general", "refresh people from Inkbox"])
 
 
@@ -307,7 +346,9 @@ def guide_schedules(store: Any) -> str:
     title = rows[0].title if rows else "daily check"
     return wording.guide("schedules", state, [
         "what are you working on", "what's stuck", "what did you do today",
-        f"pause the {title} schedule", f"run the {title} schedule now", "pause every schedule"])
+        f"pause the {title} schedule", f"run the {title} schedule now", "pause every schedule",
+        f"when did the {title} schedule last run", f"rename the {title} schedule to morning digest",
+        f"report every time for the {title} schedule", f"fix the {title} schedule"])
 
 
 def guide_requests(store: Any) -> str:
@@ -327,6 +368,8 @@ _AREAS_BY_TEXT = [
     ("Group chats", "show group chats"),
     ("Settings", "turn off group chatter"),
     ("Inbox, outbox and timers", "what's in the inbox"),
+    ("Tasks", "task 12"),
+    ("Follow-up timers", "snooze timer #3 by 2 hours"),
     ("Memory and pages", "what do you remember"),
     ("Health", "are you ok"),
 ]
@@ -945,6 +988,7 @@ async def handle(ctx: Any, cmd: Dict[str, Any]) -> str:
         "health": lambda: health(ctx),
         "outbox_list": lambda: outbox_list(store),
         "outbox_retry": lambda: outbox_retry(store, cmd.get("id") or "0"),
+        "contact_update": lambda: contact_update(store, cmd),
     }
     if action in sync_actions:
         return sync_actions[action]()
@@ -1032,10 +1076,11 @@ async def followups_show(ctx: Any, _cmd: Dict[str, Any]) -> str:
     pending = [r for r in data.get("rows") or [] if r.get("status") == "pending"]
     if not pending:
         return "No follow-up timers are waiting."
-    items = [f"{_one(r.get('note') or 'Check back', 60)}, for {r.get('for') or 'you'}, {chatreply.when(r.get('due_at'))}"
-             for r in pending]
-    return chatreply.listing(f"{chatreply.count(len(pending), 'follow-up timer')} waiting:", items,
-                             rest="on the console's Timers page")
+    items = [f"#{r['id']}: {_one(r.get('note') or 'Check back', 60)}, for {r.get('for') or 'you'}, "
+             f"{chatreply.when(r.get('due_at'))}" for r in pending]
+    return (chatreply.listing(f"{chatreply.count(len(pending), 'follow-up timer')} waiting:", items,
+                              rest="on the console's Timers page")
+            + '\nSay "snooze timer #N by 1 hour" or "cancel timer #N".')
 
 
 async def memory_show(ctx: Any, _cmd: Dict[str, Any]) -> str:
@@ -1230,10 +1275,188 @@ async def person_show(ctx: Any, cmd: Dict[str, Any]) -> str:
     return chatreply.listing(line, items)
 
 
+# ---------------------------------------------------------------------------
+# console parity, second pass (2026-11-18): a task by number, the roles summary and
+# "which roles can", a contact's value, a schedule's name and reporting, repair, and
+# follow-up timers. Same console/api.py (and store) calls the console's routes make.
+# ---------------------------------------------------------------------------
+
+_EVENT_WORDS = {"inbound": "Message", "request": "Asked", "done": "Done", "note": "Note", "result": "Result",
+                "failed": "Failed", "rejected": "Turned down", "outbound": "Sent"}
+
+
+async def task_show(ctx: Any, cmd: Dict[str, Any]) -> str:
+    from ..console import api as console_api
+    tid = int(cmd.get("id") or 0)
+    row = console_api.task(ctx.store, tid)
+    if not row:
+        return f"There is no task {tid}. Say tasks to see the open ones."
+    state = _TASK_STATE_WORDS.get(row.get("state"), str(row.get("state") or "").replace("_", " "))
+    lead = f"Task {tid}: {_one(row.get('title'), 90)}. It is {state}."
+    items = []
+    if row.get("summary"):
+        items.append(f"Where it stands: {_one(row['summary'], 160)}")
+    for ev in (row.get("events") or [])[-5:]:
+        items.append(f"{_EVENT_WORDS.get(ev.get('kind'), str(ev.get('kind') or 'Event').title())}, "
+                     f"{chatreply.when(ev.get('created_at'))}: {_one(ev.get('text'), 90)}")
+    tail = (f"\nTo close it, say: T{tid} done" if row.get("state") in ("open", "running", "waiting_aaron")
+            else f"\nTo reopen it, say: T{tid} reopen")
+    return chatreply.listing(lead, items, rest="on the console's Tasks page") + tail
+
+
+async def roles_summary(ctx: Any, _cmd: Dict[str, Any]) -> str:
+    from ..console import api as console_api
+    data = console_api.roles_summary(ctx.store)
+    items = []
+    for r in data.get("roles") or []:
+        if r.get("locked"):
+            items.append(f"{r['name']}: full control; you alone")
+            continue
+        who = r.get("member_count") or 0
+        can = " ".join(str(r.get("can_text") or "nothing without asking").split()).rstrip(".")
+        items.append(f"{r['name']}, {chatreply.count(int(who), 'person', 'people')}: {_one(can, 140)}")
+    return chatreply.listing("Who can do what:", items, rest="on the console's Roles page", empty="No roles yet.")
+
+
+async def roles_who_can(ctx: Any, cmd: Dict[str, Any]) -> str:
+    from ..console import api as console_api
+    q = " ".join(str(cmd.get("q") or "").split())
+    data = console_api.roles_who_can(ctx.store, q)
+    items = []
+    for m in data.get("matches") or []:
+        holders = []
+        for r in m.get("roles") or []:
+            names = [x.get("name") for x in r.get("members") or [] if x.get("name")]
+            holders.append(r["name"] + (f" ({', '.join(names[:4])})" if names and r["name"] != "You" else ""))
+        items.append(f"{_one(m.get('phrase'), 70)}: {', '.join(holders)}")
+    return chatreply.listing(f"Roles that can {q}:", items, rest="on the console's Roles page",
+                             empty=f"No role can {q}. Only you can.")
+
+
+def contact_update(store: Any, cmd: Dict[str, Any]) -> str:
+    from ..console import api as console_api
+    person, err = _person(store, cmd.get("person") or "")
+    if err:
+        return err
+    old, new = cmd.get("value") or "", cmd.get("new") or ""
+    contact = _find_contact(person, old)
+    who = person.get("display") or ""
+    if contact is None:
+        if _find_contact(person, new) is not None:
+            return wording.contact_line(who, _kind_for(store, cmd.get("kind") or "", new), new)
+        return wording.contact_absent(who, old)
+    try:
+        res = console_api.update_contact_endpoint(store, {"contact_id": contact["id"], "value": new})
+    except console_api.ValidationError as exc:
+        return wording.change_refused(str(exc))
+    if res.get("conflict"):
+        return wording.contact_conflict(new, res.get("existing_person_display") or "someone else")
+    kind = contact.get("kind") or _kind_for(store, cmd.get("kind") or "", new)
+    shown = (res.get("contact") or {}).get("value") or new
+    return (wording.contact_line(who, kind, shown)[:-1] + f" (was {contact.get('value') or old}).\n"
+            + wording.undo_line(f"change {who}'s {kind} from {new} to {old}"))
+
+
+async def schedule_rename(ctx: Any, cmd: Dict[str, Any]) -> str:
+    from ..console import api as console_api
+    schedule = _one_schedule(ctx.store, cmd.get("target") or "")
+    if schedule is None:
+        return "I don't have a schedule like that. Say show schedules to see them."
+    new = " ".join(str(cmd.get("name") or "").split()).strip("\"'")
+    if not new:
+        return "Say the new name, like: rename the daily check schedule to morning check"
+    if new == schedule.title:
+        return f"The schedule is called {new}."
+    if getattr(ctx, "manager", None) is None:
+        return wording.change_refused("I can't reach the schedules from here")
+    try:
+        res = await console_api.edit_schedule(ctx.manager, {"id": schedule.id, "title": new})
+    except console_api.ValidationError as exc:
+        return wording.change_refused(str(exc))
+    if res.get("needs_approval"):
+        return res.get("message") or "That change needs your yes first."
+    return (f"The schedule is called {new} (was {schedule.title}).\n"
+            + wording.undo_line(f"rename the {new} schedule to {schedule.title}"))
+
+
+async def schedule_report(ctx: Any, cmd: Dict[str, Any]) -> str:
+    from ..console import api as console_api
+    schedule = _one_schedule(ctx.store, cmd.get("target") or "")
+    if schedule is None:
+        return "I don't have a schedule like that. Say show schedules to see them."
+    every = str(cmd.get("how") or "").lower().startswith("report every")
+    was_every = bool(getattr(schedule, "report_every_time", False))
+    words = {True: "reports after every run", False: "reports only when something changed"}
+    if every == was_every:
+        return f"{schedule.title} {words[every]}."
+    if getattr(ctx, "manager", None) is None:
+        return wording.change_refused("I can't reach the schedules from here")
+    try:
+        res = await console_api.edit_schedule(ctx.manager, {"id": schedule.id, "report_every_time": every})
+    except console_api.ValidationError as exc:
+        return wording.change_refused(str(exc))
+    if res.get("needs_approval"):
+        return res.get("message") or "That change needs your yes first."
+    undo = (f"only report changes for the {schedule.title} schedule" if every
+            else f"report every time for the {schedule.title} schedule")
+    return f"{schedule.title} {words[every]} (was: {words[was_every].split(' ', 1)[1]}).\n" + wording.undo_line(undo)
+
+
+def _followup_row(store: Any, fid: int) -> Optional[Dict[str, Any]]:
+    try:
+        return store.get_followup(fid)
+    except Exception:  # noqa: BLE001 - a store without the table
+        return None
+
+
+async def followup_cancel(ctx: Any, cmd: Dict[str, Any]) -> str:
+    fid = int(cmd.get("id") or 0)
+    row = ctx.store.cancel_followup(fid)
+    if row is None:
+        old = _followup_row(ctx.store, fid)
+        if old is None:
+            return f"There is no follow-up timer #{fid}. Say timers to see them."
+        return f"Follow-up timer #{fid} is {old.get('status')}, so there is nothing to cancel."
+    ctx.store.task_event(row["task_id"], "note", f"Follow-up #{row['id']} cancelled: {row['note']}",
+                         chat_id=getattr(ctx, "chat_id", "") or "", state=None)
+    return (f"Follow-up timer #{fid} is cancelled; it will not run. It was set to {_one(row.get('note'), 80)}, "
+            f"{chatreply.when(row.get('due_at'))}.")
+
+
+_UNIT_SECONDS = {"m": 60, "h": 3600, "d": 86400, "w": 7 * 86400}
+
+
+async def followup_snooze(ctx: Any, cmd: Dict[str, Any]) -> str:
+    fid = int(cmd.get("id") or 0)
+    amount = str(cmd.get("amount") or "1").lower()
+    n = 1 if amount in ("a", "an", "one") else int(amount)
+    unit = str(cmd.get("unit") or "hour").lower()
+    seconds = n * _UNIT_SECONDS.get(unit[0], 3600)
+    if seconds < 5 * 60 or seconds > 30 * 86400:
+        return "Nothing changed: snooze a timer by at least 5 minutes and at most 30 days."
+    row = _followup_row(ctx.store, fid)
+    if row is None:
+        return f"There is no follow-up timer #{fid}. Say timers to see them."
+    if row.get("status") != "pending":
+        return f"Follow-up timer #{fid} is {row.get('status')}, so there is nothing to snooze."
+    old_due = float(row["due_at"])
+    new_due = max(old_due, time.time()) + seconds
+    updated = ctx.store.snooze_followup(fid, new_due)
+    if updated is None:
+        return f"Follow-up timer #{fid} already ran or was cancelled, so there is nothing to snooze."
+    ctx.store.task_event(row["task_id"], "note", f"Follow-up #{fid} moved to {chatreply.when(new_due)}: {row['note']}",
+                         chat_id=getattr(ctx, "chat_id", "") or "", state=None)
+    return (f"Follow-up timer #{fid} runs {chatreply.when(new_due)} (was {chatreply.when(old_due)}).\n"
+            f"To cancel it instead, say: cancel timer #{fid}")
+
+
 _PAGE_ACTIONS = {
     "home_show": home_show, "inbox_show": inbox_show, "followups_show": followups_show,
     "memory_show": memory_show, "knowledge_show": knowledge_show, "pages_show": pages_show,
     "tasks_show": tasks_show, "schedules_show": schedules_show, "schedule_runs": schedule_runs,
     "request_dismiss": request_dismiss, "systems_show": systems_show, "role_notes": role_notes,
     "role_memory": role_memory, "person_show": person_show,
+    "task_show": task_show, "roles_summary": roles_summary, "roles_who_can": roles_who_can,
+    "schedule_rename": schedule_rename, "schedule_report": schedule_report,
+    "followup_cancel": followup_cancel, "followup_snooze": followup_snooze,
 }

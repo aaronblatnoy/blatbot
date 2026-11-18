@@ -577,3 +577,124 @@ def test_replies_are_plain_text(tmp_path):
                  "let the corgi teammate role read the TAMID calendar", "settings", "roles", "people"):
         reply = say(store, text)
         plain_ok(reply)
+
+
+# ===========================================================================
+# third slice (2026-11-18): every remaining console route by text, owner only
+# ===========================================================================
+
+def test_a_non_owner_admin_phrase_gets_one_plain_refusal_and_no_router_run(tmp_path):
+    m, sent = make_manager(tmp_path)
+    seed_people(m.store)
+    add_schedule(m.store)
+    for text in ("delete the corgi teammate role", "show pending requests", "pause every schedule",
+                 "set the corgi teammate role's memory to everything", "who can do what", "outbox",
+                 "make Stanley Rabkin a corgi teammate", "turn off group chatter"):
+        before = len(m.router.calls)
+        asyncio.run(m.get("c1").handle_inbound(text, "email", stranger_meta()))
+        assert len(m.router.calls) == before, f"{text!r} reached the router"
+        assert sent[-1][1] == "Only Aaron can see or change my setup. Nothing was changed."
+    assert m.store.pending() == []
+    assert any(r["name"] == "corgi teammate" for r in m.store.roles())
+    assert not gate_settings.get("GATE_SCHEDULES_PAUSED")
+
+
+def test_ordinary_conversation_from_a_non_owner_still_goes_to_the_usual_flow(tmp_path):
+    m, sent = make_manager(tmp_path)
+    seed_people(m.store)
+    for text in ("help", "how are you doing", "what do you remember", "hello there"):
+        assert not admincmd.refuse_for_non_owner(text, m.store), text
+
+
+def test_a_task_by_number_reads_the_consoles_task_view(tmp_path):
+    store = make_store(tmp_path)
+    task = store.create_task("Book the TAMID room")
+    store.task_event(task["id"], "note", "Asked the front desk", chat_id="aaron")
+    for phrase in (f"task {task['id']}", f"show task #{task['id']}", f"T{task['id']}"):
+        assert admincmd.match(phrase, store)["action"] == "task_show"
+    reply = say(store, f"task {task['id']}")
+    assert reply.startswith(f"Task {task['id']}: Book the TAMID room. It is open.")
+    assert "Asked the front desk" in reply and reply.endswith(f"To close it, say: T{task['id']} done")
+    assert say(store, "task 9999") == "There is no task 9999. Say tasks to see the open ones."
+    plain_ok(reply)
+
+
+def test_who_can_do_what_and_which_roles_can_use_the_consoles_summaries(tmp_path, monkeypatch):
+    store = make_store(tmp_path)
+    seed_people(store)
+    reply = say(store, "who can do what")
+    assert reply.startswith("Who can do what:") and "corgi teammate, 1 person:" in reply
+    seen = []
+    real = console_api.roles_who_can
+    monkeypatch.setattr(console_api, "roles_who_can", lambda st, q: seen.append(q) or real(st, q))
+    reply = say(store, "which roles can read the zzz nothing")
+    assert seen == ["read the zzz nothing"]
+    assert reply == "No role can read the zzz nothing. Only you can."
+    plain_ok(reply)
+
+
+def test_change_a_contacts_value_says_old_and_new_and_how_to_undo(tmp_path):
+    store = make_store(tmp_path)
+    seed(store)
+    say(store, "add Dana Scully to people")
+    say(store, "add the email dana@old.com to Dana Scully")
+    reply = say(store, "change Dana Scully's email from dana@old.com to dana@new.com")
+    assert "dana@new.com" in reply and "(was dana@old.com)" in reply
+    assert reply.endswith("To undo, say: change Dana Scully's email from dana@new.com to dana@old.com")
+    person = accesscmd._one_person(store, "Dana Scully")[0]
+    assert [c["value"] for c in person["contacts"]] == ["dana@new.com"]
+    again = say(store, "change Dana Scully's email from dana@old.com to dana@new.com")
+    assert "dana@new.com" in again and "was" not in again
+    plain_ok(reply)
+
+
+def test_rename_a_schedule_and_its_reporting_and_fix_by_name(tmp_path):
+    m, sent = make_manager(tmp_path)
+    gate_settings.bind(m.store)
+    schedule = add_schedule(m.store)
+    aaron(m, "rename the Corgi NYC digest schedule to morning digest")
+    assert m.store.get_schedule(schedule.id).title == "morning digest"
+    assert last_text(sent) == ("The schedule is called morning digest (was Corgi NYC digest).\n"
+                               "To undo, say: rename the morning digest schedule to Corgi NYC digest")
+    aaron(m, "report every time for the morning digest schedule")
+    assert m.store.get_schedule(schedule.id).report_every_time is True
+    assert last_text(sent).endswith("To undo, say: only report changes for the morning digest schedule")
+    assert admincmd.match("fix the morning digest schedule", m.store)["sact"] == "repair"
+    assert admincmd.match("rename the music schedule to x", m.store) is None
+
+
+def test_follow_up_timers_list_snooze_and_cancel_by_number(tmp_path):
+    import time
+    store = make_store(tmp_path)
+    task = store.create_task("Check on Sean")
+    due = time.time() + 3600
+    fid, _ = store.add_followup(task_id=task["id"], request_id=1, chat_id="owner", requester="owner",
+                                scopes=["web"], due_at=due, note="see if Sean replied")
+    listing = say(store, "show timers")
+    assert f"#{fid}: see if Sean replied" in listing and "cancel timer #N" in listing
+    assert admincmd.match("followups due today", store)["action"] == "followups_show"
+    reply = say(store, f"snooze timer #{fid} by 2 hours")
+    assert abs(store.get_followup(fid)["due_at"] - (due + 7200)) < 2
+    assert reply.startswith(f"Follow-up timer #{fid} runs ") and "(was " in reply
+    assert say(store, f"snooze timer #{fid} by 2 minutes").startswith("Nothing changed")
+    reply = say(store, f"cancel timer #{fid}")
+    assert reply.startswith(f"Follow-up timer #{fid} is cancelled; it will not run.")
+    assert store.get_followup(fid)["status"] == "cancelled"
+    assert say(store, f"cancel timer #{fid}") == f"Follow-up timer #{fid} is cancelled, so there is nothing to cancel."
+    assert say(store, f"snooze timer #{fid}").endswith("so there is nothing to snooze.")
+    assert say(store, "cancel timer #999") == "There is no follow-up timer #999. Say timers to see them."
+
+
+def test_a_fired_follow_up_is_claimed_once_and_cannot_be_snoozed_after(tmp_path):
+    import time
+    store = make_store(tmp_path)
+    task = store.create_task("Check on Sean")
+    fid, _ = store.add_followup(task_id=task["id"], request_id=1, chat_id="owner", requester="owner",
+                                scopes=["web"], due_at=time.time() - 1, note="see if Sean replied")
+    assert [r["id"] for r in store.due_followups()] == [fid]
+    assert store.mark_followup_fired(fid) is True
+    assert store.mark_followup_fired(fid) is False, "a second claim (another loop, a restart) does nothing"
+    assert store.due_followups() == []
+    assert store.snooze_followup(fid, time.time() + 3600) is None
+    reopened = Store(str(tmp_path / "gate.db"))
+    assert reopened.get_followup(fid)["status"] == "fired", "the claim survives a restart"
