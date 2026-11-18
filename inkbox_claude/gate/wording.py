@@ -360,6 +360,36 @@ def is_progress_question(body: str) -> bool:
 
 NOT_PROMISING_FOLLOWUP = "Noted. I will pick that up when this finishes."
 
+_STOP_WORDS = r"(?:no+|stop|cancel|abort|nvm)"
+_STOP_PLAIN_RE = re.compile(rf"^\s*{_STOP_WORDS}\s*[.!]*\s*$", re.I)
+_STOP_ID_AFTER_RE = re.compile(rf"^\s*#\s*(\d+)\s*[,:]?\s*{_STOP_WORDS}\s*[.!]*\s*$", re.I)
+_STOP_ID_BEFORE_RE = re.compile(rf"^\s*{_STOP_WORDS}\s*#\s*(\d+)\s*[.!]*\s*$", re.I)
+
+
+def parse_stop(body: str) -> tuple:
+    """Aaron telling a running request to stop, by code only. Returns (matched, id):
+    a plain "no" / "stop" / "cancel" / "abort" / "nvm" (any case, optional
+    punctuation) gives (True, None); "#520 no" or "stop #520" gives (True, 520);
+    anything else (False, None)."""
+    text = str(body or "")
+    m = _STOP_ID_AFTER_RE.match(text) or _STOP_ID_BEFORE_RE.match(text)
+    if m:
+        return True, int(m.group(1))
+    if _STOP_PLAIN_RE.match(text):
+        return True, None
+    return False, None
+
+
+def stopped_line(request_id: int, sent: List[str]) -> str:
+    """The one line Aaron gets when a request is stopped."""
+    if sent:
+        return f"Stopped #{request_id}. Already sent before the stop: {'; '.join(sent)}."
+    return f"Stopped #{request_id}. Nothing had been sent."
+
+
+def ask_stop_line(request_id: int) -> str:
+    return f"Stop #{request_id}? Reply \"stop #{request_id}\" to stop it."
+
 
 def progress_status_line(started_at: float, latest_step: Optional[str], summary: str) -> str:
     """'Yes. Started <time>, <latest step>.' -- the latest step from the run's own
