@@ -124,6 +124,12 @@ def decide(req: Any, name: str, args: Dict[str, Any], allowed: Iterable[str], *,
         if dest.get("requester") and not (_hold_sends_to_others() and not req.schedule_id):
             # Answering the person who asked, or telling Aaron himself, needs no sign-off.
             return "allow", "", ""
+        if _hold_sends_to_others() and not req.schedule_id:
+            # Let the call through: manager.send holds it as its own "#id yes / no" (or
+            # sends it when it is Aaron's answer going back to the chat he asked in).
+            # Deferring the call instead parked the whole run, and a second deferral in
+            # a resumed session came back to the run as "blocked" (#536, 2026-11-18).
+            return "allow", "", ""
         if req.schedule_id or confirm_sends:
             return "defer", f"Ask Aaron before sending to {outcomes.describe(dest)}.", "send"
         return "allow", "", ""
