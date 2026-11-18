@@ -3938,14 +3938,20 @@ class GateSessionManager:
             # answers the most recently asked one, exactly like "#id yes". Never a new
             # request (2026-11-18: his "Yes" to #531 started #532 instead of sending it).
             bare = t.strip().lower().rstrip(".!")
+            # The most recently asked is the newest of everything open, held message or
+            # approval alike: his "yes" right after the prompt for #544 sent the older held
+            # message #534 instead (2026-11-18).
             held = [p for p in pending if (p.status or {}).get("held_message")]
             if held and bare in (_YES | _NO):
-                newest = max(held, key=lambda p: p.id)
-                out = await self.decide_request(newest.id, "yes" if bare in _YES else "no",
-                                                actor="Aaron", source=session.mode or "imessage")
-                if not out.get("ok") and out.get("error"):
-                    await self.send_to_approver(out["error"])
-                return True
+                newest = max(pending, key=lambda p: p.id)
+                from . import schedcmd
+                here = getattr(session, "record_id", None) or getattr(session, "chat_id", "")
+                if (newest.status or {}).get("held_message") or not schedcmd._open_proposals(self.store, here):
+                    out = await self.decide_request(newest.id, "yes" if bare in _YES else "no",
+                                                    actor="Aaron", source=session.mode or "imessage")
+                    if not out.get("ok") and out.get("error"):
+                        await self.send_to_approver(out["error"])
+                    return True
         m = re.match(r"^\s*#?(\d+)\s*[:\-]?\s*(.*)$", t, re.S)
         req: Optional[Request] = None
         rest = t

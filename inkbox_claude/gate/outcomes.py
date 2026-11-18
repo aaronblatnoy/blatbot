@@ -395,6 +395,17 @@ def _to_person(manager: Any, req: Any, person: Dict[str, Any], surface: Optional
     raise ValueError(f"There is no way to reach {who} on record.")
 
 
+def _asked_in_group(manager: Any, req: Any) -> Optional[Dict[str, Any]]:
+    """The group chat a one-off request was asked in, or None when it was not asked in one."""
+    if req is None or getattr(req, "schedule_id", None):
+        return None
+    try:
+        mine = _to_requester(manager, req, None)
+    except Exception:
+        return None
+    return mine if mine.get("group") else None
+
+
 def resolve(manager: Any, req: Any, to: Any, surface: Any = None) -> Dict[str, Any]:
     """Where one message goes. Raises ValueError with a plain sentence when it cannot."""
     if manager is None:
@@ -420,6 +431,15 @@ def resolve(manager: Any, req: Any, to: Any, surface: Any = None) -> Dict[str, A
             route = manager.store.thread_route(group["chat_id"]) or {}
             dest = _route_dest(group["chat_id"], mode, route.get("meta") or {},
                                f'the "{group["title"]}" group', group=True)
+            # Asked in a group chat, the run answers in that group chat. Which group a
+            # message lands in is never the model's pick: a different group named here is
+            # replaced by the one the request came from (2026-11-18: an answer went to
+            # another group). From Aaron's own chat a named group is still honoured.
+            home = _asked_in_group(manager, req)
+            if home is not None and home["target"] != dest["target"]:
+                logger.info("[outcomes] #%s named %s; sent where it was asked, %s",
+                            getattr(req, "id", "?"), dest["who"], home["who"])
+                dest = home
         else:
             person = _find_person(manager, name)
             if person is None:
