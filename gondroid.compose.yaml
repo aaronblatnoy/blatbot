@@ -12,6 +12,7 @@ services:
     environment:
       - TELEGRAM_BOT_TOKEN=${TELEGRAM_BOT_TOKEN}
       - OWNER_TELEGRAM_ID=${GATE_APPROVER_TELEGRAM_ID}
+      - GONDROID_ALLOWED_USER_IDS=${GONDROID_ALLOWED_USER_IDS:-}
       - DO_BRAIN_KEY=${DO_BRAIN_KEY}
       - DO_BRAIN_API_URL=https://definite-optimists-brain.aaronblatnoy.workers.dev
       - CLAUDE_CODE_OAUTH_TOKEN=${CLAUDE_CODE_OAUTH_TOKEN}

@@ -5,14 +5,16 @@
 2. A message aimed at Gondroid (a DM, an @mention, its name, or a reply to it) is a question:
    the brain is searched and a short answer goes back to that same chat. Nothing else is sent.
 
-The brain is Gondroid's only memory. The only local state is which chats and people are trusted:
+The brain is Gondroid's only memory. The only local state is which groups are trusted:
   * a group is trusted when the owner (OWNER_TELEGRAM_ID) is a member of it (getChatMember);
-  * a person is trusted when they are the owner or have written in a trusted group;
-  * DMs are answered and recorded only for trusted people. Everything else is ignored.
+    every text message in a trusted group is recorded, whoever wrote it;
+  * only the people in GONDROID_ALLOWED_USER_IDS (comma-separated Telegram user ids; the owner
+    is always included) can DM Gondroid or get an answer from it. Anyone else's DMs, mentions
+    and replies are ignored silently (group messages are still recorded).
 
 Updates arrive by long polling (getUpdates), so no public URL is needed.
 
-Environment: TELEGRAM_BOT_TOKEN, OWNER_TELEGRAM_ID, DO_BRAIN_KEY, DO_BRAIN_API_URL (optional),
+Environment: TELEGRAM_BOT_TOKEN, OWNER_TELEGRAM_ID, GONDROID_ALLOWED_USER_IDS, DO_BRAIN_KEY, DO_BRAIN_API_URL (optional),
 CLAUDE_CODE_OAUTH_TOKEN + LEDGER_MODEL (answers; default "sonnet"), STATE_DIR (default /data).
 """
 
@@ -36,6 +38,7 @@ logging.getLogger("httpx").setLevel(logging.WARNING)
 
 TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN", "").strip()
 OWNER = os.environ.get("OWNER_TELEGRAM_ID", "").strip()
+ALLOWED = {x.strip() for x in os.environ.get("GONDROID_ALLOWED_USER_IDS", "").split(",") if x.strip()} | ({OWNER} if OWNER else set())
 BRAIN = (os.environ.get("DO_BRAIN_API_URL") or
          "https://definite-optimists-brain.aaronblatnoy.workers.dev").rstrip("/")
 BRAIN_HEADERS = {"Authorization": "Bearer " + os.environ.get("DO_BRAIN_KEY", "").strip(),
@@ -169,17 +172,13 @@ async def handle(update: Dict[str, Any]) -> None:
         if not await group_trusted(chat_id):
             log.info("group %s untrusted; ignored", chat_id)
             return
-    elif from_id != OWNER and from_id not in load()["people"]:
+    elif from_id not in ALLOWED:
         log.info("DM from untrusted %s; ignored", from_id)
         return
     text = (msg.get("text") or msg.get("caption") or "").strip()
     if not text:
         return
     name = " ".join(x for x in (frm.get("first_name"), frm.get("last_name")) if x) or frm.get("username") or from_id
-    if is_group and from_id and from_id not in load()["people"]:
-        d = load()
-        d["people"][from_id] = {"name": name, "username": frm.get("username")}
-        save(d)
     when = datetime.fromtimestamp(msg.get("edit_date") or msg["date"], timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
     who = name + (f" (@{frm['username']})" if frm.get("username") else "")
     where = f'Telegram group "{chat.get("title") or chat_id}"' if is_group else "a Telegram DM with Gondroid"
@@ -215,7 +214,7 @@ async def handle(update: Dict[str, Any]) -> None:
         log.info("answered msg %s in %s", msg["message_id"], chat_id)
 
     jobs = [record()]
-    if not edited and addressed(msg, text):
+    if not edited and from_id in ALLOWED and addressed(msg, text):
         jobs.append(answer())
     await asyncio.gather(*jobs)
 
@@ -223,8 +222,8 @@ async def handle(update: Dict[str, Any]) -> None:
 async def main() -> None:
     ME.update(await tg("getMe", {}))
     await tg("deleteWebhook", {"drop_pending_updates": False})
-    log.info("gondroid up as @%s; owner set: %s; reads all group messages: %s",
-             ME.get("username"), bool(OWNER), ME.get("can_read_all_group_messages"))
+    log.info("gondroid up as @%s; owner set: %s; allowlist loaded: %d user(s); reads all group messages: %s",
+             ME.get("username"), bool(OWNER), len(ALLOWED), ME.get("can_read_all_group_messages"))
     offset = 0
     alive = os.path.join(os.path.dirname(STATE), "alive")
     while True:
