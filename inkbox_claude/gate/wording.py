@@ -552,7 +552,8 @@ def fallback_title_from_message(message: str) -> str:
     never cut by length: the caller's own words when the message is a voice
     hand-off transcript (see caller_lines), else the message itself,
     whitespace-collapsed and whole, without the bridge's group tag."""
-    text = " ".join(_GROUP_TAG_RE.sub("", message or "", count=1).split())
+    from . import ownertext
+    text = " ".join(_GROUP_TAG_RE.sub("", ownertext.strip_group_tag(message or ""), count=1).split())
     if _is_handoff_shaped(text):
         lines = caller_lines(message)
         if lines:
