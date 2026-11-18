@@ -31,6 +31,8 @@ import httpx
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 log = logging.getLogger("gondroid")
+# httpx logs every request URL at INFO, and Telegram URLs carry the bot token.
+logging.getLogger("httpx").setLevel(logging.WARNING)
 
 TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN", "").strip()
 OWNER = os.environ.get("OWNER_TELEGRAM_ID", "").strip()
