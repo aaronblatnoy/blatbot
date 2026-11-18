@@ -3235,6 +3235,10 @@ class GateSessionManager:
                   "comes as its own text."))
 
     async def notify_inbound(self, session: GateSession, body: str) -> None:
+        if not bool(_settings.get("GATE_FYI_INBOUND")):
+            # Aaron, 2026-11-18: no copy of every message people send it. He is looped in
+            # only when a run needs a tool or memory the sender has no permission for.
+            return
         meta = session.reply_meta or {}
         if meta.get("conversation_kind") == "group" or knowledge.meta_is_group(meta):
             # Group chatter is never copied to Aaron. He hears about a group only
@@ -3888,6 +3892,15 @@ class GateSessionManager:
                 await session.send_to_sender(
                     f'Yes to which: starting "{this_thread_proposals[0].title}", '
                     f'or one of {len(pending)} pending things?', role="answer")
+                return True
+            if t.lower() in (_YES | _NO):
+                # Several held things and a bare yes/no: never hand the word to the
+                # router as a new task (that is what swallowed "Yes" on 2026-11-18).
+                # Say which ones are open so he can answer "#id yes".
+                lines = [f"#{p.id} {(p.summary or p.original_message or '').strip()[:80]}"
+                         for p in pending[:6]]
+                await session.send_to_sender(
+                    "Yes to which? Reply with the number:\n" + "\n".join(lines), role="answer")
                 return True
         if req is not None:
             # A run's question to him (ask_aaron): any text after "#id" is his answer. Every

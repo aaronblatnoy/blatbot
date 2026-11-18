@@ -30,6 +30,8 @@ from typing import Any, Dict, List, Optional, Sequence
 # messages to other people; with GATE_HOLD_SENDS_TO_OTHERS off that behaviour must be
 # exactly what they say. tests/test_hold_sends.py turns it on and tests the hold.
 os.environ.setdefault("GATE_HOLD_SENDS_TO_OTHERS", "0")
+# The FYI copy is off by default since 2026-11-18; the old tests still exercise that path.
+os.environ.setdefault("GATE_FYI_INBOUND", "1")
 
 # A handful of tests build a LEGACY sqlite file by hand (raw sqlite3.connect +
 # executescript with the pre-people-model trust/people/synced_people tables,

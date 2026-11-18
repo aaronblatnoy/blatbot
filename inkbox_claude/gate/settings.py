@@ -66,12 +66,16 @@ KNOBS: List[Dict[str, Any]] = [
      "label": "Show me anything it would send",
      "help": "A message to another person that you asked for is held and shown to you first. "
              "Turning this off lets your own requests send without a second look."},
-    {"name": "GATE_HOLD_SENDS_TO_OTHERS", "kind": "bool", "default": True, "group": "Safety",
+    {"name": "GATE_HOLD_SENDS_TO_OTHERS", "kind": "bool", "default": False, "group": "Safety",
      "label": "Second yes for every message to someone else",
      "help": "Any message a request would send to anyone but you, on any channel, is held and "
-             "shown to you word for word with its own #id yes / no, even when the request was "
-             "already approved and even when you asked for it. Turning this off restores the "
-             "earlier rules."},
+             "shown to you word for word with its own #id yes / no. Off by default: plain "
+             "replies go out on their own, and you are asked only when a run needs a tool or "
+             "memory the sender has no permission for (Aaron, 2026-11-18)."},
+    {"name": "GATE_FYI_INBOUND", "kind": "bool", "default": False, "group": "Safety",
+     "label": "Copy me on what people write to it",
+     "help": "Send you a copy of every message someone else sends it. Off by default: you hear "
+             "about a conversation only when something in it needs your yes."},
     {"name": "GATE_VOICE_TRUST_APPROVER", "kind": "bool", "default": False, "group": "Safety",
      "label": "Trust my voice on the phone",
      "help": "Caller ID can be faked, so by default a spoken request from your number still "
