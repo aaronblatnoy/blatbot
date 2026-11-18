@@ -194,3 +194,4 @@ def and_list(items: Iterable[Any], word: str = "and") -> str:
 
 
 GROUP_REFUSAL = "I only change or show my setup in our direct chat. Ask me there."
+NOT_OWNER_REFUSAL = "Only Aaron can see or change my setup. Nothing was changed."

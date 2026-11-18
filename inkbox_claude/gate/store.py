@@ -4271,6 +4271,18 @@ class Store:
             self._db.commit()
             return dict(row) if cur.rowcount == 1 else None
 
+    def snooze_followup(self, followup_id: int, due_at: float) -> Optional[Dict[str, Any]]:
+        """Move a pending follow-up to a new time. Only a still-pending row moves, so a
+        timer the loop already claimed (status fired) is never pushed back after it ran."""
+        with self._lock:
+            cur = self._db.execute("UPDATE followups SET due_at=? WHERE id=? AND status='pending'",
+                                   (float(due_at), followup_id))
+            self._db.commit()
+            if cur.rowcount != 1:
+                return None
+            row = self._db.execute("SELECT * FROM followups WHERE id=?", (followup_id,)).fetchone()
+        return dict(row) if row else None
+
     def finish_followup(self, followup_id: int, result: str, *, failed: bool = False) -> None:
         with self._lock:
             self._db.execute("UPDATE followups SET status=?,result=? WHERE id=? AND status='fired'",

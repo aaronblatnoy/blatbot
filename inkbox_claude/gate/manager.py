@@ -1777,6 +1777,12 @@ class GateSession:
                 logger.info("[gate %s] access command: %s", self.chat_id, access["action"])
                 reply = accesscmd.handle(self.m.store, SimpleNamespace(**access), here=self._here())
                 return await self.send_to_sender(chatreply.finish(reply), role="answer")
+        if not system_note and not approver and admincmd.refuse_for_non_owner(body, self.m.store):
+            # Someone else using one of Aaron's admin phrases ("delete the interns role",
+            # "show pending requests"): one plain refusal, nothing changed, and no router or
+            # model run that could be talked into doing it another way.
+            logger.info("[gate %s] admin phrase from a non-owner refused", self.chat_id)
+            return await self.send_to_sender(chatreply.NOT_OWNER_REFUSAL, role="answer")
         if not system_note and await self._group_plain_talk(body):
             return True
         history = self.m.store.thread_history(self.thread_key(), exclude_chat=self.record_id) + \
