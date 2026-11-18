@@ -6,7 +6,7 @@ requires-python = ">=3.11"
 dependencies = [
     "pyyaml>=6",
   "aiohttp>=3.9",
-  "inkbox>=0.5.9,<1.0.0",
+  "inkbox>=0.7.29,<1.0.0",
   "claude-agent-sdk>=0.1.0",
   "segno>=1.5",  # terminal QR codes for the iMessage connect step
   "langgraph>=1.0",  # the Jev agent's state graph (gate/jevgraph.py)
