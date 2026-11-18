@@ -1,67 +1,23 @@
-# Gondroid: Aaron's professional assistant, a second instance of this gateway with its own
-# database and its own scope registry; its memory is the Definite Optimists brain. Deployed on black-sky
-# as the Coolify application "gondroid" (Definite Optimists team). Nothing here is shared
-# with Blatbot: separate Postgres, separate state volume, its own Inkbox identity and brain key.
-# Secrets come from the Coolify application's environment, never from this file.
+# Gondroid: the Definite Optimists team's Telegram ledger. It writes every message in its chats to
+# the Definite Optimists brain and answers questions from it, in the chat where it was asked.
+# Nothing else: no email, phone, tools, timers or local memory. Deployed on black-sky as the
+# Coolify application "gondroid" (Definite Optimists team). Secrets come from the Coolify
+# application's environment, never from this file.
 services:
   gondroid:
     build:
       context: .
       dockerfile: deploy/gondroid/Dockerfile
     restart: unless-stopped
-    depends_on:
-      - postgres
-    ports:
-      - "8772:8772"
     environment:
-      - INKBOX_MODE=gate
-      - INKBOX_BRIDGE_HOST=0.0.0.0
-      - INKBOX_BRIDGE_PORT=8772
-      - INKBOX_OFFLINE=${INKBOX_OFFLINE:-0}
-      - INKBOX_IDENTITY=${INKBOX_IDENTITY:-gondroid}
-      - INKBOX_API_KEY=${INKBOX_API_KEY:-}
-      - INKBOX_BASE_URL=${INKBOX_BASE_URL:-https://inkbox.ai}
-      - INKBOX_SIGNING_KEY=${INKBOX_SIGNING_KEY:-}
-      - ASSISTANT_NAME=Gondroid
-      - ASSISTANT_EMAIL=${ASSISTANT_EMAIL:-gondroid@inkboxmail.com}
-      - SERVER_NAME=black-sky
-      - OWNER_NAME=Aaron Blatnoy
-      - OWNER_FIRST_NAME=Aaron
-      - GATE_DB_PATH=postgresql://gondroid:${GONDROID_PG_PASSWORD}@postgres:5432/gondroid
-      - GATE_PG_URL=postgresql://gondroid:${GONDROID_PG_PASSWORD}@postgres:5432/gondroid
-      - GATE_SCOPES_FILE=/etc/gondroid/scopes.yaml
-      - GATE_EXECUTOR=claude
-      - GATE_EXECUTOR_FALLBACK=claude
-      - CLAUDE_MODEL=sonnet
-      - CLAUDE_PROJECT_DIR=/data/exec
-      - DO_BRAIN_MCP_URL=${DO_BRAIN_MCP_URL:-https://definite-optimists-brain.aaronblatnoy.workers.dev/mcp}
-      - DO_BRAIN_KEY=${DO_BRAIN_KEY:-}
-      - INKBOX_VOICE_STACK=${INKBOX_VOICE_STACK:-inkbox_tts_stt}
+      - TELEGRAM_BOT_TOKEN=${TELEGRAM_BOT_TOKEN}
+      - OWNER_TELEGRAM_ID=${GATE_APPROVER_TELEGRAM_ID}
+      - DO_BRAIN_KEY=${DO_BRAIN_KEY}
+      - DO_BRAIN_API_URL=https://definite-optimists-brain.aaronblatnoy.workers.dev
       - CLAUDE_CODE_OAUTH_TOKEN=${CLAUDE_CODE_OAUTH_TOKEN}
-      - DEEPSEEK_API_KEY=${DEEPSEEK_API_KEY}
-      - TYPESAFE_API_KEY=${TYPESAFE_API_KEY}
-      - OPENAI_API_KEY=${OPENAI_API_KEY}
-      - TELEGRAM_BOT_TOKEN=${TELEGRAM_BOT_TOKEN:-}
-      - TELEGRAM_WEBHOOK_SECRET=${TELEGRAM_WEBHOOK_SECRET:-}
-      - GATE_APPROVER_TELEGRAM_ID=${GATE_APPROVER_TELEGRAM_ID:-}
+      - LEDGER_MODEL=sonnet
     volumes:
       - gondroid-data:/data
 
-  postgres:
-    image: postgres:16-alpine
-    restart: unless-stopped
-    environment:
-      - POSTGRES_USER=gondroid
-      - POSTGRES_DB=gondroid
-      - POSTGRES_PASSWORD=${GONDROID_PG_PASSWORD}
-    volumes:
-      - gondroid-pg:/var/lib/postgresql/data
-    healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U gondroid -d gondroid"]
-      interval: 10s
-      timeout: 5s
-      retries: 10
-
 volumes:
   gondroid-data:
-  gondroid-pg:
