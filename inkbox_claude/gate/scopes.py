@@ -352,7 +352,7 @@ def tools_for(scopes: List[str]) -> List[str]:
     return out
 
 
-_SEND_TOOLS = ("inkbox_send_imessage", "inkbox_send_sms", "inkbox_send_email")
+_SEND_TOOLS = ("inkbox_send_imessage", "inkbox_send_sms", "inkbox_send_email", "inkbox_send_whatsapp")
 
 
 def _norm(v: str) -> str:
@@ -439,6 +439,9 @@ TOOL_PURPOSE: Dict[str, str] = {
     "mcp__inkbox__inkbox_send_email": f"SEND AN EMAIL from {_ASSISTANT}'s mailbox to someone else.",
     "mcp__inkbox__inkbox_send_sms": f"SEND A TEXT (SMS) from {_ASSISTANT}'s number to someone else.",
     "mcp__inkbox__inkbox_send_imessage": f"SEND AN IMESSAGE from {_ASSISTANT}'s line to someone else.",
+    "mcp__inkbox__inkbox_send_whatsapp": f"SEND A WHATSAPP MESSAGE from {_ASSISTANT}'s WhatsApp line to someone who has written to it.",
+    "mcp__inkbox__inkbox_list_whatsapp_conversations": f"LIST {_ASSISTANT}'s WhatsApp chats, direct and group, with their conversation ids.",
+    "mcp__inkbox__inkbox_get_whatsapp_conversation": f"READ one of {_ASSISTANT}'s WhatsApp chats: recent messages by conversation id.",
     # site admin
     "mcp__tamid-admin__tamid_list_board_members": "TAMID BOARD ROSTER from the website: every board member with name, title, email, bio.",
     "mcp__tamid-admin__tamid_list_members": "TAMID MEMBER ROSTER from the website: club members with names and emails.",

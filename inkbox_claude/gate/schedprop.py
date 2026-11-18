@@ -285,7 +285,7 @@ def scopes_named(text: str) -> List[str]:
 
 # The routing tag the bridge puts in front of a group message ("[telegram group:
 # <room> | from: <name> | ...]"). Never part of what he said.
-_GROUP_TAG_RE = re.compile(r"^\s*\[(?:telegram|imessage|sms) group:[^\]]*\]\s*")
+_GROUP_TAG_RE = re.compile(r"^\s*\[(?:telegram|imessage|sms|whatsapp) group:[^\]]*\]\s*")
 
 
 def strip_group_tag(text: str) -> str:
@@ -367,7 +367,7 @@ def follow_up_prompt(prompt: str, stop_when: str) -> str:
             "say what happened in the RESULT line, and end with STATUS: STOP.")
 
 
-_GROUP_SEND_SCOPES = ("imessage_send", "sms_send", "email_send")
+_GROUP_SEND_SCOPES = ("imessage_send", "sms_send", "email_send", "whatsapp_send")
 
 
 def origin_meta(schedule_or_origin: Any) -> Dict[str, Any]:

@@ -74,12 +74,12 @@ systems:
         grants:
         - stern_email_read
   blatbot_inkbox:
-    description: 'Blatbot''s own mailbox, phone line and address book: its email, SMS and iMessage threads, sending
-      a message to a third party, contact records and notes.'
+    description: 'Blatbot''s own mailbox, phone line and address book: its email, SMS, iMessage and WhatsApp threads,
+      sending a message to a third party, contact records and notes.'
     always: []
     leaves:
       inkbox_read:
-        question: Read Blatbot's own email, text or iMessage threads.
+        question: Read Blatbot's own email, text, iMessage or WhatsApp threads.
         grants:
         - inbox_read
       contacts:
@@ -98,6 +98,10 @@ systems:
         question: Send an iMessage to someone other than the requester.
         grants:
         - imessage_send
+      send_whatsapp:
+        question: Send a WhatsApp message to someone other than the requester.
+        grants:
+        - whatsapp_send
   club_websites:
     description: 'The TAMID at NYU or SJBA website admin: board members and bios, events, members, site settings,
       contact-form submissions, newsletter signups.'
@@ -318,7 +322,7 @@ scopes:
     - mcp__tamid-drive__manage_event
   inbox_read:
     description: read Blatbot's own Inkbox mailbox blatbot@inkboxmail.com (list recent inbound/outbound emails,
-      read one by id) and its SMS/iMessage threads
+      read one by id) and its SMS/iMessage/WhatsApp threads
     label: read its own email and texts
     ask: 'read its own email and texts'
     synonyms:
@@ -333,6 +337,8 @@ scopes:
     - mcp__inkbox__inkbox_get_text_conversation
     - mcp__inkbox__inkbox_list_imessage_conversations
     - mcp__inkbox__inkbox_get_imessage_conversation
+    - mcp__inkbox__inkbox_list_whatsapp_conversations
+    - mcp__inkbox__inkbox_get_whatsapp_conversation
   email_send:
     description: send email from the Inkbox mailbox blatbot@inkboxmail.com and read that mailbox
     label: send email from its own account
@@ -358,6 +364,19 @@ scopes:
     - mcp__inkbox__inkbox_send_imessage
     - mcp__inkbox__inkbox_list_imessage_conversations
     - mcp__inkbox__inkbox_get_imessage_conversation
+  whatsapp_send:
+    description: send WhatsApp messages from Blatbot's WhatsApp line and read its WhatsApp threads
+    label: send WhatsApp messages
+    ask: 'send WhatsApp messages as itself'
+    synonyms:
+    - send a whatsapp
+    - whatsapp them
+    - message him on whatsapp
+    read: false
+    tools:
+    - mcp__inkbox__inkbox_send_whatsapp
+    - mcp__inkbox__inkbox_list_whatsapp_conversations
+    - mcp__inkbox__inkbox_get_whatsapp_conversation
   sms_send:
     description: send SMS from Blatbot's number and read its text threads
     label: send text messages

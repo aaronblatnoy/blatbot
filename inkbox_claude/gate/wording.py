@@ -514,7 +514,7 @@ def caller_lines(transcript: str) -> List[str]:
 # The routing tag the bridge puts in front of a group message ("[telegram group:
 # <room> | from: <name> | your reply goes to ...]"). Context for the model, never
 # part of what the request is called.
-_GROUP_TAG_RE = re.compile(r"^\s*\[(?:telegram|imessage|sms) group:[^\]]*\]\s*")
+_GROUP_TAG_RE = re.compile(r"^\s*\[(?:telegram|imessage|sms|whatsapp) group:[^\]]*\]\s*")
 
 
 def fallback_title_from_message(message: str) -> str:

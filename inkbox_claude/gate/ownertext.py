@@ -50,10 +50,10 @@ MARKS = {
 
 SURFACE = {
     "imessage": "iMessage", "sms": "text", "email": "email", "voice": "phone call",
-    "telegram": "Telegram", "console": "the console",
+    "telegram": "Telegram", "whatsapp": "WhatsApp", "console": "the console",
 }
 
-_GROUP_TAG_RE = re.compile(r"^\s*\[(telegram|imessage|sms) group:([^\]]*)\]\s*", re.I)
+_GROUP_TAG_RE = re.compile(r"^\s*\[(telegram|imessage|sms|whatsapp) group:([^\]]*)\]\s*", re.I)
 _DASH_RE = re.compile(r"[ \t]*[—―][ \t]*")
 _EN_DASH_SPACED_RE = re.compile(r"[ \t]+–[ \t]+")
 _SPACES_RE = re.compile(r"[ \t]+")

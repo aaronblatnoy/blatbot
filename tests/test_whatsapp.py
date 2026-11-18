@@ -170,3 +170,29 @@ def test_owner_is_recognised_by_his_number_only_on_whatsapp():
 def test_unsupported_subscription_errors_are_recognised():
     assert whatsapp.unsupported(ValueError("Unknown event type prefix whatsapp"))
     assert not whatsapp.unsupported(ValueError("network down"))
+
+
+def test_whatsapp_is_a_send_message_surface_never_picked_by_default():
+    from inkbox_claude.gate import outcomes
+    assert outcomes.surface_of("WhatsApp") == "whatsapp"
+    assert outcomes.surface_of("wa") == "whatsapp"
+    assert outcomes.SURFACE_ORDER[-1] == "whatsapp"
+    person = {"display": "Sam", "contacts": [{"kind": "phone", "raw_value": "+15551112222"}]}
+    options = outcomes._person_options(None, person)
+    assert options["whatsapp"]["mode"] == "whatsapp"
+    assert options["whatsapp"]["meta"]["whatsapp_to"] == "+15551112222"
+
+
+def test_tool_send_to_a_number_uses_to():
+    gw = _gw()
+    result = asyncio.run(whatsapp.send(gw, "whatsapp:+15551112222", "hi there",
+                                       {"whatsapp_to": "+15551112222", "_inkbox_tool": True}))
+    assert result == {"id": "wa-out-1"}
+    assert gw.sent[0]["to"] == "+15551112222" and "conversation_id" not in gw.sent[0]
+
+
+def test_whatsapp_send_scope_is_registered():
+    from inkbox_claude.gate import scopes
+    assert "mcp__inkbox__inkbox_send_whatsapp" in scopes.SCOPES["whatsapp_send"]["tools"]
+    assert scopes.sends_to_requester("mcp__inkbox__inkbox_send_whatsapp",
+                                     {"to": "+1 555 111 2222"}, ["+15551112222"])

@@ -573,6 +573,103 @@ def build_inkbox_mcp_server(
             return _error(str(exc))
 
     @tool(
+        "inkbox_send_whatsapp",
+        "Send a WhatsApp message from this agent's WhatsApp line. Reply into an "
+        "existing direct or group chat with conversation_id (get it from "
+        "inkbox_list_whatsapp_conversations), or message one E.164 number with to. "
+        "WhatsApp only lets this line answer people who have written to it, so a "
+        "number that never messaged it is refused. Text is limited to 4000 characters.",
+        {"conversation_id": str, "to": str, "text": str},
+    )
+    async def inkbox_send_whatsapp(args: Dict[str, Any]) -> Dict[str, Any]:
+        from . import whatsapp as _wa
+        text = _plain_dashes(str(args.get("text") or ""))
+        conversation_id = str(args.get("conversation_id") or "").strip()
+        to = str(args.get("to") or "").strip()
+        if bool(to) == bool(conversation_id):
+            return _error("Specify exactly one of `to` or `conversation_id`.")
+        if not text.strip():
+            return _error("`text` is required.")
+        if len(text) > _wa.MAX_LENGTH:
+            return _error(_message_too_long_reason("WhatsApp", text, _wa.MAX_LENGTH),
+                          error_code="whatsapp_too_long", char_count=len(text), max_chars=_wa.MAX_LENGTH)
+        meta: Dict[str, Any] = ({"conversation_id": conversation_id} if conversation_id
+                                else {"whatsapp_to": to})
+        meta["_inkbox_tool"] = True
+        target = conversation_id or to
+
+        def _run():
+            identity = _identity()
+            kwargs: Dict[str, Any] = {"text": text}
+            if conversation_id:
+                kwargs["conversation_id"] = conversation_id
+            else:
+                kwargs["to"] = to
+            kwargs["idempotency_key"] = _wa.send_key(str(getattr(identity, "id", "")), target,
+                                                     uuid.uuid4().hex, text)
+            msg = _wa.require_method(identity, "send_whatsapp")(**kwargs)
+            return {"sent": True, "id": str(getattr(msg, "id", ""))}
+
+        try:
+            if cfg.mode == "gate" and outbox_send is not None and (outbox_enabled is None or outbox_enabled()):
+                queued = await outbox_send(f"whatsapp:{target}", text, "whatsapp", meta)
+                if queued is not None:
+                    _mark_tool_delivery("whatsapp", target)
+                    return _result({"sent": True, "id": str(queued.get("id") or "")})
+            result = await asyncio.to_thread(_run)
+            _mark_tool_delivery("whatsapp", target)
+            return _result(result)
+        except Exception as exc:
+            _log_send_rejection("inkbox_send_whatsapp", exc)
+            return _error(str(exc))
+
+    @tool(
+        "inkbox_list_whatsapp_conversations",
+        "List this agent's WhatsApp conversations (direct and group, with "
+        "conversation_id), newest first. Use it to find the conversation_id for "
+        "inkbox_send_whatsapp.",
+        {"limit": int},
+    )
+    async def inkbox_list_whatsapp_conversations(args: Dict[str, Any]) -> Dict[str, Any]:
+        def _run():
+            return _identity().list_whatsapp_conversations(limit=int(args.get("limit") or 25))
+
+        try:
+            return _result(await asyncio.to_thread(_run))
+        except Exception as exc:
+            return _error(str(exc))
+
+    @tool(
+        "inkbox_get_whatsapp_conversation",
+        "Fetch one WhatsApp conversation and its recent messages by conversation_id.",
+        {"conversation_id": str, "limit": int},
+    )
+    async def inkbox_get_whatsapp_conversation(args: Dict[str, Any]) -> Dict[str, Any]:
+        def _run():
+            identity = _identity()
+            conv_id = str(args["conversation_id"])
+            conv = identity.get_whatsapp_conversation(conv_id)
+            msgs = identity.list_whatsapp_messages(conversation_id=conv_id, limit=int(args.get("limit") or 50))
+            return {
+                "conversation": conv,
+                "messages": [
+                    {
+                        "id": str(getattr(m, "id", "")),
+                        "created_at": str(getattr(m, "created_at", ""))[:19],
+                        "direction": str(getattr(m, "direction", "") or ""),
+                        "from": getattr(m, "sender_number", None),
+                        "text": getattr(m, "content", None) or "",
+                    }
+                    for m in reversed(list(msgs))
+                ],
+            }
+
+        try:
+            return _result(await asyncio.to_thread(_run))
+        except Exception as exc:
+            return _error(str(exc))
+
+    @tool(
         "inkbox_place_call",
         "Place an outbound voice call. Calls can go out over two lines: your own "
         "dedicated phone number, or the shared Inkbox iMessage line you are "
@@ -1301,6 +1398,7 @@ def build_inkbox_mcp_server(
         inkbox_send_email,
         inkbox_send_sms,
         inkbox_send_imessage,
+        inkbox_send_whatsapp,
         inkbox_place_call,
         inkbox_list_emails,
         inkbox_get_email,
@@ -1310,6 +1408,8 @@ def build_inkbox_mcp_server(
         inkbox_get_text_conversation,
         inkbox_list_imessage_conversations,
         inkbox_get_imessage_conversation,
+        inkbox_list_whatsapp_conversations,
+        inkbox_get_whatsapp_conversation,
         inkbox_lookup_contact,
         inkbox_list_contacts,
         inkbox_get_contact,
@@ -1331,6 +1431,7 @@ def build_inkbox_mcp_server(
         "mcp__inkbox__inkbox_send_email",
         "mcp__inkbox__inkbox_send_sms",
         "mcp__inkbox__inkbox_send_imessage",
+        "mcp__inkbox__inkbox_send_whatsapp",
         "mcp__inkbox__inkbox_place_call",
         "mcp__inkbox__inkbox_list_emails",
         "mcp__inkbox__inkbox_get_email",
@@ -1340,6 +1441,8 @@ def build_inkbox_mcp_server(
         "mcp__inkbox__inkbox_get_text_conversation",
         "mcp__inkbox__inkbox_list_imessage_conversations",
         "mcp__inkbox__inkbox_get_imessage_conversation",
+        "mcp__inkbox__inkbox_list_whatsapp_conversations",
+        "mcp__inkbox__inkbox_get_whatsapp_conversation",
         "mcp__inkbox__inkbox_lookup_contact",
         "mcp__inkbox__inkbox_list_contacts",
         "mcp__inkbox__inkbox_get_contact",

@@ -40,7 +40,8 @@ def delivery_line(origin_mode: str, origin_chat_id: str) -> str:
             title = " ".join(str(meta.get("group_title") or "").split())
         except Exception:
             title = ""
-    names = {"imessage": "iMessage", "telegram": "Telegram", "sms": "text message", "email": "email"}
+    names = {"imessage": "iMessage", "telegram": "Telegram", "sms": "text message", "email": "email",
+             "whatsapp": "WhatsApp"}
     where = (f'the {names.get(mode, mode)} group "{title}"' if title
              else f"the {names.get(mode, mode)} conversation this schedule was set up in")
     return (f"WHERE YOUR RESULT GOES: the gateway posts your RESULT in {where}. If this schedule asks you to "
