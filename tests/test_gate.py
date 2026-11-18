@@ -2499,10 +2499,10 @@ def test_send_confirmation_drops_internal_arguments_and_numbers_multiple(tmp_pat
                          "about": ["Not displayed"]}}
     asyncio.run(m.ask_confirmation(req, status))
     plain = "Nothing has been sent. This is what would go out:\n\nTo: Sarah Kim\nSubject: Meeting\n\n4pm works."
-    assert sent[-1][1] == f"Held for your yes (#{req.id})\n\n" + plain + f"\n\n#{req.id} yes / no"
+    assert sent[-1][1] == "A message waiting for your yes\n\n" + plain + f"\n\n#{req.id} yes / no"
     _pretty_request(m)
     asyncio.run(m.ask_confirmation(req, status))
-    assert sent[-1][1] == f"Held for your yes (#{req.id})\n\n" + plain + f"\n\n#{req.id} yes / no"
+    assert sent[-1][1] == "A message waiting for your yes\n\n" + plain + f"\n\n#{req.id} yes / no"
     assert gm._draft_text({"internal_option": True}) == (
         "There's a message to send, but I couldn't lay out its parts plainly."
     )

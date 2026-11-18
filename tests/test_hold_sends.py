@@ -53,7 +53,7 @@ def test_answer_to_a_non_owner_is_held_with_the_exact_text(tmp_path):
     h = held[0].status["held_message"]
     assert h["text"] == ANSWER and h["mode"] == "email" and h["for_request"] == rid
     prompts = [t for _, t, mode, _ in sent if mode == "imessage" and f"#{held[0].id}" in t]
-    assert prompts and ANSWER in prompts[0] and "cand@nyu.edu" in prompts[0]
+    assert prompts and ANSWER in prompts[0] and "To: Cand Idate" in prompts[0] and "cand@nyu.edu" not in prompts[0]
 
 
 def test_yes_sends_exactly_that_text_once_and_no_sends_nothing(tmp_path):

@@ -217,14 +217,20 @@ def episode(chat_id: str, kind: str, text: str, mode: str = "", created_at: Opti
         role = owner if chat_id == "owner" else (speaker or f"the person in chat {chat_id}")
     else:
         role = "system record"
-    body = str(text or "").strip()
+    # A group message is stored with the bridge's routing marker in front (participants'
+    # phone numbers, the group's response policy). Memory keeps only the person's words;
+    # who said it and which chat stay in role and source_description.
+    from .ownertext import split_group_tag
+    group, _, body = split_group_tag(text)
+    body = body.strip()
     if len(body) > MAX_EPISODE_CHARS:
         body = body[:MAX_EPISODE_CHARS] + " [clipped]"
     ts = datetime.fromtimestamp(time.time() if created_at is None else created_at, tz=timezone.utc).isoformat()
+    where = f"group chat {group}" if group else f"chat {chat_id}"
     return {"group_id": SHARED_GROUP, "messages": [{
         "content": body, "role_type": role_type, "role": role, "timestamp": ts,
         "name": f"msg-{message_id}" if message_id else f"msg-{int(time.time() * 1000)}",
-        "source_description": f"{name} conversation, chat {chat_id}" + (f", over {mode}" if mode else ""),
+        "source_description": f"{name} conversation, {where}" + (f", over {mode}" if mode else ""),
     }]}
 
 

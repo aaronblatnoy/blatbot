@@ -49,7 +49,10 @@ _GROUP_TAG_RE = re.compile(r"^\s*\[(telegram|imessage|sms|whatsapp) group:([^\]]
 # The Inkbox-native group marker ("[inkbox:group_whatsapp conversation_id=... from=...
 # group='...' participants=... | ...]") and the fixed policy lines that follow it. Both
 # are for the run. Aaron is never shown them, or the phone numbers inside them.
-_NATIVE_TAG_RE = re.compile(r"^\s*\[inkbox:group_(?:whatsapp|imessage|sms)\b([^\]]*)\]\s*", re.I)
+# The marker carries bracketed lists of its own (contact_phones=['+1...']), so it ends at
+# the first "]" that is not inside one of those: cutting at the first "]" left titles that
+# began "] Group WhatsApp response policy: ..." (2026-11-18).
+_NATIVE_TAG_RE = re.compile(r"^\s*\[inkbox:group_(?:whatsapp|imessage|sms)\b((?:[^\[\]]|\[[^\[\]]*\])*)\]\s*", re.I)
 _NATIVE_GROUP_RE = re.compile(r"""\bgroup=(?:'([^']*)'|"([^"]*)")""")
 _NATIVE_FROM_RE = re.compile(r"\bfrom=(\S+)")
 _NATIVE_POLICY_STARTS = (
