@@ -37,6 +37,9 @@ from . import outcomes
 from . import ownertext
 from . import runguard
 
+# Manager.send's answer for a message held for Aaron's yes instead of sent.
+HELD_FOR_AARON = object()
+
 logger = logging.getLogger(__name__)
 _MISSING = object()
 _OUTBOX_HELD = object()
@@ -2074,8 +2077,14 @@ class GateSession:
                 self.m.store.add_message(self.record_id, "outbound", text, "sms", reply_to=self.inbound_id, role=role)
         else:
             self.typing_stop()
-            await self.m.send(self.chat_id, text, self.mode, self.reply_meta, record=False,
-                              kind=getattr(self, "_outbox_kind", "reply"))
+            result = await self.m.send(self.chat_id, text, self.mode, self.reply_meta, record=False,
+                                       kind=getattr(self, "_outbox_kind", "reply"),
+                                       hold_exempt=(role == "ack"))
+            if result is HELD_FOR_AARON:
+                # Not sent: held for Aaron's yes on the exact words (manager.hold_message).
+                self.m.store.add_message(self.record_id, "system",
+                                         f"Reply held for Aaron's yes before it goes out: {text}")
+                return True
             self.m.store.add_message(self.record_id, "outbound", text, self.mode, reply_to=self.inbound_id, role=role)
         t = self.task()
         if t is not None:
@@ -2502,9 +2511,13 @@ class GateSessionManager:
     async def send(self, target: str, text: str, mode: str, meta: Dict[str, Any], *,
                    chat_id: str = "", role: str = "notice", reply_to: Optional[int] = None,
                    record: bool = True, kind: str = "reply",
-                   retry_on_failure: bool = True) -> Any:
+                   retry_on_failure: bool = True, hold_exempt: bool = False) -> Any:
         """Save a message and wait for the dispatcher to deliver it.
-        Callers that write their own reply record pass record=False."""
+        Callers that write their own reply record pass record=False.
+
+        The one place every gateway send passes: a send made on behalf of a running
+        request (runguard) to anyone but Aaron is not sent but held for his exact yes
+        (GATE_HOLD_SENDS_TO_OTHERS); hold_exempt is for the short holding notice only."""
         text = wording.plain_dashes(text)
         running_for = runguard.current()
         if running_for is not None and runguard.is_cancelled(running_for):
@@ -2513,6 +2526,13 @@ class GateSessionManager:
             logger.warning("[gate] refused a %s send to %s: request #%s was stopped by Aaron",
                            mode, target, running_for)
             return None
+        if (running_for is not None and not hold_exempt and mode != "voice"
+                and bool(_settings.get("GATE_HOLD_SENDS_TO_OTHERS"))
+                and not self._is_owner_target(target, meta)):
+            origin = self.store.get_request(running_for)
+            if origin is not None and not origin.schedule_id:
+                await self.hold_message(origin, target, text, mode, meta, chat_id=chat_id, kind=kind)
+                return HELD_FOR_AARON
         result = None
         if not self._outbox_enabled() or mode == "voice":
             result = await self.send_fn(target, text, mode, meta)
@@ -2907,7 +2927,99 @@ class GateSessionManager:
 
     async def send_to_approver(self, text: str, *, kind: str = "reply") -> None:
         conv = self.approver_conv
-        await self.send(f"imessage:{conv}", text, "imessage", {"conversation_id": conv}, kind=kind)
+        await self.send(f"imessage:{conv}", text, "imessage", {"conversation_id": conv}, kind=kind,
+                        hold_exempt=True)
+
+    def _is_owner_target(self, target: str, meta: Optional[Dict[str, Any]]) -> bool:
+        """Whether a send reaches Aaron and nobody else. A group never counts as him."""
+        meta = meta or {}
+        if meta.get("conversation_kind") == "group" or meta.get("group_title"):
+            return False
+        conv = str(self.approver_conv or "")
+        if conv and (conv in str(target) or str(meta.get("conversation_id") or "") == conv):
+            return True
+        sess = self.sessions.get(target)
+        if sess is not None:
+            try:
+                if sess.is_approver() and not sess.in_group():
+                    return True
+            except Exception:
+                pass
+        from .executor import _is_owner_handle
+        protected = list(getattr(self.executor, "protected", []) or [])
+        value = str(target).split(":", 1)[-1]
+        if protected and (_is_owner_handle(value, protected) or _is_owner_handle(str(target), protected)):
+            return True
+        digits = re.sub(r"\D", "", value)
+        if self.approver_phone and digits and digits[-10:] == re.sub(r"\D", "", self.approver_phone)[-10:]:
+            return True
+        if self.approver_telegram_id and value == str(self.approver_telegram_id):
+            return True
+        return False
+
+    @staticmethod
+    def _recipient_label(target: str, meta: Dict[str, Any]) -> str:
+        contact = meta.get("contact") if isinstance(meta.get("contact"), dict) else {}
+        name = str(meta.get("group_title") or meta.get("name") or contact.get("name") or "").strip()
+        address = str(meta.get("to") or meta.get("conversation_id") or target).strip()
+        return f"{name} ({address})" if name and name != address else address
+
+    async def hold_message(self, origin: Request, target: str, text: str, mode: str,
+                           meta: Dict[str, Any], *, chat_id: str = "", kind: str = "reply") -> Request:
+        """Park one outbound message as its own pending request and show Aaron exactly what
+        would go: channel, recipient, full text, attachments. "#id yes" sends that text,
+        unchanged, once; "#id no" discards it."""
+        meta = dict(meta or {})
+        label = self._recipient_label(target, meta)
+        files = []
+        for key in ("attachments", "media", "files", "media_paths", "attachment_paths"):
+            v = meta.get(key)
+            for item in (v if isinstance(v, (list, tuple)) else [v] if v else []):
+                name = os.path.basename(str(item.get("name") or item.get("path") or item.get("url") or "")
+                                        if isinstance(item, dict) else str(item))
+                if name:
+                    files.append(name)
+        held = {"target": target, "text": text, "mode": mode, "meta": meta, "chat_id": chat_id,
+                "kind": kind, "for_request": origin.id, "label": label, "attachments": files}
+        req, _ = self.store.create_request_once(
+            chat_id=origin.chat_id, sender=origin.sender, sender_name=origin.sender_name, mode=origin.mode,
+            subject=origin.subject or "", original_message=f"Held message from #{origin.id} to {label}",
+            summary=f"Send to {label}", scopes=[], prompt=json.dumps(held, sort_keys=True, ensure_ascii=False),
+            state="pending", task_id=self.store.task_id_for_request(origin.id), bypass_dedupe=True)
+        self.store.set_state(req.id, "pending", status={"held_message": held})
+        logger.info("[gate] #%s: %s message to %s held for Aaron as #%s", origin.id, mode, target, req.id)
+        facts = [("Channel", mode), ("To", label), ("From", f"#{origin.id}")]
+        if files:
+            facts.append(("Attachments", ", ".join(files)))
+        await self.send_to_approver(ownertext.compose(
+            "held", f"Held for your yes \u00b7 #{req.id}", facts=facts,
+            body=f"Nothing has been sent. This is exactly what would go out:\n\n{text}",
+            handle=ownertext.reply_handle(req.id)), kind="approval")
+        return req
+
+    async def _decide_held_message(self, req: Request, d: str, actor: str) -> Dict[str, Any]:
+        held = (req.status or {}).get("held_message") or {}
+        if d in ("yes", "y", "ok", "approve", "run", "go", "send"):
+            self.store.set_state(req.id, "approved")
+            try:
+                await self.send(held["target"], held["text"], held["mode"], dict(held.get("meta") or {}),
+                                chat_id=held.get("chat_id") or "", kind=held.get("kind") or "reply",
+                                role="answer", hold_exempt=True)
+            except Exception as exc:
+                logger.warning("[gate] held message #%s could not be sent: %s", req.id, exc)
+                self.store.set_state(req.id, "failed", status={**(req.status or {}), "error": str(exc)})
+                await self.send_to_approver(f"#{req.id} could not be sent: {exc}")
+                return {"ok": False, "state": "failed", "error": str(exc)}
+            self.store.set_state(req.id, "done", status={**(req.status or {}), "sent_by": actor})
+            self.task_note(req, "done", f"{actor} approved the held message to {held.get('label')}", state="open")
+            await self.send_to_approver(f"Sent #{req.id} to {held.get('label')}.")
+            return {"ok": True, "state": "done", "error": ""}
+        if d in ("no", "n", "stop", "drop", "reject", "decline", "discard"):
+            self.store.set_state(req.id, "rejected")
+            self.task_note(req, "rejected", f"{actor} discarded the held message to {held.get('label')}", state="open")
+            await self.send_to_approver(f"Discarded #{req.id}. Nothing was sent.")
+            return {"ok": True, "state": "rejected", "error": ""}
+        return {"ok": False, "error": f"#{req.id} needs a yes or a no", "state": req.state}
 
     async def send_schedule_notice(self, schedule: Any, text: str, *, kind: str = "schedule") -> int:
         """Every schedule notice and proposal (schedules.py's only way to speak)
@@ -3545,6 +3657,8 @@ class GateSessionManager:
         if req.state not in ("pending",):
             # Someone already answered this one. Say so rather than acting again.
             return {"ok": False, "error": f"#{req.id} is already {req.state}", "state": req.state}
+        if (req.status or {}).get("held_message"):
+            return await self._decide_held_message(req, (decision or "").strip().lower(), actor)
         hold = (req.status or {}).get("admin_hold")
         if hold:
             # A change parked by the chat admin commands (admincmd.py): his yes does exactly

@@ -319,6 +319,12 @@ class ToolBox:
         if rid is not None and runguard.is_cancelled(rid):
             # Aaron stopped this request: no further call of any kind is made for it.
             raise RuntimeError(runguard.refusal(rid))
+        if (self._request is not None and is_outbound_message(name, args or {})
+                and _holds_send(self._request, args or {},
+                                list(getattr(getattr(self._manager, "executor", None), "protected", []) or []))):
+            # Backstop under the engines' own holds: nothing reaches another person from
+            # here without Aaron's yes on the exact message (perform() carries no request).
+            raise RuntimeError("Held: a message to someone other than Aaron needs his yes first.")
         if name == "mcp__host__request_access":
             return hosttools.request_access(args, self._manager, self._request)
         if name == "mcp__host__set_followup":
@@ -1001,6 +1007,13 @@ class JevAgent:
                         # The gateway delivers the answer; a send to the requester would duplicate it.
                         logger.info("jev agent: refusing %s to the requester; finishing with findings", choice)
                         break
+                    if is_outbound_message(choice, args) and _holds_send(req, args, self.protected):
+                        # Words to anyone but Aaron are shown to him exactly, and wait for his yes.
+                        who = ", ".join(recipients_of(args)) or "(no recipient named in the call)"
+                        st = self._status(False, "confirmation required", steps, judge, prose, started)
+                        st["confirm"] = {"tool": choice, "args": args, "kind": "send", "about": [who]}
+                        logger.info("jev agent: %s would reach %s; holding for the owner", choice.split("__")[-1], who)
+                        return st
                     if is_destructive(choice, args):
                         about = _mentions(steps, args)
                         if not about:
@@ -1534,6 +1547,21 @@ _SEND_RE = re.compile(r"(send|reply|forward|publish_post|publish|post_message|dm
 # one already out there: none of those puts new words in front of anyone.
 _NOT_SEND = re.compile(r"(draft|stage|schedule_send|list|get|read|search|check|insight|limit|recent|"
                        r"delete|remove|modify|settings|history|count)", re.I)
+
+
+def _holds_send(req: Any, args: Dict[str, Any], protected: List[str]) -> bool:
+    """Whether a send in this request waits for Aaron's yes: any recipient but Aaron,
+    under GATE_HOLD_SENDS_TO_OTHERS (or his own request under GATE_CONFIRM_SENDS)."""
+    from .settings import get as _setting
+    from .executor import _is_owner_handle
+    recips = recipients_of(args)
+    if recips and all(_is_owner_handle(r, protected) for r in recips):
+        return False
+    if getattr(req, "schedule_id", None):
+        return False
+    from .manager import OWNER_THREAD
+    own = getattr(req, "chat_id", "") == OWNER_THREAD
+    return bool(_setting("GATE_HOLD_SENDS_TO_OTHERS")) or (own and bool(_setting("GATE_CONFIRM_SENDS")))
 
 
 def is_outbound_message(name: str, args: Dict[str, Any]) -> bool:

@@ -441,7 +441,9 @@ async def guard(state: AgentState, config: RunnableConfig) -> Dict[str, Any]:
     from .settings import get as _setting
     _recips = ja.recipients_of(args)
     _to_owner = bool(_recips) and all(_is_owner_handle(r, agent.protected) for r in _recips)
-    if ja.is_outbound_message(choice, args) and _owner_asked(req) and bool(_setting("GATE_CONFIRM_SENDS")) and not _to_owner:
+    _hold = ((_owner_asked(req) and bool(_setting("GATE_CONFIRM_SENDS")))
+             or (bool(_setting("GATE_HOLD_SENDS_TO_OTHERS")) and not getattr(req, "schedule_id", None)))
+    if ja.is_outbound_message(choice, args) and _hold and not _to_owner:
         # The same rule as the other executor: words put in front of someone else are shown
         # to the owner before they go, whichever engine composed them.
         who = ", ".join(ja.recipients_of(args)) or "(no recipient named in the call)"
