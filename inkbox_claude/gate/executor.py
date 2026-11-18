@@ -130,8 +130,6 @@ EXECUTOR_SYSTEM = (
     f"Anything you write to another person (email, text, calendar invite) is from {_ASSISTANT}, Aaron's "
     "assistant. Never mention Claude, Claude Code, Anthropic, AI tooling, prompts or how the task was run, "
     f"and never sign as anything but {_ASSISTANT}.\n"
-    "Only an email carries a signature. Never add a sign-off, a name line or a title to a text, "
-    "an iMessage, a WhatsApp message or a Telegram message.\n"
     f"Commander exception: when the sender is Aaron himself and the request is about {_ASSISTANT}'s OWN "
     "configuration (a setting, a role's scopes, a person's role, a schedule's state, or a chat's response "
     "mode), the rule above does not hide those names from him -- he set them and can ask for them back. "
@@ -449,7 +447,8 @@ class Executor:
         # A message the owner asked to have sent is him speaking to someone through the
         # assistant, and he sees it before it goes. A request that came from someone else
         # was already read and approved by him in full, so answering it needs nothing more.
-        confirm_sends = bool(from_owner) and bool(_setting("GATE_CONFIRM_SENDS"))
+        confirm_sends = (bool(from_owner) and bool(_setting("GATE_CONFIRM_SENDS"))) or \
+            (bool(_setting("GATE_HOLD_SENDS_TO_OTHERS")) and not req.schedule_id)
         # A scheduled run's sends are routed through the hook too, but never on a blanket
         # from_owner basis: can_use below decides each one by its own recipients, letting a
         # send to Aaron himself through and holding anything to a third party (or anything
@@ -499,7 +498,8 @@ class Executor:
                             f"reached: {who}. Do not try another tool or another route to send it. Put the "
                             "whole thing in your final status, exactly as you would send it: every "
                             "recipient, every cc, the subject, and the full text, then stop."))
-                elif confirm_sends and not self.allow_send and not (
+                elif confirm_sends and not self.allow_send and \
+                        not blocks_requester_send(req, tool_name, input_data or {}, self.protected) and not (
                         recipients_of(input_data or {})
                         and all(_is_owner_handle(r, self.protected) for r in recipients_of(input_data or {}))):
                     # A text to Aaron himself never needs his sign-off; only third parties are held.

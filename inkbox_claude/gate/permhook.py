@@ -70,6 +70,11 @@ def reads_own_output(name: str, args: Dict[str, Any], dirs: Iterable[str]) -> bo
     return True
 
 
+def _hold_sends_to_others() -> bool:
+    from .settings import get as _setting
+    return bool(_setting("GATE_HOLD_SENDS_TO_OTHERS"))
+
+
 def decide(req: Any, name: str, args: Dict[str, Any], allowed: Iterable[str], *,
            from_owner: bool, protected: list[str], manager: Any,
            confirm_sends: bool, owner_handle: Any,
@@ -114,7 +119,9 @@ def decide(req: Any, name: str, args: Dict[str, Any], allowed: Iterable[str], *,
         except ValueError:
             # The tool itself says what was wrong with the address; nothing is sent.
             return "allow", "", ""
-        if dest.get("requester") or dest.get("owner"):
+        if dest.get("owner"):
+            return "allow", "", ""
+        if dest.get("requester") and not (_hold_sends_to_others() and not req.schedule_id):
             # Answering the person who asked, or telling Aaron himself, needs no sign-off.
             return "allow", "", ""
         if req.schedule_id or confirm_sends:

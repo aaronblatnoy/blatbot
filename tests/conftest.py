@@ -26,6 +26,11 @@ import os
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Sequence
 
+# The suite's older tests pin the behaviour from before the second approval for
+# messages to other people; with GATE_HOLD_SENDS_TO_OTHERS off that behaviour must be
+# exactly what they say. tests/test_hold_sends.py turns it on and tests the hold.
+os.environ.setdefault("GATE_HOLD_SENDS_TO_OTHERS", "0")
+
 # A handful of tests build a LEGACY sqlite file by hand (raw sqlite3.connect +
 # executescript with the pre-people-model trust/people/synced_people tables,
 # or a pre-schedules requests table) specifically to exercise store.py's
