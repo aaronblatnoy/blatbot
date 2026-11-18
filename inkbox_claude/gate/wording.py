@@ -361,7 +361,33 @@ def is_progress_question(body: str) -> bool:
 NOT_PROMISING_FOLLOWUP = "Noted. I will pick that up when this finishes."
 
 _STOP_WORDS = r"(?:no+|stop|cancel|abort|nvm)"
-_STOP_PLAIN_RE = re.compile(rf"^\s*{_STOP_WORDS}\s*[.!]*\s*$", re.I)
+# The ways he actually says it (2026-11-18: "blatbot shut up" and "nope dno't do that"
+# were both filed as follow-ups while the run carried on). Whole message only, with
+# his name for the assistant and a please allowed around it.
+_STOP_SAID = (r"(?:no+|nope|nah|stop|stop it|stop that|stop this|stop doing that|stop now|cancel|cancel it|"
+              r"cancel that|abort|nvm|never ?mind|forget it|forget that|drop it|quit|quit it|shut up|"
+              r"be quiet|quiet|hush|enough|not now|not you|"
+              r"(?:no+,? |nope,? |nah,? |please )?(?:do ?n[o']?t|dno'?t|dont) (?:do )?(?:that|this|it)|"
+              r"(?:no+|nope|nah),? stop(?: it| that)?)")
+_STOP_PLAIN_RE = re.compile(
+    rf"^\s*(?:(?:hey |ok |okay )?blatbot[,:]?\s+)?(?:please\s+)?{_STOP_SAID}(?:\s+please)?(?:[,]?\s+blatbot)?\s*[.!]*\s*$",
+    re.I)
+_ADDRESSED_RE = re.compile(r"^\s*(?:hey |ok |okay |yo )?@?blatbot\b[,:]?\s+\S", re.I)
+
+
+def addressed_to_assistant(body: str) -> bool:
+    """He opened the message with the assistant's name: it is for the assistant, not
+    for someone else in the room."""
+    return bool(_ADDRESSED_RE.match(str(body or "")))
+
+
+def steered_line(request_id: int, sent: List[str]) -> str:
+    """He sent a new instruction while a request was running: that one is stopped and
+    the new message is what gets done."""
+    if sent:
+        return (f"Stopped #{request_id} and switching to this. Already sent before the stop: "
+                f"{'; '.join(sent)}.")
+    return f"Stopped #{request_id} and switching to this."
 _STOP_ID_AFTER_RE = re.compile(rf"^\s*#\s*(\d+)\s*[,:]?\s*{_STOP_WORDS}\s*[.!]*\s*$", re.I)
 _STOP_ID_BEFORE_RE = re.compile(rf"^\s*{_STOP_WORDS}\s*#\s*(\d+)\s*[.!]*\s*$", re.I)
 
