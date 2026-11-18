@@ -233,7 +233,7 @@ def frame_inbound(mode: str, meta: Dict[str, Any], text: str) -> str:
     memories = meta.get("contact_memories") or []
     is_preframed_group = (
         meta.get("conversation_kind") == "group"
-        and text.startswith(("[inkbox:group_sms ", "[inkbox:group_imessage "))
+        and text.startswith(("[inkbox:group_sms ", "[inkbox:group_imessage ", "[inkbox:group_whatsapp "))
     )
     is_preframed_reaction = bool(meta.get("reaction")) and text.startswith(
         "[inkbox:imessage_reaction "
@@ -257,6 +257,11 @@ def frame_inbound(mode: str, meta: Dict[str, Any], text: str) -> str:
         conversation_id = str(meta.get("conversation_id") or "").strip()
         conversation_part = f" conversation_id={conversation_id}" if conversation_id else ""
         header = f"[inkbox:imessage{from_part}{conversation_part} | {marker}]"
+    elif mode == "whatsapp":
+        conversation_id = str(meta.get("conversation_id") or "").strip()
+        conversation_part = f" conversation_id={conversation_id}" if conversation_id else ""
+        header = (f"[inkbox:whatsapp{from_part}{conversation_part} | {marker}]\n"
+                  "Keep replies within 4000 characters; your final response replies here as a plain WhatsApp message.")
     elif mode == "voice":
         call_id = str(meta.get("call_id") or "").strip()
         call_part = f" call_id={call_id}" if call_id else ""

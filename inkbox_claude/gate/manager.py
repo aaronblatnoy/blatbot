@@ -48,7 +48,7 @@ HANDOFF_LINE = (
 )
 _MODE_LABEL = {
     "imessage": "iMessage", "sms": "text", "email": "email",
-    "voice": "phone call", "telegram": "Telegram",
+    "voice": "phone call", "telegram": "Telegram", "whatsapp": "WhatsApp",
 }
 EXPIRE_SECONDS = 24 * 3600
 # Item C2: how long a call's failed ask is still "the same ask" for folding purposes
@@ -254,6 +254,11 @@ class GateSession:
         # set by the sender, so it identifies Aaron as reliably as his iMessage thread.
         if self.mode == "telegram" and self.m.approver_telegram_id:
             return str((self.reply_meta or {}).get("telegram_user_id") or "") == self.m.approver_telegram_id
+        # WhatsApp: the sender number is the WhatsApp account's own, verified when it was
+        # registered and set by Inkbox on the event, not by the sender, so Aaron's number
+        # identifies him on WhatsApp the way his user id does on Telegram.
+        if self.mode == "whatsapp":
+            return bool(self.m.approver_phone) and _digits(self._sender()) == _digits(self.m.approver_phone)
         # Phone: caller ID can be spoofed, so Aaron's number only counts as the
         # approver when GATE_VOICE_TRUST_APPROVER=1. Otherwise his spoken requests
         # go to his iMessage for a yes like anyone else's.
@@ -1241,7 +1246,7 @@ class GateSession:
             finally:
                 self.mode, self.reply_meta = saved
 
-    _INDEX_PLACES = {"email": "email", "sms": "SMS", "imessage": "iMessage"}
+    _INDEX_PLACES = {"email": "email", "sms": "SMS", "imessage": "iMessage", "whatsapp": "WhatsApp"}
 
     def _index_sender(self) -> None:
         """Someone writing on email, SMS or iMessage gets a People record if they have
