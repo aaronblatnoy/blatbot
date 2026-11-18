@@ -2540,7 +2540,8 @@ class GateSessionManager:
                 and bool(_settings.get("GATE_HOLD_SENDS_TO_OTHERS"))
                 and not self._is_owner_target(target, meta)):
             origin = self.store.get_request(running_for)
-            if origin is not None and not origin.schedule_id:
+            if (origin is not None and not origin.schedule_id
+                    and not self._answers_owner_in_place(origin, target, chat_id)):
                 await self.hold_message(origin, target, text, mode, meta, chat_id=chat_id, kind=kind)
                 return HELD_FOR_AARON
         result = None
@@ -2967,6 +2968,38 @@ class GateSessionManager:
             return True
         return False
 
+    def _asked_by_owner(self, req: Request) -> bool:
+        """Whether Aaron himself wrote the message this request came from, wherever he
+        wrote it (his own thread, or a group he is in). Judged from the request's own
+        sender with the same verified identities is_approver() uses; a phone call never
+        counts (caller ID can be spoofed)."""
+        if self._is_owner_request(req):
+            return True
+        if req.mode == "voice":
+            return False
+        value = str(req.sender or "").split(":", 1)[-1].strip()
+        if not value:
+            return False
+        if req.mode == "telegram":
+            return bool(self.approver_telegram_id) and value == str(self.approver_telegram_id)
+        if self.approver_phone and _digits(value) and _digits(value) == _digits(self.approver_phone):
+            return True
+        try:
+            from .executor import _is_owner_handle
+            protected = list(getattr(self.executor, "protected", []) or [])
+            return bool(protected) and _is_owner_handle(value, protected)
+        except Exception:
+            return False
+
+    def _answers_owner_in_place(self, origin: Request, target: str, chat_id: str = "") -> bool:
+        """Aaron asked in a chat and the reply goes back to that same chat: he is reading
+        it there, so it needs no second yes. A send to any other chat or person is still
+        held."""
+        if not self._asked_by_owner(origin):
+            return False
+        here = str(origin.chat_id or "")
+        return bool(here) and here in (str(target or ""), str(chat_id or ""))
+
     @staticmethod
     def _recipient_label(target: str, meta: Dict[str, Any]) -> str:
         contact = meta.get("contact") if isinstance(meta.get("contact"), dict) else {}
@@ -3022,14 +3055,44 @@ class GateSessionManager:
                 return {"ok": False, "state": "failed", "error": str(exc)}
             self.store.set_state(req.id, "done", status={**(req.status or {}), "sent_by": actor})
             self.task_note(req, "done", f"{actor} approved the held message to {held.get('label')}", state="open")
-            await self.send_to_approver(f"Sent #{req.id} to {held.get('label')}.")
+            self._finish_waiting_origin(held)
+            await self.send_to_approver(f"Sent #{req.id} to {held.get('label')}.{self._still_waiting_line(req.id)}")
             return {"ok": True, "state": "done", "error": ""}
-        if d in ("no", "n", "stop", "drop", "reject", "decline", "discard"):
+        if d in ("no", "n", "stop", "drop", "reject", "decline", "discard", "deny", "cancel"):
             self.store.set_state(req.id, "rejected")
             self.task_note(req, "rejected", f"{actor} discarded the held message to {held.get('label')}", state="open")
-            await self.send_to_approver(f"Discarded #{req.id}. Nothing was sent.")
+            self._finish_waiting_origin(held)
+            await self.send_to_approver(f"Discarded #{req.id}. Nothing was sent.{self._still_waiting_line(req.id)}")
             return {"ok": True, "state": "rejected", "error": ""}
         return {"ok": False, "error": f"#{req.id} needs a yes or a no", "state": req.state}
+
+    def _open_held(self) -> List[Request]:
+        """Held messages still waiting for Aaron's yes or no, oldest first."""
+        return [p for p in self.store.pending() if (p.status or {}).get("held_message")]
+
+    def _still_waiting_line(self, answered_id: int) -> str:
+        """After one held message is answered: the others still waiting, by handle."""
+        rest = [p for p in self._open_held() if p.id != answered_id]
+        if not rest:
+            return ""
+        handles = chatreply.and_list([f"#{p.id}" for p in rest])
+        verb = "is" if len(rest) == 1 else "are"
+        return f" {handles} {verb} still waiting for your yes or no."
+
+    def _finish_waiting_origin(self, held: Dict[str, Any]) -> None:
+        """The run that wrote a held message ended as waiting on it. Once none of its held
+        messages are open any more, that request is done."""
+        try:
+            origin = self.store.get_request(int(held.get("for_request") or 0))
+        except Exception:
+            origin = None
+        if origin is None or origin.state != "waiting":
+            return
+        if any(int((p.status or {}).get("held_message", {}).get("for_request") or 0) == origin.id
+               for p in self._open_held()):
+            return
+        self.store.set_state(origin.id, "done", status={**(origin.status or {}), "ok": True})
+        self.task_note(origin, "done", "The held message was answered.", state="open")
 
     async def send_schedule_notice(self, schedule: Any, text: str, *, kind: str = "schedule") -> int:
         """Every schedule notice and proposal (schedules.py's only way to speak)
@@ -3838,6 +3901,19 @@ class GateSessionManager:
             explicit = re.match(r"^\s*#?(\d+)\b", t)
             if not explicit:
                 pending = [p for p in pending if p.chat_id == here]
+        else:
+            # A bare yes/no in his own chat, where every held message's prompt is asked,
+            # answers the most recently asked one, exactly like "#id yes". Never a new
+            # request (2026-11-18: his "Yes" to #531 started #532 instead of sending it).
+            bare = t.strip().lower().rstrip(".!")
+            held = [p for p in pending if (p.status or {}).get("held_message")]
+            if held and bare in (_YES | _NO):
+                newest = max(held, key=lambda p: p.id)
+                out = await self.decide_request(newest.id, "yes" if bare in _YES else "no",
+                                                actor="Aaron", source=session.mode or "imessage")
+                if not out.get("ok") and out.get("error"):
+                    await self.send_to_approver(out["error"])
+                return True
         m = re.match(r"^\s*#?(\d+)\s*[:\-]?\s*(.*)$", t, re.S)
         req: Optional[Request] = None
         rest = t
@@ -4759,6 +4835,17 @@ class GateSessionManager:
                 return await self.execute(fresh, notify=notify,
                                           continuation=next_prompt if saved_session else "",
                                           resume_session=saved_session)
+        if status.get("outcome") == "held" and not req.schedule_id:
+            # The run's message to someone else is held for Aaron's yes and he has been
+            # shown it with its own "#id yes / no". That prompt is the only thing he gets:
+            # the run is not a failure, it waits, and his yes sends it and finishes it.
+            session.typing_stop()
+            status["ok"] = True
+            self.store.set_state(req.id, "waiting", status=status, raw_output=status.get("raw"))
+            self.store.set_thread(req.chat_id, "idle")
+            self.task_note(req, "request", "Waiting on Aaron's yes for the held message.", state="waiting_aaron")
+            logger.info("[gate] #%s ended waiting on %d held message(s)", req.id, len(status.get("held_sends") or []))
+            return ""
         if status.get("confirm"):
             session.typing_stop()
             await self.ask_confirmation(req, status)

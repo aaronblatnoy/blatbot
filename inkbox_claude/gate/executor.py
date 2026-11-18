@@ -804,6 +804,12 @@ class Executor:
                 out["sends"] = sends
                 out["answered_requester"] = any(s.get("requester") for s in sends)
                 out["outcome"] = ("sent" if sends else "quiet" if outcome_log.get("quiet") else "none")
+                held_sends = list(outcome_log.get("held_sends") or [])
+                if held_sends:
+                    # A message to someone else is held for Aaron's yes: the run waits on
+                    # it rather than failing (manager._execute).
+                    out["held_sends"] = held_sends
+                    out["outcome"] = "held"
                 if outcome_log.get("quiet"):
                     out["quiet_reason"] = outcome_log["quiet"]
             pending = getattr(result, "deferred_tool_use", None) if native_defer else None

@@ -504,6 +504,24 @@ async def send_message(args: Dict[str, Any], manager: Any, request: Any,
         logger.warning("[outcomes] #%s send to %s failed: %s", request.id, describe(dest), exc)
         return (f"Could not send to {describe(dest)}: {exc}. Try another surface, "
                 "or say plainly in your final status that it could not be sent.")
+    from .manager import HELD_FOR_AARON
+    if result is HELD_FOR_AARON:
+        # Not sent: shown to Aaron word for word with its own "#id yes / no". Nothing is
+        # recorded as said until he says yes.
+        try:
+            tid = _task_id(manager, request)
+            if tid:
+                manager.store.task_event(tid, "note", f"Held for Aaron's yes: to {describe(dest)}: {text}",
+                                         chat_id=dest["record"], request_id=request.id)
+        except Exception as exc:
+            logger.warning("[outcomes] #%s could not record a held send: %s", request.id, exc)
+        if log is not None:
+            log.setdefault("held_sends", []).append({"to": dest["who"], "surface": dest["mode"],
+                                                     "target": dest["target"], "text": text[:600]})
+        logger.info("[outcomes] #%s held a message to %s for Aaron's yes", request.id, describe(dest))
+        return ("Held for Aaron's yes. He has been shown this exact message and it goes out when he says "
+                "yes. This is expected, not an error: do not retry it or try another route. If there is "
+                "another message to send, send it the same way; otherwise stop now.")
     held = result is None and manager._outbox_enabled() and dest["mode"] != "voice"
     answered = bool(request.inbound_id) and "answer" in manager.store.responses_to(request.inbound_id)
     role = "answer" if (dest["requester"] and request.inbound_id and not answered
