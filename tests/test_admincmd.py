@@ -128,9 +128,14 @@ def test_every_guide_is_plain_and_its_phrases_work(tmp_path, area):
     add_schedule(store)
     reply = admincmd.guide_for(area, store)
     plain_ok(reply)
-    block = reply.split("Type any of these:\n", 1)
-    assert len(block) == 2
-    for phrase in block[1].splitlines():
+    if area == "overview":
+        # one line per area, "Area: an example phrase", the last line says how to see more
+        phrases = [ln.split(": ", 1)[1] for ln in reply.splitlines()[1:-1]]
+    else:
+        block = reply.split("Type any of these:\n", 1)
+        assert len(block) == 2
+        phrases = block[1].splitlines()
+    for phrase in phrases:
         if phrase.startswith("#") or phrase == "try again":
             continue  # approval handles and retry belong to the request path, not match()
         assert understood(store, phrase), f"{area}: nothing understands {phrase!r}"
@@ -303,7 +308,7 @@ def test_a_role_hold_for_memory_or_sending_waits_for_a_numbered_yes(tmp_path):
     m.store.set_role("interns", [], "")
     aaron(m, "let the interns role remember everything")
     ask = last_text(sent)
-    assert ask.startswith("\u25c6 Needs your yes \u00b7 #")
+    assert ask.startswith("Needs your yes (#")
     assert "\n\nLet the interns role remember everything? That widens access" in ask
     handle = re.search(r'#(\d+) yes', ask).group(1)
     assert role_scopes(m.store, "interns") == [], "nothing changes before his yes"
@@ -323,7 +328,7 @@ def test_a_no_leaves_the_role_alone(tmp_path):
     seed(m.store)
     m.store.set_role("interns", [], "")
     aaron(m, "delete the interns role")
-    assert last_text(sent) == ('\u25c6 Needs your yes \u00b7 #1\n\nDelete the interns role? Nobody holds it.\n\n'
+    assert last_text(sent) == ('Needs your yes (#1)\n\nDelete the interns role? Nobody holds it.\n\n'
                                '#1 yes / no')
     handle = re.search(r'#(\d+) yes', last_text(sent)).group(1)
     aaron(m, f"#{handle} no")
@@ -473,7 +478,7 @@ def test_new_admin_commands_are_aarons_alone(tmp_path):
 def test_people_groups_and_request_lists(tmp_path):
     store = make_store(tmp_path)
     seed(store)
-    assert say(store, "show people") == "1 people: Stanley Rabkin."
+    assert say(store, "show people") == "1 person in People:\nStanley Rabkin"
     assert say(store, "show group chats") == "I am not in any group chats yet."
     assert say(store, "show pending requests") == "Nothing is waiting on you."
     assert say(store, "show failed requests") == "Nothing has failed lately."
@@ -496,7 +501,7 @@ def test_group_list_shows_each_room_and_its_mode(tmp_path):
         store._db.execute("UPDATE threads SET meta_json=? WHERE chat_id=?",
                           ('{"conversation_kind": "group", "group_title": "FellowSIp of the Ring"}', "tg:-9"))
         store._db.commit()
-    assert say(store, "show group chats") == "FellowSIp of the Ring: silent"
+    assert say(store, "show group chats") == "I am in 1 group chat:\nFellowSIp of the Ring: silent"
 
 
 def test_refresh_people_uses_the_console_sync(tmp_path, monkeypatch):

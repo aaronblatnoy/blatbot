@@ -147,7 +147,7 @@ async def test_blocked_run_pauses_clears_next_run_and_gives_the_exact_notice(tmp
 
     notice = sent[-1][1]
     assert notice == (
-        '\u25b2 Team chat digest could not run\n\n'
+        'Team chat digest could not run\n\n'
         'It could not find a team chat in any reachable iMessage, SMS, or Telegram source, so no summary '
         'could be produced today. I won\'t retry on my own.\n\n'
         'Say "let it read your Telegram chats" and I will run it now, or "stop it".'
@@ -217,7 +217,7 @@ async def test_complete_notice_whole_string(tmp_path):
     await asyncio.sleep(0)
     updated = m.store.get_schedule(schedule.id)
     next_text = schedcmd._clock_text(updated.next_run, updated.timezone)
-    assert sent[-1][1] == f"\u25f7 Price watch\n\nThe price dropped to $9.\n\nNext check: {next_text}"
+    assert sent[-1][1] == f"Price watch\n\nThe price dropped to $9.\n\nNext check: {next_text}"
 
 
 @pytest.mark.asyncio
@@ -238,7 +238,7 @@ async def test_incomplete_notice_whole_string(tmp_path):
     await m.schedules.tick(now=activated.next_run)
     await asyncio.sleep(0)
     assert sent[-1][1] == (
-        "\u25b2 Contact note watch could not finish\n\n"
+        "Contact note watch could not finish\n\n"
         "It is not allowed to look up and edit contacts, so the note was not written.\n\n"
         'Say "let it look up and edit contacts" and I will run it again, or "stop it".'
     )
@@ -260,7 +260,7 @@ async def test_failed_notice_whole_string_first_miss(tmp_path):
     await asyncio.sleep(0)
     updated = m.store.get_schedule(schedule.id)
     when = schedcmd._clock_text(updated.next_run, updated.timezone)
-    assert sent[-1][1] == f"\u25b2 Price watch could not finish\n\nIt took too long.\n\nNext try: {when}"
+    assert sent[-1][1] == f"Price watch could not finish\n\nIt took too long.\n\nNext try: {when}"
 
 
 @pytest.mark.asyncio
@@ -279,7 +279,7 @@ async def test_paused_after_three_notice_whole_string(tmp_path):
         await m.schedules.tick(now=activated.next_run)
         await asyncio.sleep(0)
         activated = m.store.get_schedule(schedule.id)
-    assert sent[-1][1] == ('\u25b2 Price watch is paused\n\n'
+    assert sent[-1][1] == ('Price watch is paused\n\n'
                            'Three runs in a row could not finish. The page timed out.\n\n'
                            'Say "run now" when it is fixed.')
 

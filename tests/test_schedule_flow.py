@@ -163,12 +163,12 @@ async def test_full_flow_propose_approve_fire_complete_notice(tmp_path):
 
     proposal_text = sent[-1][1]
     assert proposal_text == (
-        f'\u25c6 Set up "{schedule.title}"?\n\nWhen: every 4 hours, starting '
+        f'Set up "{schedule.title}"?\n\nWhen: every 4 hours, starting '
         + proposal_text.split("starting ", 1)[1]
     )  # sanity: the exact string is asserted in full just below, against the live schedule
     first_run = schedule.next_run or time.time()
     from inkbox_claude.gate import schedprop
-    expected = (f'\u25c6 Set up "{schedule.title}"?\n\nWhen: every 4 hours, starting '
+    expected = (f'Set up "{schedule.title}"?\n\nWhen: every 4 hours, starting '
                + schedprop._first_run_text(schedule) + '\nIt will: read public web pages\n'
                'You hear from it: only when something changed or it could not finish\n\n'
                'Reply yes to start, or tell me what to change.')
@@ -193,7 +193,7 @@ async def test_full_flow_propose_approve_fire_complete_notice(tmp_path):
     run = m.store.last_schedule_run(schedule.id)
     assert run["outcome"] == "complete"
     notice = sent[-1][1]
-    assert notice.startswith(f"\u25f7 {schedule.title}\n\nTotal went from $4,027.39 to $4,922.45.")
+    assert notice.startswith(f"{schedule.title}\n\nTotal went from $4,027.39 to $4,922.45.")
     assert "Next check" in notice
 
 

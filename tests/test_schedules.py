@@ -795,7 +795,7 @@ async def test_failed_notice_title_ending_in_punctuation_does_not_double_up(env)
                                  "denied": [], "held": False})
     text = manager.notices[-1][1]
     assert "Nightly check!:" not in text
-    assert text.startswith("\u25b2 Nightly check could not finish\n")
+    assert text.startswith("Nightly check could not finish\n")
 
 
 def test_run_outcome_ok_with_could_not_result_is_incomplete():

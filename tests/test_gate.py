@@ -4,6 +4,7 @@ executor hash refusal, routing with a stubbed router. No network."""
 from __future__ import annotations
 
 import asyncio
+import re
 import itertools
 import time
 import json
@@ -117,7 +118,7 @@ def test_stranger_benign_reply_no_request(tmp_path):
     asyncio.run(m.get("c1").handle_inbound("hello", "email", stranger_meta()))
     assert [x[1] for x in sent if x[2] == "email"] == ["Sure, what times work?"]
     fyi = [x for x in sent if x[2] == "imessage"]
-    assert len(fyi) == 1 and fyi[0][1].startswith("\u25cb Cand Idate wrote to Blatbot") and "hello" in fyi[0][1]
+    assert len(fyi) == 1 and fyi[0][1].startswith("Cand Idate wrote to Blatbot") and "hello" in fyi[0][1]
     assert m.store.pending() == [] and m.store.thread_state("c1") == "idle"
 
 
@@ -127,7 +128,7 @@ def test_stranger_request_goes_to_aaron_and_waits(tmp_path):
         prompt="Book Tue 6pm", scopes=["calendar", "email_send"], summary="book chat"))
     asyncio.run(m.get("c1").handle_inbound("can we do tue 6pm?", "email", stranger_meta()))
     pend = m.store.pending(); assert len(pend) == 1
-    approver_msgs = [x for x in sent if x[2] == "imessage" and x[1].startswith("\u25c6 ")]
+    approver_msgs = [x for x in sent if x[2] == "imessage" and re.search(r"#\d+ yes / no", x[1])]
     assert len(approver_msgs) == 1
     text = approver_msgs[0][1]
     assert "can we do tue 6pm?" in text and "book chat" in text and gm.schedprop.short_labels(["calendar", "email_send"]) in text
@@ -150,7 +151,7 @@ def test_aaron_yes_runs_exact_prompt_and_reports(tmp_path):
     asyncio.run(go())
     assert m.executor.ran == [rid]
     assert m.store.get_request(rid).state == "done"
-    assert any(x[1].startswith("\u25cf Done") and f"#{rid}" in x[1] for x in sent if x[2] == "imessage")
+    assert any(x[1].startswith("Done") and f"#{rid}" in x[1] for x in sent if x[2] == "imessage")
     assert not [x for x in sent if x[2] == "email"]  # nothing to the sender from the executor
 
 
@@ -195,7 +196,7 @@ def test_hash_mismatch_refused(tmp_path):
     r.prompt = "tampered"
     asyncio.run(m.execute(r))
     assert m.store.get_request(r.id).state == "failed"
-    assert any(x[1].startswith("\u25b2 Could not finish") for x in sent)
+    assert any(x[1].startswith("Could not finish") for x in sent)
 
 
 def test_aaron_direct_request_skips_gate(tmp_path):
@@ -840,7 +841,7 @@ def test_fyi_is_not_truncated(tmp_path):
     m, sent = make_manager(tmp_path)
     long = "word " * 300
     asyncio.run(m.get("c1").handle_inbound(long, "email", stranger_meta()))
-    fyi = [x for x in sent if x[1].startswith("\u25cb ")][0][1]
+    fyi = [x for x in sent if " wrote to " in x[1].split("\n")[0]][0][1]
     assert "..." not in fyi and fyi.count("word") == 300
 
 
@@ -982,7 +983,7 @@ def test_jev_action_creates_request_when_router_missed_it(tmp_path):
     pend = m.store.pending()
     assert len(pend) == 1 and pend[0].scopes == ["tamid_drive_write"]
     assert "Here is my application" in pend[0].prompt and m.store.task_id_for_request(pend[0].id) == t["id"]
-    assert any(x[2] == "imessage" and x[1].startswith("\u25c6 Sam Rivera needs your yes") and "Where: email" in x[1]
+    assert any(x[2] == "imessage" and x[1].startswith("Sam Rivera needs your yes") and "Where: email" in x[1]
                for x in sent)
 
 
@@ -1067,7 +1068,7 @@ def test_jev_first_stranger_request_waits_for_aaron(tmp_path):
     r = m.store.get_request(1)
     assert r.state == "pending" and r.scopes == ["calendar"]
     assert m.router.calls[-1]["action"] is True
-    assert any(s[2] == "imessage" and s[1].startswith("\u25c6 Cand Idate needs your yes") for s in sent)
+    assert any(s[2] == "imessage" and s[1].startswith("Cand Idate needs your yes") for s in sent)
 
 
 def test_jev_first_follow_up_inherits_task_scopes(tmp_path):
@@ -2424,7 +2425,7 @@ def test_approval_text_plain_single_and_numbered_multiple(tmp_path):
     m, _ = make_manager(tmp_path)
     req = _pretty_request(m)
     text = m.format_request(req)
-    assert text.startswith(f"\u25c6 Sarah Kim needs your yes \u00b7 #{req.id}\n\nWhere: iMessage\n"
+    assert text.startswith(f"Sarah Kim needs your yes (#{req.id})\n\nWhere: iMessage\n"
                            "Wants: Move Thursday's TAMID meeting to 4pm")
     assert '\u201chey can we push the meeting to 4\u201d' in text
     assert not any(token in text for token in ("---", "Tools:", "[", "stern_calendar", req.sender))
@@ -2440,7 +2441,7 @@ def test_approval_text_optional_parts_and_unknown_mode(tmp_path):
                           original_message="", scopes=[],
                           prompt="Move it\n\n--- AARON'S INSTRUCTIONS ---\nAfter class")
     assert m.format_request(req, revised=True) == (
-        f"\u25c6 +15550100002 needs your yes, revised \u00b7 #{req.id}\n\n"
+        f"+15550100002 needs your yes, revised (#{req.id})\n\n"
         "Where: fax\nWants: Move Thursday's TAMID meeting to 4pm\nSubject: Meeting\n"
         f"Your instructions: After class\n\n#{req.id} yes / no / edit: what to change"
     )
@@ -2482,7 +2483,7 @@ def test_confirmation_fallback_is_plain(tmp_path):
     text = sent[-1][1]
     assert "Before I do this" in text and "Sam Rivera" in text
     assert not any(token in text for token in ("Action:", "{", "manage_event", "[Blatbot #"))
-    assert text.startswith(f"\u25c6 Before I do this, I need your yes \u00b7 #{req.id}\n\n")
+    assert text.startswith(f"Before I do this, I need your yes (#{req.id})\n\n")
     assert text.endswith(f"Nothing has happened yet.\n\n#{req.id} yes / no")
     assert asyncio.run(m._phrase_confirmation(req, "manage_event", {}, [])) == (
         "Before I do this, I need your yes. I don't have more detail on what this affects."
@@ -2498,10 +2499,10 @@ def test_send_confirmation_drops_internal_arguments_and_numbers_multiple(tmp_pat
                          "about": ["Not displayed"]}}
     asyncio.run(m.ask_confirmation(req, status))
     plain = "Nothing has been sent. This is what would go out:\n\nTo: Sarah Kim\nSubject: Meeting\n\n4pm works."
-    assert sent[-1][1] == f"\u25a0 Held for your yes \u00b7 #{req.id}\n\n" + plain + f"\n\n#{req.id} yes / no"
+    assert sent[-1][1] == f"Held for your yes (#{req.id})\n\n" + plain + f"\n\n#{req.id} yes / no"
     _pretty_request(m)
     asyncio.run(m.ask_confirmation(req, status))
-    assert sent[-1][1] == f"\u25a0 Held for your yes \u00b7 #{req.id}\n\n" + plain + f"\n\n#{req.id} yes / no"
+    assert sent[-1][1] == f"Held for your yes (#{req.id})\n\n" + plain + f"\n\n#{req.id} yes / no"
     assert gm._draft_text({"internal_option": True}) == (
         "There's a message to send, but I couldn't lay out its parts plainly."
     )

@@ -5,7 +5,7 @@ needs his yes, someone wrote, a schedule missed), as opposed to a run's own
 free-form answer. Every one of them is built here, so they all look the same on
 his phone:
 
-    <mark> <what this is, in a few words>
+    <what this is, in a few words>
 
     Label: short value
     Label: short value
@@ -14,8 +14,8 @@ his phone:
 
     #472 yes / no
 
-* The first line is the header. It starts with one mark from the fixed set below,
-  so the kind of text is visible before a word is read. There are no bracket tags,
+* The first line is the header: a few plain words that say what the text is. No
+  symbols or marks of any kind. There are no bracket tags,
   no ALL CAPS words and no "STATUS:" lines.
 * Label lines carry who, what, where and when, only when they help.
 * The reply handle, when there is one, is the last line on its own, so it can be
@@ -30,18 +30,10 @@ from __future__ import annotations
 import re
 from typing import Iterable, Optional, Sequence, Tuple
 
-# One mark per kind of text. A small fixed set, used the same way everywhere.
-# Plain text symbols, never emoji (Aaron's standing rule: no emoji anywhere); each
-# is a geometric shape phones draw as text, so it looks the same on iMessage, SMS
-# and Telegram.
-DONE = "\u25cf"      # ● a task or request finished
-FAILED = "\u25b2"    # ▲ something could not finish, was stopped, or is broken
-ASK = "\u25c6"       # ◆ needs his yes, his no, or his answer
-HELD = "\u25a0"      # ■ a send held back for his yes before it goes out
-FYI = "\u25cb"       # ○ someone wrote; a copy for him to read
-TIMER = "\u25f7"     # ◷ a schedule or timer: its report, an expired ask
-PEOPLE = "\u25ce"    # ◎ someone was added to or changed in People
-WORKING = "\u25d4"   # ◔ still working; the answer follows
+# The kinds of structured text. Aaron, 2026-11-18: "adding random squares and
+# triangles is not what i'm looking for". No kind carries a symbol any more; the
+# headline's own words say what the text is.
+DONE = FAILED = ASK = HELD = FYI = TIMER = PEOPLE = WORKING = ""
 
 MARKS = {
     "done": DONE, "failed": FAILED, "ask": ASK, "held": HELD, "fyi": FYI,
@@ -145,7 +137,7 @@ def quote(text: object, limit: int = 600) -> str:
 
 
 def bullets(items: Iterable[object]) -> str:
-    return "\n".join(f"• {one_line(i)}" for i in items if one_line(i))
+    return "\n".join(one_line(i) for i in items if one_line(i))
 
 
 def compose(kind: str, headline: str, *, facts: Sequence[Tuple[str, object]] = (),
@@ -153,7 +145,7 @@ def compose(kind: str, headline: str, *, facts: Sequence[Tuple[str, object]] = (
     """Build one structured text in the house format.
 
     kind     one of MARKS ("done", "failed", "ask", "held", "fyi", "timer", "people",
-             "working"); it picks the leading mark.
+             "working"). Kept for the callers; it adds nothing to the text.
     headline what this text is, in a few words. One line.
     facts    (label, value) pairs shown as short "Label: value" lines; empty values
              are dropped.
@@ -161,9 +153,8 @@ def compose(kind: str, headline: str, *, facts: Sequence[Tuple[str, object]] = (
     tail     one closing line (what he can do, or that nothing is needed).
     handle   the reply line, e.g. reply_handle(472); always the last line.
     """
-    mark = MARKS.get(kind, kind)
     head = one_line(headline).rstrip(".:")
-    blocks = [f"{mark} {head}".strip()]
+    blocks = [head]
     fact_lines = []
     for label, value in facts:
         value = one_line(value)

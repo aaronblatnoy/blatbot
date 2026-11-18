@@ -27,7 +27,7 @@ import time
 from types import SimpleNamespace
 from typing import Any, Dict, List, Optional
 
-from . import accesscmd, settings as gate_settings, wording
+from . import accesscmd, chatreply, settings as gate_settings, wording
 from .store import role_names
 
 logger = logging.getLogger(__name__)
@@ -69,6 +69,26 @@ _NAME_RE = r"(?P<name>[A-Za-z][A-Za-z0-9' \-]{0,38}?)"
 
 # (action, regex). Earlier wins. Named groups: name, role, target, ...
 _PATTERNS: List[Any] = [(a, re.compile(p, re.I)) for a, p in [
+    # The console's read-only pages, by name or in his own words (console parity, 2026-11-18).
+    ("home_show", r"^(?:overview|dashboard|home|how are things|what(?:'s| is) going on|give me the rundown)$"),
+    ("inbox_show", r"^(?:show (?:me )?(?:my |the |your )?)?(?:event )?inbox$"),
+    ("inbox_show", r"^what(?:'s| is| came) (?:in (?:the |your |my )?inbox|in lately|in today)$"),
+    ("followups_show", r"^(?:show (?:me )?(?:my |the |your )?)?(?:follow[- ]?ups?|timers)$"),
+    ("followups_show", r"^what are you waiting (?:on|for)$"),
+    ("memory_show", r"^(?:show (?:me )?(?:your |the |my )?)?memory$"),
+    ("memory_show", r"^(?:what do you remember|what(?:'s| is) in your memory)$"),
+    ("knowledge_show", r"^who can (?:see|read) (?:my |your |the )?(?:notes|memory|what)$"),
+    ("pages_show", r"^(?:show (?:me )?(?:your |the |my )?)?(?:published )?pages$"),
+    ("pages_show", r"^what pages have you (?:published|made)$"),
+    ("tasks_show", r"^(?:(?:show|list)(?: me)?(?: my| your| the)?(?: recent)? )?tasks$"),
+    ("schedules_show", r"^(?:show|list)(?: me)?(?: all)?(?: of)?(?: my| your| the)? schedules$"),
+    ("schedule_runs", r"^when did (?:the )?(?P<target>.+?)(?: schedule| job)? (?:last )?run$"),
+    ("schedule_runs", r"^(?:show )?(?:the )?(?:runs|run history) (?:of|for) (?:the )?(?P<target>.+?)(?: schedule| job)?$"),
+    ("request_dismiss", r"^(?:dismiss|clear) (?:request )?#?(?P<id>\d+)$"),
+    ("systems_show", r"^(?:show (?:me )?(?:your |the )?)?(?:scopes|systems|tools|connections)$"),
+    ("systems_show", r"^what (?:systems|tools|apps) (?:can you use|do you have|are you connected to)$"),
+    ("role_notes", r"^set (?:the )?(?P<role>.+?) role'?s? notes? (?:access )?to (?P<level>none|nothing|all|everything)$"),
+    ("role_memory", r"^set (?:the )?(?P<role>.+?) role'?s? memory (?:access )?to (?P<level>own|their own|own chats|groups|group chats|all|everything)$"),
     ("role_create", r"^(?:create|make|add|start) (?:me )?(?:a |an |a new |an new |the )?(?:new )?role (?:called|named|for) " + _NAME_RE + r"$"),
     ("role_create", r"^(?:create|make|add) (?:a |an )?(?:new )?" + _NAME_RE + r" role$"),
     ("role_create", r"^new role[: ] ?" + _NAME_RE + r"$"),
@@ -112,6 +132,7 @@ _PATTERNS: List[Any] = [(a, re.compile(p, re.I)) for a, p in [
     ("roles_list", r"^what roles (?:are there|do (?:we|you|i) have|exist)\??$"),
     ("role_show", r"^what (?:can|does|do) (?:the |a )?(?P<role>.+?) role (?:do|have|allow)\??$"),
     ("role_show", r"^(?:show|what is|what's|describe) (?:the )?(?P<role>.+?) role\??$"),
+    ("person_show", r"^(?:show|show me|look up|pull up|who is|who's) (?P<person>[A-Za-z][A-Za-z'.\- ]{1,40})$"),
 ]]
 
 
@@ -150,7 +171,7 @@ def match(text: str, store: Any) -> Optional[Dict[str, Any]]:
             continue
         g = {k: (v.strip() if isinstance(v, str) else v) for k, v in m.groupdict().items()}
         if action in ("role_show", "role_rename", "role_delete", "role_level", "role_send", "role_unsend",
-                      "role_remove", "role_add"):
+                      "role_remove", "role_add", "role_notes", "role_memory"):
             if accesscmd.resolve_role(store, g.get("role") or "") is None:
                 continue
         if action in ("role_add", "role_remove"):
@@ -163,6 +184,12 @@ def match(text: str, store: Any) -> Optional[Dict[str, Any]]:
         if action in ("person_merge", "person_remove", "person_rename", "person_note", "contact_add",
                       "contact_remove", "contact_move"):
             if _norm_person_word(g.get("person")) in accesscmd._PRONOUNS or not g.get("person"):
+                continue
+        if action == "schedule_runs" and _one_schedule(store, g.get("target") or "") is None:
+            continue
+        if action == "person_show":
+            if _norm_person_word(g.get("person")) in accesscmd._PRONOUNS or not accesscmd.find_people(
+                    store, g.get("person") or ""):
                 continue
         if action == "schedule_do":
             sact = (g.get("sact") or "").lower()
@@ -290,6 +317,36 @@ def guide_requests(store: Any) -> str:
                                               "#417 edit: make it shorter", "show failed requests", "retry #417"])
 
 
+# "What can I do from here": one line per area, one phrase each.
+_AREAS_BY_TEXT = [
+    ("Status", "what's going on"),
+    ("Requests", "what's pending"),
+    ("People", "show people"),
+    ("Roles and access", "who has access to my calendar"),
+    ("Schedules", "show schedules"),
+    ("Group chats", "show group chats"),
+    ("Settings", "turn off group chatter"),
+    ("Inbox, outbox and timers", "what's in the inbox"),
+    ("Memory and pages", "what do you remember"),
+    ("Health", "are you ok"),
+]
+
+
+def guide_everything(store: Any = None) -> str:
+    rows = list(_AREAS_BY_TEXT)
+    if store is not None:
+        name = next((p.get("display") for p in store.list_people()
+                     if p.get("display") and not accesscmd._is_commander(store, p)), None)
+        if name:
+            rows[2] = ("People", f"show {name.split()[0] if len(accesscmd.find_people(store, name.split()[0])) == 1 else name}")
+        live = [s for s in store.schedules() if s.state == "active"]
+        if live:
+            rows[4] = ("Schedules", f"pause the {live[0].title} schedule")
+    return chatreply.scrub("Everything the console shows, you can see or change here. One example each:\n"
+                           + "\n".join(f"{area}: {phrase}" for area, phrase in rows)
+                           + "\nSay an area's name for more.")
+
+
 def guide_for(area: str, store: Any, manager: Any = None) -> str:
     if area == "settings":
         return guide_settings()
@@ -304,7 +361,7 @@ def guide_for(area: str, store: Any, manager: Any = None) -> str:
     if area == "requests":
         return guide_requests(store)
     if area == "overview":
-        return wording.guide_overview(["settings", "roles", "schedules", "group chats", "people", "requests"])
+        return guide_everything(store)
     return wording.guide(area, [], [])
 
 
@@ -463,6 +520,12 @@ async def apply_hold(manager: Any, hold: Dict[str, Any]) -> str:
         if kind == "people_merge":
             console_api.link_people_endpoint(store, {"keep_id": pl["keep"], "merge_id": pl["merge"]})
             return wording.people_merged_line(pl["keep_name"], pl["merge_name"])
+        if kind == "role_memory":
+            name = pl["role"]
+            old = set((_role_row(store, name) or {}).get("scopes") or [])
+            was = "all" if "memory:all" in old else "groups" if "memory:groups" in old else "own"
+            console_api.roles_set_memory(store, {"role": name, "level": pl["level"]})
+            return memory_line(name, pl["level"], was=was if was != pl["level"] else None)
         if kind == "schedule_stop":
             schedule = await manager.schedules.action(int(pl["id"]), "stop", owner=True)
             return wording.schedule_line(schedule.title, "ended")
@@ -593,9 +656,8 @@ def people_list(store: Any) -> str:
     people = [p for p in store.list_people() if p.get("display")]
     if not people:
         return "No one is in People yet."
-    shown = [p["display"] for p in people[:25]]
-    more = f", and {len(people) - 25} more" if len(people) > 25 else ""
-    return f"{len(people)} people: " + ", ".join(shown) + more + "."
+    return chatreply.listing(f"{chatreply.count(len(people), 'person', 'people')} in People:",
+                             [p["display"] for p in people], rest="on the console's People page")
 
 
 def person_create(store: Any, name_text: str) -> str:
@@ -759,8 +821,9 @@ def groups_list(store: Any) -> str:
     groups = store.known_group_chats()
     if not groups:
         return "I am not in any group chats yet."
-    return "\n".join(f"{g['title']}: {g.get('response_mode') or g.get('mode') or 'mention'}"
-                     for g in groups[:15]) + (f"\nand {len(groups) - 15} more" if len(groups) > 15 else "")
+    return chatreply.listing(f"I am in {chatreply.count(len(groups), 'group chat')}:",
+                             [f"{g['title']}: {g.get('response_mode') or g.get('mode') or 'mention'}" for g in groups],
+                             rest="on the console's Group chats page")
 
 
 def requests_list(store: Any, which: str = "pending") -> str:
@@ -773,10 +836,10 @@ def requests_list(store: Any, which: str = "pending") -> str:
         verb = "Failed"
     if not rows:
         return "Nothing is waiting on you." if which != "failed" else "Nothing has failed lately."
-    lines = [f"#{r.id}: {' '.join(str(r.summary or '').split())[:90]}" for r in rows[:8]]
+    lines = [f"#{r.id}: {_one(r.summary, 90)}" for r in rows]
     tail = ('Reply "#N yes" or "#N no" to answer one.' if verb == "Waiting on you"
-            else 'Say "retry #N" to try one again.')
-    return f"{verb}:\n" + "\n".join(lines) + "\n" + tail
+            else 'Say "retry #N" to try one again, or "dismiss #N" to clear it.')
+    return chatreply.listing(f"{verb}:", lines, rest="on the console's Requests page", cap=7) + "\n" + tail
 
 
 async def request_retry(ctx: Any, request_id: str) -> str:
@@ -813,17 +876,19 @@ def health(ctx: Any) -> str:
 
 
 def outbox_list(store: Any) -> str:
-    rows = store.recent_outbox(time.time() - 24 * 3600)
+    from ..console import api as console_api
+    cutoff = time.time() - 24 * 3600
+    rows = [r for r in console_api.outbox_view(store, 200)["rows"]
+            if r["status"] in ("queued", "held", "failed") and float(r.get("created_at") or 0) >= cutoff]
     if not rows:
-        return "No queued, held, or failed messages in the last 24 hours."
-    lines = ["Outbox in the last 24 hours:"]
-    for row in rows[:30]:
-        preview = " ".join(str(row["text"]).split())[:100]
-        reason = f" ({row['last_error']})" if row["status"] == "failed" and row["last_error"] else ""
-        lines.append(f"#{row['id']} {row['status']} for {row['target']}: {preview}{reason}")
-    if len(rows) > 30:
-        lines.append(f"And {len(rows) - 30} more.")
-    return "\n".join(lines)
+        return "Nothing is queued, held or failed in the last 24 hours."
+    words = {"queued": "queued", "held": "held for your yes", "failed": "failed"}
+    to = [r["to"] if not re.match(r"^(telegram|tg|imessage|sms|voice|whatsapp):", str(r["to"])) else "someone"
+          for r in rows]
+    items = [f"#{r['id']} to {t}, {words.get(r['status'], r['status'])}: {_one(r['preview'], 60)}"
+             for r, t in zip(rows, to)]
+    return chatreply.listing(f"{chatreply.count(len(rows), 'message')} not sent yet in the last 24 hours:", items,
+                             rest="on the console's Outbox page")
 
 
 def outbox_retry(store: Any, row_id: str) -> str:
@@ -897,4 +962,278 @@ async def handle(ctx: Any, cmd: Dict[str, Any]) -> str:
         return roles_list(store)
     if action == "role_show":
         return role_show(store, cmd.get("role") or "")
+    if action in _PAGE_ACTIONS:
+        return await _PAGE_ACTIONS[action](ctx, cmd)
     return wording.ABILITY_UNKNOWN
+
+
+# ---------------------------------------------------------------------------
+# the rest of the console, by text (2026-11-18): every reply comes from the same
+# console/api.py function the page reads, shaped by chatreply (lead line, short list)
+# ---------------------------------------------------------------------------
+
+def _gateway(ctx: Any) -> Any:
+    manager = getattr(ctx, "manager", None)
+    return getattr(manager, "gateway", None) or SimpleNamespace()
+
+
+async def home_show(ctx: Any, _cmd: Dict[str, Any]) -> str:
+    from ..console import api as console_api
+    data = console_api.home(_gateway(ctx), ctx.store)
+    needs = int(data["needs_you"]["count"])
+    running = data["right_now"]["running"]
+    lead = (f"{chatreply.count(needs, 'thing')} waiting on you, {int(data['right_now']['running_count'])} running."
+            if needs or running else "Nothing is waiting on you and nothing is running.")
+    items = [f"Running: {_one(r.get('summary'))}" for r in running[:3]]
+    oldest = data["needs_you"].get("oldest")
+    if oldest:
+        items.insert(0, f"Waiting longest: {_one(oldest.get('summary'))} (#{oldest.get('id')})")
+    nxt = (data.get("coming_up") or {}).get("next") or []
+    if (data.get("coming_up") or {}).get("schedules_paused"):
+        items.append("Every schedule is paused.")
+    elif nxt:
+        items.append(f"Next schedule: {nxt[0]['title']}, {chatreply.when(nxt[0].get('next_run'))}")
+    ppl = data.get("people") or {}
+    items.append(f"People: {ppl.get('total', 0)}; roles: {len(ppl.get('roles') or [])}")
+    if not data["right_now"].get("tunnel_connected"):
+        items.append("My public link is not connected.")
+    return chatreply.listing(lead, items)
+
+
+def _one(text: Any, limit: int = 80) -> str:
+    out = " ".join(str(text or "").split())
+    from .ownertext import strip_group_tag
+    out = strip_group_tag(out)
+    return out if len(out) <= limit else out[:limit].rsplit(" ", 1)[0].rstrip(",;:") + "…"
+
+
+async def inbox_show(ctx: Any, _cmd: Dict[str, Any]) -> str:
+    from ..console import api as console_api
+    data = console_api.inbox_view(ctx.store, 200)
+    c = data.get("counts") or {}
+    waiting, running, failed = int(c.get("pending", 0)), int(c.get("running", 0)), int(c.get("failed", 0))
+    lead = f"Inbox: {waiting} waiting, {running} being handled, {failed} failed."
+    items = []
+    for lane in data.get("lanes") or []:
+        ev = (lane.get("events") or [{}])[0]
+        state = {"pending": "waiting", "running": "being handled", "done": "done", "failed": "failed"}.get(
+            ev.get("status"), ev.get("status") or "")
+        items.append(f"{lane.get('label') or 'Someone'}: {ev.get('kind_label') or 'Message'}, {state}, "
+                     f"{chatreply.when(ev.get('created_at'))}")
+    return chatreply.listing(lead, items, total=len(data.get("lanes") or []),
+                             rest="on the console's Inbox page", empty="The inbox is empty.")
+
+
+async def followups_show(ctx: Any, _cmd: Dict[str, Any]) -> str:
+    from ..console import api as console_api
+    data = console_api.followups_view(ctx.store, 100)
+    if not data.get("available", True):
+        return "Follow-up timers are not set up on this server."
+    pending = [r for r in data.get("rows") or [] if r.get("status") == "pending"]
+    if not pending:
+        return "No follow-up timers are waiting."
+    items = [f"{_one(r.get('note') or 'Check back', 60)}, for {r.get('for') or 'you'}, {chatreply.when(r.get('due_at'))}"
+             for r in pending]
+    return chatreply.listing(f"{chatreply.count(len(pending), 'follow-up timer')} waiting:", items,
+                             rest="on the console's Timers page")
+
+
+async def memory_show(ctx: Any, _cmd: Dict[str, Any]) -> str:
+    from ..console import api as console_api
+    data = console_api.memory_view(_gateway(ctx), ctx.store)
+    notes = data.get("notes") or {}
+    graph = data.get("graph") or {}
+    msgs = data.get("messages") or {}
+    tasks = data.get("tasks") or {}
+    items = []
+    instr = data.get("instructions") or {}
+    if instr.get("available"):
+        items.append(f"Standing instructions: {chatreply.count(int(instr.get('paragraph_count') or 0), 'paragraph')}")
+    if notes.get("available"):
+        top = ", ".join(sec["name"] for sec in (notes.get("sections") or [])[:3])
+        items.append(f"Notes I can read: {notes.get('total', 0)}" + (f", mostly {top}" if top else ""))
+    total_msgs = msgs.get("total") if isinstance(msgs, dict) else None
+    if total_msgs is not None:
+        items.append(f"Stored messages: {total_msgs}")
+    open_tasks = tasks.get("open") if isinstance(tasks, dict) else None
+    if open_tasks is not None:
+        items.append(f"Open tasks: {open_tasks}")
+    items.append("Long-term memory: " + ("on" if graph.get("enabled") else "off")
+                 + (f", {graph.get('pending_writes')} facts still being saved" if graph.get("pending_writes") else ""))
+    return chatreply.listing("Here is what I keep between conversations.", items)
+
+
+async def knowledge_show(ctx: Any, _cmd: Dict[str, Any]) -> str:
+    from ..console import api as console_api
+    rows = console_api.memory_access(ctx.store)
+    items = [f"{r['part']}: {r['readers']}" for r in rows]
+    return chatreply.listing("Who can see what I keep:", items)
+
+
+async def pages_show(ctx: Any, _cmd: Dict[str, Any]) -> str:
+    from ..console import api as console_api
+    data = console_api.pages_view(200)
+    pages = data.get("pages") or []
+    items = [f"{p['title']}, {chatreply.when(p.get('created_at'))}" for p in pages]
+    return chatreply.listing(f"{chatreply.count(len(pages), 'page')} published, kept {data.get('days')} days.",
+                             items, rest="on the console's Pages page", empty="No pages are published right now.")
+
+
+_TASK_STATE_WORDS = {"open": "open", "running": "running", "waiting_aaron": "waiting on you", "done": "done",
+                     "failed": "failed", "closed": "closed"}
+
+
+async def tasks_show(ctx: Any, _cmd: Dict[str, Any]) -> str:
+    from ..console import api as console_api
+    rows = console_api.tasks(ctx.store)
+    live = [r for r in rows if r.get("state") in ("open", "running", "waiting_aaron")]
+    items = [f"{_one(r.get('title'), 70)}: {_TASK_STATE_WORDS.get(r.get('state'), str(r.get('state') or '').replace('_', ' '))}"
+             for r in (live or rows)]
+    lead = (f"{chatreply.count(len(live), 'task')} open." if live else "No open tasks. The most recent:")
+    return chatreply.listing(lead, items, rest="on the console's Tasks page", empty="No tasks yet.")
+
+
+async def schedules_show(ctx: Any, _cmd: Dict[str, Any]) -> str:
+    from ..console import api as console_api
+    manager = getattr(ctx, "manager", None)
+    if manager is None:
+        return "I can't reach the schedules from here."
+    data = console_api.schedule_list(ctx.store, manager.schedules)
+    rows = [r for r in data["schedules"] if r["state"] != "ended"]
+    items = []
+    for r in rows:
+        nxt = chatreply.when(r.get("next_run"), r.get("timezone") or "")
+        items.append(f"{r['title']}: {r.get('cadence_text') or ''}, {str(r.get('state_label') or r['state']).lower()}"
+                     + (f", next {nxt}" if nxt else ""))
+    lead = ("Every schedule is paused. " if data.get("paused_all") else "") + f"{chatreply.count(len(rows), 'schedule')}:"
+    return chatreply.listing(lead, items, rest="on the console's Schedules page", empty="No schedules yet.")
+
+
+async def schedule_runs(ctx: Any, cmd: Dict[str, Any]) -> str:
+    from ..console import api as console_api
+    schedule = _one_schedule(ctx.store, cmd.get("target") or "")
+    if schedule is None:
+        return "I don't have a schedule like that. Say show schedules to see them."
+    data = console_api.schedule_runs_view(ctx.store, schedule.id) or {"runs": []}
+    runs = data["runs"]
+    if not runs:
+        return f"{schedule.title} has not run yet."
+    items = []
+    for r in runs:
+        line = f"{chatreply.when(r.get('started_at'), schedule.timezone)}: {r.get('outcome_label') or 'Ran'}"
+        if r.get("duration_seconds") is not None:
+            line += f", took {chatreply.span(r['duration_seconds'])}"
+        if r.get("failure_reason"):
+            line += f", {_one(r['failure_reason'], 60)}"
+        items.append(line)
+    return chatreply.listing(f"{schedule.title} has run {chatreply.count(len(runs), 'time')}. Latest first:",
+                             items, rest="on the console's Schedules page")
+
+
+async def request_dismiss(ctx: Any, cmd: Dict[str, Any]) -> str:
+    from ..console import api as console_api
+    manager = getattr(ctx, "manager", None)
+    if manager is None:
+        return wording.change_refused("I can't reach the request queue from here")
+    rid = int(cmd.get("id") or 0)
+    req = ctx.store.get_request(rid)
+    if req is not None and req.state == "failed" and (req.status or {}).get("dismissed"):
+        return f"#{rid} is cleared from the failed list."
+    try:
+        await console_api.dismiss_request_endpoint(manager, {"id": rid})
+    except console_api.ValidationError:
+        if req is None:
+            return f"There is no request #{rid}."
+        return f"#{rid} is {req.state}, not failed, so there is nothing to clear."
+    return f"#{rid} is cleared from the failed list.\n" + wording.undo_line(f"retry #{rid}")
+
+
+async def systems_show(ctx: Any, _cmd: Dict[str, Any]) -> str:
+    from ..console import api as console_api
+    rows = console_api.scopes_breakdown(ctx.store)
+    items = []
+    for r in rows:
+        name = console_api._system_label(r.get("system") or "")
+        n = len(r.get("scopes") or [])
+        if not n:
+            continue
+        items.append(f"{name}" + (f": {chatreply.count(int(n), 'ability', 'abilities')}" if n else ""))
+    return chatreply.listing(f"I can use {chatreply.count(len(items), 'system')}:", items, total=len(items),
+                             rest="on the console's Scopes page", empty="I have no systems connected.")
+
+
+def _level_word(level: str, table: Dict[str, str]) -> str:
+    return table.get(accesscmd._norm(level), accesscmd._norm(level))
+
+
+async def role_notes(ctx: Any, cmd: Dict[str, Any]) -> str:
+    from ..console import api as console_api
+    name, err = _role_or_error(ctx.store, cmd.get("role") or "")
+    if err:
+        return err
+    level = _level_word(cmd.get("level") or "", {"nothing": "none", "everything": "all"})
+    old = (_role_row(ctx.store, name) or {}).get("scopes") or []
+    try:
+        console_api.roles_set_notes(ctx.store, {"role": name, "level": level})
+    except console_api.ValidationError as exc:
+        return wording.change_refused(str(exc))
+    shown = "every note folder" if level == "all" else "no notes"
+    undo = f"set the {name} role's notes to {'none' if level == 'all' else 'all'}"
+    head = f"The {name} role can read {shown}."
+    if set(old) == set((_role_row(ctx.store, name) or {}).get("scopes") or []):
+        return head
+    return head + "\n" + wording.undo_line(undo)
+
+
+async def role_memory(ctx: Any, cmd: Dict[str, Any]) -> str:
+    from ..console import api as console_api
+    name, err = _role_or_error(ctx.store, cmd.get("role") or "")
+    if err:
+        return err
+    level = _level_word(cmd.get("level") or "", {"their own": "own", "own chats": "own", "group chats": "groups",
+                                                  "everything": "all"})
+    old = set((_role_row(ctx.store, name) or {}).get("scopes") or [])
+    was = "all" if "memory:all" in old else "groups" if "memory:groups" in old else "own"
+    if level in ("all", "groups") and was != level:
+        words = {"all": "remember every conversation", "groups": "remember every group chat"}[level]
+        return open_hold(ctx, "role_memory", {"role": name, "level": level},
+                         ask=wording.hold_role_grant(name, words, _members(ctx.store, name)))
+    if was != level:
+        try:
+            console_api.roles_set_memory(ctx.store, {"role": name, "level": level})
+        except console_api.ValidationError as exc:
+            return wording.change_refused(str(exc))
+    return memory_line(name, level, was=was if was != level else None)
+
+
+def memory_line(name: str, level: str, *, was: Optional[str] = None) -> str:
+    reach = {"own": "only their own conversations", "groups": "their own conversations plus every group chat",
+             "all": "every conversation"}[level]
+    line = f"The {name} role remembers {reach}."
+    if was:
+        line += "\n" + wording.undo_line(f"set the {name} role's memory to {was}")
+    return line
+
+
+async def person_show(ctx: Any, cmd: Dict[str, Any]) -> str:
+    person, err = accesscmd._one_person(ctx.store, cmd.get("person") or "")
+    if err:
+        return err
+    line = accesscmd.show_person(ctx.store, person.get("display") or cmd.get("person") or "")
+    contacts = [c for c in person.get("contacts") or [] if c.get("value")]
+    kinds = {"email": "Email", "phone": "Phone", "telegram": "Telegram", "imessage": "iMessage", "sms": "Text",
+             "whatsapp": "WhatsApp"}
+    items = [f"{kinds.get(c.get('kind'), str(c.get('kind') or 'Contact').title())}: {c.get('value')}"
+             for c in contacts if not re.match(r"^(telegram|tg|imessage|sms|voice):\d", str(c.get("value")))]
+    if person.get("note"):
+        items.append(f"Note: {_one(person['note'], 120)}")
+    return chatreply.listing(line, items)
+
+
+_PAGE_ACTIONS = {
+    "home_show": home_show, "inbox_show": inbox_show, "followups_show": followups_show,
+    "memory_show": memory_show, "knowledge_show": knowledge_show, "pages_show": pages_show,
+    "tasks_show": tasks_show, "schedules_show": schedules_show, "schedule_runs": schedule_runs,
+    "request_dismiss": request_dismiss, "systems_show": systems_show, "role_notes": role_notes,
+    "role_memory": role_memory, "person_show": person_show,
+}

@@ -219,7 +219,7 @@ def test_format_proposal_matches_the_specs_example_shape(monkeypatch):
     schedule = _schedule()
     text = schedprop.format_proposal(schedule)
     assert text == (
-        '\u25c6 Set up "Team total watch"?\n\n'
+        'Set up "Team total watch"?\n\n'
         'When: every 4 hours, starting 2:30 PM today\n'
         'It will: read public web pages and look up and edit contacts\n'
         'You hear from it: only when something changed or it could not finish\n\n'
@@ -277,14 +277,14 @@ def test_format_change_cadence_only(monkeypatch):
     monkeypatch.setattr(schedprop, "_first_run_text", lambda s: "8:00 AM tomorrow")
     schedule = _schedule(title="Team total watch", cadence_kind="daily", cadence={"time": "08:00"})
     text = schedprop.format_change(schedule, {"cadence_kind": "daily", "cadence": {"time": "08:00"}})
-    assert text == ("\u25c6 Change Team total watch?\n\n"
+    assert text == ("Change Team total watch?\n\n"
                     "Runs: daily at 8:00 AM, next 8:00 AM tomorrow\n\nReply yes to confirm.")
 
 
 def test_format_change_added_capabilities_only(monkeypatch):
     schedule = _schedule(title="Team total watch")
     text = schedprop.format_change(schedule, {"scopes": ["contacts"]})
-    assert text == ("\u25c6 Change Team total watch?\n\n"
+    assert text == ("Change Team total watch?\n\n"
                     "Also allowed to: look up and edit contacts\n\nReply yes to confirm.")
 
 
@@ -293,7 +293,7 @@ def test_format_change_both_cadence_and_capabilities(monkeypatch):
     monkeypatch.setattr(schedprop, "_first_run_text", lambda s: "8:00 AM tomorrow")
     schedule = _schedule(title="Team total watch")
     text = schedprop.format_change(schedule, {"cadence_kind": "daily", "scopes": ["contacts"]})
-    assert text == ("\u25c6 Change Team total watch?\n\n"
+    assert text == ("Change Team total watch?\n\n"
                     "Runs: daily at 8:00 AM, next 8:00 AM tomorrow\n"
                     "Also allowed to: look up and edit contacts\n\nReply yes to confirm.")
 
