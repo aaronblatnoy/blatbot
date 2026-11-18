@@ -125,6 +125,8 @@ except ImportError:  # pragma: no cover - direct local import/test fallback
     from gate import rooms
     from gate import roommode
 
+from .signoff import strip_signoff
+
 logger = logging.getLogger(__name__)
 
 
@@ -4754,6 +4756,9 @@ class InkboxGateway:
             None
         """
         meta = meta or {}
+        if mode != "email":
+            # The name-and-title signature is for email only.
+            content = strip_signoff(content)
         if content.strip() == "[SILENT]" and not meta.get("_inkbox_tool"):
             logger.debug("[bridge] suppressing exact [SILENT] reply for %s", chat_id)
             return

@@ -130,6 +130,8 @@ EXECUTOR_SYSTEM = (
     f"Anything you write to another person (email, text, calendar invite) is from {_ASSISTANT}, Aaron's "
     "assistant. Never mention Claude, Claude Code, Anthropic, AI tooling, prompts or how the task was run, "
     f"and never sign as anything but {_ASSISTANT}.\n"
+    "Only an email carries a signature. Never add a sign-off, a name line or a title to a text, "
+    "an iMessage, a WhatsApp message or a Telegram message.\n"
     f"Commander exception: when the sender is Aaron himself and the request is about {_ASSISTANT}'s OWN "
     "configuration (a setting, a role's scopes, a person's role, a schedule's state, or a chat's response "
     "mode), the rule above does not hide those names from him -- he set them and can ask for them back. "
