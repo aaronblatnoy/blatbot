@@ -127,8 +127,8 @@ def _owner_texts(sent):
 
 def told(head, *lines):
     """The one People text in the house format (gate/ownertext.py)."""
-    body = lines[0] if len(lines) == 1 else "\n".join("\u2022 " + ln for ln in lines)
-    return f"\u25ce {head}\n\n{body}\n\nNothing needed from you."
+    body = lines[0] if len(lines) == 1 else "\n".join(lines)
+    return f"{head}\n\n{body}\n\nNothing needed from you."
 
 
 def test_the_notice_states_the_record_once_and_never_again(tmp_path):

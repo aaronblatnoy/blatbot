@@ -598,12 +598,12 @@ def ask_text(req: Any, question: str, kind: str, owner: bool) -> str:
     if q and q[-1] not in ".?!":
         q += "."
     if owner:
-        head = f"Your task has a question \u00b7 #{req.id}"
+        head = f"Your task has a question (#{req.id})"
         facts = [("Task", ownertext.strip_group_tag(getattr(req, "summary", "") or ""))]
     else:
         group, tagged_from, _ = ownertext.split_group_tag(getattr(req, "original_message", "") or "")
         who = ownertext.person(getattr(req, "sender_name", "") or tagged_from, getattr(req, "sender", ""))
-        head = f"{who}'s task has a question \u00b7 #{req.id}"
+        head = f"{who}'s task has a question (#{req.id})"
         facts = [("Task", ownertext.strip_group_tag(getattr(req, "summary", "") or "")),
                  ("Where", ownertext.where(getattr(req, "mode", ""), group))]
     handle = ownertext.reply_handle(req.id, answer=kind != "permission")

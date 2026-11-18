@@ -30,7 +30,7 @@ from .schedules import ScheduleService, starts_unasked
 from . import schedprop
 from . import wording
 from . import peopleindex
-from . import accesscmd, admincmd
+from . import accesscmd, admincmd, chatreply
 from . import graphmem
 from . import knowledge
 from . import outcomes
@@ -1758,6 +1758,12 @@ class GateSession:
             # one of his own common phrasings: answered by code in one state line, before
             # any lookup, model or running request can turn it into something else.
             admin = admincmd.match(body, self.m.store)
+            access = accesscmd.match(body, self.m.store) if admin is None else None
+            if (admin is not None or access is not None) and self.in_group() and not (
+                    access is not None and access.get("action") in ("set_mode", "show_mode")):
+                # Admin output never lands in a group: one short line, nothing changed.
+                logger.info("[gate %s] admin command refused in a group", self.chat_id)
+                return await self.send_to_sender(chatreply.GROUP_REFUSAL, role="answer")
             if admin is not None:
                 from types import SimpleNamespace
                 logger.info("[gate %s] admin command: %s", self.chat_id, admin["action"])
@@ -1765,13 +1771,12 @@ class GateSession:
                                       manager=self.m, session=self,
                                       directory_client=getattr(self.m, "directory_client", None))
                 reply = await admincmd.handle(ctx, admin)
-                return await self.send_to_sender(reply, role="answer")
-            access = accesscmd.match(body, self.m.store)
+                return await self.send_to_sender(chatreply.finish(reply), role="answer")
             if access is not None:
                 from types import SimpleNamespace
                 logger.info("[gate %s] access command: %s", self.chat_id, access["action"])
                 reply = accesscmd.handle(self.m.store, SimpleNamespace(**access), here=self._here())
-                return await self.send_to_sender(reply, role="answer")
+                return await self.send_to_sender(chatreply.finish(reply), role="answer")
         if not system_note and await self._group_plain_talk(body):
             return True
         history = self.m.store.thread_history(self.thread_key(), exclude_chat=self.record_id) + \
@@ -1963,14 +1968,16 @@ class GateSession:
                 return await self.send_to_sender("Only Aaron can manage schedules.", role="answer")
             from . import schedcmd
             reply = await schedcmd.handle(self.m, self, out.schedule_command)
-            return await self.send_to_sender(reply, role="answer")
+            return await self.send_to_sender(chatreply.finish(reply), role="answer")
         if not system_note and getattr(out, "access_command", None) is not None:
             out.request = None
             if not approver:
                 out.access_command = None
                 return await self.send_to_sender("Only Aaron can change who can do what.", role="answer")
+            if self.in_group() and getattr(out.access_command, "action", "") not in ("set_mode", "show_mode"):
+                return await self.send_to_sender(chatreply.GROUP_REFUSAL, role="answer")
             reply = accesscmd.handle(self.m.store, out.access_command, here=self._here())
-            return await self.send_to_sender(reply, role="answer")
+            return await self.send_to_sender(chatreply.finish(reply), role="answer")
         if out.request is None:
             if out.reply:
                 return await self.send_to_sender(out.reply, role="answer")
@@ -2519,6 +2526,9 @@ class GateSessionManager:
         request (runguard) to anyone but Aaron is not sent but held for his exact yes
         (GATE_HOLD_SENDS_TO_OTHERS); hold_exempt is for the short holding notice only."""
         text = wording.plain_dashes(text)
+        if self._is_owner_target(target, meta):
+            # Aaron, 2026-11-18: no decorative symbols in anything Blatbot sends him.
+            text = chatreply.ORNAMENT_RE.sub("", text).replace(" \n", "\n")
         running_for = runguard.current()
         if running_for is not None and runguard.is_cancelled(running_for):
             # A send made on behalf of a request Aaron has stopped: refused, right here,
@@ -2917,7 +2927,7 @@ class GateSessionManager:
                 session = self.get(req.chat_id)
                 if not await session.notify_after_request(line, inbound_id=req.inbound_id):
                     await self.send_to_approver(ownertext.compose(
-                        "failed", f"Stopped by a restart \u00b7 #{req.id}",
+                        "failed", f"Stopped by a restart (#{req.id})",
                         facts=[("Asked", ownertext.strip_group_tag(req.summary))],
                         body="It never finished and nothing was reported back.",
                         tail="Say the word and I will run it again."), kind="notice")
@@ -2992,7 +3002,7 @@ class GateSessionManager:
         if files:
             facts.append(("Attachments", ", ".join(files)))
         await self.send_to_approver(ownertext.compose(
-            "held", f"Held for your yes \u00b7 #{req.id}", facts=facts,
+            "held", f"Held for your yes (#{req.id})", facts=facts,
             body=f"Nothing has been sent. This is exactly what would go out:\n\n{text}",
             handle=ownertext.reply_handle(req.id)), kind="approval")
         return req
@@ -3182,7 +3192,7 @@ class GateSessionManager:
             head = "Could not finish" + (", finished late" if late else "")
         if who:
             head += f" for {who}"
-        head += f" \u00b7 #{req.id}"
+        head += f" (#{req.id})"
         facts = [("Asked", ownertext.strip_group_tag(title))]
         if not own:
             facts.append(("Where", ownertext.where(req.mode, group)))
@@ -3247,7 +3257,7 @@ class GateSessionManager:
         if marker in req.prompt:
             facts.append(("Your instructions", req.prompt.split(marker, 1)[1].strip()))
         quoted = ownertext.quote(original) if original and " ".join(original.split()) != " ".join(summary.split()) else ""
-        head = f"{name} needs your yes" + (", revised" if revised else "") + f" \u00b7 #{req.id}"
+        head = f"{name} needs your yes" + (", revised" if revised else "") + f" (#{req.id})"
         return ownertext.compose("ask", head, facts=facts, body=quoted,
                                  handle=self._approval_reply_text(req))
 
@@ -3434,7 +3444,7 @@ class GateSessionManager:
         if c.get("kind") == "send":
             # Not a summary of a message: the message. He approves the words that will go out.
             full_text = ownertext.compose(
-                "held", f"Held for your yes \u00b7 #{req.id}",
+                "held", f"Held for your yes (#{req.id})",
                 facts=[("Schedule", schedule_title)],
                 body=f"Nothing has been sent. This is what would go out:\n\n{_draft_text(shown)}",
                 handle=ownertext.reply_handle(req.id))
@@ -3444,7 +3454,7 @@ class GateSessionManager:
             if plain:
                 plain = plain[0].upper() + plain[1:]
             full_text = ownertext.compose(
-                "ask", f"Before I do this, I need your yes \u00b7 #{req.id}",
+                "ask", f"Before I do this, I need your yes (#{req.id})",
                 facts=[("Schedule", schedule_title)], body=plain,
                 tail="Nothing has happened yet.", handle=ownertext.reply_handle(req.id))
         schedule = self.store.get_schedule(req.schedule_id) if req.schedule_id else None
@@ -3551,7 +3561,7 @@ class GateSessionManager:
             self.task_note(req, "request", f"Waiting on Aaron for access to {labels}.", state="waiting_aaron")
             group, tagged_from, _ = ownertext.split_group_tag(req.original_message or "")
             await self.send_to_approver(ownertext.compose(
-                "ask", f"Needs more access \u00b7 #{req.id}",
+                "ask", f"Needs more access (#{req.id})",
                 facts=[("From", ownertext.person(req.sender_name or tagged_from, req.sender)),
                        ("Where", ownertext.where(req.mode, group)),
                        ("Task", ownertext.strip_group_tag(summary)),
@@ -3667,7 +3677,7 @@ class GateSessionManager:
             d0 = (decision or "").strip().lower()
             if d0 in ("yes", "y", "ok", "approve", "run", "go"):
                 from . import admincmd
-                reply = await admincmd.apply_hold(self, hold)
+                reply = chatreply.finish(await admincmd.apply_hold(self, hold))
                 self.store.set_state(req.id, "done", status={**(req.status or {}), "result": reply})
                 self.task_note(req, "done", reply, state="done")
                 await self.send_to_approver(reply)
@@ -4949,7 +4959,7 @@ class GateSessionManager:
         group, tagged_from, _ = ownertext.split_group_tag(req.original_message or req.summary or "")
         who = ownertext.person(req.sender_name or tagged_from, req.sender)
         return ownertext.compose(
-            "timer", f"Expired with no answer \u00b7 #{req.id}",
+            "timer", f"Expired with no answer (#{req.id})",
             facts=[("From", who), ("Where", ownertext.where(req.mode, group)),
                    ("Asked", ownertext.strip_group_tag(req.summary))],
             tail="Nothing was done. It waited 24 hours for your yes.")

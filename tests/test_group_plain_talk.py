@@ -4,6 +4,7 @@ approval; anything needing a tool, lookup or action still goes to Aaron as befor
 from __future__ import annotations
 
 import asyncio
+import re
 from types import SimpleNamespace
 
 import httpx
@@ -71,7 +72,7 @@ def test_plain_reply_in_group_goes_out_with_no_approval(tmp_path, monkeypatch):
     room = [t for chat, t, mode, _ in sent if chat == "tg:-100"]
     assert room == ["Ha, fair point. Mondays are rough."]
     assert m.store.pending() == [], "no approval request for plain talk"
-    assert not [t for _, t, mode, _ in sent if mode == "imessage" and t.startswith("◆ ")]
+    assert not [t for _, t, mode, _ in sent if mode == "imessage" and re.search(r"#\d+ yes / no", t)]
     assert m.router.calls == [], "the usual router never ran"
     hist = m.store.history("tg:-100", limit=10)
     assert any(r["kind"] == "outbound" and "Mondays" in r["text"] for r in hist)
@@ -89,7 +90,7 @@ def test_sentinel_falls_through_to_the_approval_flow(tmp_path, monkeypatch):
     assert len(m.store.pending()) == 1, "the request waits for Aaron as before"
     room = [t for chat, t, mode, _ in sent if chat == "tg:-100"]
     assert Router.PLAIN_TALK_SENTINEL not in " ".join(room)
-    assert any(mode == "imessage" and t.startswith("◆ ") for _, t, mode, _ in sent)
+    assert any(mode == "imessage" and re.search(r"#\d+ yes / no", t) for _, t, mode, _ in sent)
 
 
 def test_plain_talk_error_falls_through(tmp_path, monkeypatch):
