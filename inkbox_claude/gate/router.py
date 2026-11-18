@@ -577,6 +577,52 @@ class Router:
         return (await self._chat([{"role": "system", "content": sys_p}, {"role": "user", "content": user}],
                                  json_mode=False)).strip()
 
+    # Group plain talk: a reply to someone who is not Aaron, in a group, with no tools at
+    # all and no record beyond what the room itself can already see. The model either
+    # writes the reply or answers with exactly this word, meaning the message needs a
+    # tool, a lookup, memory, private information or an action, and so goes to Aaron.
+    PLAIN_TALK_SENTINEL = "NEEDS_AARON"
+
+    PLAIN_TALK_SYSTEM = (
+        f"You are {_ASSISTANT}, Aaron Blatnoy's assistant, and a member of the group chat described below. "
+        "Someone in the room who is not Aaron has written something you are expected to answer. You can only "
+        "talk: you have no tools, no memory beyond the messages shown, no calendar, no email, no contacts, no "
+        "files, no web, and you cannot do, find, check, send, book, schedule, remember or look up anything.\n"
+        "Write a reply ONLY when it is ordinary conversation you can answer well from general knowledge and the "
+        "messages shown: a greeting, small talk, a joke, thanks, an opinion, a general question anyone could "
+        "answer, or a reaction to what was said in the room.\n"
+        f"Answer with exactly {PLAIN_TALK_SENTINEL} and nothing else when the person asks you to do, find, "
+        "remember, schedule, send, book, check or look up anything; when the answer needs anything about Aaron "
+        "(his plans, schedule, whereabouts, contacts, opinions, work or private matters) or about anyone's "
+        "private information; when it needs today's facts, prices, news or anything that changes; when it needs "
+        "something said in another chat or earlier than the messages shown; or whenever you are in any doubt.\n"
+        "Voice: brief, warm, natural, one to three short sentences, like a person in a group chat. No emojis, "
+        "no em dashes (use a comma, a colon or a full stop), no markdown, no lists, no headers. Never mention "
+        "models, tools, approvals or how you work. Never promise to do something later. Never claim to know "
+        "anything about Aaron. Write only the message itself."
+    )
+
+    async def plain_talk(self, *, room: str, history: List[Dict[str, Any]], message: str,
+                         sender: str = "") -> str:
+        """One tool-less turn for group plain talk. The request carries messages only: no
+        tools, no functions, nothing the model could call. Returns the reply text, or
+        PLAIN_TALK_SENTINEL when the model chose it (or wrote nothing)."""
+        lines = []
+        for m in history:
+            text = " ".join(str(m.get("text") or "").split())
+            if not text:
+                continue
+            lines.append(f"{_ASSISTANT}: {text}" if m.get("kind") == "outbound" else text)
+        recent = "\n".join(lines)[-4000:] or "(none)"
+        user = (f"{room or 'This is a group conversation.'}\n\n"
+                f"--- RECENT MESSAGES IN THIS ROOM ---\n{recent}\n\n"
+                f"--- NEW MESSAGE{(' FROM ' + sender) if sender else ''} ---\n{message.strip()}")
+        raw = (await self._chat([{"role": "system", "content": self.PLAIN_TALK_SYSTEM},
+                                 {"role": "user", "content": user}], json_mode=False)).strip()
+        if not raw or self.PLAIN_TALK_SENTINEL in raw:
+            return self.PLAIN_TALK_SENTINEL
+        return raw
+
     # The writer must never hang a turn: a hard wall-clock cap on the primary provider,
     # then the same request to a second provider (OpenAI, whose key the voice side already
     # holds). The fallback is logged so a slow primary shows up in the record.
