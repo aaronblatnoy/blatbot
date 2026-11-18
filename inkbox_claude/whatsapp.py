@@ -176,6 +176,17 @@ async def _receive_once(gateway, envelope: Dict[str, Any]):
     from aiohttp import web
     from .prompts import contact_marker
 
+    # A message can arrive in the first second after start, before the sessions
+    # exist. Wait for them briefly; if they never come, answer 503 so the delivery
+    # is retried instead of failing with an error and losing the message.
+    for _ in range(60):
+        if gateway.sessions is not None:
+            break
+        await asyncio.sleep(0.25)
+    else:
+        logger.warning("[whatsapp] message arrived before startup finished; asked for a retry")
+        return web.json_response({"ok": False, "error": "starting"}, status=503)
+
     data = envelope.get("data") or {}
     message = data.get("message") or {}
     message_id = str(message.get("id") or "").strip()
