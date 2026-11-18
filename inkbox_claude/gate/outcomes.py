@@ -26,13 +26,17 @@ OUTCOME_TOOLS = (SEND_TOOL, QUIET_TOOL, REACH_TOOL)
 ALL_TOOLS = OUTCOME_TOOLS + (ASK_TOOL,)
 
 # The order a surface is picked in when nothing says which one a person uses.
-SURFACE_ORDER = ("imessage", "telegram", "sms", "email")
-SURFACE_WORDS = {"imessage": "iMessage", "telegram": "Telegram", "sms": "text message", "email": "email"}
+# WhatsApp is last: its line cannot open a conversation with a new contact, so it is
+# used when asked for, or to answer a WhatsApp conversation that already exists.
+SURFACE_ORDER = ("imessage", "telegram", "sms", "email", "whatsapp")
+SURFACE_WORDS = {"imessage": "iMessage", "telegram": "Telegram", "sms": "text message", "email": "email",
+                 "whatsapp": "WhatsApp"}
 _SURFACE_ALIASES = {
     "imessage": "imessage", "i message": "imessage", "apple": "imessage", "blue": "imessage",
     "telegram": "telegram", "tg": "telegram",
     "sms": "sms", "text": "sms", "text message": "sms", "texts": "sms", "mms": "sms", "phone": "sms",
     "email": "email", "e-mail": "email", "mail": "email",
+    "whatsapp": "whatsapp", "whats app": "whatsapp", "wa": "whatsapp",
 }
 _OWNER_WORDS = {"aaron", "aaron blatnoy", "me", "owner", "the owner", "aaron b"}
 _REQUESTER_WORDS = {"", "requester", "the requester", "sender", "the sender", "them",
@@ -59,9 +63,9 @@ def ask_enabled() -> bool:
 
 SEND_MESSAGE_DESCRIPTION = (
     f"SEND A MESSAGE. This is how a run delivers anything to anyone, on any surface {_ASSISTANT} has: "
-    "iMessage, text message, email or Telegram. to is \"requester\" (the person who asked, answered on "
+    "iMessage, text message, email, Telegram or WhatsApp. to is \"requester\" (the person who asked, answered on "
     "the surface they wrote from: this is how you give them your answer), \"aaron\", a person's name, or a "
-    "group chat's name. surface is optional (imessage, telegram, sms, email): without it the surface they "
+    "group chat's name. surface is optional (imessage, telegram, sms, email, whatsapp): without it the surface they "
     f"last used with {_ASSISTANT} is picked. subject is for email only. The answer says where it went. "
     f"Posting in a Telegram group {_ASSISTANT} is in is done here too: to is the group's name. It needs no extra "
     "access; the telegram_* tools only read Aaron's personal account and have nothing to do with sending."
@@ -69,7 +73,7 @@ SEND_MESSAGE_DESCRIPTION = (
 SEND_MESSAGE_SCHEMA = {"type": "object", "required": ["to", "text"], "properties": {
     "to": {"type": "string", "description": "\"requester\", \"aaron\", a person's name, or a group chat's name"},
     "text": {"type": "string", "description": "the whole message, plain text"},
-    "surface": {"type": "string", "description": "optional: imessage, telegram, sms or email"},
+    "surface": {"type": "string", "description": "optional: imessage, telegram, sms, email or whatsapp"},
     "subject": {"type": "string", "description": "email subject, only for email"}}}
 NOTHING_TO_SEND_DESCRIPTION = (
     "END WITHOUT SENDING ANYTHING. Call this when this run has nothing worth telling anyone (for example a "
@@ -79,7 +83,7 @@ NOTHING_TO_SEND_SCHEMA = {"type": "object", "required": ["reason"], "properties"
     "reason": {"type": "string", "description": "one plain sentence: why nothing needs to be sent"}}}
 WHERE_TO_REACH_DESCRIPTION = (
     "WHERE CAN SOMEONE BE REACHED: lists the surfaces on record for a person or group chat (iMessage, text "
-    "message, email, Telegram) and which one send_message would use. Read-only."
+    "message, email, Telegram, WhatsApp) and which one send_message would use. Read-only."
 )
 WHERE_TO_REACH_SCHEMA = {"type": "object", "required": ["person"], "properties": {
     "person": {"type": "string", "description": "\"requester\", \"aaron\", a person's name or a group chat's name"}}}
@@ -101,7 +105,7 @@ def surface_of(word: Any) -> Optional[str]:
         return None
     if w in _SURFACE_ALIASES:
         return _SURFACE_ALIASES[w]
-    raise ValueError(f'"{word}" is not a surface. Use imessage, telegram, sms or email.')
+    raise ValueError(f'"{word}" is not a surface. Use imessage, telegram, sms, email or whatsapp.')
 
 
 def _e164(raw: str) -> str:
@@ -155,6 +159,8 @@ def _owner_surfaces(manager: Any) -> Dict[str, Dict[str, Any]]:
     phone = _e164(getattr(manager, "approver_phone", "") or "")
     if phone:
         out["sms"] = _dest(f"sms:{phone}", "sms", {"to": phone}, OWNER_THREAD, "Aaron", owner=True)
+        out["whatsapp"] = _dest(f"whatsapp:{phone}", "whatsapp", {"whatsapp_to": phone}, OWNER_THREAD,
+                                "Aaron", owner=True)
     try:
         pid = manager.store.commander_person_id()
         person = manager.store.get_person(pid) if pid else None
@@ -340,6 +346,8 @@ def _person_options(manager: Any, person: Dict[str, Any]) -> Dict[str, Dict[str,
             out.setdefault("imessage", _dest(f"imessage:{phone}", "imessage", {"imessage_to": phone},
                                              f"imessage:{phone}", who))
             out.setdefault("sms", _dest(f"sms:{phone}", "sms", {"to": phone}, f"sms:{phone}", who))
+            out.setdefault("whatsapp", _dest(f"whatsapp:{phone}", "whatsapp", {"whatsapp_to": phone},
+                                             f"whatsapp:{phone}", who))
         elif kind == "telegram" and raw:
             tid = raw.split(":", 1)[1] if raw.lower().startswith("telegram:") else raw
             out.setdefault("telegram", _dest(f"tg:{tid}", "telegram", {"telegram_chat_id": tid},
@@ -423,6 +431,9 @@ def resolve(manager: Any, req: Any, to: Any, surface: Any = None) -> Dict[str, A
                     phone = _e164(name)
                     dest = (_dest(f"sms:{phone}", "sms", {"to": phone}, f"sms:{phone}", name)
                             if want == "sms" else
+                            _dest(f"whatsapp:{phone}", "whatsapp", {"whatsapp_to": phone},
+                                  f"whatsapp:{phone}", name)
+                            if want == "whatsapp" else
                             _dest(f"imessage:{phone}", "imessage", {"imessage_to": phone},
                                   f"imessage:{phone}", name))
                 else:
