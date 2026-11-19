@@ -55,6 +55,9 @@ _MODE_LABEL = {
     "voice": "phone call", "telegram": "Telegram", "whatsapp": "WhatsApp",
 }
 EXPIRE_SECONDS = 24 * 3600
+# How sure the event judgment must be that a message only handed over information
+# before a run that answered it without a tool call is accepted as done.
+INFO_ONLY_FLOOR = 0.6
 # Item C2: how long a call's failed ask is still "the same ask" for folding purposes
 # on timing alone -- long enough to cover the tail end of one spoken turn, short
 # enough that a later fragment on the same task but a genuinely different ask (the
@@ -2064,6 +2067,7 @@ class GateSession:
         self.m.remember_knowledge_notes(req.id, getattr(out.request, "knowledge_notes", None))
         if preflight is not None:
             self.m.remember_complexity(req.id, preflight.get("complexity"))
+            self.m.remember_inbound_event(req.id, preflight.get("event"))
         self.m.record_request_on_task(req, task, self)
         if approver or trusted:
             # Run after this turn releases the session lock; execute() will
@@ -2479,6 +2483,7 @@ class GateSessionManager:
         # request id -> the source-only model-complexity judgment made in the turn's
         # preflight. Scheduled/restarted work has no entry and judges at execution time.
         self._complexity_results: Dict[int, Dict[str, Any]] = {}
+        self._inbound_events: Dict[int, Dict[str, Any]] = {}
         # Request ids a blanket "you have my permission for everything" (item 4) was
         # said about while still running: applied to that request's own retry, once,
         # the moment it actually fails and shows what it was refused. Held in memory
@@ -4344,6 +4349,13 @@ class GateSessionManager:
             # a draft, an estimate) and the words are the work. Insisting on a tool here
             # threw away finished answers and reported them as failures.
             return status
+        if self._message_only_gave_information(req):
+            # The message handed over a fact ("this is Stanley's email"): there was nothing
+            # to look up, and taking it in is the work (every message already lands in
+            # long-term memory). Insisting on a tool here turned an acknowledgement into
+            # "something broke on my side".
+            logger.info("[gate] #%s: the message gave information; no tool call needed", req.id)
+            return status
         logger.warning("[gate] #%s reported success with no tool call; insisting it runs", req.id)
         insist = (context + "\n\n--- THIS RUN ---\nThe last attempt returned without using a tool and "
                   "said the work was already done. It was not. Whatever the record above says was "
@@ -4531,6 +4543,21 @@ class GateSessionManager:
             self._knowledge_notes[int(request_id)] = list(notes)
             while len(self._knowledge_notes) > 500:
                 self._knowledge_notes.pop(next(iter(self._knowledge_notes)))
+
+    def remember_inbound_event(self, request_id: int, result: Any) -> None:
+        """What the message behind this request did (the preflight event judgment), so the
+        run can tell a statement of fact from an ask for work."""
+        if isinstance(result, dict):
+            self._inbound_events[int(request_id)] = dict(result)
+            while len(self._inbound_events) > 500:
+                self._inbound_events.pop(next(iter(self._inbound_events)))
+
+    def _message_only_gave_information(self, req: Request) -> bool:
+        """True when the message this request came from was judged to hand over
+        information (a fact, an address, an answer) rather than ask for work."""
+        event = self._inbound_events.get(int(req.id)) or {}
+        kind = event.get("raw_kind") or event.get("kind")
+        return kind == "provided_information" and float(event.get("kind_conf") or 0.0) >= INFO_ONLY_FLOOR
 
     def remember_complexity(self, request_id: int, result: Any) -> None:
         if isinstance(result, dict):

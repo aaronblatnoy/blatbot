@@ -3418,10 +3418,14 @@ class Store:
         return Request.from_row(r) if r else None
 
     def inbound_since(self, chat_id: str, since: float) -> List[Dict[str, Any]]:
-        """Inbound messages ({id, text}) on this thread after a point in time, oldest first."""
+        """Inbound messages ({id, text}) on this thread after a point in time, oldest first.
+        Overheard messages (role 'overheard': aimed at another bot, or ones the room's mode
+        or the group judgment kept the assistant out of) are history only, never something
+        to pick up and answer later, so they are left out."""
         with self._lock:
             rows = self._db.execute(
-                "SELECT id, text FROM messages WHERE chat_id=? AND kind='inbound' AND created_at>? ORDER BY id",
+                "SELECT id, text FROM messages WHERE chat_id=? AND kind='inbound' AND created_at>? "
+                "AND COALESCE(role, '')<>'overheard' ORDER BY id",
                 (chat_id, since),
             ).fetchall()
         return [{"id": int(r["id"]), "text": r["text"]} for r in rows]
