@@ -21,8 +21,10 @@ Files: a document or photo sent in a trusted chat is downloaded, its text is ext
 the brain in parts, each part naming the file, who sent it, where and when. Read: PDF (text layer;
 scans are read by the local vision model), Word .docx, PowerPoint .pptx (slide text and notes),
 Excel .xlsx/.xls, any text file (.txt, .md, .csv, .json), and images (png, jpg, webp, heic, gif, photos)
-via the local Ollama vision model (OLLAMA_URL, qwen2.5vl:7b): it transcribes the visible text and
-describes the picture. Audio and video are not read. After a file is ingested an allowed sender gets
+via a vision model: the Bedrock one (BEDROCK_VISION_KEY, BEDROCK_VISION_MODEL, default
+qwen.qwen3-vl-235b-a22b-instruct) when its key is set, else local Ollama (OLLAMA_URL, qwen2.5vl:7b). It
+describes the picture and transcribes the visible text; an image goes to the brain as one entry,
+'Image "<name or photo>" sent by X in Y on Z. What it shows: ... Text in it: ...'. Audio and video are not read. After a file is ingested an allowed sender gets
 one reply line: file name, parts written, stored.
 The original bytes are also kept in STATE_DIR/files/<YYYYMMDD-HHMMSS>-<name> with an index.json
 (original name, Telegram file_id, sha256, size, chat, sender, date); every brain entry for the file
@@ -65,6 +67,10 @@ BRAIN_HEADERS = {"Authorization": "Bearer " + os.environ.get("DO_BRAIN_KEY", "")
 MODEL = os.environ.get("LEDGER_MODEL", "sonnet").strip()
 OLLAMA = os.environ.get("OLLAMA_URL", "http://host.docker.internal:11434").rstrip("/")
 VISION_MODEL = os.environ.get("VISION_MODEL", "qwen2.5vl:7b").strip()
+# Images go to a Bedrock vision model (OpenAI-compatible chat/completions) when a key is set; without one, to Ollama.
+BEDROCK_URL = (os.environ.get("BEDROCK_VISION_URL") or "https://bedrock-mantle.us-east-2.api.aws/v1").rstrip("/")
+BEDROCK_KEY = os.environ.get("BEDROCK_VISION_KEY", "").strip()
+BEDROCK_MODEL = os.environ.get("BEDROCK_VISION_MODEL", "qwen.qwen3-vl-235b-a22b-instruct").strip()
 STATE = os.path.join(os.environ.get("STATE_DIR", "/data"), "trust.json")
 FILES_DIR = os.path.join(os.environ.get("STATE_DIR", "/data"), "files")
 FILES_INDEX = os.path.join(FILES_DIR, "index.json")
@@ -211,8 +217,9 @@ SHEET_ROWS, SCAN_PAGES = 2000, 10
 
 IMAGE_EXT = (".png", ".jpg", ".jpeg", ".webp", ".heic", ".heif", ".gif")
 MEDIA_EXT = (".mp3", ".m4a", ".wav", ".ogg", ".oga", ".opus", ".flac", ".aac", ".mp4", ".mov", ".mkv", ".avi", ".webm", ".m4v")
-VISION_PROMPT = ("Transcribe all visible text in this image exactly as written, in reading order. "
-                 "Then, on a new line starting with 'Picture:', describe what the image shows in two or three sentences.")
+VISION_PROMPT = ("Read this image. Answer in exactly this form, nothing else:\n"
+                 "What it shows: <two or three plain sentences describing the image>\n"
+                 "Text in it: <all visible text exactly as written, in reading order, or 'none'>")
 
 
 def file_text(name: str, data: bytes) -> str:
@@ -296,8 +303,20 @@ def pdf_page_images(data: bytes) -> List[bytes]:
 
 
 async def vision(jpeg: bytes) -> str:
-    """Ask the local Ollama vision model to transcribe and describe one image."""
+    """Describe one image and transcribe its text: the Bedrock vision model when BEDROCK_VISION_KEY is set,
+    otherwise the local Ollama vision model."""
     import base64
+    if BEDROCK_KEY:
+        t0 = time.monotonic()
+        async with httpx.AsyncClient(timeout=120.0) as c:
+            r = await c.post(BEDROCK_URL + "/chat/completions", headers={"Authorization": "Bearer " + BEDROCK_KEY}, json={
+                "model": BEDROCK_MODEL, "max_tokens": 1500, "messages": [{"role": "user", "content": [
+                    {"type": "text", "text": VISION_PROMPT},
+                    {"type": "image_url", "image_url": {"url": "data:image/jpeg;base64," + base64.b64encode(jpeg).decode()}}]}]})
+            r.raise_for_status()
+        out = ((r.json().get("choices") or [{}])[0].get("message") or {}).get("content") or ""
+        log.info("image read by %s in %.1fs (%d chars)", BEDROCK_MODEL, time.monotonic() - t0, len(out))
+        return out.strip()
     async with httpx.AsyncClient(timeout=240.0) as c:
         r = await c.post(OLLAMA + "/api/chat", json={
             "model": VISION_MODEL, "stream": False, "keep_alive": "5m",
@@ -477,6 +496,13 @@ async def record_file(doc: Dict[str, Any], who: str, where: str, when: str, chat
         return f"file {name}: kept as {stored}, no readable text"
     if sink is not None:
         sink["text"] = text
+    if name.lower().endswith(IMAGE_EXT):
+        label = "photo" if name.startswith("photo-") else name
+        await brain_add(f'Image "{label}" sent by {who} in {where} on {when}. {text[:6000]}\n{ref}',
+                        f"Image {name} ({chat_title})")
+        if notify:
+            await send(notify, f"{label}: described and written to the brain, image stored.")
+        return f"image {name}: kept as {stored}, description written"
     parts = parts_of(text)
     kept = parts[:MAX_PARTS]
     for i, part in enumerate(kept, 1):
@@ -490,6 +516,9 @@ async def record_file(doc: Dict[str, Any], who: str, where: str, when: str, chat
 def doc_of(msg: Dict[str, Any]) -> Optional[Dict[str, Any]]:
     """The file or photo of a Telegram message, shaped like record_file wants it."""
     doc = msg.get("document")
+    if doc and (doc.get("mime_type") or "").startswith("image/") and not (doc.get("file_name") or "").lower().endswith(IMAGE_EXT):
+        # An image sent as a document without an image extension is still read as an image.
+        doc = dict(doc, file_name=(doc.get("file_name") or f"image-{msg['message_id']}") + "." + doc["mime_type"].split("/", 1)[1].split(";")[0])
     if not doc and msg.get("photo"):
         ph = max(msg["photo"], key=lambda x: x.get("file_size") or x.get("width", 0))
         doc = {"file_id": ph["file_id"], "file_size": ph.get("file_size"), "file_name": f"photo-{msg['message_id']}.jpg"}

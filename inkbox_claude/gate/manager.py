@@ -1209,6 +1209,8 @@ class GateSession:
                 self.m.store.mark_owner_thread(self.chat_id, mode)
             body = _strip_quoted(text) if mode == "email" else text.strip()
             self.inbound_id = self.m.store.add_message(self.record_id, "inbound", body, mode)
+            from .. import imagememory
+            imagememory.schedule(self.m.store, self.record_id, body, mode)   # background, never waits
             self._index_sender()
             self.deferred_ack = None
             self.typing_start()
@@ -1272,7 +1274,10 @@ class GateSession:
                 body = _strip_quoted(text) if mode == "email" else (text or "").strip()
                 if not body:
                     return None
-                return self.m.store.add_message(self.record_id, "inbound", body, mode)
+                mid = self.m.store.add_message(self.record_id, "inbound", body, mode)
+                from .. import imagememory
+                imagememory.schedule(self.m.store, self.record_id, body, mode)
+                return mid
             finally:
                 self.mode, self.reply_meta = saved
 
