@@ -690,7 +690,7 @@ async def handle(update: Dict[str, Any]) -> None:
         sink: Dict[str, str] = {}
         try:
             log.info("%s (msg %s in %s)", await record_file(doc, who, where, when, chat.get("title") or "DM",
-                                                            chat_id if from_id in ALLOWED else None, sink),
+                                                            None, sink),
                      msg["message_id"], chat_id)
             if sink.get("text"):
                 tx_set_file_text(chat_id, msg["message_id"], sink["text"])
