@@ -2666,3 +2666,90 @@ async def test_outbox_pacing_returns_when_message_is_held(tmp_path, monkeypatch)
     assert m.store.outbox_counts()["held"] == 1
     assert [row["text"] for row in m.store.history("sms:a") if row["kind"] == "outbound"] == ["first"]
     await m.close_all()
+
+
+GROUP = "tg:-5275613007"
+
+
+def _group_session(m):
+    s = m.get(GROUP)
+    s.room = "--- WHERE YOU ARE ---\nThis is a group chat and you are one of its members."
+    s.mode = "telegram"
+    s.reply_meta = {"sender": "telegram:6752193595", "to": "-5275613007", "telegram_chat_id": "-5275613007",
+                    "telegram_user_id": "6752193595", "conversation_kind": "group"}
+    m._is_owner_request = lambda req: True
+    return s
+
+
+def test_a_message_for_another_bot_is_never_picked_up_after_a_failed_run(tmp_path):
+    """2026-11-19 03:06, "FellowSIp of the Ring": #558 failed while Aaron asked
+    "@gondroid_bot what is stanley's email?". The bridge ignored it as addressed to
+    another bot, but the failed run's "handling the latest" turned the overheard line
+    into task T300 and a Blatbot reply. Overheard lines are history only."""
+    from inkbox_claude.gateway import InkboxGateway as Gateway
+    m, sent = make_manager(tmp_path)
+    _group_session(m)
+    m.executor = HoldingExecutor()
+    m.executor.result = {"ok": False, "error": "nothing found", "tool_calls": [], "raw": "STATUS: FAILED"}
+    m.router.next = RouterOutput(reply="On it.", task="new", task_title="Stanley's email",
+                                 request=RouterRequest(prompt="find it", scopes=["tamid_drive_read"],
+                                                       summary="Stanley's email"))
+    task = m.store.create_task("Stanley's email", [])
+    req = m.store.create_request(chat_id=GROUP, sender="telegram:6752193595", sender_name="Aaron", mode="telegram",
+                                 subject="", original_message="@gondroid_bot @bh_blatbot this is stanley's email.",
+                                 summary="Stanley's email", scopes=["tamid_drive_read"], prompt="p",
+                                 state="approved", task_id=task["id"])
+    gw = SimpleNamespace(sessions=m)
+
+    async def go():
+        run = asyncio.create_task(m.execute(req))
+        await m.executor.started.wait()
+        # The real bridge step for a message aimed only at another bot.
+        Gateway._telegram_overhear(gw, {"chat_id": "-5275613007", "name": "Aaron B", "from_id": "6752193595",
+                                        "text": "@gondroid_bot what is stanley's email?"})
+        m.executor.release.set()
+        await run
+        await asyncio.sleep(0.1)
+    asyncio.run(go())
+    assert m.store.get_request(req.id).state == "failed"
+    assert m.store.get_request(req.id + 1) is None, "an overheard line must not become a Blatbot request"
+    assert m.executor.ran == [req.id]
+    # Still kept as history for later turns.
+    assert any("@gondroid_bot what is stanley's email?" in x["text"] for x in m.store.history(GROUP, 20))
+
+
+def test_a_message_that_only_gives_information_is_acknowledged_not_failed(tmp_path):
+    """2026-11-19 03:06: "@gondroid_bot @bh_blatbot this is stanley's email." was judged
+    provided_information (0.82), yet the run that took it in without a tool call was told
+    to look again and then reported as "something broke on my side"."""
+    m, sent = make_manager(tmp_path)
+    _group_session(m)
+    m.router.next_note = RouterOutput(reply="Got it, saved Stanley's email.", task=None)
+    m.executor.result = {"ok": True, "summary": "Noted Stanley's email.", "tool_calls": [],
+                         "raw": "Noted Stanley's email.\nSTATUS: OK"}
+    task = m.store.create_task("Stanley's email", [])
+    req = m.store.create_request(chat_id=GROUP, sender="telegram:6752193595", sender_name="Aaron", mode="telegram",
+                                 subject="", original_message="@gondroid_bot @bh_blatbot this is stanley's email.",
+                                 summary="Stanley's email", scopes=["tamid_drive_read", "calendar"], prompt="p",
+                                 state="approved", task_id=task["id"])
+    m.remember_inbound_event(req.id, {"kind": "provided_information", "raw_kind": "provided_information",
+                                      "kind_conf": 0.82, "waiting_on": "nobody", "resolves_task": 0.75})
+    asyncio.run(m.execute(req))
+    assert m.executor.ran == [req.id], "no second, insisting run"
+    assert m.store.get_request(req.id).state == "done"
+    assert not any("something broke" in t for _, t, *_ in sent)
+
+
+def test_an_ask_answered_without_a_tool_is_still_insisted_on(tmp_path):
+    """The information exemption is narrow: an ask for work still has to do the work."""
+    m, sent = make_manager(tmp_path)
+    m._is_owner_request = lambda req: True
+    m.executor.result = {"ok": True, "summary": "Already done.", "tool_calls": [], "raw": "Already done."}
+    task = m.store.create_task("Rows", [])
+    req = m.store.create_request(chat_id="aaron", sender="+15550100001", sender_name="Aaron", mode="imessage",
+                                 subject="", original_message="how many rows?", summary="Rows",
+                                 scopes=["tamid_drive_read"], prompt="p", state="approved", task_id=task["id"])
+    m.remember_inbound_event(req.id, {"kind": "asked_for_something", "raw_kind": "asked_for_something",
+                                      "kind_conf": 0.94})
+    asyncio.run(m.execute(req))
+    assert m.executor.ran == [req.id, req.id] and m.store.get_request(req.id).state == "failed"

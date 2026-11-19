@@ -2127,7 +2127,7 @@ class InkboxGateway:
             return
         try:
             store.add_message(f"tg:{u['chat_id']}", "inbound",
-                              f"{u['name'] or u['from_id']}: {u['text']}", "telegram")
+                              f"{u['name'] or u['from_id']}: {u['text']}", "telegram", role="overheard")
         except Exception as exc:
             logger.warning("[bridge] could not record overheard group message: %s", exc)
 
@@ -2157,7 +2157,7 @@ class InkboxGateway:
         if store is None:
             return
         try:
-            store.add_message(chat_id, "inbound", f"{sender}: {text}", channel)
+            store.add_message(chat_id, "inbound", f"{sender}: {text}", channel, role="overheard")
         except Exception as exc:
             logger.warning("[bridge] could not record overheard %s group message: %s", channel, exc)
 
