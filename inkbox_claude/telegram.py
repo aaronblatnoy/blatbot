@@ -155,16 +155,72 @@ def for_other_bot(text: str) -> bool:
     return bool(others) and not names_blatbot(text)
 
 
+_MIME_EXT = {"image/jpeg": ".jpg", "image/png": ".png", "image/webp": ".webp", "image/heic": ".heic",
+             "image/gif": ".gif", "application/pdf": ".pdf", "text/csv": ".csv", "text/plain": ".txt"}
+
+
+def media_of(msg: Dict[str, Any]) -> list:
+    """The readable files on one message: its photo (largest size) and/or document."""
+    out = []
+    photos = [p for p in (msg.get("photo") or []) if isinstance(p, dict) and p.get("file_id")]
+    if photos:
+        best = max(photos, key=lambda p: int(p.get("width") or 0) * int(p.get("height") or 0))
+        out.append({"kind": "photo", "file_id": best["file_id"],
+                    "file_unique_id": best.get("file_unique_id") or best["file_id"],
+                    "name": "photo.jpg", "size": int(best.get("file_size") or 0)})
+    doc = msg.get("document")
+    if isinstance(doc, dict) and doc.get("file_id"):
+        name = str(doc.get("file_name") or "file")
+        if "." not in name:
+            name += _MIME_EXT.get(str(doc.get("mime_type") or ""), "")
+        out.append({"kind": "file", "file_id": doc["file_id"],
+                    "file_unique_id": doc.get("file_unique_id") or doc["file_id"],
+                    "name": name, "size": int(doc.get("file_size") or 0)})
+    return out
+
+
+def _display(frm: Dict[str, Any]) -> str:
+    name = " ".join(str(frm.get(k) or "").strip() for k in ("first_name", "last_name")).strip()
+    return name or str(frm.get("username") or "")
+
+
+def reply_of(msg: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    """The message this one replies to, as Telegram attached it (text, caption, files)."""
+    r = msg.get("reply_to_message")
+    if not isinstance(r, dict):
+        return None
+    frm = r.get("from") or {}
+    return {"message_id": str(r.get("message_id") or ""), "name": _display(frm),
+            "from_id": str(frm.get("id") or ""), "username": str(frm.get("username") or ""),
+            "is_bot": bool(frm.get("is_bot")), "date": _unix(r.get("date")),
+            "text": str(r.get("text") or r.get("caption") or "").strip(), "media": media_of(r)}
+
+
+async def download(file_id: str) -> bytes:
+    """One file's bytes through the Bot API (bots may download up to 20 MB). The URL
+    carries the token, so it is never logged."""
+    info = await _call("getFile", {"file_id": file_id})
+    path = info.get("file_path")
+    if not path:
+        raise RuntimeError("telegram gave no file path")
+    async with httpx.AsyncClient(timeout=120.0) as client:
+        r = await client.get(f"{API}/file/bot{token()}/{path}")
+        r.raise_for_status()
+        return r.content
+
+
 def parse_update(update: Dict[str, Any]) -> Optional[Dict[str, Any]]:
     """What the gateway needs from one message update, or None when there is nothing
     to act on. In a group the bot now sees every message (privacy mode off), so the
-    dict says whether this one was actually addressed to it."""
+    dict says whether this one was actually addressed to it. A photo or file with no
+    caption is a message too: its `media` is read before anything acts on it."""
     msg = update.get("message") or update.get("edited_message") or {}
     chat = msg.get("chat") or {}
     frm = msg.get("from") or {}
     text = str(msg.get("text") or msg.get("caption") or "").strip()
     chat_id = str(chat.get("id") or "")
-    if not chat_id or not text:
+    media = media_of(msg)
+    if not chat_id or (not text and not media):
         return None
     name = " ".join(str(frm.get(k) or "").strip() for k in ("first_name", "last_name")).strip()
     if not name:
@@ -179,6 +235,7 @@ def parse_update(update: Dict[str, Any]) -> Optional[Dict[str, Any]]:
             "is_group": is_group, "group_title": str(chat.get("title") or ""), "addressed": addressed,
             "for_other_bot": other_bot,
             "username": str(frm.get("username") or ""), "is_bot": bool(frm.get("is_bot")),
+            "media": media, "reply_to": reply_of(msg),
             # Unix seconds the message was sent (or last edited); 0 when Telegram gave none.
             "date": _unix(msg.get("edit_date") or msg.get("date"))}
 

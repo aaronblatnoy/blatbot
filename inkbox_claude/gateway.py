@@ -2257,6 +2257,19 @@ class InkboxGateway:
         u = self._telegram_known_name(u)
         chat_id, from_id, name, text = u["chat_id"], u["from_id"], u["name"], u["text"]
         meta = self._telegram_meta(u)
+        reply = u.get("reply_to")
+        if reply:
+            # The message this one replies to, whole: who, when, its words and its files as
+            # read. "Respond to this" means that message.
+            from . import chatfiles
+            files = reply.get("read") or ""
+            if not files and reply.get("media"):
+                files = await chatfiles.read_media(reply["media"])
+            text = chatfiles.reply_block(reply, files) + chr(10) + text
+        # The run reads this chat's recent messages (everyone's, files as read) when it
+        # starts; only this chat's, keyed by the chat the message came from.
+        meta["_context_chat"] = {"chat_id": chat_id, "is_group": bool(u["is_group"]),
+                                 "before": float(u.get("date") or 0)}
         if u["is_group"]:
             where = u.get("group_title") or "group"
             text = ("[telegram group: " + where + " | from: " + (name or from_id)
@@ -2295,7 +2308,7 @@ class InkboxGateway:
             return web.json_response({"ok": True, "ignored": True})
         if self.sessions is None:
             return web.json_response({"ok": True, "no_sessions": True})
-        chat_id, from_id, name, text = u["chat_id"], u["from_id"], u["name"], u["text"]
+        chat_id = u["chat_id"]
         # Telegram retries an update it believes failed. Answering the same message twice
         # is worse than answering late, so a repeat is acknowledged and dropped.
         mark = u["update_id"] or u["message_id"]
@@ -2304,6 +2317,32 @@ class InkboxGateway:
             if self._is_duplicate(key):
                 logger.info("[bridge] telegram update %s already handled; ignored", key)
                 return web.json_response({"ok": True, "duplicate": True})
+        if u.get("media") or (u.get("reply_to") or {}).get("media"):
+            # Files are read first (vision model, file parsers), in the background so the
+            # webhook answers at once; the message then goes the usual way with its files
+            # as read in its text.
+            asyncio.create_task(self._telegram_read_then_route(u), name=f"telegram-files-{chat_id}")
+            return web.json_response({"ok": True, "reading": True})
+        return await self._telegram_route(u)
+
+    async def _telegram_read_then_route(self, u: Dict[str, Any]) -> None:
+        from . import chatfiles
+        try:
+            if u.get("media"):
+                rendered = await chatfiles.read_media(u["media"])
+                chatfiles.remember_read(u["chat_id"], int(u.get("date") or 0), rendered)
+                u["text"] = (rendered + (chr(10) + u["text"] if u["text"] else "")).strip()
+                logger.info("[bridge] telegram: read %d file(s) from %s in chat %s (%d chars)",
+                            len(u["media"]), u.get("name") or u.get("from_id"), u["chat_id"], len(rendered))
+            reply = u.get("reply_to") or {}
+            if reply.get("media"):
+                reply["read"] = await chatfiles.read_media(reply["media"])
+            await self._telegram_route(u)
+        except Exception:
+            logger.exception("[bridge] telegram message with files failed")
+
+    async def _telegram_route(self, u: Dict[str, Any]) -> "web.Response":
+        chat_id, from_id, name, text = u["chat_id"], u["from_id"], u["name"], u["text"]
         if u["is_group"]:
             recent = self._tg_recent.setdefault(chat_id, [])
             recent.append(f"{name or from_id}: {text}")
