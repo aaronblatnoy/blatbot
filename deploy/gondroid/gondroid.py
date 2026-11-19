@@ -12,9 +12,18 @@ The brain is Gondroid's only memory. The only local state is which groups are tr
     is always included) can DM Gondroid or get an answer from it. Anyone else's DMs, mentions
     and replies are ignored silently (group messages are still recorded).
 
-Files: a document sent in a trusted chat (PDF, Word .docx, or any text file such as .txt, .md,
-.csv, .json) is downloaded, its text is extracted and written to the brain in parts, each part
-naming the file, who sent it, where and when. Photos, audio and video are not read.
+Files: a document or photo sent in a trusted chat is downloaded, its text is extracted and written to
+the brain in parts, each part naming the file, who sent it, where and when. Read: PDF (text layer;
+scans are read by the local vision model), Word .docx, PowerPoint .pptx (slide text and notes),
+Excel .xlsx/.xls, any text file (.txt, .md, .csv, .json), and images (png, jpg, webp, heic, gif, photos)
+via the local Ollama vision model (OLLAMA_URL, qwen2.5vl:7b): it transcribes the visible text and
+describes the picture. Audio and video are not read. After a file is ingested an allowed sender gets
+one reply line: file name, parts written, stored.
+The original bytes are also kept in STATE_DIR/files/<YYYYMMDD-HHMMSS>-<name> with an index.json
+(original name, Telegram file_id, sha256, size, chat, sender, date); every brain entry for the file
+carries a "Stored file: <stored name> (telegram file_id <id>)" line. An allowed user who asks
+Gondroid to send/give/share a file gets it back by DM (never to anyone else). Files over 20 MB
+cannot be downloaded by a bot and are not kept.
 
 Updates arrive by long polling (getUpdates), so no public URL is needed.
 
@@ -25,6 +34,7 @@ CLAUDE_CODE_OAUTH_TOKEN + LEDGER_MODEL (answers; default "sonnet"), STATE_DIR (d
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 import logging
 import os
@@ -48,7 +58,11 @@ BRAIN = (os.environ.get("DO_BRAIN_API_URL") or
 BRAIN_HEADERS = {"Authorization": "Bearer " + os.environ.get("DO_BRAIN_KEY", "").strip(),
                  "User-Agent": "gondroid", "Content-Type": "application/json"}
 MODEL = os.environ.get("LEDGER_MODEL", "sonnet").strip()
+OLLAMA = os.environ.get("OLLAMA_URL", "http://host.docker.internal:11434").rstrip("/")
+VISION_MODEL = os.environ.get("VISION_MODEL", "qwen2.5vl:7b").strip()
 STATE = os.path.join(os.environ.get("STATE_DIR", "/data"), "trust.json")
+FILES_DIR = os.path.join(os.environ.get("STATE_DIR", "/data"), "files")
+FILES_INDEX = os.path.join(FILES_DIR, "index.json")
 MEMBER = ("creator", "administrator", "member", "restricted")
 ME: Dict[str, Any] = {}
 RECENT: Dict[str, List[str]] = {}
@@ -117,23 +131,116 @@ async def group_trusted(chat_id: str) -> bool:
 # ---------- files ----------
 FILE_MAX_BYTES = 20 * 1024 * 1024   # the most the Telegram Bot API lets a bot download
 PART_CHARS, MAX_PARTS = 3000, 60
+SHEET_ROWS, SCAN_PAGES = 2000, 10
+
+
+IMAGE_EXT = (".png", ".jpg", ".jpeg", ".webp", ".heic", ".heif", ".gif")
+MEDIA_EXT = (".mp3", ".m4a", ".wav", ".ogg", ".oga", ".opus", ".flac", ".aac", ".mp4", ".mov", ".mkv", ".avi", ".webm", ".m4v")
+VISION_PROMPT = ("Transcribe all visible text in this image exactly as written, in reading order. "
+                 "Then, on a new line starting with 'Picture:', describe what the image shows in two or three sentences.")
 
 
 def file_text(name: str, data: bytes) -> str:
+    import io
     low = name.lower()
     if low.endswith(".pdf"):
-        import io
         from pypdf import PdfReader
         return "\n\n".join((pg.extract_text() or "") for pg in PdfReader(io.BytesIO(data)).pages)
     if low.endswith(".docx"):
-        import io
         import docx
         d = docx.Document(io.BytesIO(data))
         rows = ["\t".join(c.text for c in r.cells) for t in d.tables for r in t.rows]
         return "\n".join([p.text for p in d.paragraphs] + rows)
+    if low.endswith(".pptx"):
+        from pptx import Presentation
+        out = []
+        for i, sl in enumerate(Presentation(io.BytesIO(data)).slides, 1):
+            lines = []
+            for sh in sl.shapes:
+                if sh.has_text_frame and sh.text_frame.text.strip():
+                    lines.append(sh.text_frame.text.strip())
+                if getattr(sh, "has_table", False) and sh.has_table:
+                    lines += ["\t".join(c.text for c in r.cells) for r in sh.table.rows]
+            if sl.has_notes_slide and sl.notes_slide.notes_text_frame.text.strip():
+                lines.append("Notes: " + sl.notes_slide.notes_text_frame.text.strip())
+            if lines:
+                out.append(f"Slide {i}:\n" + "\n".join(lines))
+        return "\n\n".join(out)
+    if low.endswith(".xlsx") or low.endswith(".xlsm"):
+        import openpyxl
+        wb = openpyxl.load_workbook(io.BytesIO(data), read_only=True, data_only=True)
+        out = []
+        for ws in wb.worksheets[:20]:
+            rows = []
+            for row in ws.iter_rows(values_only=True, max_row=SHEET_ROWS):
+                if any(v is not None for v in row):
+                    rows.append("\t".join("" if v is None else str(v) for v in row))
+            if rows:
+                out.append(f"Sheet {ws.title}:\n" + "\n".join(rows))
+        return "\n\n".join(out)
+    if low.endswith(".xls"):
+        import xlrd
+        wb = xlrd.open_workbook(file_contents=data)
+        out = []
+        for ws in wb.sheets()[:20]:
+            rows = ["\t".join(str(v) for v in ws.row_values(r)) for r in range(min(ws.nrows, SHEET_ROWS))]
+            if rows:
+                out.append(f"Sheet {ws.name}:\n" + "\n".join(rows))
+        return "\n\n".join(out)
     if b"\x00" in data[:4000]:
         raise ValueError("not a text file")
     return data.decode("utf-8", errors="replace")
+
+
+def to_jpeg(data: bytes) -> bytes:
+    """Any image (png, jpg, webp, heic, gif) as a JPEG of at most 1600px, which the vision model reads."""
+    import io
+    from PIL import Image
+    try:
+        import pillow_heif
+        pillow_heif.register_heif_opener()
+    except Exception:
+        pass
+    im = Image.open(io.BytesIO(data)).convert("RGB")
+    im.thumbnail((1600, 1600))
+    out = io.BytesIO()
+    im.save(out, "JPEG", quality=88)
+    return out.getvalue()
+
+
+def pdf_page_images(data: bytes) -> List[bytes]:
+    import io
+    import pypdfium2 as pdfium
+    pdf = pdfium.PdfDocument(data)
+    out = []
+    for i in range(min(len(pdf), SCAN_PAGES)):
+        buf = io.BytesIO()
+        pdf[i].render(scale=2).to_pil().convert("RGB").save(buf, "JPEG", quality=88)
+        out.append(buf.getvalue())
+    return out
+
+
+async def vision(jpeg: bytes) -> str:
+    """Ask the local Ollama vision model to transcribe and describe one image."""
+    import base64
+    async with httpx.AsyncClient(timeout=240.0) as c:
+        r = await c.post(OLLAMA + "/api/chat", json={
+            "model": VISION_MODEL, "stream": False, "keep_alive": "5m",
+            "messages": [{"role": "user", "content": VISION_PROMPT, "images": [base64.b64encode(jpeg).decode()]}]})
+        r.raise_for_status()
+    return (r.json().get("message") or {}).get("content", "").strip()
+
+
+async def extract(name: str, data: bytes) -> str:
+    """Text of any readable file; images and scanned PDFs go through the local vision model."""
+    low = name.lower()
+    if low.endswith(IMAGE_EXT):
+        return await vision(await asyncio.to_thread(to_jpeg, data))
+    text = (await asyncio.to_thread(file_text, name, data)).strip()
+    if not text and low.endswith(".pdf"):
+        pages = await asyncio.to_thread(pdf_page_images, data)
+        text = "\n\n".join(f"Page {i}:\n{await vision(j)}" for i, j in enumerate(pages, 1))
+    return text.strip()
 
 
 def parts_of(text: str) -> List[str]:
@@ -152,24 +259,151 @@ def parts_of(text: str) -> List[str]:
     return out
 
 
-async def record_file(doc: Dict[str, Any], who: str, where: str, when: str, chat_title: str) -> str:
-    """Download one Telegram document and write its text to the brain. Returns a one-line outcome."""
+def safe_name(name: str) -> str:
+    n = re.sub(r"[^A-Za-z0-9._-]+", "_", os.path.basename(name or "file")).strip("._") or "file"
+    return n[:100]
+
+
+def load_index() -> Dict[str, Any]:
+    try:
+        return json.load(open(FILES_INDEX))
+    except Exception:
+        return {}
+
+
+def save_file(name: str, data: bytes, file_id: str, chat: str, sender: str, when: str) -> str:
+    """Keep the original bytes under FILES_DIR and record them in index.json. Returns the stored name."""
+    os.makedirs(FILES_DIR, exist_ok=True)
+    stem = datetime.now(timezone.utc).strftime("%Y%m%d-%H%M%S") + "-" + safe_name(name)
+    stored, n = stem, 1
+    while os.path.exists(os.path.join(FILES_DIR, stored)):
+        n += 1
+        stored = f"{stem}.{n}"
+    with open(os.path.join(FILES_DIR, stored + ".tmp"), "wb") as f:
+        f.write(data)
+    os.replace(os.path.join(FILES_DIR, stored + ".tmp"), os.path.join(FILES_DIR, stored))
+    idx = load_index()
+    idx[stored] = {"original_name": name, "file_id": file_id, "sha256": hashlib.sha256(data).hexdigest(),
+                   "size": len(data), "chat": chat, "sender": sender, "date": when}
+    with open(FILES_INDEX + ".tmp", "w") as f:
+        json.dump(idx, f, indent=1)
+    os.replace(FILES_INDEX + ".tmp", FILES_INDEX)
+    return stored
+
+
+STOP = set("""me the a an please file files pdf doc docx document documents copy of that this us to you can could would
+send give share forward resend attach again back i my our it one for from and gondroid sent we want need get
+latest last newest most recent""".split())
+
+
+def find_files(query: str, extra_stored: Optional[List[str]] = None) -> List[str]:
+    """Best-matching stored names (newest first). Name match against index.json first; if none,
+    fall back to stored names that brain search results mention (extra_stored)."""
+    idx = load_index()
+    toks = [t for t in re.findall(r"[a-z0-9]+", query.lower()) if t not in STOP]
+    newest = sorted(idx, reverse=True)
+    if not toks:
+        return newest[:5]
+    def score(k: str) -> int:
+        nm = (idx[k].get("original_name") or "").lower()
+        return sum(1 for t in toks if t in nm)
+    scored = {k: score(k) for k in idx}
+    best = max(scored.values(), default=0)
+    if best > 0:
+        return sorted((k for k, v in scored.items() if v == best), reverse=True)
+    return sorted({k for k in (extra_stored or []) if k in idx}, reverse=True)
+
+
+SEND_RE = re.compile(r"\b(send|give|share|forward|resend|attach)\b", re.I)
+FILE_WORD_RE = re.compile(r"\b(files?|pdf|docx?|documents?|attachments?|deck|spreadsheet|sheet|csv|prd)\b", re.I)
+
+
+def wants_file(q: str) -> bool:
+    return bool(SEND_RE.search(q)) and bool(load_index())
+
+
+async def send_document(to_chat: str, stored: str) -> None:
+    ent = load_index()[stored]
+    try:
+        await tg("sendDocument", {"chat_id": to_chat, "document": ent["file_id"]}, timeout=60)
+        return
+    except Exception as exc:
+        log.info("sendDocument by file_id failed (%s); uploading stored bytes", exc)
+    with open(os.path.join(FILES_DIR, stored), "rb") as f:
+        data = f.read()
+    async with httpx.AsyncClient(timeout=120.0) as c:
+        r = await c.post(f"https://api.telegram.org/bot{TOKEN}/sendDocument", data={"chat_id": to_chat},
+                         files={"document": (ent.get("original_name") or stored, data)})
+    if not r.json().get("ok"):
+        raise RuntimeError("sendDocument upload: " + str(r.json().get("description")))
+
+
+async def file_request(q: str, chat_id: str, from_id: str, is_group: bool, reply_to: Optional[int]) -> bool:
+    """Handle "send me the PRD". Returns True when it answered. Files only ever go to the asker's own DM."""
+    extra: List[str] = []
+    if not find_files(q) or not [t for t in re.findall(r"[a-z0-9]+", q.lower()) if t not in STOP]:
+        try:
+            ctx = await brain_context(q)
+            extra = re.findall(r"Stored file: (\S+?)(?: \(|\s|$)", ctx)
+        except Exception:
+            pass
+    found = find_files(q, extra)
+    idx = load_index()
+    if not found:
+        if FILE_WORD_RE.search(q):
+            await send(chat_id, "I don't have a stored file that matches that.", reply_to if is_group else None)
+            return True
+        return False
+    if len(found) > 1:
+        lines = [f"- {idx[k]['original_name']} ({idx[k]['date']}, from {idx[k]['sender']})" for k in found[:5]]
+        await send(chat_id, "Which one do you want?\n" + "\n".join(lines) + "\nTell me the name and I'll send it.",
+                   reply_to if is_group else None)
+        return True
+    try:
+        await send_document(from_id, found[0])
+    except Exception as exc:
+        log.error("file send failed: %s", exc)
+        await send(chat_id, "I couldn't send it to you. Message me directly once (DM me /start), then ask again.",
+                   reply_to if is_group else None)
+        return True
+    if is_group:
+        await send(chat_id, f"Sent {idx[found[0]]['original_name']} to you in a DM.", reply_to)
+    log.info("sent stored file %s to %s", found[0], from_id)
+    return True
+
+
+async def record_file(doc: Dict[str, Any], who: str, where: str, when: str, chat_title: str, notify: Optional[str] = None) -> str:
+    """Download one Telegram document, keep the original bytes, and write its text to the brain. Returns a one-line outcome."""
     name = doc.get("file_name") or "file"
     if (doc.get("file_size") or 0) > FILE_MAX_BYTES:
-        return f"file {name} is over 20 MB, too large for a bot to download; not read"
+        if notify:
+            await send(notify, f'I can\'t keep "{name}": Telegram only lets a bot download files up to 20 MB.')
+        return f"file {name} is over 20 MB, too large for a bot to download; not kept"
     info = await tg("getFile", {"file_id": doc["file_id"]})
     async with httpx.AsyncClient(timeout=120.0) as c:
         r = await c.get(f"https://api.telegram.org/file/bot{TOKEN}/{info['file_path']}")
         r.raise_for_status()
-    text = (await asyncio.to_thread(file_text, name, r.content)).strip()
+    stored = await asyncio.to_thread(save_file, name, r.content, doc["file_id"], chat_title, who, when)
+    ref = f"Stored file: {stored} (telegram file_id {doc['file_id']})"
+    try:
+        text = await extract(name, r.content)
+    except Exception as exc:
+        log.info("no text from %s: %s", name, type(exc).__name__)
+        text = ""
     if not text:
-        return f"file {name} has no readable text; not read"
+        await brain_add(f'File "{name}", sent by {who} in {where} on {when}. Its text could not be read, but the original is kept. {ref}',
+                        f"File {name} ({chat_title})")
+        if notify:
+            await send(notify, f'{name}: nothing readable in it, 0 parts written to the brain. The file is stored.')
+        return f"file {name}: kept as {stored}, no readable text"
     parts = parts_of(text)
     kept = parts[:MAX_PARTS]
     for i, part in enumerate(kept, 1):
-        await brain_add(f'File "{name}" (part {i} of {len(kept)}), sent by {who} in {where} on {when}. Its text:\n{part}',
+        await brain_add(f'File "{name}" (part {i} of {len(kept)}), sent by {who} in {where} on {when}. {ref}. Its text:\n{part}',
                         f"File {name} part {i}/{len(kept)} ({chat_title})")
-    return f"file {name}: {len(kept)} part(s) written" + (f", {len(parts) - len(kept)} more left out (too long)" if len(parts) > len(kept) else "")
+    if notify:
+        await send(notify, f"{name}: {len(kept)} part(s) written to the brain, file stored.")
+    return f"file {name}: kept as {stored}, {len(kept)} part(s) written" + (f", {len(parts) - len(kept)} more left out (too long)" if len(parts) > len(kept) else "")
 
 
 # ---------- brain ----------
@@ -236,6 +470,21 @@ async def handle(update: Dict[str, Any]) -> None:
         return
     text = (msg.get("text") or msg.get("caption") or "").strip()
     doc = msg.get("document")
+    if not doc and msg.get("photo"):
+        ph = max(msg["photo"], key=lambda x: x.get("file_size") or x.get("width", 0))
+        doc = {"file_id": ph["file_id"], "file_size": ph.get("file_size"), "file_name": f"photo-{msg['message_id']}.jpg"}
+    unread = None
+    if not doc:
+        for k in ("voice", "audio", "video", "video_note", "animation"):
+            if msg.get(k):
+                unread = k.replace("_", " ")
+    elif (doc.get("mime_type") or "").startswith(("audio/", "video/")) or (doc.get("file_name") or "").lower().endswith(MEDIA_EXT):
+        unread, doc = "audio or video", None
+    if unread and from_id in ALLOWED and not "edited_message" in update:
+        try:
+            await send(chat_id, f"I don't read {unread} files. Only documents, spreadsheets, slides and images.")
+        except Exception as exc:
+            log.error("unread-media reply failed: %s", exc)
     if doc and not text:
         text = f'[sent the file "{doc.get("file_name") or "file"}"]'
     if not text:
@@ -266,6 +515,12 @@ async def handle(update: Dict[str, Any]) -> None:
             await tg("sendChatAction", {"chat_id": chat_id, "action": "typing"})
         except Exception:
             pass
+        if wants_file(q):
+            try:
+                if await file_request(q, chat_id, from_id, is_group, msg["message_id"]):
+                    return
+            except Exception as exc:
+                log.error("file request failed: %s", exc)
         try:
             reply = await asyncio.wait_for(compose(q, await brain_context(q), RECENT[chat_id]), 120)
         except Exception as exc:
@@ -277,7 +532,8 @@ async def handle(update: Dict[str, Any]) -> None:
 
     async def record_doc():
         try:
-            log.info("%s (msg %s in %s)", await record_file(doc, who, where, when, chat.get("title") or "DM"),
+            log.info("%s (msg %s in %s)", await record_file(doc, who, where, when, chat.get("title") or "DM",
+                                                            chat_id if from_id in ALLOWED else None),
                      msg["message_id"], chat_id)
         except Exception as exc:
             log.error("file read failed (msg %s in %s): %s", msg["message_id"], chat_id, type(exc).__name__)

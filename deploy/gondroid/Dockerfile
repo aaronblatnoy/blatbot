@@ -4,6 +4,7 @@ FROM python:3.12-slim
 ENV PYTHONUNBUFFERED=1 HOME=/data/home STATE_DIR=/data
 WORKDIR /app
 RUN pip install --no-cache-dir "httpx==0.28.1" "claude-agent-sdk==0.2.152" "pypdf==5.1.0" "python-docx==1.1.2" \
+        "python-pptx==1.0.2" "openpyxl==3.1.5" "xlrd==2.0.1" "pypdfium2==4.30.0" "pillow==11.0.0" "pillow-heif==0.21.0" \
     && useradd --uid 1000 --create-home --home-dir /home/app app \
     && mkdir -p /data/home && chown -R app:app /data
 COPY deploy/gondroid/gondroid.py /app/gondroid.py

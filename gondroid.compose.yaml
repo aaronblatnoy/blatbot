@@ -17,6 +17,10 @@ services:
       - DO_BRAIN_API_URL=https://definite-optimists-brain.aaronblatnoy.workers.dev
       - CLAUDE_CODE_OAUTH_TOKEN=${CLAUDE_CODE_OAUTH_TOKEN}
       - LEDGER_MODEL=sonnet
+      - OLLAMA_URL=http://host.docker.internal:11434
+      - VISION_MODEL=qwen2.5vl:7b
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
     volumes:
       - gondroid-data:/data
 
