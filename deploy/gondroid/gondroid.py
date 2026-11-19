@@ -2,7 +2,7 @@
 
 1. Every text message in a trusted chat is written to the Definite Optimists brain
    (POST /api/add, Gondroid's own brain key) with who said it, where and when.
-2. A message aimed at Gondroid (a DM, an @mention, its name, or a reply to it) is a question:
+2. A message aimed at Gondroid (a DM, or in a group an @mention of its handle, nothing else) is a question:
    the brain is searched and a short answer goes back to that same chat. Nothing else is sent.
 
 The brain is Gondroid's only memory. The only local state is which groups are trusted:
@@ -155,10 +155,7 @@ def addressed(msg: Dict[str, Any], text: str) -> bool:
     if msg["chat"]["type"] == "private":
         return True
     handle = (ME.get("username") or "").lower()
-    low = text.lower()
-    reply_from = (msg.get("reply_to_message") or {}).get("from") or {}
-    return (f"@{handle}" in low or re.search(r"\bgondroid\b", low) is not None
-            or str(reply_from.get("id")) == str(ME.get("id")))
+    return bool(handle) and re.search(r"@" + re.escape(handle) + r"\b", text.lower()) is not None
 
 
 async def handle(update: Dict[str, Any]) -> None:
