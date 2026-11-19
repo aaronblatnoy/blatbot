@@ -56,6 +56,7 @@ def _gondroid() -> Any:
         spec.loader.exec_module(mod)
         mod.OLLAMA = (os.getenv("BLATBOT_OLLAMA_URL") or "http://127.0.0.1:11434").rstrip("/")
         mod.VISION_MODEL = os.getenv("BLATBOT_VISION_MODEL") or "qwen2.5vl:7b"
+        mod.BEDROCK_KEY = ""   # Blatbot's images stay on the local model, whatever the environment holds
         _reader = mod
     return _reader
 
