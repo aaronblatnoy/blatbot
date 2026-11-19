@@ -12,6 +12,10 @@ The brain is Gondroid's only memory. The only local state is which groups are tr
     is always included) can DM Gondroid or get an answer from it. Anyone else's DMs, mentions
     and replies are ignored silently (group messages are still recorded).
 
+Files: a document sent in a trusted chat (PDF, Word .docx, or any text file such as .txt, .md,
+.csv, .json) is downloaded, its text is extracted and written to the brain in parts, each part
+naming the file, who sent it, where and when. Photos, audio and video are not read.
+
 Updates arrive by long polling (getUpdates), so no public URL is needed.
 
 Environment: TELEGRAM_BOT_TOKEN, OWNER_TELEGRAM_ID, GONDROID_ALLOWED_USER_IDS, DO_BRAIN_KEY, DO_BRAIN_API_URL (optional),
@@ -110,6 +114,64 @@ async def group_trusted(chat_id: str) -> bool:
     return ok
 
 
+# ---------- files ----------
+FILE_MAX_BYTES = 20 * 1024 * 1024   # the most the Telegram Bot API lets a bot download
+PART_CHARS, MAX_PARTS = 3000, 60
+
+
+def file_text(name: str, data: bytes) -> str:
+    low = name.lower()
+    if low.endswith(".pdf"):
+        import io
+        from pypdf import PdfReader
+        return "\n\n".join((pg.extract_text() or "") for pg in PdfReader(io.BytesIO(data)).pages)
+    if low.endswith(".docx"):
+        import io
+        import docx
+        d = docx.Document(io.BytesIO(data))
+        rows = ["\t".join(c.text for c in r.cells) for t in d.tables for r in t.rows]
+        return "\n".join([p.text for p in d.paragraphs] + rows)
+    if b"\x00" in data[:4000]:
+        raise ValueError("not a text file")
+    return data.decode("utf-8", errors="replace")
+
+
+def parts_of(text: str) -> List[str]:
+    out, cur = [], ""
+    for para in re.split(r"\n\s*\n", text):
+        para = para.strip()
+        while len(para) > PART_CHARS:
+            if cur:
+                out.append(cur); cur = ""
+            out.append(para[:PART_CHARS]); para = para[PART_CHARS:]
+        if cur and len(cur) + len(para) + 2 > PART_CHARS:
+            out.append(cur); cur = ""
+        cur = (cur + "\n\n" + para).strip() if para else cur
+    if cur:
+        out.append(cur)
+    return out
+
+
+async def record_file(doc: Dict[str, Any], who: str, where: str, when: str, chat_title: str) -> str:
+    """Download one Telegram document and write its text to the brain. Returns a one-line outcome."""
+    name = doc.get("file_name") or "file"
+    if (doc.get("file_size") or 0) > FILE_MAX_BYTES:
+        return f"file {name} is over 20 MB, too large for a bot to download; not read"
+    info = await tg("getFile", {"file_id": doc["file_id"]})
+    async with httpx.AsyncClient(timeout=120.0) as c:
+        r = await c.get(f"https://api.telegram.org/file/bot{TOKEN}/{info['file_path']}")
+        r.raise_for_status()
+    text = (await asyncio.to_thread(file_text, name, r.content)).strip()
+    if not text:
+        return f"file {name} has no readable text; not read"
+    parts = parts_of(text)
+    kept = parts[:MAX_PARTS]
+    for i, part in enumerate(kept, 1):
+        await brain_add(f'File "{name}" (part {i} of {len(kept)}), sent by {who} in {where} on {when}. Its text:\n{part}',
+                        f"File {name} part {i}/{len(kept)} ({chat_title})")
+    return f"file {name}: {len(kept)} part(s) written" + (f", {len(parts) - len(kept)} more left out (too long)" if len(parts) > len(kept) else "")
+
+
 # ---------- brain ----------
 async def brain_add(content: str, title: str) -> None:
     async with httpx.AsyncClient(timeout=30.0) as c:
@@ -173,6 +235,9 @@ async def handle(update: Dict[str, Any]) -> None:
         log.info("DM from untrusted %s; ignored", from_id)
         return
     text = (msg.get("text") or msg.get("caption") or "").strip()
+    doc = msg.get("document")
+    if doc and not text:
+        text = f'[sent the file "{doc.get("file_name") or "file"}"]'
     if not text:
         return
     name = " ".join(x for x in (frm.get("first_name"), frm.get("last_name")) if x) or frm.get("username") or from_id
@@ -210,7 +275,16 @@ async def handle(update: Dict[str, Any]) -> None:
                    msg["message_id"] if is_group else None)
         log.info("answered msg %s in %s", msg["message_id"], chat_id)
 
+    async def record_doc():
+        try:
+            log.info("%s (msg %s in %s)", await record_file(doc, who, where, when, chat.get("title") or "DM"),
+                     msg["message_id"], chat_id)
+        except Exception as exc:
+            log.error("file read failed (msg %s in %s): %s", msg["message_id"], chat_id, type(exc).__name__)
+
     jobs = [record()]
+    if doc and not edited:
+        jobs.append(record_doc())
     if not edited and from_id in ALLOWED and addressed(msg, text):
         jobs.append(answer())
     await asyncio.gather(*jobs)
