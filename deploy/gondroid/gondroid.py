@@ -12,6 +12,11 @@ The brain is Gondroid's only memory. The only local state is which groups are tr
     is always included) can DM Gondroid or get an answer from it. Anyone else's DMs, mentions
     and replies are ignored silently (group messages are still recorded).
 
+Transcript: every message seen in a trusted chat (sender, time, text or caption, reply-to id, text read from files and
+photos) is also kept in STATE_DIR/transcripts/<chat_id>.jsonl (last 200 per chat). An answer prompt carries the replied-to
+message in full (its photo or file is read on the spot if not yet ingested), the last 40 transcript lines of that same chat
+only, and the brain results.
+
 Files: a document or photo sent in a trusted chat is downloaded, its text is extracted and written to
 the brain in parts, each part naming the file, who sent it, where and when. Read: PDF (text layer;
 scans are read by the local vision model), Word .docx, PowerPoint .pptx (slide text and notes),
@@ -65,14 +70,84 @@ FILES_DIR = os.path.join(os.environ.get("STATE_DIR", "/data"), "files")
 FILES_INDEX = os.path.join(FILES_DIR, "index.json")
 MEMBER = ("creator", "administrator", "member", "restricted")
 ME: Dict[str, Any] = {}
-RECENT: Dict[str, List[str]] = {}
+TX_DIR = os.path.join(os.environ.get("STATE_DIR", "/data"), "transcripts")
+TX_KEEP = 200        # messages kept per chat
+TX_PROMPT = 40       # messages put in an answer prompt
+TX_FILE_CAP = 8000   # characters of a file's text kept in a transcript row
 
 SYSTEM = (
-    "You are Gondroid, the Definite Optimists team's ledger. Your memory is the team brain, and the "
-    "material in the message is everything you know. Answer the question from that material only. "
+    "You are Gondroid, the Definite Optimists team's ledger. The material in the message is everything you know. "
+    "It has up to three blocks. 'MESSAGE BEING REPLIED TO' is the exact message the asker replied to, with the text "
+    "read out of its photo or file; when it is there, the question is usually about it, so read it first. "
+    "'CURRENT CONVERSATION' is the last messages of this very chat in order with names and times: it is what is "
+    "being talked about right now, and the newest lines are the most relevant. 'FACTS FROM THE BRAIN' is older "
+    "team memory, searched by topic; it may lag by a few minutes, so trust the conversation block for anything recent. "
+    "Answer the question from that material only. "
     "Be plain and short: a sentence or a few lines, no headers, no preamble, no em dashes. Say who "
     "said what and when when it helps. If the material does not hold the answer, say you don't have "
     "that recorded. Never invent anything.")
+
+
+# ---------- per-chat transcript ----------
+# One file per chat, /data/transcripts/<chat_id>.jsonl, last TX_KEEP rows. A chat only ever reads its own file.
+# Limit: Telegram's Bot API never delivers other bots' messages to a bot, so a message another bot posts in a
+# group is not in the transcript. It can still be read when someone replies to it, because the reply update
+# carries the replied-to message (reply_to_message) in full.
+def tx_path(chat_id: str) -> str:
+    return os.path.join(TX_DIR, re.sub(r"[^0-9A-Za-z_-]", "_", chat_id) + ".jsonl")
+
+
+def tx_rows(chat_id: str) -> List[Dict[str, Any]]:
+    rows: List[Dict[str, Any]] = []
+    try:
+        with open(tx_path(chat_id), encoding="utf-8") as f:
+            for line in f:
+                try:
+                    rows.append(json.loads(line))
+                except ValueError:
+                    pass
+    except OSError:
+        pass
+    return rows
+
+
+def tx_write(chat_id: str, rows: List[Dict[str, Any]]) -> None:
+    os.makedirs(TX_DIR, exist_ok=True)
+    tmp = tx_path(chat_id) + ".tmp"
+    with open(tmp, "w", encoding="utf-8") as f:
+        f.write("".join(json.dumps(r, ensure_ascii=False) + "\n" for r in rows[-TX_KEEP:]))
+    os.replace(tmp, tx_path(chat_id))
+
+
+def tx_append(chat_id: str, row: Dict[str, Any]) -> None:
+    """No await inside, so on the single event loop each append/rewrite is atomic."""
+    try:
+        os.makedirs(TX_DIR, exist_ok=True)
+        with open(tx_path(chat_id), "a", encoding="utf-8") as f:
+            f.write(json.dumps(row, ensure_ascii=False) + "\n")
+        if row["id"] % 20 == 0 or len(tx_rows(chat_id)) > TX_KEEP + 40:
+            tx_write(chat_id, tx_rows(chat_id))
+    except OSError as exc:
+        log.error("transcript write failed: %s", exc)
+
+
+def tx_set_file_text(chat_id: str, message_id: int, text: str) -> None:
+    try:
+        rows = tx_rows(chat_id)
+        for r in rows:
+            if r.get("id") == message_id:
+                r["file_text"] = text[:TX_FILE_CAP]
+        tx_write(chat_id, rows)
+    except OSError as exc:
+        log.error("transcript update failed: %s", exc)
+
+
+def tx_line(r: Dict[str, Any], file_cap: int = 1500) -> str:
+    head = f"[{r.get('ts')}] {r.get('who')} (message {r.get('id')}" + (f", reply to {r['reply_to']}" if r.get("reply_to") else "") + ")"
+    out = f"{head}: {r.get('text') or ''}"
+    if r.get("file_text"):
+        out += f"\n   [text read from the file or photo: {r['file_text'][:file_cap]}]"
+    return out
 
 
 # ---------- Telegram ----------
@@ -375,7 +450,8 @@ async def file_request(q: str, chat_id: str, from_id: str, is_group: bool, reply
     return True
 
 
-async def record_file(doc: Dict[str, Any], who: str, where: str, when: str, chat_title: str, notify: Optional[str] = None) -> str:
+async def record_file(doc: Dict[str, Any], who: str, where: str, when: str, chat_title: str, notify: Optional[str] = None,
+                      sink: Optional[Dict[str, str]] = None) -> str:
     """Download one Telegram document, keep the original bytes, and write its text to the brain. Returns a one-line outcome."""
     name = doc.get("file_name") or "file"
     if (doc.get("file_size") or 0) > FILE_MAX_BYTES:
@@ -399,6 +475,8 @@ async def record_file(doc: Dict[str, Any], who: str, where: str, when: str, chat
         if notify:
             await send(notify, f'{name}: nothing readable in it, 0 parts written to the brain. The file is stored.')
         return f"file {name}: kept as {stored}, no readable text"
+    if sink is not None:
+        sink["text"] = text
     parts = parts_of(text)
     kept = parts[:MAX_PARTS]
     for i, part in enumerate(kept, 1):
@@ -407,6 +485,27 @@ async def record_file(doc: Dict[str, Any], who: str, where: str, when: str, chat
     if notify:
         await send(notify, f"{name}: {len(kept)} part(s) written to the brain, file stored.")
     return f"file {name}: kept as {stored}, {len(kept)} part(s) written" + (f", {len(parts) - len(kept)} more left out (too long)" if len(parts) > len(kept) else "")
+
+
+def doc_of(msg: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    """The file or photo of a Telegram message, shaped like record_file wants it."""
+    doc = msg.get("document")
+    if not doc and msg.get("photo"):
+        ph = max(msg["photo"], key=lambda x: x.get("file_size") or x.get("width", 0))
+        doc = {"file_id": ph["file_id"], "file_size": ph.get("file_size"), "file_name": f"photo-{msg['message_id']}.jpg"}
+    return doc
+
+
+async def read_doc(doc: Dict[str, Any]) -> str:
+    """Download and read a file now (not stored, not written to the brain). Used for a replied-to file not yet ingested."""
+    name = doc.get("file_name") or "file"
+    if (doc.get("file_size") or 0) > FILE_MAX_BYTES:
+        return ""
+    info = await tg("getFile", {"file_id": doc["file_id"]})
+    async with httpx.AsyncClient(timeout=120.0) as c:
+        r = await c.get(f"https://api.telegram.org/file/bot{TOKEN}/{info['file_path']}")
+        r.raise_for_status()
+    return (await extract(name, r.content))[:12000]
 
 
 # ---------- brain ----------
@@ -437,9 +536,44 @@ async def brain_context(question: str) -> str:
     return "\n".join(lines)
 
 
-async def compose(question: str, context: str, recent: List[str]) -> str:
+async def reply_block(msg: Dict[str, Any], chat_id: str) -> str:
+    """The message the asker replied to, in full, with the text of its photo or file."""
+    rep_msg = msg.get("reply_to_message")
+    if not rep_msg:
+        return ""
+    sender = rep_msg.get("from") or {}
+    name = " ".join(x for x in (sender.get("first_name"), sender.get("last_name")) if x) or sender.get("username") or "unknown"
+    if sender.get("is_bot"):
+        name += " (a bot)"
+    when = datetime.fromtimestamp(rep_msg.get("date") or 0, timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
+    text = (rep_msg.get("text") or rep_msg.get("caption") or "").strip()
+    row = next((r for r in tx_rows(chat_id) if r.get("id") == rep_msg.get("message_id")), None)
+    file_text = (row or {}).get("file_text") or ""
+    doc = doc_of(rep_msg)
+    note = ""
+    if doc and not file_text:
+        try:
+            file_text = await asyncio.wait_for(read_doc(doc), 110)
+            log.info("read replied-to file now (msg %s in %s): %d chars", rep_msg.get("message_id"), chat_id, len(file_text))
+        except Exception as exc:
+            log.error("replied-to file read failed: %s", type(exc).__name__)
+            note = " (it has a photo or file I could not read just now)"
+    out = f"[{when}] {name} (message {rep_msg.get('message_id')}){note}: {text or '(no text)'}"
+    if doc:
+        out += f"\nFile or photo: {doc.get('file_name') or 'photo'}\nText read from it:\n{file_text or '(nothing readable)'}"
+    return out
+
+
+def transcript_block(chat_id: str) -> str:
+    return "\n".join(tx_line(r) for r in tx_rows(chat_id)[-TX_PROMPT:])
+
+
+async def compose(question: str, context: str, replied: str = "", transcript: str = "") -> str:
     from claude_agent_sdk import AssistantMessage, ClaudeAgentOptions, TextBlock, query
-    prompt = f"{context}\n\nTHIS CHAT, LAST MESSAGES:\n" + "\n".join(recent[-10:]) + f"\n\nQUESTION: {question}"
+    prompt = ""
+    if replied:
+        prompt += f"MESSAGE BEING REPLIED TO (the asker replied to this message):\n{replied}\n\n"
+    prompt += f"CURRENT CONVERSATION (this chat, oldest first, newest last):\n{transcript or '(nothing yet)'}\n\n{context}\n\nQUESTION: {question}"
     opts = ClaudeAgentOptions(model=MODEL, system_prompt=SYSTEM, allowed_tools=[],
                               mcp_servers={}, strict_mcp_config=True, max_turns=1, setting_sources=[])
     out: List[str] = []
@@ -472,10 +606,7 @@ async def handle(update: Dict[str, Any]) -> None:
         log.info("DM from untrusted %s; ignored", from_id)
         return
     text = (msg.get("text") or msg.get("caption") or "").strip()
-    doc = msg.get("document")
-    if not doc and msg.get("photo"):
-        ph = max(msg["photo"], key=lambda x: x.get("file_size") or x.get("width", 0))
-        doc = {"file_id": ph["file_id"], "file_size": ph.get("file_size"), "file_name": f"photo-{msg['message_id']}.jpg"}
+    doc = doc_of(msg)
     unread = None
     if not doc:
         for k in ("voice", "audio", "video", "video_note", "animation"):
@@ -497,8 +628,9 @@ async def handle(update: Dict[str, Any]) -> None:
     who = name + (f" (@{frm['username']})" if frm.get("username") else "")
     where = f'Telegram group "{chat.get("title") or chat_id}"' if is_group else "a Telegram DM with Gondroid"
     edited = "edited_message" in update
-    RECENT.setdefault(chat_id, []).append(f"[{when}] {name}: {text}")
-    del RECENT[chat_id][:-20]
+    tx_append(chat_id, {"id": msg["message_id"], "ts": when, "who": name, "from_id": from_id, "text": text[:4000],
+                        "reply_to": (msg.get("reply_to_message") or {}).get("message_id"),
+                        "file": (doc or {}).get("file_name"), "edited": edited})
 
     async def record():
         try:
@@ -525,7 +657,8 @@ async def handle(update: Dict[str, Any]) -> None:
             except Exception as exc:
                 log.error("file request failed: %s", exc)
         try:
-            reply = await asyncio.wait_for(compose(q, await brain_context(q), RECENT[chat_id]), 120)
+            replied = await reply_block(msg, chat_id)
+            reply = await asyncio.wait_for(compose(q, await brain_context(q), replied, transcript_block(chat_id)), 120)
         except Exception as exc:
             log.error("answer failed: %s", exc)
             reply = ""
@@ -534,10 +667,13 @@ async def handle(update: Dict[str, Any]) -> None:
         log.info("answered msg %s in %s", msg["message_id"], chat_id)
 
     async def record_doc():
+        sink: Dict[str, str] = {}
         try:
             log.info("%s (msg %s in %s)", await record_file(doc, who, where, when, chat.get("title") or "DM",
-                                                            chat_id if from_id in ALLOWED else None),
+                                                            chat_id if from_id in ALLOWED else None, sink),
                      msg["message_id"], chat_id)
+            if sink.get("text"):
+                tx_set_file_text(chat_id, msg["message_id"], sink["text"])
         except Exception as exc:
             log.error("file read failed (msg %s in %s): %s", msg["message_id"], chat_id, type(exc).__name__)
 
