@@ -1740,6 +1740,42 @@ class GateSession:
         await self.send_to_sender(line, role="answer")
         return True
 
+    async def _dev_work(self, dev: Any, approver: bool) -> bool:
+        """Dev work from chat (gate/devwork.py). Only the verified approver, only in a
+        direct chat. Sends a started line now and the merged PR link (or the failure)
+        when Claude Code finishes; the run itself goes on in the background."""
+        from . import devwork
+        if not approver:
+            logger.info("[gate %s] dev work phrase from a non-owner refused", self.chat_id)
+            return await self.send_to_sender("Only Aaron can start dev work. Nothing was started.", role="answer")
+        if self.in_group():
+            return await self.send_to_sender(chatreply.GROUP_REFUSAL, role="answer")
+        if devwork.bullpen_blocked(dev):
+            return await self.send_to_sender(
+                "That is a Bullpen repo. Name Bullpen in the message if you want it run on black-sky.", role="answer")
+        if devwork.busy():
+            return await self.send_to_sender("Dev work is already running. Ask again when it finishes.", role="answer")
+        logger.info("[gate %s] dev work: %s", self.chat_id, dev.slug)
+        await self.send_to_sender(devwork.started_line(dev), role="ack")
+        chat_id, mode, meta, record_id = self.chat_id, self.mode, dict(self.reply_meta or {}), self.record_id
+        inbound_id = self.inbound_id
+
+        async def finish() -> None:
+            try:
+                result = await devwork.run(dev)
+                line = result.line()
+            except Exception as exc:  # noqa: BLE001
+                logger.exception("[gate %s] dev work crashed", chat_id)
+                line = f"Dev work failed: {type(exc).__name__}"
+            try:
+                await self.m.send(chat_id, line, mode, meta, record=False, kind="reply")
+                self.m.store.add_message(record_id, "outbound", line, mode, reply_to=inbound_id, role="answer")
+            except Exception:  # noqa: BLE001
+                logger.exception("[gate %s] could not deliver the dev work result: %s", chat_id, line)
+
+        asyncio.create_task(finish(), name=f"devwork-{chat_id}")
+        return True
+
     async def _group_plain_talk(self, body: str) -> bool:
         """Group plain talk. Someone who is not Aaron says something in a group that the
         room's mode already let through: one model call with NO tools wired at all
@@ -1783,6 +1819,11 @@ class GateSession:
 
     async def _route_and_act(self, body: str, system_note: Optional[str] = None) -> bool:
         approver = self.is_approver()
+        if not system_note:
+            from . import devwork
+            dev = devwork.match(body)
+            if dev is not None:
+                return await self._dev_work(dev, approver)
         if not system_note and approver:
             # Aaron changing or asking who may do what, a room's mode, or a setting, in
             # one of his own common phrasings: answered by code in one state line, before
