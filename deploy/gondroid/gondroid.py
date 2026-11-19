@@ -491,8 +491,6 @@ async def record_file(doc: Dict[str, Any], who: str, where: str, when: str, chat
     if not text:
         await brain_add(f'File "{name}", sent by {who} in {where} on {when}. Its text could not be read, but the original is kept. {ref}',
                         f"File {name} ({chat_title})")
-        if notify:
-            await send(notify, f'{name}: nothing readable in it, 0 parts written to the brain. The file is stored.')
         return f"file {name}: kept as {stored}, no readable text"
     if sink is not None:
         sink["text"] = text
@@ -500,16 +498,12 @@ async def record_file(doc: Dict[str, Any], who: str, where: str, when: str, chat
         label = "photo" if name.startswith("photo-") else name
         await brain_add(f'Image "{label}" sent by {who} in {where} on {when}. {text[:6000]}\n{ref}',
                         f"Image {name} ({chat_title})")
-        if notify:
-            await send(notify, f"{label}: described and written to the brain, image stored.")
         return f"image {name}: kept as {stored}, description written"
     parts = parts_of(text)
     kept = parts[:MAX_PARTS]
     for i, part in enumerate(kept, 1):
         await brain_add(f'File "{name}" (part {i} of {len(kept)}), sent by {who} in {where} on {when}. {ref}. Its text:\n{part}',
                         f"File {name} part {i}/{len(kept)} ({chat_title})")
-    if notify:
-        await send(notify, f"{name}: {len(kept)} part(s) written to the brain, file stored.")
     return f"file {name}: kept as {stored}, {len(kept)} part(s) written" + (f", {len(parts) - len(kept)} more left out (too long)" if len(parts) > len(kept) else "")
 
 
@@ -643,11 +637,8 @@ async def handle(update: Dict[str, Any]) -> None:
                 unread = k.replace("_", " ")
     elif (doc.get("mime_type") or "").startswith(("audio/", "video/")) or (doc.get("file_name") or "").lower().endswith(MEDIA_EXT):
         unread, doc = "audio or video", None
-    if unread and from_id in ALLOWED and not "edited_message" in update:
-        try:
-            await send(chat_id, f"I don't read {unread} files. Only documents, spreadsheets, slides and images.")
-        except Exception as exc:
-            log.error("unread-media reply failed: %s", exc)
+    if unread:
+        log.info("not read: %s (msg %s in %s)", unread, msg.get("message_id"), chat_id)
     if doc and not text:
         text = f'[sent the file "{doc.get("file_name") or "file"}"]'
     if not text:
