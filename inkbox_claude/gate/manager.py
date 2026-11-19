@@ -198,6 +198,7 @@ class GateSession:
         self._typing: Optional[asyncio.Task] = None
         self.deferred_ack: Optional[str] = None   # the writer's "on it" line, sent only if the run is slow
         self.room: str = ""                       # set when this thread is a group chat: who is in it
+        self.chat_context: str = ""               # this chat's recent messages, read when a turn starts
         # Item 4: how many times a voice fragment has already folded into THIS
         # call's already-failed ask, keyed by (call_id, failed request id) so a
         # different call from the same person never shares the count. In-memory
@@ -419,7 +420,8 @@ class GateSession:
     def _contact_notes(self) -> str:
         c = (self.reply_meta or {}).get("contact") or {}
         notes = str(c.get("notes") or "") if isinstance(c, dict) else ""
-        return f"{self.room}\n\n{notes}".strip() if self.room else notes
+        notes = f"{self.room}\n\n{notes}".strip() if self.room else notes
+        return f"{notes}\n\n{self.chat_context}".strip() if self.chat_context else notes
 
     # -- task ledger -----------------------------------------------------------
     def task(self) -> Optional[Dict[str, Any]]:
@@ -711,10 +713,12 @@ class GateSession:
             + _what_it_supplies(body, _last_failed_run(self.m.store, task))
             + "\n"
             f"--- RECENT CONVERSATION WITH THEM ---\n{convo}\n\n"
-            f"--- THE TASK THIS BELONGS TO ---\n{ledger}\n\n{recalled}"
+            + (f"{self.chat_context}\n\n" if self.chat_context else "")
+            + f"--- THE TASK THIS BELONGS TO ---\n{ledger}\n\n{recalled}"
             "Work out what they are asking for, or what this message makes possible on the task (for example, "
             "information the task was waiting for), and do it with your tools. A bare reference in the message "
-            "(this, that, it, the list, the report) points at the nearest earlier message in the conversation "
+            "(this, that, it, the list, the report) points at the message it replies to when it is a reply (shown "
+            "whole above, files included), otherwise at the nearest earlier message in the conversation "
             "above that fits, most often the one just before it, from either side; a block of text pasted into "
             "the conversation is content to use as it stands, not something to go and look up. Do only what the "
             "message and the task call for; do not invent extra steps. If something essential is missing, stop "
@@ -1208,6 +1212,7 @@ class GateSession:
             self._index_sender()
             self.deferred_ack = None
             self.typing_start()
+            await self._read_chat_context(meta)
             if self.thread_key():
                 self.m.store.link_thread(self.thread_key(), self.record_id)
             # First thing every turn: put this message on the person's task ledger,
@@ -1236,6 +1241,22 @@ class GateSession:
                 self.typing_stop()
                 if self.m.store.thread_state(self.chat_id) == "routing":
                     self.m.store.set_thread(self.chat_id, "idle")
+
+    async def _read_chat_context(self, meta: Dict[str, Any]) -> None:
+        """This chat's recent messages from everyone (files as read), for every model this
+        turn consults. Only the chat named in the message's own meta, which the gateway
+        set from the chat the message came from; "" when there is none or it fails."""
+        self.chat_context = ""
+        spec = (meta or {}).get("_context_chat")
+        if not isinstance(spec, dict) or not spec.get("chat_id"):
+            return
+        try:
+            from .. import chatfiles
+            self.chat_context = await asyncio.wait_for(chatfiles.recent_chat(
+                str(spec["chat_id"]), is_group=bool(spec.get("is_group")), store=self.m.store,
+                before=float(spec.get("before") or 0)), 150)
+        except Exception as exc:  # noqa: BLE001 - context is help, never a reason to fail the turn
+            logger.warning("[gate %s] could not read the chat's recent messages: %s", self.chat_id, exc)
 
     async def file_inbound(self, text: str, mode: str, meta: Dict[str, Any]) -> Optional[int]:
         """Keep a message in this conversation's history, and so in long-term memory,
@@ -1735,7 +1756,8 @@ class GateSession:
             recent = [m for m in self.m.store.history(self.record_id, limit=20)
                       if m.get("kind") in ("inbound", "outbound")]
             reply = await asyncio.wait_for(
-                self.m.router.plain_talk(room=self.room, history=recent[:-1], message=body,
+                self.m.router.plain_talk(
+                    room=(f"{self.room}\n\n{self.chat_context}".strip() if self.chat_context else self.room), history=recent[:-1], message=body,
                                          sender=self._sender_name() or ""),
                 timeout=self.PLAIN_TALK_TIMEOUT_S)
         except Exception as exc:  # noqa: BLE001  (timeout or provider error: the usual flow takes it)

@@ -10,6 +10,15 @@ dependencies = [
   "claude-agent-sdk>=0.1.0",
   "segno>=1.5",  # terminal QR codes for the iMessage connect step
   "langgraph>=1.0",  # the Jev agent's state graph (gate/jevgraph.py)
+  # Reading files sent in chats (chatfiles.py, via deploy/gondroid/gondroid.py's extract)
+  "pypdf>=5.1",
+  "python-docx>=1.1",
+  "python-pptx>=1.0",
+  "openpyxl>=3.1",
+  "xlrd>=2.0",
+  "pypdfium2>=4.30",
+  "pillow>=11.0",
+  "pillow-heif>=0.21",
 ]
 
 [project.scripts]
