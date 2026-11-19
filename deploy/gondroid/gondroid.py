@@ -239,7 +239,10 @@ async def extract(name: str, data: bytes) -> str:
     text = (await asyncio.to_thread(file_text, name, data)).strip()
     if not text and low.endswith(".pdf"):
         pages = await asyncio.to_thread(pdf_page_images, data)
-        text = "\n\n".join(f"Page {i}:\n{await vision(j)}" for i, j in enumerate(pages, 1))
+        segs = []
+        for i, j in enumerate(pages, 1):
+            segs.append(f"Page {i}:\n{await vision(j)}")
+        text = "\n\n".join(segs)
     return text.strip()
 
 
