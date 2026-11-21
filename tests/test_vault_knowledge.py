@@ -717,3 +717,23 @@ def test_an_answer_from_attached_notes_is_not_failed_for_using_no_tool(tmp_path,
 def test_no_notes_attached_still_insists(tmp_path, monkeypatch):
     m, _sent, _root = _manager_with_vault(tmp_path, monkeypatch)
     assert m._answered_from_attached_notes(_approved(["web"], request_id=12)) is False
+
+
+def test_a_first_request_of_a_task_answered_without_a_tool_is_accepted(tmp_path, monkeypatch):
+    import asyncio
+    m, _sent, _root = _manager_with_vault(tmp_path, monkeypatch)
+    req = _approved(["web", "browser_read"], request_id=21)
+    monkeypatch.setattr(m.store, "task_id_for_request", lambda rid: 5)
+    monkeypatch.setattr(m.store, "console_task_requests", lambda ids: {5: [req]})
+    status = {"ok": True, "tool_calls": [], "summary": "Vega, Halite, Obsidian."}
+    out = asyncio.run(m._insist_it_actually_ran(req, status, "ctx", None))
+    assert out is status and out["ok"] is True
+
+
+def test_a_task_with_an_earlier_request_still_insists(tmp_path, monkeypatch):
+    m, _sent, _root = _manager_with_vault(tmp_path, monkeypatch)
+    req = _approved(["web"], request_id=22)
+    monkeypatch.setattr(m.store, "task_id_for_request", lambda rid: 5)
+    monkeypatch.setattr(m.store, "console_task_requests",
+                        lambda ids: {5: [req, _approved(["web"], request_id=20)]})
+    assert m._task_has_an_earlier_request(req) is True
