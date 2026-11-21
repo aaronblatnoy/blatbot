@@ -4417,6 +4417,13 @@ class GateSessionManager:
             # a draft, an estimate) and the words are the work. Insisting on a tool here
             # threw away finished answers and reported them as failures.
             return status
+        if not self._task_has_an_earlier_request(req):
+            # This is the first request of its task, so there is no earlier answer in the
+            # record to mistake for this one. An answer written without a tool (names, a
+            # draft) is then the work itself, even when web or browser access was granted
+            # in case it was wanted. Insisting here failed finished naming answers twice.
+            logger.info("[gate] #%s: first request of its task answered without a tool; accepted", req.id)
+            return status
         if self._message_only_gave_information(req):
             # The message handed over a fact ("this is Stanley's email"): there was nothing
             # to look up, and taking it in is the work (every message already lands in
@@ -4619,6 +4626,20 @@ class GateSessionManager:
             self._inbound_events[int(request_id)] = dict(result)
             while len(self._inbound_events) > 500:
                 self._inbound_events.pop(next(iter(self._inbound_events)))
+
+    def _task_has_an_earlier_request(self, req: Request) -> bool:
+        """True when this request's task already holds an earlier request, whose recorded
+        answer a run could repeat instead of looking again. Unknown counts as True, so the
+        insistence stays on whenever the record cannot be read."""
+        try:
+            tid = self.store.task_id_for_request(int(req.id))
+            if not tid:
+                return True
+            others = self.store.console_task_requests([tid]).get(tid, [])
+            return any(int(r.id) != int(req.id) for r in others)
+        except Exception:
+            logger.exception("[gate] could not read the task of #%s", req.id)
+            return True
 
     def _message_only_gave_information(self, req: Request) -> bool:
         """True when the message this request came from was judged to hand over
