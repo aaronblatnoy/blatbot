@@ -160,10 +160,19 @@ async def judge_actionable(state: DecideState, config: RunnableConfig) -> Dict[s
 
 async def join_judgments(state: DecideState, config: RunnableConfig) -> Dict[str, Any]:
     s = _s(config)
+    forced: Dict[str, Any] = {}
+    image_turn = getattr(s, "image_turn", None)
+    if (s.is_approver() and state["mode"] != "voice" and callable(image_turn) and image_turn(state["body"])
+            and not (state["needs_action"] and state["actionable"])):
+        # The words-only writer cannot see an image. A turn about one runs Claude, which is
+        # given the image itself (executor.py attaches every "image file:" in the prompt).
+        logger.info("[gate %s] image turn: answered by a run that sees the image", s.chat_id)
+        forced = {"needs_action": True, "actionable": True}
+        state = {**state, **forced}  # type: ignore[assignment]
     logger.info("[gate %s] jev-first: task=%s action=%s (p=%.2f) actionable=%s (p=%.2f)", s.chat_id,
                 state["task_choice"] or ("new" if state["pick"] == "new" else None), state["needs_action"],
                 state["p_action"], state["actionable"], state["p_actionable"])
-    return {}
+    return forced
 
 
 def after_join(state: DecideState, config: RunnableConfig) -> List[str]:
