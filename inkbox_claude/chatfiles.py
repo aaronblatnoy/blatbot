@@ -250,8 +250,13 @@ async def main():
     ddir = a.get("dir")
     out = []
     keep = int(a.get("keep") or 0)
-    async for m in c.iter_messages(ent, limit=int(a["limit"])):
+    until = float(a.get("until") or 0)
+    import datetime as _dt
+    start = _dt.datetime.fromtimestamp(until, tz=_dt.timezone.utc) if until else None
+    async for m in c.iter_messages(ent, limit=int(a["limit"]) + 10, offset_date=start):
         ts = m.date.timestamp()
+        if until and ts >= until:
+            continue
         if ts < since and len(out) >= keep:
             break
         s = m.sender
@@ -282,7 +287,7 @@ asyncio.run(main())
 """
 
 
-async def _account_window(chat_id: str, since: float, downloads: int) -> List[Dict[str, Any]]:
+async def _account_window(chat_id: str, since: float, downloads: int, until: float = 0.0) -> List[Dict[str, Any]]:
     """The group's messages since `since`, newest first, through Aaron's account, with up
     to `downloads` files fetched that Blatbot has not already read."""
     from .gate import tgread
@@ -292,7 +297,7 @@ async def _account_window(chat_id: str, since: float, downloads: int) -> List[Di
     try:
         data = await asyncio.wait_for(transport._run(_CONTEXT_SCRIPT, {
             "chat": int(chat_id), "since": since, "limit": WINDOW_MESSAGES, "known": known,
-            "keep": WINDOW_MIN_MESSAGES,
+            "keep": WINDOW_MIN_MESSAGES, "until": until,
             "downloads": downloads, "dir": tmp}), 120)
         rows = list(data.get("messages") or [])
         for r in rows:
@@ -348,7 +353,7 @@ async def recent_chat(chat_id: str, *, is_group: bool, store: Any, before: float
     lines: List[str] = []
     if is_group and str(chat_id).startswith("-"):
         try:
-            rows = await _account_window(chat_id, since, DOWNLOADS_PER_WINDOW)
+            rows = await _account_window(chat_id, since, DOWNLOADS_PER_WINDOW, before)
             for r in reversed(rows):
                 at = float(r.get("at") or 0)
                 if at >= before:
