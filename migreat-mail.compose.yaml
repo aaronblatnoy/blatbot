@@ -1,0 +1,21 @@
+# migreat-mail: reads every migreat.us Workspace mailbox and writes each email to the Definite Optimists brain.
+# Deployed on black-sky as the Coolify application "migreat-mail" (Definite Optimists team). Secrets (SA_JSON, DO_BRAIN_KEY)
+# come from the Coolify application's environment, never from this file.
+services:
+  migreat-mail:
+    build:
+      context: .
+      dockerfile: deploy/migreat-mail/Dockerfile
+    restart: unless-stopped
+    environment:
+      - SA_JSON=${SA_JSON}
+      - DO_BRAIN_KEY=${DO_BRAIN_KEY}
+      - DO_BRAIN_API_URL=https://definite-optimists-brain.aaronblatnoy.workers.dev
+      - WORKSPACE_DOMAIN=migreat.us
+      - DIRECTORY_ADMIN=aaron@migreat.us
+      - POLL_SECONDS=300
+    volumes:
+      - migreat-mail-data:/data
+
+volumes:
+  migreat-mail-data:
