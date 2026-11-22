@@ -2264,7 +2264,7 @@ class InkboxGateway:
             from . import chatfiles
             files = reply.get("read") or ""
             if not files and reply.get("media"):
-                files = await chatfiles.read_media(reply["media"])
+                files = await chatfiles.read_media(reply["media"], chat_id, float(reply.get("date") or 0))
             text = chatfiles.reply_block(reply, files) + chr(10) + text
         # The run reads this chat's recent messages (everyone's, files as read) when it
         # starts; only this chat's, keyed by the chat the message came from.
@@ -2329,14 +2329,14 @@ class InkboxGateway:
         from . import chatfiles
         try:
             if u.get("media"):
-                rendered = await chatfiles.read_media(u["media"])
+                rendered = await chatfiles.read_media(u["media"], u["chat_id"], float(u.get("date") or 0))
                 chatfiles.remember_read(u["chat_id"], int(u.get("date") or 0), rendered)
                 u["text"] = (rendered + (chr(10) + u["text"] if u["text"] else "")).strip()
                 logger.info("[bridge] telegram: read %d file(s) from %s in chat %s (%d chars)",
                             len(u["media"]), u.get("name") or u.get("from_id"), u["chat_id"], len(rendered))
             reply = u.get("reply_to") or {}
             if reply.get("media"):
-                reply["read"] = await chatfiles.read_media(reply["media"])
+                reply["read"] = await chatfiles.read_media(reply["media"], u["chat_id"], float(reply.get("date") or 0))
             await self._telegram_route(u)
         except Exception:
             logger.exception("[bridge] telegram message with files failed")

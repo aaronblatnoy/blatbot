@@ -44,6 +44,90 @@ from .store import Request, sha256
 
 logger = logging.getLogger(__name__)
 
+MAX_IMAGES = 4
+_IMAGE_MAX_BYTES = 3_500_000      # under the API's 5 MB per image once base64-encoded
+
+
+def _image_block(path: str) -> Optional[Dict[str, Any]]:
+    """One image file as a Messages API image block, shrunk to fit when it is large."""
+    import base64
+    import io
+    try:
+        data = open(path, "rb").read()
+    except OSError as exc:
+        logger.warning("[gate] image %s unreadable: %s", path, exc)
+        return None
+    media = ("image/png" if data[:8] == b"\x89PNG\r\n\x1a\n" else
+             "image/gif" if data[:4] == b"GIF8" else
+             "image/webp" if data[:4] == b"RIFF" and data[8:12] == b"WEBP" else "image/jpeg")
+    try:
+        from PIL import Image
+        img = Image.open(io.BytesIO(data))
+        if len(data) > _IMAGE_MAX_BYTES or max(img.size) > 2000:
+            img = img.convert("RGB")
+            img.thumbnail((2000, 2000))
+            buf = io.BytesIO()
+            img.save(buf, "JPEG", quality=85)
+            data, media = buf.getvalue(), "image/jpeg"
+    except Exception as exc:  # noqa: BLE001
+        if len(data) > _IMAGE_MAX_BYTES:
+            logger.warning("[gate] image %s too large and could not be shrunk: %s", path, exc)
+            return None
+    return {"type": "image", "source": {"type": "base64", "media_type": media,
+                                        "data": base64.b64encode(data).decode("ascii")}}
+
+
+def prompt_images(prompt: str) -> List[str]:
+    """The images a run's prompt names: those in the sender's own message (and the message
+    it replies to) first, then the most recent of the rest, at most MAX_IMAGES."""
+    from .. import chatfiles
+    head = (prompt or "").split("--- RECENT CONVERSATION", 1)[0]
+    first = chatfiles.image_paths(head)
+    rest = [p for p in reversed(chatfiles.image_paths(prompt or "")) if p not in first]
+    return (first + rest)[:MAX_IMAGES]
+
+
+def with_images(text: str, paths: List[str]):
+    """A streaming prompt: one user message holding the text and the images themselves."""
+    blocks: List[Dict[str, Any]] = [{"type": "text", "text": text}]
+    for p in paths:
+        b = _image_block(p)
+        if b is not None:
+            blocks.append({"type": "text", "text": f"(image file: {p})"})
+            blocks.append(b)
+    if len(blocks) == 1:
+        return text
+
+    async def _stream():
+        yield {"type": "user", "message": {"role": "user", "content": blocks},
+               "parent_tool_use_id": None, "session_id": "default"}
+    return _stream()
+
+
+VISION_SYSTEM = (
+    f"You are {_ASSISTANT}'s eyes. You are shown one or more images from a chat and the message that asks "
+    "about them, with the chat's recent messages. Say precisely what the images show that bears on the "
+    "message: name things by their exact terms (a design pattern, a texture, a UI element, an object, a "
+    "place), read any text that matters, and when the message points at a spot (a pointer, a box, a colour) "
+    "describe exactly what is at that spot. Plain sentences, no preamble, under 150 words. If you cannot "
+    "see an image, say so.")
+
+
+async def vision_answer(paths: List[str], *, question: str, context: str = "", model: str = "sonnet") -> str:
+    """Claude looks at the images, no tools, one turn. "" when nothing could be read."""
+    text = (f"{context.strip()}\n\n" if context.strip() else "") + f"--- THE MESSAGE ---\n{question.strip()}"
+    prompt = with_images(text, paths)
+    if isinstance(prompt, str):
+        return ""
+    options = ClaudeAgentOptions(model=model, system_prompt=VISION_SYSTEM, allowed_tools=[], tools=[],
+                                 max_turns=1, setting_sources=[], strict_mcp_config=True,
+                                 max_buffer_size=64 * 1024 * 1024)
+    out: List[str] = []
+    async for msg in query(prompt=prompt, options=options):
+        if isinstance(msg, AssistantMessage):
+            out.extend(b.text for b in msg.content if isinstance(b, TextBlock))
+    return "\n".join(out).strip()
+
 
 def _load_user_mcp_servers() -> Dict[str, Any]:
     """Load Claude's user-level MCP registry once without making import fragile."""
@@ -671,7 +755,11 @@ class Executor:
             final: Optional[Any] = None
             # Consume the generator to completion; returning from inside the
             # loop leaves the SDK's async generator half-closed.
-            async for msg in query(prompt=prompt_text, options=options):
+            images = [] if req.schedule_id else prompt_images(req.prompt or "")
+            run_prompt = with_images(prompt_text, images) if images else prompt_text
+            if images:
+                logger.info("[gate] #%s attaching %d image(s) to the run", req.id, len(images))
+            async for msg in query(prompt=run_prompt, options=options):
                 if isinstance(msg, AssistantMessage):
                     saw_tool_use = False
                     for block in msg.content:

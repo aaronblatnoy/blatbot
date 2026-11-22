@@ -347,6 +347,48 @@ class GateSession:
         """This turn arrived in a room with several people in it (gate/knowledge.py)."""
         return knowledge.meta_is_group(self.reply_meta or {})
 
+    IMAGE_FOLLOWUP_S = 600.0   # a message this soon after an image in the chat is read with that image
+
+    def image_turn(self, body: str) -> bool:
+        """This turn is about an image: the message or the one it replies to carries one,
+        or one was posted in this chat in the last few minutes and is in the chat context
+        this turn reads. Such a turn is answered by a model that sees the pixels; the local
+        vision model's description alone once named a guilloche "row dividers" twice."""
+        from .. import chatfiles
+        if chatfiles.image_paths(body) or chatfiles.mentions_unread_image(body):
+            return True
+        spec = (self.reply_meta or {}).get("_context_chat")
+        cid = str(spec.get("chat_id") or "") if isinstance(spec, dict) else ""
+        if not cid or not chatfiles.recent_images(cid, self.IMAGE_FOLLOWUP_S):
+            return False
+        return bool(chatfiles.image_paths(self.chat_context or ""))
+
+    async def with_vision(self, message: str, body: str) -> str:
+        """For an image turn the words-only writer answers (anyone but the owner, whose
+        image turns run Claude directly): Claude looks at the images first and its reading
+        goes into the message the writer sees, in place of guessing from the local model."""
+        from .. import chatfiles
+        paths = chatfiles.image_paths(body) + [p for p in reversed(chatfiles.image_paths(self.chat_context or ""))
+                                               if p not in chatfiles.image_paths(body)]
+        if not paths:
+            if chatfiles.mentions_unread_image(body):
+                return message + ("\n\n[NOTE: the image in this message could not be read. Say plainly that you "
+                                  "could not see it and ask for it again; never guess what it shows.]")
+            return message
+        from .executor import vision_answer
+        try:
+            seen = await asyncio.wait_for(vision_answer(
+                paths[:3], question=body, context=self.chat_context or ""), 90)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("[gate %s] vision step failed: %s", self.chat_id, exc)
+            seen = ""
+        if not seen:
+            return message + ("\n\n[NOTE: the image could not be looked at just now. Say you could not see it; "
+                              "never guess what it shows.]")
+        logger.info("[gate %s] vision step: %d image(s) read by Claude (%d chars)", self.chat_id, len(paths[:3]), len(seen))
+        return message + ("\n\n[WHAT THE IMAGE SHOWS, read by a model that sees it, for answering this message "
+                          "(trust this over any automatic description):\n" + seen.strip() + "\n]")
+
     def reads_all_tasks(self) -> bool:
         """Whether this turn's ledger may show every task. Aaron in his own chats only: in a
         group, whoever speaks, the ledger shows the tasks that group itself worked on, since
@@ -704,6 +746,18 @@ class GateSession:
         recalled = str(getattr(self, "_graph_memory", "") or "")
         recalled = f"--- {recalled}\n\n" if recalled else ""
         subject = str((self.reply_meta or {}).get("subject") or "").strip()
+        from .. import chatfiles
+        seen_text = f"{body}\n{convo}\n{self.chat_context or ''}"
+        images_note = ""
+        if chatfiles.image_paths(seen_text) or chatfiles.mentions_unread_image(body):
+            images_note = (
+                "IMAGES: every image named above (\"image file: ...\") is attached to this message as an image, "
+                "the ones in their message first. The \"automatic description\" under each comes from a small local "
+                "model and is often vague or wrong: answer from what you see in the attached image itself. When "
+                "the message points at part of an image (\"where my pointer is\", \"the lines in the blue box\"), "
+                "look at exactly that spot and name what is there precisely (the design term, pattern or object). "
+                "If the image the message is about is not attached or could not be read, say you could not see it; "
+                "never guess what it shows.\n\n")
         return (
             (f"{self.room}\n\n" if self.room else "")
             + f"A message arrived over {self.mode} from {who} ({addr}).\n"
@@ -715,7 +769,8 @@ class GateSession:
             f"--- RECENT CONVERSATION WITH THEM ---\n{convo}\n\n"
             + (f"{self.chat_context}\n\n" if self.chat_context else "")
             + f"--- THE TASK THIS BELONGS TO ---\n{ledger}\n\n{recalled}"
-            "Work out what they are asking for, or what this message makes possible on the task (for example, "
+            + images_note
+            + "Work out what they are asking for, or what this message makes possible on the task (for example, "
             "information the task was waiting for), and do it with your tools. A bare reference in the message "
             "(this, that, it, the list, the report) points at the message it replies to when it is a reply (shown "
             "whole above, files included), otherwise at the nearest earlier message in the conversation "
@@ -1789,6 +1844,8 @@ class GateSession:
             return False
         if not (body or "").strip():
             return False
+        if self.image_turn(body):
+            return False   # the words-only model cannot see the image; the usual flow looks at it
         # A run already going in this room, or a check-in on one, is the existing flow's to answer.
         if self.m.store.running_for_thread(self.chat_id) is not None or wording.is_fixed_progress_phrase(body):
             return False
@@ -2005,6 +2062,8 @@ class GateSession:
                     rewrite_task.cancel()
                 await asyncio.gather(rewrite_task, return_exceptions=True)
         else:
+            if not approver and self.image_turn(body):
+                message = await self.with_vision(message, body)
             out, task = await self.decide(body=body, message=message, prior=prior, mode=self.mode,
                                           memory=memory, found=found, preflight=preflight)
         if not system_note and out.schedule is not None:
@@ -4465,7 +4524,9 @@ class GateSessionManager:
         scheduled-run prompt, no RESULT/NOTE/STATUS closing-line contract and
         no third-party-send hold, all of which the scheduled-run contract
         (schedrun.py, schedules.py) requires."""
-        if continuation or not self.jev_agent or req.schedule_id or (req.status or {}).get("followup_id"):
+        from .. import chatfiles as _chatfiles
+        if (continuation or not self.jev_agent or req.schedule_id or (req.status or {}).get("followup_id")
+                or _chatfiles.image_paths(req.prompt or "")):
             model = await self._pick_model(req)
             run_kwargs: Dict[str, Any] = {}
             if req.schedule_id:
