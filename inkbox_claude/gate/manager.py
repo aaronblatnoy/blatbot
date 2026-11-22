@@ -4640,6 +4640,13 @@ class GateSessionManager:
         """Claude Code runs the request; Jev decides which Claude: the strongest model for
         work that combines sources, changes many things, or writes at length; the fast one
         for a lookup or a single plain change."""
+        from .. import chatfiles as _chatfiles
+        if _chatfiles.image_paths(req.prompt or ""):
+            # Reading an image closely is where the fast model fails: on the 2026-11-21
+            # guilloche screenshot it saw "crosshatch", the strong one named it.
+            model = _settings.get("GATE_STRONG_MODEL") or self.STRONG_MODEL
+            logger.info("[gate] #%s model: %s (images attached)", req.id, model)
+            return model
         picker = self.task_picker
         if picker is None or not hasattr(picker, "judge_complexity"):
             return _settings.get("GATE_FAST_MODEL") or self.FAST_MODEL

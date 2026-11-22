@@ -113,7 +113,7 @@ VISION_SYSTEM = (
     "see an image, say so.")
 
 
-async def vision_answer(paths: List[str], *, question: str, context: str = "", model: str = "sonnet") -> str:
+async def vision_answer(paths: List[str], *, question: str, context: str = "", model: str = "opus") -> str:
     """Claude looks at the images, no tools, one turn. "" when nothing could be read."""
     text = (f"{context.strip()}\n\n" if context.strip() else "") + f"--- THE MESSAGE ---\n{question.strip()}"
     prompt = with_images(text, paths)
