@@ -774,6 +774,8 @@ class InkboxGateway:
         # Last few lines of each Telegram group, so Jev can judge an unaddressed
         # message against what was being said around it.
         self._tg_recent: Dict[str, List[str]] = {}
+        self._tg_turn: Dict[str, Tuple[str, bool]] = {}      # chat -> (sender, turn carried an image)
+        self._tg_answered: Dict[str, Tuple[float, str, bool]] = {}  # chat -> (when, sender, image) of our last answer
 
         self._self_addresses: set[str] = set()
         self._recent_request_ids: Dict[str, float] = {}
@@ -2275,6 +2277,8 @@ class InkboxGateway:
             text = ("[telegram group: " + where + " | from: " + (name or from_id)
                     + " | your reply goes to the whole group; answer only what"
                     + " was asked of you]" + chr(10) + text)
+        from . import chatfiles as _cf
+        self._tg_turn[chat_id] = (str(from_id), bool(_cf.image_paths(text)))
         if self.sessions is None:
             return
         session = self.sessions.get(f"tg:{chat_id}")
@@ -2377,6 +2381,13 @@ class InkboxGateway:
             reply=lambda message: self._send_telegram_mode_reply(chat_id, message))
         if handled:
             return web.json_response({"ok": True, "mode_command": True})
+        if u["is_group"] and not u["addressed"] and not u.get("for_other_bot"):
+            # The same person following up within two minutes on Blatbot's own answer about
+            # an image is still talking to Blatbot, named or not.
+            last = self._tg_answered.get(chat_id)
+            if (last and last[2] and last[1] == str(from_id)
+                    and time.time() - last[0] <= 120.0):
+                u["addressed"] = True
         if u["is_group"] and u.get("for_other_bot"):
             # Aimed at a different bot (an @handle that is not ours, and we are not named).
             # Not ours to judge, answer, file as a task or ask Aaron about: it is heard and
@@ -4823,8 +4834,11 @@ class InkboxGateway:
             return
 
         if mode == "telegram":
-            await telegram.send_message(str(meta.get("telegram_chat_id") or str(chat_id).removeprefix("tg:")),
-                                        strip_markdown(content))
+            tg_chat = str(meta.get("telegram_chat_id") or str(chat_id).removeprefix("tg:"))
+            await telegram.send_message(tg_chat, strip_markdown(content))
+            turn = self._tg_turn.get(tg_chat)
+            if turn:
+                self._tg_answered[tg_chat] = (time.time(), turn[0], turn[1])
             return
 
         if mode == "sms":
