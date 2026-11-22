@@ -305,6 +305,19 @@ systems:
         question: "Save something new to the Definite Optimists brain (a fact, decision, note or update for the team to remember)."
         grants:
         - do_brain_write
+  migreat_google:
+    description: 'Aaron''s Migreat company Google Workspace (aaron@migreat.us): Migreat Gmail, Drive, Docs, Sheets
+      and Calendar. Not his Corgi, Stern, TAMID or personal Google accounts.'
+    always: []
+    leaves:
+      migreat_read:
+        question: 'Read Aaron''s Migreat (migreat.us) email, calendar, Drive, Docs or Sheets.'
+        grants:
+        - migreat_google_read
+      migreat_write:
+        question: 'Send Migreat email, or create or change Migreat calendar events, Docs, Sheets or Drive files.'
+        grants:
+        - migreat_google_write
 scopes:
   calendar:
     description: 'TAMID calendar: read and write the club''s Google Calendar (org@example.org; interviews, club
@@ -458,6 +471,31 @@ scopes:
     - mcp__tamid-drive__batch_update_form
     - mcp__tamid-drive__set_publish_settings
     - mcp__tamid-drive__create_drive_folder
+  migreat_google_read:
+    description: 'read Aaron''s Migreat Google Workspace (aaron@migreat.us): Gmail, Calendar, Drive, Docs, Sheets;
+      no sending or editing'
+    label: read your Migreat email, calendar and Drive
+    ask: 'read your Migreat email, calendar and Drive'
+    synonyms:
+    - my migreat email
+    - migreat inbox
+    - migreat drive
+    - migreat calendar
+    read: true
+    server: migreat-google
+    include: [search_*, get_*, list_*, query_freebusy, inspect_*, read_*, check_*, debug_*]
+  migreat_google_write:
+    description: 'change Aaron''s Migreat Google Workspace (aaron@migreat.us): send or draft Gmail, manage labels,
+      create or edit calendar events, Docs, Sheets and Drive files'
+    label: send Migreat email and edit Migreat Drive and calendar
+    ask: 'send Migreat email and edit Migreat Drive and calendar'
+    synonyms:
+    - email from migreat
+    - send from my migreat email
+    read: false
+    server: migreat-google
+    include: ["*"]
+    exclude: [search_*, get_*, list_*, query_freebusy, inspect_*, read_*, check_*, debug_*, start_google_auth]
   stern_calendar:
     description: 'read and write Aaron''s own NYU Stern Google Calendar (tool address owner@example.edu): list,
       free/busy, create/update events and invites'
