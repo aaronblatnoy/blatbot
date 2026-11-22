@@ -178,7 +178,39 @@ async def _read_bot_file(item: Dict[str, Any], chat_id: str = "", at: float = 0.
     if is_image(item.get("kind") or "", item.get("name") or ""):
         path = save_image(chat_id, str(item.get("file_unique_id") or item.get("file_id") or ""),
                           item.get("name") or "", data, at)
-    return await read_bytes(item.get("name") or "file", data), path
+    if not path:
+        return await read_bytes(item.get("name") or "file", data), path
+    # An image goes to Claude itself, so the small local model's description must never hold
+    # the reply: wait a few seconds for it, then go ahead without it and let it finish in the
+    # background for the stored record.
+    task = asyncio.ensure_future(asyncio.wait_for(read_bytes(item.get("name") or "file", data), VISION_BG_S))
+    try:
+        return await asyncio.wait_for(asyncio.shield(task), VISION_WAIT_S), path
+    except asyncio.TimeoutError:
+        task.add_done_callback(lambda t: _late_description(t, item, chat_id, at, path))
+        return NO_DESCRIPTION, path
+    except Exception as exc:  # noqa: BLE001
+        return f"(could not be read: {type(exc).__name__})", path
+
+
+NO_DESCRIPTION = "(automatic description unavailable)"
+VISION_WAIT_S = float(os.getenv("BLATBOT_VISION_WAIT_S") or 4)   # how long a reply waits on it
+VISION_BG_S = float(os.getenv("BLATBOT_VISION_BG_S") or 90)     # how long it may keep going after
+
+
+def _late_description(task: "asyncio.Future[str]", item: Dict[str, Any], chat_id: str, at: float, path: str) -> None:
+    """The description that arrived after the reply went ahead: keep it for later lookups."""
+    try:
+        read = _cap(task.result()) or NO_DESCRIPTION
+    except BaseException:  # noqa: BLE001  (timed out or failed: the placeholder stands)
+        return
+    rendered = render(item.get("kind") or "file", item.get("name") or "", read, path)
+    key = str(item.get("file_unique_id") or item.get("file_id") or "")
+    fut = asyncio.get_event_loop().create_future()
+    fut.set_result((read, path))
+    _reads[key] = fut
+    if chat_id and at:
+        _by_time[(str(chat_id), int(at))] = rendered
 
 
 async def read_media(media: List[Dict[str, Any]], chat_id: str = "", at: float = 0.0) -> str:
