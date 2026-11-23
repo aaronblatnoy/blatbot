@@ -439,7 +439,7 @@ def _contact_sheet(tiles: List[Dict[str, Any]], tile: int, sizes: List[int]) -> 
         for s in sizes:
             small = big.resize(fit(big, s), Image.LANCZOS)
             sheet.paste(small, (x, y), small)
-            d.text((x, y + s + 2), f"{s} px", font=f_sz, fill=dim)
+            d.text((x, y + small.height + 2), f"{s} px", font=f_sz, fill=dim)
             x += s + 14
     buf = io.BytesIO()
     sheet.save(buf, "PNG", optimize=True)
