@@ -97,6 +97,43 @@ async def send_photo(chat_id: str, path: str, caption: str = "") -> None:
             raise RuntimeError(f"telegram sendPhoto failed: {str(r.json())[:200]}")
 
 
+# ---- emoji reactions -------------------------------------------------------------------------
+# Telegram lets a bot react with these (the free set). Compared without the emoji variation selector.
+REACTIONS = set(
+    "\U0001F44D \U0001F44E \u2764 \U0001F525 \U0001F970 \U0001F44F \U0001F601 \U0001F914 \U0001F92F \U0001F631 "
+    "\U0001F622 \U0001F389 \U0001F929 \U0001F64F \U0001F44C \U0001F54A \U0001F921 \U0001F60D \U0001F433 \U0001F4AF "
+    "\U0001F923 \u26A1 \U0001F3C6 \U0001F494 \U0001F928 \U0001F610 \U0001F4CB \U0001F60E \U0001F440 \U0001F648 "
+    "\U0001F607 \U0001F91D \U0001FAE1 \U0001F5FF \U0001F192 \U0001F984 \U0001F618 \U0001F917 \U0001F913 \U0001F47B "
+    "\U0001F62D \U0001F4A9 \U0001F91D".split()
+) - {"\U0001F4CB"}
+INBOUND: Dict[str, str] = {}      # chat id -> message id of the latest message people sent there
+
+
+def remember_inbound(chat_id: str, message_id: str) -> None:
+    if chat_id and message_id:
+        INBOUND[str(chat_id)] = str(message_id)
+        if len(INBOUND) > 2000:
+            INBOUND.pop(next(iter(INBOUND)))
+
+
+def clean_reaction(emoji: str) -> str:
+    """The emoji Telegram accepts, or raises ValueError listing what is allowed."""
+    e = (emoji or "").strip().replace("\ufe0f", "")
+    if e not in REACTIONS:
+        raise ValueError("Telegram only allows these reactions: " + " ".join(sorted(REACTIONS)))
+    return e
+
+
+async def react(chat_id: str, message_id: str, emoji: str) -> None:
+    """Put an emoji reaction on one message (setMessageReaction); an empty emoji clears it."""
+    reaction = [{"type": "emoji", "emoji": clean_reaction(emoji)}] if emoji else []
+    async with httpx.AsyncClient(timeout=20.0) as client:
+        r = await client.post(f"{API}/bot{token()}/setMessageReaction",
+                              json={"chat_id": str(chat_id), "message_id": int(message_id), "reaction": reaction})
+        if r.status_code >= 400 or not r.json().get("ok"):
+            raise RuntimeError(f"telegram setMessageReaction failed: {r.text[:200]}")
+
+
 async def send_typing(chat_id: str) -> None:
     """The "typing..." indicator; it lapses after ~5 s, so it is re-sent."""
     await _call("sendChatAction", {"chat_id": chat_id, "action": "typing"}, timeout=10.0)

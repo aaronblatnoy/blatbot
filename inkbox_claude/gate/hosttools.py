@@ -365,6 +365,10 @@ def sdk_server(*, vault_prefixes: Optional[List[str]] = None, manager: Any = Non
     async def _send_message(args: Dict[str, Any]) -> Dict[str, Any]:
         return {"content": [{"type": "text", "text": await outcomes.send_message(args, manager, request, outcome_log)}]}
 
+    @tool("react_message", outcomes.REACT_DESCRIPTION, outcomes.REACT_SCHEMA)
+    async def _react_message(args: Dict[str, Any]) -> Dict[str, Any]:
+        return {"content": [{"type": "text", "text": await outcomes.react_message(args, manager, request)}]}
+
     @tool("nothing_to_send", outcomes.NOTHING_TO_SEND_DESCRIPTION, outcomes.NOTHING_TO_SEND_SCHEMA)
     async def _nothing_to_send(args: Dict[str, Any]) -> Dict[str, Any]:
         return {"content": [{"type": "text", "text": outcomes.nothing_to_send(args, manager, request, outcome_log)}]}
@@ -476,7 +480,7 @@ def sdk_server(*, vault_prefixes: Optional[List[str]] = None, manager: Any = Non
         return {"content": [{"type": "text", "text": await pages.publish_page(args, pages.allowed_for(is_commander))}]}
 
     tools = [_make_page, _render_image, _host_status, _set_followup, _cancel_followup, _request_access,
-             _send_message, _nothing_to_send, _where_to_reach, _ask_aaron,
+             _send_message, _react_message, _nothing_to_send, _where_to_reach, _ask_aaron,
              _vault_search, _vault_read, _vault_list, _memory_search,
              _telegram_find_chats, _telegram_list_chats, _telegram_read_chat,
              _admin_list_settings, _admin_get_setting, _admin_set_setting,

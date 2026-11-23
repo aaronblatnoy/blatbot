@@ -293,6 +293,8 @@ RUN_ENDINGS = (
     f"name, no access request needed. If an earlier line in the conversation says {_ASSISTANT} cannot send on "
     "Telegram, that is out of date; send. Use send_message, not the inkbox_send tools. A message to anyone but the person who "
     "asked or Aaron may pause for Aaron's yes; that is expected.\n"
+    "On Telegram you can also react with one emoji (react_message) the way a person taps a reaction: a thumbs up "
+    "for a plain acknowledgement, a fire for good news. It does not end the run.\n"
     "2. NOTHING TO SEND. When there is nothing worth telling anyone, call nothing_to_send with the reason.\n"
     "3. ASK AARON. When an essential detail is missing, or a decision only Aaron can make is needed, call "
     "ask_aaron (kind \"input\" for a detail or a choice, \"permission\" for a yes or no) instead of stopping "
