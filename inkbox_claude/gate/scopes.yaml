@@ -61,8 +61,8 @@ systems:
     - calendar
     leaves: {}
   aaron_stern:
-    description: 'Aaron''s own NYU Stern account: his personal calendar (''my calendar'') or his Stern Gmail (''my
-      email'').'
+    description: 'Aaron''s own NYU Stern account: his personal calendar (''my calendar''), his Stern Gmail (''my
+      email''), or his Stern Google Drive and Docs (''my stern drive'', ''a google doc on my stern'').'
     always: []
     leaves:
       stern_calendar:
@@ -73,6 +73,11 @@ systems:
         question: 'Aaron''s Stern Gmail: search or read his messages.'
         grants:
         - stern_email_read
+      stern_drive:
+        question: 'Aaron''s Stern Google Drive and Docs: find, read, or create and edit his own Docs, Sheets, files and folders (for example: make this a Google Doc on my Stern).'
+        grants:
+        - stern_drive_read
+        - stern_drive_write
   blatbot_inkbox:
     description: 'Blatbot''s own mailbox, phone line and address book: its email, SMS, iMessage and WhatsApp threads,
       sending a message to a third party, contact records and notes.'
@@ -427,6 +432,26 @@ scopes:
     - mcp__inkbox__inkbox_get_contact
     - mcp__inkbox__inkbox_create_contact
     - mcp__inkbox__inkbox_update_contact
+  stern_drive_read:
+    description: 'read Aaron''s own Stern Google Drive, Docs and Sheets ({OWNER_ACCOUNT}); not TAMID''s Drive'
+    label: read your Stern Drive and Docs
+    ask: read your Stern Drive and Docs
+    synonyms:
+    - my stern drive
+    - my stern docs
+    read: true
+    server: stern-drive
+    include: [search_drive_files, list_drive_items, get_drive_file_content, get_drive_shareable_link, get_drive_file_permissions, search_docs, list_docs_in_folder, get_doc_content, get_doc_as_markdown, inspect_doc_structure, list_spreadsheets, get_spreadsheet_info, read_sheet_values]
+  stern_drive_write:
+    description: 'create or edit files in Aaron''s own Stern Google Drive ({OWNER_ACCOUNT}): new Google Docs (including from Markdown), Sheets, folders, doc edits; not TAMID''s Drive, no sharing changes'
+    label: create and edit Docs on your Stern Drive
+    ask: create and edit Docs on your Stern Drive
+    synonyms:
+    - make a google doc on my stern
+    - save to my stern drive
+    read: false
+    server: stern-drive
+    include: [create_doc, import_to_google_doc, modify_doc_text, insert_doc_elements, batch_update_doc, find_and_replace_doc, update_paragraph_style, create_table_with_data, create_drive_folder, create_drive_file, copy_drive_file, create_spreadsheet, modify_sheet_values, export_doc_to_pdf]
   tamid_drive_read:
     description: read TAMID Google Drive, Sheets, Docs, Forms, and Gmail (org@example.org)
     label: 'read TAMID''s Drive, Sheets, Docs and Forms'
