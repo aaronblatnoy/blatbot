@@ -416,8 +416,13 @@ def _contact_sheet(tiles: List[Dict[str, Any]], tile: int, sizes: List[int]) -> 
     rows = (len(tiles) + cols - 1) // cols
     pad, label_h = 24, 44
     prev_h = (max(sizes) + 28) if sizes else 0
+    def fit(im, side):
+        return (side, max(1, round(im.height * side / im.width))) if im.width >= im.height \
+            else (max(1, round(im.width * side / im.height)), side)
+    bigs = [t["big"].convert("RGBA") for t in tiles]
+    view_h = max(fit(b, tile)[1] for b in bigs)          # the tallest large view sets the row, not a square
     cell_w = max(tile, sum(sizes) + 14 * len(sizes)) + pad
-    cell_h = tile + label_h + prev_h + pad
+    cell_h = view_h + label_h + prev_h + pad
     sheet = Image.new("RGB", (cols * cell_w + pad, rows * cell_h + pad), bg)
     d = ImageDraw.Draw(sheet)
     f_id, f_cap, f_sz = _font(18, True), _font(14), _font(12)
@@ -427,16 +432,14 @@ def _contact_sheet(tiles: List[Dict[str, Any]], tile: int, sizes: List[int]) -> 
         d.text((x0, y0), str(t["id"]), font=f_id, fill=ink)
         if t.get("caption"):
             d.text((x0, y0 + 22), str(t["caption"])[:48], font=f_cap, fill=dim)
-        big = t["big"].convert("RGBA")
-        view = big.resize((tile, round(big.height * tile / big.width)) if big.width >= big.height
-                          else (round(big.width * tile / big.height), tile), Image.LANCZOS)
+        big = bigs[i]
+        view = big.resize(fit(big, tile), Image.LANCZOS)
         sheet.paste(view, (x0, y0 + label_h), view)
-        x = x0
+        x, y = x0, y0 + label_h + view_h + 10
         for s in sizes:
-            small = big.resize((s, round(big.height * s / big.width)) if big.width >= big.height
-                               else (round(big.width * s / big.height), s), Image.LANCZOS)
-            sheet.paste(small, (x, y0 + label_h + tile + 10), small)
-            d.text((x, y0 + label_h + tile + 12 + s), f"{s} px", font=f_sz, fill=dim)
+            small = big.resize(fit(big, s), Image.LANCZOS)
+            sheet.paste(small, (x, y), small)
+            d.text((x, y + small.height + 2), f"{s} px", font=f_sz, fill=dim)
             x += s + 14
     buf = io.BytesIO()
     sheet.save(buf, "PNG", optimize=True)
