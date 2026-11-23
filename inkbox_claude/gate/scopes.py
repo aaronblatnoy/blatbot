@@ -395,6 +395,7 @@ TOOL_PURPOSE: Dict[str, str] = {
     "mcp__host__vault_search": "SEARCH AARON'S SECOND BRAIN (his Obsidian vault of notes) for notes containing every word of a query: what he has written down about a project, a person, a decision, a preference. Read-only.",
     "mcp__host__vault_read": "READ ONE VAULT NOTE IN FULL by the path vault_search or vault_list printed, or by title. Read-only.",
     "mcp__host__vault_list": "LIST THE NOTES in Aaron's vault, all or under one folder (Projects, Areas, Daily, Reference, Inbox, Archive). Read-only.",
+    "mcp__host__render_image": "DRAW AN IMAGE AS SVG CODE AND RENDER IT TO PNG (logos, icons, diagrams, cards, contact sheets of variants), then look at it, fix it and send it with send_message images. No image model: you write the vector shapes.",
     "mcp__host__host_status": f"WHAT IS RUNNING ON BLACK-SKY (the server {_ASSISTANT} runs on): containers, services, uptime, disk, memory, GPUs. Read-only.",
     # web
     "mcp__playwright__browser_search": "SEARCH THE PUBLIC WEB (last resort for facts that live OUTSIDE Aaron's own systems): a person's LinkedIn or employer, an outside organization's leadership, an article, a public page. Not for anything that lives in TAMID/SJBA sheets, forms, rosters, calendars or inboxes; use those tools first.",

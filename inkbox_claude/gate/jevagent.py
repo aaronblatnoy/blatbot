@@ -40,7 +40,7 @@ from zoneinfo import ZoneInfo
 import httpx
 
 from .scopes import ORG_ACCOUNT, OWNER_ACCOUNT, TOOL_DESCRIPTIONS, TOOL_PURPOSE, blocks_requester_send, sends_to_requester, tools_for
-from . import hosttools
+from . import hosttools, imagetool
 from .outcomes import ALL_TOOLS as OUTCOME_TOOLS
 from . import graphmem
 from .store import Request, sha256
@@ -104,6 +104,7 @@ VIRTUAL_TOOLS: Dict[str, Dict[str, Any]] = {
     "mcp__host__set_followup": {"description": hosttools.SET_FOLLOWUP_DESCRIPTION, "schema": hosttools.SET_FOLLOWUP_SCHEMA},
     "mcp__host__cancel_followup": {"description": hosttools.CANCEL_FOLLOWUP_DESCRIPTION, "schema": hosttools.CANCEL_FOLLOWUP_SCHEMA},
     "mcp__host__host_status": {"description": hosttools.DESCRIPTION, "schema": hosttools.SCHEMA},
+    "mcp__host__render_image": {"description": imagetool.DESCRIPTION, "schema": imagetool.SCHEMA},
     "mcp__host__rows_where": {"description": hosttools.ROWS_WHERE_DESCRIPTION, "schema": hosttools.ROWS_WHERE_SCHEMA},
     "mcp__host__memory_search": {"description": hosttools.MEMORY_SEARCH_DESCRIPTION, "schema": hosttools.MEMORY_SEARCH_SCHEMA},
     "mcp__host__vault_search": {"description": hosttools.VAULT_SEARCH_DESCRIPTION, "schema": hosttools.VAULT_SEARCH_SCHEMA},
@@ -335,6 +336,8 @@ class ToolBox:
             return await self._browser_search(str(args.get("query") or ""))
         if name == "mcp__host__host_status":
             return await hosttools.host_status(args)
+        if name == "mcp__host__render_image":
+            return (await imagetool.render(args))["text"] + "\n(This agent cannot see the picture; it was rendered and saved.)"
         if name == "mcp__host__rows_where":
             return hosttools.rows_where(args, getattr(self, "facts", None) or {})
         if name == "mcp__host__memory_search":

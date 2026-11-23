@@ -6,6 +6,7 @@ from __future__ import annotations
 from inkbox_claude.instance import ASSISTANT as _ASSISTANT, ASSISTANT_UPPER as _ASSISTANT_UPPER, ASSISTANT_EMAIL as _ASSISTANT_EMAIL, SERVER_NAME as _SERVER_NAME  # noqa: F401
 import ast
 import asyncio
+import base64
 import logging
 import os
 import re
@@ -15,7 +16,7 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional
 from zoneinfo import ZoneInfo
 
-from . import pages
+from . import imagetool, pages
 
 logger = logging.getLogger(__name__)
 
@@ -461,11 +462,20 @@ def sdk_server(*, vault_prefixes: Optional[List[str]] = None, manager: Any = Non
     async def _admin_show_access(args: Dict[str, Any]) -> Dict[str, Any]:
         return {"content": [{"type": "text", "text": await admin_show_access(args, manager, is_commander)}]}
 
+    @tool("render_image", imagetool.DESCRIPTION, imagetool.SCHEMA)
+    async def _render_image(args: Dict[str, Any]) -> Dict[str, Any]:
+        res = await imagetool.render(args)
+        content: List[Dict[str, Any]] = [{"type": "text", "text": res["text"]}]
+        if res.get("image"):
+            content.append({"type": "image", "data": base64.b64encode(res["image"]).decode("ascii"),
+                            "mimeType": "image/png"})
+        return {"content": content}
+
     @tool("make_page", pages.PUBLISH_PAGE_DESCRIPTION, pages.PUBLISH_PAGE_SCHEMA)
     async def _make_page(args: Dict[str, Any]) -> Dict[str, Any]:
         return {"content": [{"type": "text", "text": await pages.publish_page(args, pages.allowed_for(is_commander))}]}
 
-    tools = [_make_page, _host_status, _set_followup, _cancel_followup, _request_access,
+    tools = [_make_page, _render_image, _host_status, _set_followup, _cancel_followup, _request_access,
              _send_message, _nothing_to_send, _where_to_reach, _ask_aaron,
              _vault_search, _vault_read, _vault_list, _memory_search,
              _telegram_find_chats, _telegram_list_chats, _telegram_read_chat,

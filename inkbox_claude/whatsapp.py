@@ -281,8 +281,17 @@ async def send(gateway, chat_id: str, content: str, meta: Dict[str, Any]) -> Opt
         kwargs["conversation_id"] = conversation_id
     else:
         kwargs["to"] = recipient
-    if meta.get("whatsapp_media_ids"):
-        kwargs["media_ids"] = list(meta["whatsapp_media_ids"])
+    media_ids = list(meta.get("whatsapp_media_ids") or [])
+    for path in meta.get("generated_images") or []:
+        from pathlib import Path as _P
+        import mimetypes as _mt
+        p = _P(str(path))
+        up = await asyncio.to_thread(require_method(gateway._identity, "upload_whatsapp_media"),
+                                     content=p.read_bytes(), filename=p.name,
+                                     content_type=_mt.guess_type(p.name)[0] or "image/png")
+        media_ids.append(str(field(up, "id", "") or field(up, "media_id", "")))
+    if media_ids:
+        kwargs["media_ids"] = media_ids
     # A reply to one inbound message has a stable key, so a retried send is the
     # same send; a tool message without a source gets a fresh one.
     source = str(meta.get("outbox_id") or meta.get("message_id") or uuid.uuid4().hex)
