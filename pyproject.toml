@@ -19,6 +19,7 @@ dependencies = [
   "pypdfium2>=4.30",
   "pillow>=11.0",
   "pillow-heif>=0.21",
+  "fonttools>=4.50",  # render_image: <text> in a bundled font becomes exact outlines (gate/imagetool.py)
 ]
 
 [project.scripts]
@@ -29,7 +30,7 @@ include = ["inkbox_claude*"]
 
 [tool.setuptools.package-data]
 # Ship the bundled Claude Code avatar attached to agents during setup.
-inkbox_claude = ["assets/*.png"]
+inkbox_claude = ["assets/*.png", "assets/fonts/*"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

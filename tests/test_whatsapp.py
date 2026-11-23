@@ -33,7 +33,7 @@ class _Store:
     def get_response_mode(self, chat_id):
         return self.mode
 
-    def add_message(self, chat_id, direction, text, channel):
+    def add_message(self, chat_id, direction, text, channel, **kwargs):
         self.messages.append((chat_id, direction, text, channel))
 
 
@@ -196,3 +196,25 @@ def test_whatsapp_send_scope_is_registered():
     assert "mcp__inkbox__inkbox_send_whatsapp" in scopes.SCOPES["whatsapp_send"]["tools"]
     assert scopes.sends_to_requester("mcp__inkbox__inkbox_send_whatsapp",
                                      {"to": "+1 555 111 2222"}, ["+15551112222"])
+
+
+def test_generated_image_is_uploaded_and_attached_dry_run(tmp_path, monkeypatch):
+    """Stubbed transport: a render_image PNG is uploaded, its media id rides on the send."""
+    from inkbox_claude.gate import imagetool
+    monkeypatch.setattr(imagetool, "GENERATED_DIR", tmp_path)
+    png = tmp_path / "sheet-1.png"
+    png.write_bytes(b"\x89PNG\r\n\x1a\nfake")
+    gw = _gw()
+    uploads = []
+
+    def upload_whatsapp_media(**kwargs):
+        uploads.append(kwargs)
+        return types.SimpleNamespace(id="media-1")
+
+    gw._identity.upload_whatsapp_media = upload_whatsapp_media
+    paths = imagetool.allowed_image_paths([str(png)])
+    meta = {"whatsapp_to": "+15551112222", "_inkbox_tool": True, "generated_images": paths}
+    asyncio.run(gw.send_to_contact("whatsapp:+15551112222", "here are the options", "whatsapp", meta))
+    assert uploads[0]["filename"] == "sheet-1.png" and uploads[0]["content_type"] == "image/png"
+    assert uploads[0]["recipient_number"] == "+15551112222"
+    assert gw.sent[0]["media_ids"] == ["media-1"] and gw.sent[0]["to"] == "+15551112222"
