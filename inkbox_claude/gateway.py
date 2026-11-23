@@ -2279,6 +2279,7 @@ class InkboxGateway:
                     + " was asked of you]" + chr(10) + text)
         from . import chatfiles as _cf
         self._tg_turn[chat_id] = (str(from_id), bool(_cf.image_paths(text)))
+        telegram.remember_inbound(chat_id, str(u.get("message_id") or ""))
         if self.sessions is None:
             return
         session = self.sessions.get(f"tg:{chat_id}")

@@ -654,3 +654,39 @@ def ask_text(req: Any, question: str, kind: str, owner: bool) -> str:
                  ("Where", ownertext.where(getattr(req, "mode", ""), group))]
     handle = ownertext.reply_handle(req.id, answer=kind != "permission")
     return ownertext.compose("ask", head, facts=facts, body=q, handle=handle)
+
+
+REACT_DESCRIPTION = (
+    "REACT TO A MESSAGE WITH ONE EMOJI, the way a person taps a reaction instead of typing a reply. Use it for a "
+    "light acknowledgement (a thumbs up for 'got it', a fire for good news, a laugh, a heart), alone when no words "
+    "are needed, or next to a written answer. It reacts to the message that started this run, in the same Telegram "
+    "chat, unless you pass message_id of an earlier message in that chat. Telegram only: other surfaces cannot "
+    "take reactions yet. It does not end the run; still send_message or nothing_to_send."
+)
+REACT_SCHEMA = {"type": "object", "required": ["emoji"], "properties": {
+    "emoji": {"type": "string", "description": "one emoji from Telegram's reaction set, e.g. thumbs up, fire, heart, "
+                                               "laughing, party popper, hundred points, eyes, folded hands"},
+    "message_id": {"type": "string", "description": "optional: a Telegram message id in this same chat; default is "
+                                                    "the message that started this run"}}}
+
+
+async def react_message(args: Dict[str, Any], manager: Any, request: Any) -> str:
+    """Emoji reaction on a Telegram message in the chat this run belongs to. Never another chat."""
+    from .. import telegram
+    chat = str(getattr(request, "chat_id", "") or "")
+    if not chat.startswith("tg:"):
+        return "Reactions only work in Telegram chats for now; answer in words instead."
+    tg_chat = chat[3:]
+    msg_id = str(args.get("message_id") or "").strip() or telegram.INBOUND.get(tg_chat, "")
+    if not msg_id.isdigit():
+        return "There is no message to react to here."
+    try:
+        await telegram.react(tg_chat, msg_id, str(args.get("emoji") or ""))
+    except ValueError as exc:
+        return str(exc)
+    except Exception as exc:
+        logger.warning("[outcomes] reaction failed: %s", exc)
+        return f"The reaction did not go through: {exc}"
+    logger.info("[outcomes] #%s reacted %s on telegram message %s", getattr(request, "id", "?"),
+                args.get("emoji"), msg_id)
+    return "Reacted."

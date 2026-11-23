@@ -344,7 +344,7 @@ def tools_for(scopes: List[str]) -> List[str]:
             # decide nothing needs sending, or ask Aaron (gate/outcomes.py).
             if get_setting("GATE_RUN_OUTCOMES"):
                 out += [t for t in ("mcp__host__send_message", "mcp__host__nothing_to_send",
-                                    "mcp__host__where_to_reach") if t not in out]
+                                    "mcp__host__where_to_reach", "mcp__host__react_message") if t not in out]
             if get_setting("GATE_ASK_AARON") and "mcp__host__ask_aaron" not in out:
                 out.append("mcp__host__ask_aaron")
         except Exception as exc:
