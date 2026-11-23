@@ -21,6 +21,7 @@ from datetime import datetime, timezone
 import httpx
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
+logging.getLogger("httpx").setLevel(logging.WARNING)  # its INFO lines contain the bot token in the URL
 log = logging.getLogger("dj-khaled")
 
 DOMAIN = os.environ.get("MIGREAT_DOMAIN", "migreat.us").lower()
