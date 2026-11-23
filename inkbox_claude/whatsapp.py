@@ -288,7 +288,8 @@ async def send(gateway, chat_id: str, content: str, meta: Dict[str, Any]) -> Opt
         p = _P(str(path))
         up = await asyncio.to_thread(require_method(gateway._identity, "upload_whatsapp_media"),
                                      content=p.read_bytes(), filename=p.name,
-                                     content_type=_mt.guess_type(p.name)[0] or "image/png")
+                                     content_type=_mt.guess_type(p.name)[0] or "image/png",
+                                     recipient_number=(recipient or None))
         media_ids.append(str(field(up, "id", "") or field(up, "media_id", "")))
     if media_ids:
         kwargs["media_ids"] = media_ids

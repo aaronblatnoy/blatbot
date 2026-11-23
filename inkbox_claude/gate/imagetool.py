@@ -40,8 +40,9 @@ _NS_SVG = "http://www.w3.org/2000/svg"
 DESCRIPTION = (
     "DRAW AN IMAGE AS CODE AND RENDER IT TO A PNG you can then look at. You write the SVG yourself "
     "(hand-built vector shapes; 3D looks are flat-shaded polygons; guilloche is thin low-opacity sine/rosette "
-    "curves you compute; lettering is <text> in a real font such as Liberation Serif or Liberation Sans). No image "
-    "model is used. Pass svg for one image, or variants (a list of {id, svg, caption}) for a labeled CONTACT SHEET: "
+    "curves you compute; lettering is <text>; set font-family to Libre Baskerville, Newsreader or Inter and the text is converted to exact "
+    "outlines of that font (use font-style=\"italic\", font-weight, font-size, letter-spacing, text-anchor), so wordmarks "
+    "render in the real typeface). No image model is used. Pass svg for one image, or variants (a list of {id, svg, caption}) for a labeled CONTACT SHEET: "
     "every variant shown large with 64 px and 32 px previews under it, on a light gray backdrop. The result is the "
     "saved PNG path(s) AND the picture itself so you can check it: look, fix what is off, render again. To send "
     "it, pass the PNG path in send_message's images. External links, scripts and files inside the SVG are refused."
@@ -104,6 +105,214 @@ def sanitize(svg: str) -> str:
     return svg
 
 
+# ---- exact-font text: <text> in a bundled font becomes <path> outlines ----------------------------
+FONT_DIR = Path(__file__).resolve().parent.parent / "assets" / "fonts"
+# family -> {"normal": file, "italic": file}; "axes" says which variable axes the file has.
+FONTS: Dict[str, Dict[str, str]] = {
+    "libre baskerville": {"normal": "LibreBaskerville[wght].ttf", "italic": "LibreBaskerville-Italic[wght].ttf"},
+    "newsreader": {"normal": "Newsreader[opsz,wght].ttf", "italic": "Newsreader-Italic[opsz,wght].ttf"},
+    "inter": {"normal": "Inter[opsz,wght].ttf", "italic": "Inter[opsz,wght].ttf"},   # Inter has no italic file
+}
+FONT_ALIASES = {"baskerville": "libre baskerville", "librebaskerville": "libre baskerville"}
+_font_cache: Dict[Tuple[str, int, int], Any] = {}
+
+
+def bundled_family(value: Optional[str]) -> Optional[str]:
+    """The bundled family named first in a font-family list, or None when it is not one of ours."""
+    for part in (value or "").split(","):
+        name = part.strip().strip("'\"").lower()
+        name = FONT_ALIASES.get(name, name)
+        if name in FONTS:
+            return name
+        return None          # first family is something else: leave the text for the renderer
+    return None
+
+
+def _load_font(family: str, italic: bool, weight: int, size: float):
+    """A fontTools TTFont instanced at this weight (and optical size), cached."""
+    from fontTools.ttLib import TTFont
+    from fontTools.varLib import instancer
+    fname = FONTS[family]["italic" if italic else "normal"]
+    opsz = int(max(6, min(72, round(size)))) if "opsz" in fname else 0
+    key = (fname, weight, opsz)
+    if key not in _font_cache:
+        font = TTFont(str(FONT_DIR / fname))
+        if "fvar" in font:
+            axes = {a.axisTag: a for a in font["fvar"].axes}
+            loc = {}
+            if "wght" in axes:
+                loc["wght"] = max(axes["wght"].minValue, min(axes["wght"].maxValue, weight))
+            if "opsz" in axes:
+                loc["opsz"] = max(axes["opsz"].minValue, min(axes["opsz"].maxValue, opsz or 14))
+            font = instancer.instantiateVariableFont(font, loc)
+        _font_cache[key] = font
+    return _font_cache[key]
+
+
+def text_to_path(text: str, family: str, size: float, weight: int = 400, italic: bool = False,
+                 letter_spacing: float = 0.0) -> Tuple[str, float]:
+    """(SVG path data in px with the baseline at y=0, advance width in px) for one line of text."""
+    from fontTools.pens.svgPathPen import SVGPathPen
+    from fontTools.pens.transformPen import TransformPen
+    font = _load_font(family, italic, weight, size)
+    cmap, gs, hmtx = font.getBestCmap(), font.getGlyphSet(), font["hmtx"]
+    scale = size / font["head"].unitsPerEm
+    kern = _kerning(font)
+    pen = SVGPathPen(gs, ntos=lambda v: ("%.2f" % v).rstrip("0").rstrip("."))
+    x, prev = 0.0, None
+    for ch in text:
+        gname = cmap.get(ord(ch)) or cmap.get(0xFFFD) or ".notdef"
+        if prev is not None:
+            x += kern.get((prev, gname), 0) * scale
+        gs[gname].draw(TransformPen(pen, (scale, 0, 0, -scale, x, 0)))
+        x += hmtx[gname][0] * scale + letter_spacing
+        prev = gname
+    return pen.getCommands(), x
+
+
+def _kerning(font) -> Dict[Tuple[str, str], int]:
+    """Pair kerning from GPOS (PairPos formats 1 and 2), enough for wordmark spacing; cached on the font."""
+    cached = getattr(font, "_blatbot_kern", None)
+    if cached is not None:
+        return cached
+    kern: Dict[Tuple[str, str], int] = {}
+    try:
+        gpos = font["GPOS"].table
+        feats = [f for f in gpos.FeatureList.FeatureRecord if f.FeatureTag == "kern"]
+        idx = sorted({i for f in feats for i in f.Feature.LookupListIndex})
+        for i in idx:
+            for sub in gpos.LookupList.Lookup[i].SubTable:
+                if sub.LookupType == 9:
+                    sub = sub.ExtSubTable
+                if sub.LookupType != 2:
+                    continue
+                first = sub.Coverage.glyphs
+                if sub.Format == 1:
+                    for g1, ps in zip(first, sub.PairSet):
+                        for rec in ps.PairValueRecord:
+                            v = getattr(rec.Value1, "XAdvance", 0) if rec.Value1 else 0
+                            if v:
+                                kern.setdefault((g1, rec.SecondGlyph), v)
+                elif sub.Format == 2:
+                    cd1, cd2 = sub.ClassDef1.classDefs, sub.ClassDef2.classDefs
+                    seconds: Dict[int, List[str]] = {}
+                    for g, c in cd2.items():
+                        seconds.setdefault(c, []).append(g)
+                    for g1 in first:
+                        c1 = cd1.get(g1, 0)
+                        for c2, rec in enumerate(sub.Class1Record[c1].Class2Record):
+                            v = getattr(rec.Value1, "XAdvance", 0) if rec.Value1 else 0
+                            if v and c2 in seconds:
+                                for g2 in seconds[c2]:
+                                    kern.setdefault((g1, g2), v)
+    except Exception:
+        kern = {}
+    font._blatbot_kern = kern
+    return kern
+
+
+def _num(v: Any, default: float = 0.0) -> float:
+    m = re.match(r"^\s*(-?[0-9.]+)", str(v if v is not None else ""))
+    return float(m.group(1)) if m else default
+
+
+def _style_of(el: ET.Element, inherited: Dict[str, str]) -> Dict[str, str]:
+    st = dict(inherited)
+    for k in ("font-family", "font-size", "font-weight", "font-style", "letter-spacing", "fill", "fill-opacity",
+              "stroke", "stroke-width", "opacity", "text-anchor"):
+        if el.get(k) is not None:
+            st[k] = el.get(k)
+    for decl in (el.get("style") or "").split(";"):
+        if ":" in decl:
+            k, v = decl.split(":", 1)
+            st[k.strip().lower()] = v.strip().strip("'\"") if k.strip().lower() == "font-family" else v.strip()
+    return st
+
+
+def outline_text(svg: str) -> str:
+    """Replace each <text> whose font-family names a bundled font with <path> outlines of that font.
+
+    Handles x/y, font-size, font-weight, font-style italic, letter-spacing, text-anchor, fill/stroke/opacity,
+    transform, and <tspan> runs (own x/y/dx/dy/fill/size). Text in other families is left for the renderer."""
+    if "<text" not in svg:
+        return svg
+    ET.register_namespace("", _NS_SVG)
+    ET.register_namespace("xlink", "http://www.w3.org/1999/xlink")
+    root = ET.fromstring(svg)
+    changed = False
+    parents = {c: p for p in root.iter() for c in p}
+    for text in [e for e in root.iter() if _local(e.tag) == "text"]:
+        chain = []                    # ancestor groups, nearest last: font settings inherit down to the text
+        anc = parents.get(text)
+        while anc is not None:
+            chain.append(anc)
+            anc = parents.get(anc)
+        base: Dict[str, str] = {}
+        for a in reversed(chain):
+            base = _style_of(a, base)
+        base = _style_of(text, base)
+        if not bundled_family(base.get("font-family")):
+            continue
+        runs: List[Tuple[Dict[str, str], str, ET.Element]] = []
+        if (text.text or "").strip("\n") != "":
+            runs.append((base, text.text or "", text))
+        for kid in text:
+            if _local(kid.tag) == "tspan":
+                st = _style_of(kid, base)
+                if (kid.text or ""):
+                    runs.append((st, kid.text, kid))
+            if (kid.tail or "").strip("\n") != "":
+                runs.append((base, kid.tail, text))
+        x = _num(str(text.get("x", "0")).replace(",", " ").split()[0] if text.get("x") else 0)
+        y = _num(str(text.get("y", "0")).replace(",", " ").split()[0] if text.get("y") else 0)
+        x += _num(text.get("dx")) if text.get("dx") else 0
+        y += _num(text.get("dy")) if text.get("dy") else 0
+        placed: List[Tuple[float, float, str, float, Dict[str, str]]] = []
+        cx, cy = x, y
+        for st, content, src in runs:
+            if src is not text:
+                if src.get("x"):
+                    cx = _num(str(src.get("x")).replace(",", " ").split()[0])
+                if src.get("y"):
+                    cy = _num(str(src.get("y")).replace(",", " ").split()[0])
+                cx += _num(src.get("dx")) if src.get("dx") else 0
+                cy += _num(src.get("dy")) if src.get("dy") else 0
+            content = re.sub(r"\s+", " ", content)
+            fam = bundled_family(st.get("font-family")) or bundled_family(base.get("font-family"))
+            size = _num(st.get("font-size"), 16.0)
+            w = st.get("font-weight", "400")
+            weight = 700 if w == "bold" else 400 if w in ("normal", "") else int(_num(w, 400))
+            d, adv = text_to_path(content, fam, size, weight, "italic" in st.get("font-style", "") or "oblique" in st.get("font-style", ""),
+                                  _num(st.get("letter-spacing")))
+            placed.append((cx, cy, d, adv, st))
+            cx += adv
+        if not placed:
+            continue
+        total = sum(p[3] for p in placed)
+        anchor = base.get("text-anchor", "start")
+        shift = -total / 2 if anchor == "middle" else -total if anchor == "end" else 0.0
+        g = ET.Element(f"{{{_NS_SVG}}}g")
+        for k, v in text.attrib.items():
+            if k in ("transform", "id", "opacity", "class", "filter", "mask", "clip-path"):
+                g.set(k, v)
+        for px, py, d, adv, st in placed:
+            if not d:
+                continue
+            path = ET.SubElement(g, f"{{{_NS_SVG}}}path")
+            path.set("d", d)
+            path.set("transform", f"translate({px + shift:.2f} {py:.2f})")
+            path.set("fill", st.get("fill", "#000"))
+            for k in ("fill-opacity", "stroke", "stroke-width", "opacity"):
+                if st.get(k) is not None and not (k == "opacity" and text.get("opacity")):
+                    path.set(k, st[k])
+        parent = parents[text]
+        parent[list(parent).index(text)] = g
+        changed = True
+    if not changed:
+        return svg
+    return ET.tostring(root, encoding="unicode")
+
+
 def _size_of(svg: str) -> Tuple[int, int]:
     root = ET.fromstring(svg)
 
@@ -152,7 +361,7 @@ async def _run(cmd: List[str]) -> Tuple[int, str]:
 
 async def rasterize(svg: str, width: int, height: int) -> bytes:
     """PNG bytes of an already-sanitized SVG at exactly width x height."""
-    svg = sanitize(svg)
+    svg = outline_text(sanitize(svg))
     with tempfile.TemporaryDirectory(prefix="blatbot-svg-") as td:
         src, png = Path(td) / "in.svg", Path(td) / "out.png"
         root = ET.fromstring(svg)
