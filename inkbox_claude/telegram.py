@@ -80,6 +80,23 @@ async def send_message(chat_id: str, text: str) -> None:
         await _call("sendMessage", {"chat_id": chat_id, "text": part, "disable_web_page_preview": True})
 
 
+async def send_photo(chat_id: str, path: str, caption: str = "") -> None:
+    """One local image as a Telegram photo (a document when it is too big or too tall for a photo)."""
+    from pathlib import Path as _P
+    p = _P(path)
+    data = p.read_bytes()
+    form = {"chat_id": str(chat_id)}
+    if caption:
+        form["caption"] = caption[:1000]
+    async with httpx.AsyncClient(timeout=60.0) as client:
+        r = await client.post(f"{API}/bot{token()}/sendPhoto", data=form, files={"photo": (p.name, data)})
+        if r.status_code == 400 or len(data) > 10 * 1024 * 1024:
+            r = await client.post(f"{API}/bot{token()}/sendDocument", data=form, files={"document": (p.name, data)})
+        r.raise_for_status()
+        if not r.json().get("ok"):
+            raise RuntimeError(f"telegram sendPhoto failed: {str(r.json())[:200]}")
+
+
 async def send_typing(chat_id: str) -> None:
     """The "typing..." indicator; it lapses after ~5 s, so it is re-sent."""
     await _call("sendChatAction", {"chat_id": chat_id, "action": "typing"}, timeout=10.0)

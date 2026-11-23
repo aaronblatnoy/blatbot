@@ -74,7 +74,9 @@ SEND_MESSAGE_SCHEMA = {"type": "object", "required": ["to", "text"], "properties
     "to": {"type": "string", "description": "\"requester\", \"aaron\", a person's name, or a group chat's name"},
     "text": {"type": "string", "description": "the whole message, plain text"},
     "surface": {"type": "string", "description": "optional: imessage, telegram, sms, email or whatsapp"},
-    "subject": {"type": "string", "description": "email subject, only for email"}}}
+    "subject": {"type": "string", "description": "email subject, only for email"},
+    "images": {"type": "array", "items": {"type": "string"},
+               "description": "PNG paths returned by render_image to attach (up to 4), on any surface"}}}
 NOTHING_TO_SEND_DESCRIPTION = (
     "END WITHOUT SENDING ANYTHING. Call this when this run has nothing worth telling anyone (for example a "
     "check found nothing new). It is recorded on the task with your reason and nothing is sent. Then stop."
@@ -501,13 +503,19 @@ async def send_message(args: Dict[str, Any], manager: Any, request: Any,
     if not enabled() or manager is None or request is None:
         return "Sending is unavailable for this run. Put the message in your final status."
     text = str(args.get("text") or "").strip()
-    if not text:
+    if not text and not args.get("images"):
         return "Give the text of the message."
     try:
         dest = resolve(manager, request, args.get("to"), args.get("surface"))
     except ValueError as exc:
         return str(exc)
     meta = dict(dest["meta"])
+    if args.get("images"):
+        from . import imagetool
+        try:
+            meta["generated_images"] = imagetool.allowed_image_paths(args.get("images"))
+        except ValueError as exc:
+            return str(exc)
     subject = str(args.get("subject") or "").strip()
     if dest["mode"] == "email":
         if subject:

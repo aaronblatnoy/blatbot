@@ -306,6 +306,16 @@ RUN_ENDINGS = (
     "record and make the very last line exactly STATUS: OK or STATUS: FAILED."
 )
 
+IMAGE_GUIDANCE = (
+    "IMAGES: you make images by writing SVG code, never with an image model. Loop: draw (hand-built vector "
+    "shapes, flat-shaded polygons for 3D, thin low-opacity guilloche curves, <text> in Liberation Serif or "
+    "Sans) -> render_image -> LOOK at the picture it returns -> fix what is off -> render again -> send the PNG "
+    "path with send_message images. For options, render one contact sheet (variants with ids like ic-01..ic-06, "
+    "each shown large with 64 px and 32 px previews) and send ONE text first (what the set is, the ids, which "
+    "share a background, the sizes shown, your pick and your own critique of it) ending 'Which direction?', "
+    "then the sheet as the image. Check the small sizes before you send."
+)
+
 EXECUTOR_SYSTEM_OUTCOMES = (
     f"You are running ONE approved task for {_ASSISTANT}, Executive Assistant to Aaron Blatnoy. "
     "You are given the sender's message verbatim, the recent conversation, and the task's record. "
@@ -680,6 +690,8 @@ class Executor:
             prompt_text = continuation or req.prompt
         if pages_ok:
             system_append += "\n" + pages.PAGE_GUIDANCE
+        if "mcp__host__render_image" in scoped_allowed:
+            system_append += "\n" + IMAGE_GUIDANCE
         if context.strip():
             system_append += (
                 "\n\nTASK LEDGER (read-only background on this person; the task text below is what to do):\n"

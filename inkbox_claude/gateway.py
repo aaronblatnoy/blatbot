@@ -4836,6 +4836,8 @@ class InkboxGateway:
         if mode == "telegram":
             tg_chat = str(meta.get("telegram_chat_id") or str(chat_id).removeprefix("tg:"))
             await telegram.send_message(tg_chat, strip_markdown(content))
+            for img in meta.get("generated_images") or []:
+                await telegram.send_photo(tg_chat, str(img))
             turn = self._tg_turn.get(tg_chat)
             if turn:
                 self._tg_answered[tg_chat] = (time.time(), turn[0], turn[1])
@@ -4847,8 +4849,11 @@ class InkboxGateway:
                 raise ValueError(_message_too_long_reason("SMS", text, SMS_MAX_LENGTH))
             identity = await asyncio.to_thread(self._inkbox.get_identity, self.cfg.identity)
             kwargs: Dict[str, Any] = {"text": text}
-            if meta.get("media_urls"):
-                kwargs["media_urls"] = list(meta["media_urls"])
+            if meta.get("media_urls") or meta.get("generated_images"):
+                from .tools import _upload_media_url
+                kwargs["media_urls"] = list(meta.get("media_urls") or []) + [
+                    await asyncio.to_thread(_upload_media_url, identity, str(p))
+                    for p in meta.get("generated_images") or []]
             conversation_id = str(meta.get("conversation_id") or "").strip()
             if not conversation_id and not meta.get("_inkbox_tool") and str(chat_id).startswith("sms:"):
                 conversation_id = str(chat_id).split(":", 1)[1]
@@ -4876,8 +4881,11 @@ class InkboxGateway:
                 kwargs["conversation_id"] = conversation_id
             else:
                 kwargs["to"] = meta["imessage_to"]
-            if meta.get("media_urls"):
-                kwargs["media_urls"] = list(meta["media_urls"])
+            if meta.get("media_urls") or meta.get("generated_images"):
+                from .tools import _upload_media_url
+                kwargs["media_urls"] = list(meta.get("media_urls") or []) + [
+                    await asyncio.to_thread(_upload_media_url, identity, str(p))
+                    for p in meta.get("generated_images") or []]
             msg = await asyncio.to_thread(identity.send_imessage, **kwargs)
             return {"id": str(getattr(msg, "id", ""))} if meta.get("_inkbox_tool") else None
         else:  # email
@@ -4889,5 +4897,10 @@ class InkboxGateway:
                       "subject": reply_subject, "body_text": content}
             if meta.get("_inkbox_tool"):
                 kwargs["attachments"] = meta.get("attachments")
+            if meta.get("generated_images"):
+                from .media import file_to_email_attachment
+                kwargs["attachments"] = list(kwargs.get("attachments") or []) + [
+                    await asyncio.to_thread(file_to_email_attachment, str(p))
+                    for p in meta["generated_images"]]
             msg = await asyncio.to_thread(identity.send_email, **kwargs)
             return {"id": str(getattr(msg, "id", ""))} if meta.get("_inkbox_tool") else None

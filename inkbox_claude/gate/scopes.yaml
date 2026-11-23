@@ -141,6 +141,12 @@ systems:
         grants:
         - browser_act
         - browser_read
+  image_drawing:
+    description: 'Drawing an image from scratch as code (a logo, icon, diagram, graphic, a set of logo options) and
+      sending it as a picture. Not a photo, not looking up an existing image on the web.'
+    always:
+    - image_make
+    leaves: {}
   server:
     description: 'The black-sky server Blatbot runs on (''black sky'', ''the server'', ''the box''): what is running,
       containers, services, the gateway, uptime, disk, memory, GPUs.'
@@ -706,6 +712,21 @@ scopes:
     - mcp__host__vault_search
     - mcp__host__vault_read
     - mcp__host__vault_list
+  image_make:
+    description: 'draw an image as SVG code and render it to a PNG she can look at and send: logos, icons, diagrams,
+      cards, a contact sheet of variants with small-size previews. No photos, no image-generation model: Blatbot writes
+      the vector shapes itself. Saves only into its own generated-images folder; sending is send_message.'
+    label: draw an image
+    ask: 'draw an image'
+    synonyms:
+    - draw a logo
+    - make an image
+    - make a logo
+    - design a graphic
+    - svg
+    read: true
+    tools:
+    - mcp__host__render_image
   host_read:
     description: 'see what is running on the server Blatbot itself runs on (black-sky): containers, services, uptime,
       disk, memory, GPUs. Read-only status only; no commands, no changes.'
