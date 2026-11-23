@@ -1,0 +1,19 @@
+# dj-khaled: posts "Anotha one" to Telegram (as the DJ Khaled bot) when a Migreat outreach thread gets a reply.
+# Deployed on black-sky as the Coolify application "dj-khaled" (gondroid project). Secrets (STERN_OAUTH_JSON,
+# DJKHALED_BOT_TOKEN, DJKHALED_CHAT_ID) come from the Coolify application's environment, never from this file.
+services:
+  dj-khaled:
+    build:
+      context: .
+      dockerfile: deploy/dj-khaled/Dockerfile
+    restart: unless-stopped
+    environment:
+      - STERN_OAUTH_JSON=${STERN_OAUTH_JSON}
+      - DJKHALED_BOT_TOKEN=${DJKHALED_BOT_TOKEN}
+      - DJKHALED_CHAT_ID=${DJKHALED_CHAT_ID}
+      - POLL_SECONDS=60
+    volumes:
+      - dj-khaled-data:/data
+
+volumes:
+  dj-khaled-data:
