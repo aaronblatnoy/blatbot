@@ -29,7 +29,7 @@ one reply line: file name, parts written, stored.
 The original bytes are also kept in STATE_DIR/files/<YYYYMMDD-HHMMSS>-<name> with an index.json
 (original name, Telegram file_id, sha256, size, chat, sender, date); every brain entry for the file
 carries a "Stored file: <stored name> (telegram file_id <id>)" line. An allowed user who asks
-Gondroid to send/give/share a file gets it back by DM (never to anyone else). Files over 20 MB
+Gondroid to send/give/share a file gets it posted in the chat they asked in. Files over 20 MB
 cannot be downloaded by a bot and are not kept.
 
 Updates arrive by long polling (getUpdates), so no public URL is needed.
@@ -419,24 +419,26 @@ def wants_file(q: str) -> bool:
     return bool(SEND_RE.search(q)) and bool(load_index())
 
 
-async def send_document(to_chat: str, stored: str) -> None:
+async def send_document(to_chat: str, stored: str, reply_to: Optional[int] = None) -> None:
     ent = load_index()[stored]
+    extra = {"reply_to_message_id": reply_to, "allow_sending_without_reply": True} if reply_to else {}
     try:
-        await tg("sendDocument", {"chat_id": to_chat, "document": ent["file_id"]}, timeout=60)
+        await tg("sendDocument", {"chat_id": to_chat, "document": ent["file_id"], **extra}, timeout=60)
         return
     except Exception as exc:
         log.info("sendDocument by file_id failed (%s); uploading stored bytes", exc)
     with open(os.path.join(FILES_DIR, stored), "rb") as f:
         data = f.read()
     async with httpx.AsyncClient(timeout=120.0) as c:
-        r = await c.post(f"https://api.telegram.org/bot{TOKEN}/sendDocument", data={"chat_id": to_chat},
+        r = await c.post(f"https://api.telegram.org/bot{TOKEN}/sendDocument", data={"chat_id": to_chat, **{k: str(v) for k, v in extra.items()}},
                          files={"document": (ent.get("original_name") or stored, data)})
     if not r.json().get("ok"):
         raise RuntimeError("sendDocument upload: " + str(r.json().get("description")))
 
 
 async def file_request(q: str, chat_id: str, from_id: str, is_group: bool, reply_to: Optional[int]) -> bool:
-    """Handle "send me the PRD". Returns True when it answered. Files only ever go to the asker's own DM."""
+    """Handle "send me the PRD". Returns True when it answered. The file is posted in the chat it was asked in
+    (a trusted group or the asker's DM); only allowlisted people get here."""
     extra: List[str] = []
     if not find_files(q) or not [t for t in re.findall(r"[a-z0-9]+", q.lower()) if t not in STOP]:
         try:
@@ -457,15 +459,13 @@ async def file_request(q: str, chat_id: str, from_id: str, is_group: bool, reply
                    reply_to if is_group else None)
         return True
     try:
-        await send_document(from_id, found[0])
+        await send_document(chat_id, found[0], reply_to if is_group else None)
     except Exception as exc:
         log.error("file send failed: %s", exc)
-        await send(chat_id, "I couldn't send it to you. Message me directly once (DM me /start), then ask again.",
+        await send(chat_id, f"I couldn't post {idx[found[0]]['original_name']} here just now. Try again in a minute.",
                    reply_to if is_group else None)
         return True
-    if is_group:
-        await send(chat_id, f"Sent {idx[found[0]]['original_name']} to you in a DM.", reply_to)
-    log.info("sent stored file %s to %s", found[0], from_id)
+    log.info("sent stored file %s to chat %s (asked by %s)", found[0], chat_id, from_id)
     return True
 
 
