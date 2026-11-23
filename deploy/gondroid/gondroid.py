@@ -91,7 +91,10 @@ SYSTEM = (
     "Answer the question from that material only. "
     "Be plain and short: a sentence or a few lines, no headers, no preamble, no em dashes. Say who "
     "said what and when when it helps. If the material does not hold the answer, say you don't have "
-    "that recorded. Never invent anything.")
+    "that recorded. Never invent anything. Telegram does not show you what other bots (such as Samwise) post "
+    "unless someone replies to it, so when 'that document' or 'that message' has no match in the conversation "
+    "block, do not guess from older memory: say you can't see it and ask them to reply to it and tag you, which "
+    "lets you read and keep it.")
 
 
 # ---------- per-chat transcript ----------
@@ -587,6 +590,36 @@ async def reply_block(msg: Dict[str, Any], chat_id: str) -> str:
     return out
 
 
+async def ingest_bot_reply(msg: Dict[str, Any], chat_id: str, where: str, chat_title: str) -> None:
+    """Telegram never delivers another bot's messages, so the only time Gondroid sees one is when someone replies to
+    it. Take that chance: put the bot's message in the transcript and the brain, and keep its file like any other."""
+    rep = msg.get("reply_to_message") or {}
+    sender = rep.get("from") or {}
+    if not sender.get("is_bot") or sender.get("id") == ME.get("id"):
+        return
+    if any(r.get("id") == rep.get("message_id") for r in tx_rows(chat_id)):
+        return
+    doc = doc_of(rep)
+    text = (rep.get("text") or rep.get("caption") or "").strip() or (f'[sent the file "{doc.get("file_name") or "file"}"]' if doc else "")
+    if not text:
+        return
+    name = " ".join(x for x in (sender.get("first_name"), sender.get("last_name")) if x) or sender.get("username") or "a bot"
+    who = name + (f" (@{sender['username']})" if sender.get("username") else "") + " (a bot)"
+    when = datetime.fromtimestamp(rep.get("date") or 0, timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
+    tx_append(chat_id, {"id": rep["message_id"], "ts": when, "who": name + " (a bot)", "from_id": str(sender.get("id") or ""),
+                        "text": text[:4000], "reply_to": None, "file": (doc or {}).get("file_name"), "edited": False})
+    try:
+        await brain_add(f"On {when} in {where}, {who} said: {text}", f"Telegram {chat_title}: {name} {when}")
+        if doc and not (doc.get("mime_type") or "").startswith(("audio/", "video/")):
+            sink: Dict[str, str] = {}
+            log.info("bot file via reply: %s (msg %s in %s)", await asyncio.wait_for(
+                record_file(doc, who, where, when, chat_title, None, sink), 150), rep["message_id"], chat_id)
+            if sink.get("text"):
+                tx_set_file_text(chat_id, rep["message_id"], sink["text"])
+    except Exception as exc:
+        log.error("bot reply ingest failed (msg %s in %s): %s", rep.get("message_id"), chat_id, type(exc).__name__)
+
+
 def transcript_block(chat_id: str) -> str:
     return "\n".join(tx_line(r) for r in tx_rows(chat_id)[-TX_PROMPT:])
 
@@ -648,6 +681,7 @@ async def handle(update: Dict[str, Any]) -> None:
     who = name + (f" (@{frm['username']})" if frm.get("username") else "")
     where = f'Telegram group "{chat.get("title") or chat_id}"' if is_group else "a Telegram DM with Gondroid"
     edited = "edited_message" in update
+    await ingest_bot_reply(msg, chat_id, where, chat.get("title") or "DM")
     tx_append(chat_id, {"id": msg["message_id"], "ts": when, "who": name, "from_id": from_id, "text": text[:4000],
                         "reply_to": (msg.get("reply_to_message") or {}).get("message_id"),
                         "file": (doc or {}).get("file_name"), "edited": edited})
