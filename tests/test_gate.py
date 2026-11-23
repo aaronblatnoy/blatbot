@@ -1495,7 +1495,7 @@ def test_host_read_scope_maps_to_the_status_tool():
                                        "mcp__host__set_followup", "mcp__host__cancel_followup",
                                        "mcp__host__request_access", "mcp__host__send_message",
                                        "mcp__host__nothing_to_send", "mcp__host__where_to_reach",
-                                       "mcp__host__ask_aaron"]
+                                       "mcp__host__react_message", "mcp__host__ask_aaron"]
     out = asyncio.run(hosttools.host_status({"parts": ["uptime_load", "nope"]}))
     assert out.startswith("## uptime_load") and "nope" not in out
 
