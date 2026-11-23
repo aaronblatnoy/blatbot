@@ -308,8 +308,9 @@ RUN_ENDINGS = (
 
 IMAGE_GUIDANCE = (
     "IMAGES: you make images by writing SVG code, never with an image model. Loop: draw (hand-built vector "
-    "shapes, flat-shaded polygons for 3D, thin low-opacity guilloche curves, <text> in Liberation Serif or "
-    "Sans) -> render_image -> LOOK at the picture it returns -> fix what is off -> render again -> send the PNG "
+    "shapes, flat-shaded polygons for 3D, guilloche from 3 to 5 interlaced rosette or wave curves at stroke-opacity 0.25 to 0.4 so it reads at the large size, "
+    "lettering as <text> with font-family Libre Baskerville, Newsreader or Inter, which render as exact outlines of that "
+    "typeface, Libre Baskerville italic for an italic serif wordmark) -> render_image -> LOOK at the picture it returns -> fix what is off -> render again -> send the PNG "
     "path with send_message images. For options, render one contact sheet (variants with ids like ic-01..ic-06, "
     "each shown large with 64 px and 32 px previews) and send ONE text first (what the set is, the ids, which "
     "share a background, the sizes shown, your pick and your own critique of it) ending 'Which direction?', "
