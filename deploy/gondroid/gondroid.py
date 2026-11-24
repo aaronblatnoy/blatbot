@@ -392,7 +392,8 @@ def save_file(name: str, data: bytes, file_id: str, chat: str, sender: str, when
 
 STOP = set("""me the a an please file files pdf doc docx document documents copy of that this us to you can could would
 send give share forward resend attach again back i my our it one for from and gondroid sent we want need get
-latest last newest most recent""".split())
+latest last newest most recent retrieve fetch grab post drop pull up upload put find show where here chat groupchat
+group in this into""".split())
 
 
 def find_files(query: str, extra_stored: Optional[List[str]] = None) -> List[str]:
@@ -413,12 +414,13 @@ def find_files(query: str, extra_stored: Optional[List[str]] = None) -> List[str
     return sorted({k for k in (extra_stored or []) if k in idx}, reverse=True)
 
 
-SEND_RE = re.compile(r"\b(send|give|share|forward|resend|attach)\b", re.I)
-FILE_WORD_RE = re.compile(r"\b(files?|pdf|docx?|documents?|attachments?|deck|spreadsheet|sheet|csv|prd)\b", re.I)
+SEND_RE = re.compile(r"\b(send|give|share|forward|resend|attach|retrieve|fetch|grab|post|drop|pull up|upload)\b", re.I)
+SOFT_SEND_RE = re.compile(r"\b(get|put|find|show|where'?s|where is)\b", re.I)   # a file request only with a file word
+FILE_WORD_RE = re.compile(r"\b(files?|pdf|docx?|documents?|attachments?|deck|spreadsheet|sheet|csv|prd|script|kit|primer|memo|one-?pager)\b", re.I)
 
 
 def wants_file(q: str) -> bool:
-    return bool(SEND_RE.search(q)) and bool(load_index())
+    return bool(SEND_RE.search(q) or (SOFT_SEND_RE.search(q) and FILE_WORD_RE.search(q))) and bool(load_index())
 
 
 async def send_document(to_chat: str, stored: str, reply_to: Optional[int] = None) -> None:
@@ -455,6 +457,9 @@ async def file_request(q: str, chat_id: str, from_id: str, is_group: bool, reply
             await send(chat_id, "I don't have a stored file that matches that.", reply_to if is_group else None)
             return True
         return False
+    found.sort(key=lambda k: idx[k].get("date") or "", reverse=True)   # newest posted first
+    if len({(idx[k].get("original_name") or "").lower() for k in found}) == 1:
+        found = found[:1]   # versions of one file: send the latest
     if len(found) > 1:
         lines = [f"- {idx[k]['original_name']} ({idx[k]['date']}, from {idx[k]['sender']})" for k in found[:5]]
         await send(chat_id, "Which one do you want?\n" + "\n".join(lines) + "\nTell me the name and I'll send it.",
