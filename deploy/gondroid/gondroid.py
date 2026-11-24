@@ -77,6 +77,7 @@ FILES_INDEX = os.path.join(FILES_DIR, "index.json")
 MEMBER = ("creator", "administrator", "member", "restricted")
 ME: Dict[str, Any] = {}
 TX_DIR = os.path.join(os.environ.get("STATE_DIR", "/data"), "transcripts")
+INBOX = os.path.join(os.environ.get("STATE_DIR", "/data"), "inbox")   # other bots' messages, put here by bridge.py
 TX_KEEP = 200        # messages kept per chat
 TX_PROMPT = 40       # messages put in an answer prompt
 TX_FILE_CAP = 8000   # characters of a file's text kept in a transcript row
@@ -91,17 +92,15 @@ SYSTEM = (
     "Answer the question from that material only. "
     "Be plain and short: a sentence or a few lines, no headers, no preamble, no em dashes. Say who "
     "said what and when when it helps. If the material does not hold the answer, say you don't have "
-    "that recorded. Never invent anything. Telegram does not show you what other bots (such as Samwise) post "
-    "unless someone replies to it, so when 'that document' or 'that message' has no match in the conversation "
-    "block, do not guess from older memory: say you can't see it and ask them to reply to it and tag you, which "
-    "lets you read and keep it.")
+    "that recorded. Never invent anything. Lines marked '(a bot)' are other bots' messages (such as Samwise or Blatbot) "
+    "and their files; they reach you a few seconds after they are posted. When 'that document' or 'that message' "
+    "has no match in the conversation block, do not guess from older memory: say you don't see it yet.")
 
 
 # ---------- per-chat transcript ----------
 # One file per chat, /data/transcripts/<chat_id>.jsonl, last TX_KEEP rows. A chat only ever reads its own file.
-# Limit: Telegram's Bot API never delivers other bots' messages to a bot, so a message another bot posts in a
-# group is not in the transcript. It can still be read when someone replies to it, because the reply update
-# carries the replied-to message (reply_to_message) in full.
+# Telegram's Bot API never delivers other bots' messages to a bot. Those rows come from bridge.py through INBOX
+# (see ingest_outside), or from a reply to the bot's message (ingest_bot_reply); their ids are negative.
 def tx_path(chat_id: str) -> str:
     return os.path.join(TX_DIR, re.sub(r"[^0-9A-Za-z_-]", "_", chat_id) + ".jsonl")
 
@@ -152,7 +151,7 @@ def tx_set_file_text(chat_id: str, message_id: int, text: str) -> None:
 
 
 def tx_line(r: Dict[str, Any], file_cap: int = 1500) -> str:
-    head = f"[{r.get('ts')}] {r.get('who')} (message {r.get('id')}" + (f", reply to {r['reply_to']}" if r.get("reply_to") else "") + ")"
+    head = f"[{r.get('ts')}] {r.get('who')} (message {r.get('id') if (r.get('id') or 0) > 0 else 'from a bot'}" + (f", reply to {r['reply_to']}" if r.get("reply_to") else "") + ")"
     out = f"{head}: {r.get('text') or ''}"
     if r.get("file_text"):
         out += f"\n   [text read from the file or photo: {r['file_text'][:file_cap]}]"
@@ -484,10 +483,16 @@ async def record_file(doc: Dict[str, Any], who: str, where: str, when: str, chat
     async with httpx.AsyncClient(timeout=120.0) as c:
         r = await c.get(f"https://api.telegram.org/file/bot{TOKEN}/{info['file_path']}")
         r.raise_for_status()
-    stored = await asyncio.to_thread(save_file, name, r.content, doc["file_id"], chat_title, who, when)
-    ref = f"Stored file: {stored} (telegram file_id {doc['file_id']})"
+    return await keep_file(name, r.content, doc["file_id"], who, where, when, chat_title, sink)
+
+
+async def keep_file(name: str, data: bytes, file_id: str, who: str, where: str, when: str, chat_title: str,
+                    sink: Optional[Dict[str, str]] = None) -> str:
+    """Keep one file's original bytes and write its text to the brain. Returns a one-line outcome."""
+    stored = await asyncio.to_thread(save_file, name, data, file_id, chat_title, who, when)
+    ref = f"Stored file: {stored}" + (f" (telegram file_id {file_id})" if file_id else "")
     try:
-        text = await extract(name, r.content)
+        text = await extract(name, data)
     except Exception as exc:
         log.info("no text from %s: %s", name, type(exc).__name__)
         text = ""
@@ -601,7 +606,7 @@ async def ingest_bot_reply(msg: Dict[str, Any], chat_id: str, where: str, chat_t
         return
     doc = doc_of(rep)
     text = (rep.get("text") or rep.get("caption") or "").strip() or (f'[sent the file "{doc.get("file_name") or "file"}"]' if doc else "")
-    if not text:
+    if not text or already_have(chat_id, str(sender.get("id") or ""), text):
         return
     name = " ".join(x for x in (sender.get("first_name"), sender.get("last_name")) if x) or sender.get("username") or "a bot"
     who = name + (f" (@{sender['username']})" if sender.get("username") else "") + " (a bot)"
@@ -618,6 +623,61 @@ async def ingest_bot_reply(msg: Dict[str, Any], chat_id: str, where: str, chat_t
                 tx_set_file_text(chat_id, rep["message_id"], sink["text"])
     except Exception as exc:
         log.error("bot reply ingest failed (msg %s in %s): %s", rep.get("message_id"), chat_id, type(exc).__name__)
+
+
+def already_have(chat_id: str, from_id: str, text: str) -> bool:
+    """The same sender's same words are already in this chat's transcript (a bot's message can arrive by two routes)."""
+    return any(r.get("from_id") == from_id and (r.get("text") or "")[:200] == text[:200] for r in tx_rows(chat_id)[-TX_KEEP:])
+
+
+async def ingest_outside(item: Dict[str, Any], data: Optional[bytes]) -> None:
+    """One message another bot posted in a group. Telegram never delivers these to a bot, so deploy/gondroid/bridge.py
+    reads them through a person's own Telegram account and drops them in INBOX. Kept like any other message and file."""
+    chat_id, title = str(item["chat_id"]), item.get("chat_title") or str(item["chat_id"])
+    from_id, name = str(item.get("from_id") or ""), item.get("name") or "a bot"
+    if from_id == str(ME.get("id")) or not await group_trusted(chat_id):
+        return
+    fname = item.get("file_name") if data else None
+    text = (item.get("text") or "").strip() or (f'[sent the file "{fname}"]' if fname else "")
+    if not text or already_have(chat_id, from_id, text):
+        return
+    who = name + (f" (@{item['username']})" if item.get("username") else "") + " (a bot)"
+    when = datetime.fromtimestamp(item.get("date") or 0, timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
+    where, row_id = f'Telegram group "{title}"', -int(item["uid"])   # negative: this id is from the reader's account, not the bot's
+    tx_append(chat_id, {"id": row_id, "ts": when, "who": name + " (a bot)", "from_id": from_id, "text": text[:4000],
+                        "reply_to": None, "file": fname, "edited": False})
+    if fname:
+        sha = hashlib.sha256(data).hexdigest()
+        if any(e.get("sha256") == sha and e.get("chat") == title for e in load_index().values()):
+            log.info("outside file %s already kept", fname)
+        else:
+            sink: Dict[str, str] = {}
+            log.info("outside file: %s (%s)", await asyncio.wait_for(keep_file(fname, data, "", who, where, when, title, sink), 300), chat_id)
+            if sink.get("text"):
+                tx_set_file_text(chat_id, row_id, sink["text"])
+    await brain_add(f"On {when} in {where}, {who} said: {text}", f"Telegram {title}: {name} {when}")
+
+
+async def inbox_loop() -> None:
+    while True:
+        await asyncio.sleep(2)
+        try:
+            names = sorted(n for n in os.listdir(INBOX) if n.endswith(".json"))
+        except OSError:
+            continue
+        for n in names:
+            blob = None
+            try:
+                item = json.load(open(os.path.join(INBOX, n)))
+                blob = os.path.join(INBOX, os.path.basename(item["blob"])) if item.get("blob") else None
+                await ingest_outside(item, open(blob, "rb").read() if blob else None)
+            except Exception as exc:
+                log.error("inbox item %s failed: %s %s", n, type(exc).__name__, str(exc)[:200])
+            for f in (os.path.join(INBOX, n), blob):
+                try:
+                    f and os.remove(f)
+                except OSError:
+                    pass
 
 
 def transcript_block(chat_id: str) -> str:
@@ -745,6 +805,8 @@ async def main() -> None:
     log.info("gondroid up as @%s; owner set: %s; allowlist loaded: %d user(s); reads all group messages: %s",
              ME.get("username"), bool(OWNER), len(ALLOWED), ME.get("can_read_all_group_messages"))
     offset = 0
+    os.makedirs(INBOX, exist_ok=True)
+    inbox = asyncio.create_task(inbox_loop())   # keep a reference so the task is not collected
     alive = os.path.join(os.path.dirname(STATE), "alive")
     while True:
         try:
