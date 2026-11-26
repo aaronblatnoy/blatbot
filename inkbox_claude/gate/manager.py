@@ -1997,6 +1997,8 @@ class GateSession:
                 if kind == "declined_or_cancelled" and conf >= 0.5 and running.id not in self.m._stop_asked:
                     self.m._stop_asked.add(running.id)
                     return await self.send_to_sender(wording.ask_stop_line(running.id), role="answer")
+            if await self._steer_into_run(running, body, message):
+                return True
             steer = False
             if (approver or self._is_owner_person()) and not wording.is_progress_question(body):
                 # Steering, by code: a new instruction from him while a request runs stops
@@ -2217,6 +2219,40 @@ class GateSession:
         if req.state == "done":
             return wording.success_message(_clean_result(status.get("summary") or ""))
         return f"That one failed: {wording.failure_in_words(status)}."
+
+    STEER_WINDOW_S = float(os.environ.get("GATE_STEER_WINDOW_S", "0") or 0)   # 0 = the whole run
+
+    async def _steer_into_run(self, running: Any, body: str, message: str) -> bool:
+        """A message from the same person, in the same chat, while their request runs, is
+        written into that run as one more user turn, the way a message sent to a running
+        session is. The run keeps its own scopes, tools and permission checks; text that
+        names a capability the run was not given is not injected (the caller then queues
+        it the ordinary way). True when it was delivered and acknowledged."""
+        if wording.is_progress_question(body):
+            return False
+        if running.sender and running.sender != self._sender():
+            return False
+        if self.STEER_WINDOW_S > 0 and time.time() - float(running.created_at or 0) > self.STEER_WINDOW_S:
+            return False
+        steer = getattr(self.m.executor, "steer", None)
+        if steer is None:
+            return False
+        try:
+            wanted = set(schedprop._said_scopes(body))
+        except Exception:
+            wanted = set()
+        if wanted - set(running.scopes or []):
+            logger.info("[gate %s] steer for #%s names scopes the run lacks (%s); queuing instead",
+                        self.chat_id, running.id, sorted(wanted - set(running.scopes or [])))
+            return False
+        if not steer(running.id, wording.steer_note(running.sender_name, body)):
+            return False
+        logger.info("[gate %s] steer: message handed to running #%s", self.chat_id, running.id)
+        t = self._peek_task(RouterOutput(task=f"T{self.m.store.task_id_for_request(running.id)}"))
+        if t:
+            self._ensure_inbound_on_task(t, body)
+        await self.send_to_sender(wording.STEER_ACK, role="ack")
+        return True
 
     def _progress_reply(self, running: Request) -> str:
         """The status line for a message that asked about the still-running request

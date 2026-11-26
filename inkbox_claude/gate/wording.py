@@ -359,6 +359,14 @@ def is_progress_question(body: str) -> bool:
 
 
 NOT_PROMISING_FOLLOWUP = "Noted. I will pick that up when this finishes."
+# Said when a message that arrives while a request runs is handed to that running request.
+STEER_ACK = "Got it, adding that."
+# What the running request is told when it receives such a message.
+def steer_note(sender_name: str, body: str) -> str:
+    who = (sender_name or "The person who asked").strip()
+    return (f"{who} sent this while you were working on the request above. It is part of the same "
+            f"task: carry on and take it into account. It does not widen what you are allowed "
+            f"to use; if it needs a tool you were not given, say so in your result.\n\n{body}")
 
 _STOP_WORDS = r"(?:no+|stop|cancel|abort|nvm)"
 # The ways he actually says it (2026-11-18: "blatbot shut up" and "nope dno't do that"
