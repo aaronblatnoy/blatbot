@@ -1117,6 +1117,14 @@ class HoldingExecutor(FakeExecutor):
         await self.release.wait()
         return await super().run(req, context)
 
+    def steer(self, request_id, text):
+        """Takes a message into the running request until it is released."""
+        if self.release.is_set():
+            return False
+        self.steers = getattr(self, "steers", [])
+        self.steers.append((request_id, text))
+        return True
+
 
 def test_message_during_a_running_request_does_not_start_a_second_one(tmp_path):
     # A message during a still-running request is answered by code, not a model
@@ -1142,7 +1150,77 @@ def test_message_during_a_running_request_does_not_start_a_second_one(tmp_path):
     assert m.store.get_request(1).state == "done"
     assert len(m.executor.ran) == 1
     outbound = [t for _, t, *_ in sent]
-    assert outbound == ["On it.", "Noted. I will pick that up when this finishes.", "Done: 47%."]
+    # The message went into the running request as a steer; nothing says "when this finishes".
+    assert "Got it, adding that." in outbound
+    assert not any(t.startswith(("Noted", "Stopped")) for t in outbound)
+    assert len(m.executor.steers) == 1 and m.executor.steers[0][0] == 1
+    assert "it's in the Fall 2026 responses sheet" in m.executor.steers[0][1]
+
+
+def test_message_during_a_run_that_cannot_take_it_is_not_claimed_as_added(tmp_path):
+    """The run's input is already closed (it is finishing): the ordinary handling applies."""
+    m, sent = make_manager(tmp_path)
+    m.executor = HoldingExecutor()
+    m.executor.steer = lambda rid, text: False
+    m.router.next = RouterOutput(reply="On it.", task="new", task_title="Acceptance rate",
+                                 request=RouterRequest(prompt="compute it", scopes=["tamid_drive_read"], summary="Acceptance rate"))
+    async def go():
+        s = m.get("aaron")
+        await s.handle_inbound("what's my acceptance rate as a reviewer?", "imessage", approver_meta())
+        await m.executor.started.wait()
+        await s.handle_inbound("it's in the Fall 2026 responses sheet", "imessage", approver_meta())
+        m.executor.release.set()
+        await asyncio.sleep(0.1)
+    asyncio.run(go())
+    # Nothing was handed to the run, so no "adding that" is claimed.
+    assert "Got it, adding that." not in [t for _, t, *_ in sent]
+
+
+def test_steer_never_widens_the_runs_scopes(tmp_path):
+    """A message that asks for a capability the run was not given is not injected."""
+    m, sent = make_manager(tmp_path)
+    m.executor = HoldingExecutor()
+    m.router.next = RouterOutput(reply="On it.", task="new", task_title="Acceptance rate",
+                                 request=RouterRequest(prompt="compute it", scopes=["tamid_drive_read"], summary="Acceptance rate"))
+    async def go():
+        s = m.get("aaron")
+        await s.handle_inbound("what's my acceptance rate as a reviewer?", "imessage", approver_meta())
+        await m.executor.started.wait()
+        await s.handle_inbound("also send an email with the numbers to bob", "imessage", approver_meta())
+        m.executor.release.set()
+        await asyncio.sleep(0.1)
+    asyncio.run(go())
+    assert getattr(m.executor, "steers", []) == []
+    assert "Got it, adding that." not in [t for _, t, *_ in sent]
+
+
+def test_executor_feeds_a_steer_into_the_same_session_then_closes():
+    """Executor.steer queues a user turn on the run's own input stream; once the turn ends
+    with nothing waiting, the stream closes, and a later steer is refused."""
+    from inkbox_claude.gate.executor import Executor
+    ex = Executor(mcp_server=None, cwd=".")
+    class R:  # the bits of a request the queue needs
+        id = 7
+        schedule_id = None
+    async def go():
+        q = ex._open_steer_queue(R)
+        closing = ["old closing text"]
+        stream = ex._steerable_stream(7, "do the task", q, closing)
+        first = await stream.__anext__()
+        assert first["message"]["content"] == "do the task"
+        assert ex.steer(7, "also this") is True
+        second = await stream.__anext__()
+        assert second["message"]["content"] == "also this" and second["type"] == "user"
+        assert closing == []                      # the earlier closing text no longer counts
+        ex._close_steer_queue(7)
+        assert ex.steer(7, "too late") is False
+        try:
+            await stream.__anext__()
+            assert False, "stream should have ended"
+        except StopAsyncIteration:
+            pass
+        assert ex.steer(99, "nobody") is False
+    asyncio.run(go())
 
 
 def test_failed_run_re_decides_the_message_that_arrived_meanwhile(tmp_path):

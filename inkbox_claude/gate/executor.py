@@ -87,14 +87,20 @@ def prompt_images(prompt: str) -> List[str]:
     return (first + rest)[:MAX_IMAGES]
 
 
-def with_images(text: str, paths: List[str]):
-    """A streaming prompt: one user message holding the text and the images themselves."""
+def image_blocks(text: str, paths: List[str]) -> List[Dict[str, Any]]:
+    """The text block followed by each readable image; just the text block when none read."""
     blocks: List[Dict[str, Any]] = [{"type": "text", "text": text}]
     for p in paths:
         b = _image_block(p)
         if b is not None:
             blocks.append({"type": "text", "text": f"(image file: {p})"})
             blocks.append(b)
+    return blocks
+
+
+def with_images(text: str, paths: List[str]):
+    """A streaming prompt: one user message holding the text and the images themselves."""
+    blocks = image_blocks(text, paths)
     if len(blocks) == 1:
         return text
 
@@ -416,6 +422,55 @@ class Executor:
         self.manager = manager
         self._quota_until: Optional[float] = None
         self._quota_reset_text: Optional[str] = None
+        # request id -> messages that arrived while that request runs, fed into the same
+        # session as further user turns (see steer()). None in the queue closes the input.
+        self._steers: Dict[int, "asyncio.Queue[Optional[str]]"] = {}
+        self._steers_closed: set = set()
+
+    def _open_steer_queue(self, req: Request) -> Optional["asyncio.Queue[Optional[str]]"]:
+        """A live-input queue for an ordinary request. A scheduled run takes its prompt
+        whole and cannot be steered."""
+        if req.schedule_id:
+            return None
+        q: "asyncio.Queue[Optional[str]]" = asyncio.Queue()
+        self._steers[req.id] = q
+        self._steers_closed.discard(req.id)
+        return q
+
+    def _close_steer_queue(self, request_id: int) -> None:
+        self._steers_closed.add(request_id)
+        q = self._steers.get(request_id)
+        if q is not None:
+            q.put_nowait(None)
+
+    def steer(self, request_id: int, text: str) -> bool:
+        """Give a running request one more message from the person who asked for it. It is
+        written into the run's own session as a user turn: the model reads it at its next
+        step and carries on with the same tools, the same scopes and the same permission
+        checks. False when the request is not running here, or its input already closed
+        (the run is finishing): the caller then queues the message the ordinary way."""
+        q = self._steers.get(request_id)
+        if q is None or request_id in self._steers_closed or not str(text or "").strip():
+            return False
+        q.put_nowait(str(text))
+        return True
+
+    async def _steerable_stream(self, request_id: int, first: Any, q: "asyncio.Queue[Optional[str]]",
+                                closing_texts: List[str]):
+        """The run's input as a stream: the task, then each steer as it arrives, until the
+        run closes it."""
+        def _msg(content: Any) -> Dict[str, Any]:
+            return {"type": "user", "message": {"role": "user", "content": content},
+                    "parent_tool_use_id": None, "session_id": "default"}
+        yield _msg(first)
+        while True:
+            item = await q.get()
+            if item is None:
+                return
+            # What the run said before this message is not its closing status any more.
+            closing_texts.clear()
+            logger.info("[gate] #%s steer delivered into the running session", request_id)
+            yield _msg(item)
 
     def _mcp_servers_for(self, allowed_tools: List[str], host_server: Any) -> Dict[str, Any]:
         """Return the built-in servers plus user servers required by scoped tools."""
@@ -774,6 +829,12 @@ class Executor:
             run_prompt = with_images(prompt_text, images) if images else prompt_text
             if images:
                 logger.info("[gate] #%s attaching %d image(s) to the run", req.id, len(images))
+            steer_q = self._open_steer_queue(req)
+            if steer_q is not None:
+                first = image_blocks(prompt_text, images) if images else prompt_text
+                if isinstance(first, list) and len(first) == 1:
+                    first = prompt_text
+                run_prompt = self._steerable_stream(req.id, first, steer_q, closing_texts)
             async for msg in query(prompt=run_prompt, options=options):
                 if isinstance(msg, AssistantMessage):
                     saw_tool_use = False
@@ -820,6 +881,11 @@ class Executor:
                             except Exception as exc:
                                 logger.warning("[gate] #%s could not save session: %s", req.id, exc)
                     final = msg
+                    # The turn is over. With nothing waiting, close the input so the run
+                    # ends; a message that arrived while it ran is still in the queue and
+                    # becomes the next turn of this same session.
+                    if steer_q is not None and steer_q.empty():
+                        self._close_steer_queue(req.id)
             return final
 
         def _finalize_exception(exc: Exception) -> Dict[str, Any]:
@@ -958,6 +1024,7 @@ class Executor:
 
         eff_timeout_s = self.voice_timeout_s if req.mode == "voice" else self.timeout_s
         go_task = asyncio.ensure_future(_go())
+        go_task.add_done_callback(lambda _t, _rid=req.id: self._steers.pop(_rid, None))
         try:
             result = await asyncio.wait_for(asyncio.shield(go_task), timeout=eff_timeout_s)
         except asyncio.TimeoutError:
