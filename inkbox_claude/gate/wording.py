@@ -380,7 +380,9 @@ _STOP_SAID = (r"(?:no+|nope|nah|stop|stop it|stop that|stop this|stop doing that
 _STOP_PLAIN_RE = re.compile(
     rf"^\s*(?:(?:hey |ok |okay )?blatbot[,:]?\s+)?(?:please\s+)?{_STOP_SAID}(?:\s+please)?(?:[,]?\s+blatbot)?\s*[.!]*\s*$",
     re.I)
-_ADDRESSED_RE = re.compile(r"^\s*(?:hey |ok |okay |yo )?@?blatbot\b[,:]?\s+\S", re.I)
+# "blatbot ...", "@blatbot ...", any handle that ends in the name ("@bh_blatbot ..."), with up
+# to three short words before it ("hey ok blatbot ...").
+_ADDRESSED_RE = re.compile(r"^\s*(?:[\w']{1,8}[,\s]+){0,3}@?\w*blatbot\b[,:]?\s+\S", re.I)
 
 
 def addressed_to_assistant(body: str) -> bool:
