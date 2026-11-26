@@ -1238,7 +1238,12 @@ def test_failed_run_re_decides_the_message_that_arrived_meanwhile(tmp_path):
         await s.handle_inbound("use the Fall 2026 responses sheet", "imessage", approver_meta())
         assert m.store.get_request(2) is None
         m.executor.release.set()
-        await asyncio.sleep(0.2)
+        # The message was handed to the run as a steer; the run then failed, so it is decided
+        # again as a new turn. That turn makes model calls, so wait for it rather than for a beat.
+        for _ in range(300):
+            await asyncio.sleep(0.1)
+            if m.store.get_request(2) is not None:
+                break
     asyncio.run(go())
     r2 = m.store.get_request(2)
     assert r2 is not None and r2.original_message == "use the Fall 2026 responses sheet"
@@ -2831,3 +2836,12 @@ def test_an_ask_answered_without_a_tool_is_still_insisted_on(tmp_path):
                                       "kind_conf": 0.94})
     asyncio.run(m.execute(req))
     assert m.executor.ran == [req.id, req.id] and m.store.get_request(req.id).state == "failed"
+
+
+def test_any_handle_of_the_assistant_counts_as_addressed():
+    from inkbox_claude.gate import wording as w
+    for text in ("@bh_blatbot drop the pdfs in chat", "blatbot do it", "@blatbot do it",
+                 "hey blatbot, do it", "ok hey @bh_blatbot do it"):
+        assert w.addressed_to_assistant(text), text
+    for text in ("nothing here", "@someone drop the pdfs", "blatbot"):
+        assert not w.addressed_to_assistant(text), text
