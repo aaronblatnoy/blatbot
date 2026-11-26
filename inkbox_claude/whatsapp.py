@@ -282,13 +282,13 @@ async def send(gateway, chat_id: str, content: str, meta: Dict[str, Any]) -> Opt
     else:
         kwargs["to"] = recipient
     media_ids = list(meta.get("whatsapp_media_ids") or [])
-    for path in meta.get("generated_images") or []:
+    for path in list(meta.get("generated_images") or []) + list(meta.get("attach_files") or []):
         from pathlib import Path as _P
         import mimetypes as _mt
         p = _P(str(path))
         up = await asyncio.to_thread(require_method(gateway._identity, "upload_whatsapp_media"),
                                      content=p.read_bytes(), filename=p.name,
-                                     content_type=_mt.guess_type(p.name)[0] or "image/png",
+                                     content_type=_mt.guess_type(p.name)[0] or "application/octet-stream",
                                      recipient_number=(recipient or None))
         media_ids.append(str(field(up, "id", "") or field(up, "media_id", "")))
     if media_ids:
