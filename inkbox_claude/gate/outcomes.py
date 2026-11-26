@@ -11,6 +11,7 @@ bot. Every send still goes through the permission hook and the outbox.
 from __future__ import annotations
 
 from inkbox_claude.instance import ASSISTANT as _ASSISTANT, ASSISTANT_UPPER as _ASSISTANT_UPPER, ASSISTANT_EMAIL as _ASSISTANT_EMAIL, SERVER_NAME as _SERVER_NAME  # noqa: F401
+import os
 import json
 import logging
 import re
@@ -63,7 +64,10 @@ def ask_enabled() -> bool:
 
 SEND_MESSAGE_DESCRIPTION = (
     f"SEND A MESSAGE. This is how a run delivers anything to anyone, on any surface {_ASSISTANT} has: "
-    "iMessage, text message, email, Telegram or WhatsApp. to is \"requester\" (the person who asked, answered on "
+    "iMessage, text message, email, Telegram or WhatsApp. It can attach images (images) and any document, "
+    "such as a PDF (files, from a public link or a path): when someone asks you to drop or send a PDF or file "
+    "in a chat, attach it with files; never say you cannot send files and never send only a link when they "
+    "asked for the file. to is \"requester\" (the person who asked, answered on "
     "the surface they wrote from: this is how you give them your answer), \"aaron\", a person's name, or a "
     "group chat's name. surface is optional (imessage, telegram, sms, email, whatsapp): without it the surface they "
     f"last used with {_ASSISTANT} is picked. subject is for email only. The answer says where it went. "
@@ -76,7 +80,11 @@ SEND_MESSAGE_SCHEMA = {"type": "object", "required": ["to", "text"], "properties
     "surface": {"type": "string", "description": "optional: imessage, telegram, sms, email or whatsapp"},
     "subject": {"type": "string", "description": "email subject, only for email"},
     "images": {"type": "array", "items": {"type": "string"},
-               "description": "PNG paths returned by render_image to attach (up to 4), on any surface"}}}
+               "description": "PNG paths returned by render_image to attach (up to 4), on any surface"},
+    "files": {"type": "array", "items": {"type": "string"},
+              "description": "documents to attach (up to 5): each a public http(s) link or a local file path. A link "
+                             "is downloaded first, so the person gets the actual file (a PDF, a spreadsheet), not a "
+                             "link. Works on Telegram, email, text message, iMessage and WhatsApp."}}}
 NOTHING_TO_SEND_DESCRIPTION = (
     "END WITHOUT SENDING ANYTHING. Call this when this run has nothing worth telling anyone (for example a "
     "check found nothing new). It is recorded on the task with your reason and nothing is sent. Then stop."
@@ -498,12 +506,17 @@ def _task_id(manager: Any, req: Any) -> Optional[int]:
         return None
 
 
+def _files_note(meta: Dict[str, Any]) -> str:
+    names = [os.path.basename(str(p)) for p in (meta.get("attach_files") or [])]
+    return f" [attached: {', '.join(names)}]" if names else ""
+
+
 async def send_message(args: Dict[str, Any], manager: Any, request: Any,
                        log: Optional[Dict[str, Any]] = None) -> str:
     if not enabled() or manager is None or request is None:
         return "Sending is unavailable for this run. Put the message in your final status."
     text = str(args.get("text") or "").strip()
-    if not text and not args.get("images"):
+    if not text and not args.get("images") and not args.get("files"):
         return "Give the text of the message."
     try:
         dest = resolve(manager, request, args.get("to"), args.get("surface"))
@@ -516,6 +529,12 @@ async def send_message(args: Dict[str, Any], manager: Any, request: Any,
             meta["generated_images"] = imagetool.allowed_image_paths(args.get("images"))
         except ValueError as exc:
             return str(exc)
+    if args.get("files"):
+        from . import attachfiles
+        try:
+            meta["attach_files"] = await attachfiles.resolve_files(args.get("files"))
+        except ValueError as exc:
+            return f"Not sent: {exc}"
     subject = str(args.get("subject") or "").strip()
     if dest["mode"] == "email":
         if subject:
@@ -539,7 +558,7 @@ async def send_message(args: Dict[str, Any], manager: Any, request: Any,
         try:
             tid = _task_id(manager, request)
             if tid:
-                manager.store.task_event(tid, "note", f"Held for Aaron's yes: to {describe(dest)}: {text}",
+                manager.store.task_event(tid, "note", f"Held for Aaron's yes: to {describe(dest)}: {text}" + _files_note(meta),
                                          chat_id=dest["record"], request_id=request.id)
         except Exception as exc:
             logger.warning("[outcomes] #%s could not record a held send: %s", request.id, exc)
@@ -559,7 +578,7 @@ async def send_message(args: Dict[str, Any], manager: Any, request: Any,
                                   reply_to=request.inbound_id if dest["requester"] else None, role=role)
         tid = _task_id(manager, request)
         if tid:
-            manager.store.task_event(tid, "outbound", f"To {describe(dest)}: {text}",
+            manager.store.task_event(tid, "outbound", f"To {describe(dest)}: {text}" + _files_note(meta),
                                      chat_id=dest["record"], request_id=request.id)
     except Exception as exc:
         logger.warning("[outcomes] #%s could not record a send: %s", request.id, exc)

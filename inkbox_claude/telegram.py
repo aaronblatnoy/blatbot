@@ -97,6 +97,25 @@ async def send_photo(chat_id: str, path: str, caption: str = "") -> None:
             raise RuntimeError(f"telegram sendPhoto failed: {str(r.json())[:200]}")
 
 
+async def send_document(chat_id: str, path: str, caption: str = "") -> None:
+    """One local file of any kind (a PDF, a spreadsheet, an image sent as is) as a Telegram document."""
+    from pathlib import Path as _P
+    p = _P(path)
+    data = p.read_bytes()
+    form = {"chat_id": str(chat_id)}
+    if caption:
+        form["caption"] = caption[:1000]
+    async with httpx.AsyncClient(timeout=120.0) as client:
+        r = await client.post(f"{API}/bot{token()}/sendDocument", data=form, files={"document": (p.name, data)})
+        body = {}
+        try:
+            body = r.json()
+        except Exception:
+            pass
+        if r.status_code >= 400 or not body.get("ok"):
+            raise RuntimeError(f"telegram sendDocument failed: {str(body or r.text)[:200]}")
+
+
 # ---- emoji reactions -------------------------------------------------------------------------
 # Telegram lets a bot react with these (the free set). Compared without the emoji variation selector.
 REACTIONS = set(
