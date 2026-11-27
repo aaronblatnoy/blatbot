@@ -78,7 +78,53 @@ def base_url() -> str:
     return (os.getenv("GRAPHITI_URL") or "").strip().rstrip("/")
 
 
+# MEMORY_BACKEND=do_brain (Gondroid): long-term memory is the Definite Optimists team brain
+# (DO_BRAIN_API_URL, DO_BRAIN_KEY), not a Graphiti service of this instance's own. Reads are its
+# /api/search facts plus its newest raw entries (/api/recent), as gondroid.py answered from; writes
+# are not made here, because ledger mode (teamledger.py) already writes every message in its own
+# wording. The team brain is one shared record with no per-chat provenance, and such an instance
+# answers only its allowlisted people (TELEGRAM_ANSWER_ONLY), so every reader sees all of it.
+DO_BRAIN_DEFAULT_URL = "https://definite-optimists-brain.aaronblatnoy.workers.dev"
+DO_BRAIN_RECENT = 20          # newest raw entries added to a recall, each clipped to 600 characters
+
+
+def backend() -> str:
+    return (os.getenv("MEMORY_BACKEND") or "graphiti").strip().lower()
+
+
+def _do_brain() -> bool:
+    return backend() == "do_brain"
+
+
+def _brain_request(path: str, payload: Optional[Dict[str, Any]], timeout: float) -> Any:
+    base = (os.getenv("DO_BRAIN_API_URL") or DO_BRAIN_DEFAULT_URL).strip().rstrip("/")
+    headers = {"Authorization": "Bearer " + (os.getenv("DO_BRAIN_KEY") or "").strip(),
+               "User-Agent": (os.getenv("INSTANCE_NAME") or "gateway"), "Content-Type": "application/json"}
+    req = urllib.request.Request(base + path, data=None if payload is None else json.dumps(payload).encode(),
+                                 headers=headers, method="GET" if payload is None else "POST")
+    with urllib.request.urlopen(req, timeout=timeout) as resp:
+        raw = resp.read()
+    return json.loads(raw) if raw else None
+
+
+def _brain_search(q: str, max_facts: int, timeout: float) -> List[Dict[str, Any]]:
+    res = _brain_request("/api/search", {"query": q, "limit": max(max_facts, 20)}, timeout)
+    facts = [dict(f) for f in ((res or {}).get("facts") or []) if isinstance(f, dict) and str(f.get("fact") or "").strip()]
+    try:
+        recent = _brain_request(f"/api/recent?limit={DO_BRAIN_RECENT}", None, timeout)
+        for m in (recent or {}).get("memories") or []:
+            text = " ".join(str(m.get("content") or "").split())[:600]
+            if text:
+                facts.append({"fact": "Recent team brain entry: " + text,
+                              "created_at": m.get("created_at") or m.get("valid_at") or ""})
+    except Exception as exc:  # noqa: BLE001 - search facts still count without the newest entries
+        _log_error("recent", exc)
+    return facts
+
+
 def enabled() -> bool:
+    if _do_brain():
+        return bool((os.getenv("DO_BRAIN_KEY") or "").strip())
     return bool(base_url())
 
 
@@ -258,7 +304,7 @@ def _ensure_worker() -> None:
 def record(chat_id: str, kind: str, text: str, mode: str = "", created_at: Optional[float] = None,
            message_id: Optional[int] = None, speaker: str = "") -> None:
     """Hand one stored message to the graph. Returns at once; never raises."""
-    if not enabled() or not str(text or "").strip():
+    if _do_brain() or not enabled() or not str(text or "").strip():
         return
     try:
         _queue.put_nowait(episode(chat_id, kind, text, mode, created_at, message_id, speaker=speaker))
@@ -324,8 +370,14 @@ def search(query: str, chat_id: str, is_approver: bool, max_facts: int = MAX_FAC
         return []
     if groups is _ALL:
         groups = None if is_approver else [group_for(chat_id)]
-    if groups is not None and not groups:
+    if groups is not None and not groups and not _do_brain():
         return []
+    if _do_brain():
+        try:
+            return _brain_search(q, max_facts, timeout)[:max_facts + DO_BRAIN_RECENT]
+        except Exception as exc:  # noqa: BLE001 - fails closed: no facts
+            _log_error("search", exc)
+            return []
     try:
         fetch = max_facts if groups is None else max(max_facts, min(max_facts * FETCH_FACTOR, MAX_FETCH))
         res = _post("/search", {"query": q, "max_facts": fetch, "group_ids": [SHARED_GROUP]}, timeout)

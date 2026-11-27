@@ -69,7 +69,7 @@ def test_blatbot_profile_is_todays_environment(tmp_path, monkeypatch):
     home = tmp_path / "home"
     (home / "blatbot").mkdir(parents=True)
     (home / "blatbot" / ".env").write_text("ASSISTANT_NAME=Blatbot\nINKBOX_BRIDGE_PORT=8771\n")
-    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.setattr(profile, "_user_home", lambda: str(home))
     live = dict(profile.parse_env_file(str(home / "blatbot" / ".env")))
     live["CLAUDE_MODEL"] = "sonnet"            # exported by ~/blatbot/watchdog.sh
     environ = dict(live)
@@ -90,13 +90,14 @@ def test_no_profile_means_blatbot_identity():
 def test_gondroid_profile_applies_before_modules_read_it(tmp_path):
     """The profile is applied when the package is imported, before instance.py reads it."""
     env = {k: v for k, v in os.environ.items() if k not in ("ASSISTANT_NAME", "INKBOX_BRIDGE_PORT")}
+    # A separate HOME for the instance's runs does not move its files: ~ is the account's home.
     env.update({"HOME": str(tmp_path), "INSTANCE_PROFILE": str(INSTANCES / "gondroid.yaml")})
     out = subprocess.run([sys.executable, "-c",
                           "import os; from inkbox_claude import instance as i; "
                           "print(i.ASSISTANT, os.environ['INKBOX_BRIDGE_PORT'], os.environ['GATE_DB_PATH'], "
                           "os.environ['GATE_SCOPES_FILE'])"],
                          cwd=ROOT, env=env, capture_output=True, text=True, check=True).stdout.split()
-    assert out[:3] == ["Gondroid", "8772", f"{tmp_path}/gondroid/gate.db"]
+    assert out[:3] == ["Gondroid", "8772", f"{profile._user_home()}/gondroid/gate.db"]
     assert Path(out[3]).is_file()                             # the scope registry it names exists
 
 

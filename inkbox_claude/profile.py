@@ -16,7 +16,8 @@ runs from this same code with nothing but a different profile:
 How it is applied: when INSTANCE_PROFILE names a file, importing the package applies it before
 any module reads the environment. Nothing ever overrides a variable the process already has
 (the real environment wins); after that `env` wins over `secret_files`, which wins over
-`env_files`. `~` and `${VAR}` are expanded in file paths and in `env` values. A missing
+`env_files`. `~` (the account's home folder, even when $HOME is set elsewhere) and `${VAR}` are expanded
+in file paths and in `env` values. A missing
 secret or env file is skipped with a warning, never an exception: a profile must not stop the
 process from starting.
 
@@ -51,7 +52,20 @@ def _expand(value: str, extra: Optional[Dict[str, str]] = None) -> str:
         name = m.group(1)
         got = (extra or {}).get(name, os.environ.get(name))
         return m.group(0) if got is None else got
-    return os.path.expanduser(_VAR.sub(sub, str(value)))
+    out = _VAR.sub(sub, str(value))
+    if out == "~" or out.startswith("~/"):
+        out = _user_home() + out[1:]
+    return out
+
+
+def _user_home() -> str:
+    """The account's own home folder (password database), not $HOME: an instance may give its
+    runs a separate HOME (deploy/instances/gondroid.service does) and still finds its files."""
+    try:
+        import pwd
+        return pwd.getpwuid(os.getuid()).pw_dir
+    except Exception:  # noqa: BLE001
+        return os.path.expanduser("~")
 
 
 def read(path: str) -> Dict[str, Any]:

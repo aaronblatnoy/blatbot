@@ -15,11 +15,13 @@ Configuration (environment):
 
 from __future__ import annotations
 
+import json
 import logging
 import os
 import re
 import secrets
-from typing import Any, Dict, Optional, Tuple
+import time
+from typing import Any, Callable, Dict, Optional, Tuple
 
 import httpx
 
@@ -54,7 +56,65 @@ def webhook_secret() -> str:
     return s
 
 
+# ---- shadow mode and the send guard ----------------------------------------------------------
+# TELEGRAM_SHADOW=1: every Bot API call that would change anything in Telegram (send, react,
+# typing, webhook) is appended to <INKBOX_CLAUDE_HOME>/shadow/telegram.jsonl instead of made, so an
+# instance can run beside the live one on the same traffic and be compared. Reads still go out.
+# A send guard (set by teamledger for an instance that answers only some people) is asked before
+# any message, photo, file or reaction goes to a chat; it raises for a chat it does not allow.
+_READ_PREFIXES = ("get",)
+_send_guard: Optional[Callable[[str], bool]] = None
+
+
+def shadow() -> bool:
+    return (os.getenv("TELEGRAM_SHADOW") or "").strip().lower() in {"1", "true", "yes", "on"}
+
+
+def is_read_method(method: str) -> bool:
+    return method.startswith(_READ_PREFIXES)
+
+
+def shadow_record(kind: str, row: Dict[str, Any], base: str = "") -> None:
+    base = base or os.path.join(os.path.expanduser(os.getenv("INKBOX_CLAUDE_HOME") or "~/.inkbox-claude"), "shadow")
+    try:
+        os.makedirs(base, exist_ok=True)
+        with open(os.path.join(base, f"{kind}.jsonl"), "a", encoding="utf-8") as f:
+            f.write(json.dumps({"at": time.time(), **row}, ensure_ascii=False, default=str) + "\n")
+    except OSError as exc:
+        logger.warning("[telegram] shadow record failed: %s", exc)
+
+
+def set_send_guard(fn: Optional[Callable[[str], bool]]) -> None:
+    global _send_guard
+    _send_guard = fn
+
+
+class SendRefused(RuntimeError):
+    pass
+
+
+def check_send(chat_id: str, method: str) -> None:
+    """Raise SendRefused when the guard does not allow this chat."""
+    if _send_guard is not None and method not in ("deleteWebhook", "setWebhook") and not _send_guard(str(chat_id)):
+        logger.warning("[telegram] %s to chat %s refused: not an allowed chat for this instance", method, chat_id)
+        raise SendRefused(f"telegram {method} to chat {chat_id} refused for this instance")
+
+
+def _intercept(method: str, payload: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    """Shadow or guard a write call. Returns a stand-in result when the call must not be made."""
+    if is_read_method(method):
+        return None
+    if shadow():
+        shadow_record("telegram", {"method": method, "payload": payload})
+        return {"message_id": 0, "shadow": True}
+    check_send(str(payload.get("chat_id") or ""), method)
+    return None
+
+
 async def _call(method: str, payload: Dict[str, Any], timeout: float = 20.0) -> Dict[str, Any]:
+    stand_in = _intercept(method, payload)
+    if stand_in is not None:
+        return stand_in
     async with httpx.AsyncClient(timeout=timeout) as client:
         r = await client.post(f"{API}/bot{token()}/{method}", json=payload)
         r.raise_for_status()
@@ -84,6 +144,8 @@ async def send_photo(chat_id: str, path: str, caption: str = "") -> None:
     """One local image as a Telegram photo (a document when it is too big or too tall for a photo)."""
     from pathlib import Path as _P
     p = _P(path)
+    if _intercept("sendPhoto", {"chat_id": str(chat_id), "path": str(path), "caption": caption}) is not None:
+        return
     data = p.read_bytes()
     form = {"chat_id": str(chat_id)}
     if caption:
@@ -127,6 +189,8 @@ def clean_reaction(emoji: str) -> str:
 async def react(chat_id: str, message_id: str, emoji: str) -> None:
     """Put an emoji reaction on one message (setMessageReaction); an empty emoji clears it."""
     reaction = [{"type": "emoji", "emoji": clean_reaction(emoji)}] if emoji else []
+    if _intercept("setMessageReaction", {"chat_id": str(chat_id), "message_id": message_id, "reaction": reaction}) is not None:
+        return
     async with httpx.AsyncClient(timeout=20.0) as client:
         r = await client.post(f"{API}/bot{token()}/setMessageReaction",
                               json={"chat_id": str(chat_id), "message_id": int(message_id), "reaction": reaction})
@@ -157,6 +221,31 @@ async def set_webhook(public_url: str) -> Dict[str, Any]:
     await remember_username(me)
     logger.info("[telegram] webhook set: %s -> @%s", url, me.get("username") or "?")
     return me
+
+
+async def get_me() -> Dict[str, Any]:
+    """The bot's own identity; also kept for @mention matching (remember_username)."""
+    me = await _call("getMe", {})
+    await remember_username(me)
+    return me
+
+
+def poll_enabled() -> bool:
+    """TELEGRAM_POLL=1: take updates by long polling (getUpdates) instead of a webhook, for an
+    instance with no public URL. Never in shadow mode: one poller per bot token at a time, and
+    the token belongs to the deployment being shadowed."""
+    return enabled() and not shadow() and (os.getenv("TELEGRAM_POLL") or "").strip().lower() in {"1", "true", "yes", "on"}
+
+
+async def get_updates(offset: int, timeout_s: int = 50) -> list:
+    async with httpx.AsyncClient(timeout=timeout_s + 20) as client:
+        r = await client.post(f"{API}/bot{token()}/getUpdates",
+                              json={"offset": offset, "timeout": timeout_s,
+                                    "allowed_updates": ["message", "edited_message"]})
+        data = r.json()
+    if not data.get("ok"):
+        raise RuntimeError(f"telegram getUpdates failed: {str(data.get('description'))[:200]}")
+    return list(data.get("result") or [])
 
 
 def _names_the_bot(text: str, msg: Dict[str, Any]) -> bool:

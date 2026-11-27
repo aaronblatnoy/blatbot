@@ -89,6 +89,7 @@ try:
     from .tools import build_inkbox_mcp_server
     from .webhook_providers import match_provider
     from . import telegram
+    from . import teamledger
     from .gate import rooms
     from .gate import roommode
 except ImportError:  # pragma: no cover - direct local import/test fallback
@@ -122,6 +123,7 @@ except ImportError:  # pragma: no cover - direct local import/test fallback
     from tools import build_inkbox_mcp_server
     from webhook_providers import match_provider
     import telegram
+    import teamledger
     from gate import rooms
     from gate import roommode
 
@@ -889,6 +891,17 @@ class InkboxGateway:
             await self._open_tunnel()
         from .gate import pages as _pages
         _pages.set_public_base(self._public_url)
+        if offline and telegram.enabled():
+            # No tunnel, so no setWebhook (which is where the bot's own @name is learned).
+            try:
+                me = await telegram.get_me()
+                logger.info("[bridge] telegram @%s (no public URL: %s)", me.get("username") or "?",
+                            "long polling" if telegram.poll_enabled() else
+                            "shadow, updates arrive at the webhook" if telegram.shadow() else "webhook only")
+            except Exception as exc:
+                logger.error("[bridge] telegram getMe failed: %s", exc)
+        if teamledger.enabled():
+            await teamledger.start()
 
         if not offline:
             await asyncio.to_thread(self._patch_identity_objects)
@@ -955,6 +968,8 @@ class InkboxGateway:
             except Exception as exc:
                 logger.warning("[inbox] replay failed; new events can still arrive: %s", exc)
         await self._catch_up_a2a_tasks()
+        if telegram.poll_enabled():
+            self._tg_poller = asyncio.create_task(self._telegram_poll(), name="telegram-poll")
 
         logger.info(
             "[bridge] ready — %s / %s / %s → Claude Code in %s",
@@ -1709,6 +1724,9 @@ class InkboxGateway:
             logger.exception("[bridge] hosted call completion failed call_id=%s", call_id)
 
     async def _cleanup(self) -> None:
+        poller = getattr(self, "_tg_poller", None)
+        if poller is not None:
+            poller.cancel()
         if self.inbox is not None:
             await self.inbox.close()
         jobs = list(self._hosted_call_jobs.values())
@@ -2292,6 +2310,31 @@ class InkboxGateway:
         else:
             await session.handle_inbound(text, "telegram", meta)
 
+    async def _telegram_poll(self) -> None:
+        """TELEGRAM_POLL=1: take updates with getUpdates (no public URL needed). The webhook is
+        removed first: Telegram refuses getUpdates while one is set. Each update is handled in
+        its own task, as the webhook route handles each request."""
+        try:
+            await telegram._call("deleteWebhook", {"drop_pending_updates": False})
+        except Exception as exc:
+            logger.warning("[bridge] telegram deleteWebhook failed: %s", exc)
+        logger.info("[bridge] telegram: long polling")
+        offset = 0
+        while True:
+            try:
+                updates = await telegram.get_updates(offset)
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:
+                logger.error("[bridge] telegram getUpdates: %s", exc)
+                await asyncio.sleep(5)
+                continue
+            for upd in updates:
+                offset = max(offset, int(upd.get("update_id") or 0) + 1)
+                task = asyncio.create_task(self._telegram_update(upd), name="telegram-update")
+                task.add_done_callback(lambda t: (not t.cancelled() and t.exception()) and logger.error(
+                    "[bridge] telegram update failed: %r", t.exception()))
+
     async def _handle_telegram(self, request: "web.Request") -> "web.Response":
         """One Telegram update. Telegram echoes the secret we registered with the
         webhook, which is what proves the update is really theirs; anything else is
@@ -2304,6 +2347,11 @@ class InkboxGateway:
             update = await request.json()
         except Exception:
             return web.Response(status=400, text="invalid json")
+        return await self._telegram_update(update if isinstance(update, dict) else {})
+
+    async def _telegram_update(self, update: Dict[str, Any]) -> "web.Response":
+        """One Telegram update, however it arrived (the webhook above, or the long-polling loop
+        of an instance with no public URL)."""
         joined = telegram.parse_new_members(update if isinstance(update, dict) else {})
         if joined is not None:
             self._index_telegram_members(joined)
@@ -2322,6 +2370,17 @@ class InkboxGateway:
             if self._is_duplicate(key):
                 logger.info("[bridge] telegram update %s already handled; ignored", key)
                 return web.json_response({"ok": True, "duplicate": True})
+        if teamledger.enabled():
+            # Ledger mode (Gondroid): the message is recorded whoever sent it; only an answerer's
+            # DM, or their @mention in a trusted group, goes on to be answered.
+            seen = await teamledger.take(update)
+            if not seen["answerable"]:
+                if seen["trusted"] and u["is_group"]:
+                    self._telegram_overhear(self._telegram_known_name(u))
+                return web.json_response({"ok": True, "ledger": True})
+            if seen["file_request"] and await teamledger.file_request(update):
+                return web.json_response({"ok": True, "ledger": True, "file": True})
+            u["addressed"] = True
         if u.get("media") or (u.get("reply_to") or {}).get("media"):
             # Files are read first (vision model, file parsers), in the background so the
             # webhook answers at once; the message then goes the usual way with its files
@@ -4258,6 +4317,8 @@ class InkboxGateway:
                 raise
 
     async def _catch_up_a2a_tasks(self) -> None:
+        if _inkbox_offline():
+            return  # no Inkbox identity, so no agent-to-agent tasks to catch up on
         try:
             for key, entry in self._read_a2a_registry().items():
                 if entry.get("state") == "finalized":

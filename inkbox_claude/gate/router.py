@@ -221,11 +221,13 @@ class RouterOutput(BaseModel):
 
 class Router:
     def __init__(self, api_key: str, model: str = "deepseek-chat",
-                 base_url: str = "https://api.deepseek.com",
+                 base_url: str = "",
                  standing_path: Optional[str] = None, timeout: float = 60.0):
         self.api_key = api_key
         self.model = model
-        self.base_url = base_url.rstrip("/")
+        # DEEPSEEK_BASE_URL points the writer model at another OpenAI-compatible endpoint (Gondroid:
+        # DeepSeek V3.2 on Bedrock mantle); unset, it is DeepSeek's own API as before.
+        self.base_url = (base_url or os.getenv("DEEPSEEK_BASE_URL") or "https://api.deepseek.com").rstrip("/")
         self.standing_path = standing_path
         self.timeout = timeout
 

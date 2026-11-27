@@ -2,7 +2,12 @@
 # instance of this gateway: same code as Blatbot, its own identity, state, database, port and
 # scope registry. Started by deploy/instances/gondroid.service (systemd user unit `gondroid` on
 # black-sky, PartOf=blatbot.service, so every Blatbot deploy restarts it on the new code too).
-# Secrets live in ~/gondroid/.env and the secret files below, never in this file.
+# Secrets live in ~/gondroid/.env and the secret files below, never in this file. ~/gondroid/.env
+# holds: GATE_APPROVER_TELEGRAM_ID (Aaron), TELEGRAM_ANSWER_ONLY (Stanley; the owner is always
+# included), DO_BRAIN_KEY (brain key "gondroid"), BEDROCK_VISION_KEY and DEEPSEEK_API_KEY (the
+# venture Bedrock mantle key), CLAUDE_CODE_OAUTH_TOKEN, TELEGRAM_WEBHOOK_SECRET.
+# Shadow phase: the unit sets TELEGRAM_SHADOW=1 (nothing sent, nothing written to the brain; both
+# captured under ~/gondroid/shadow), and the old deployment tees its updates to /telegram.
 name: gondroid
 description: The Definite Optimists team's Telegram ledger; answers Aaron and Stanley only.
 env_files:
@@ -41,3 +46,23 @@ env:
   CLAUDE_MODEL: sonnet
   GATE_EXECUTOR: claude
   GATE_EXECUTOR_FALLBACK: claude
+  # Telegram: long polling (no public URL). Off by itself while TELEGRAM_SHADOW=1.
+  TELEGRAM_POLL: "1"
+  # Gondroid's features (inkbox_claude/teamledger.py): ledger, answer only Aaron and Stanley,
+  # stored files and "send me the <name>", other bots' messages from deploy/gondroid/bridge.py.
+  TELEGRAM_LEDGER: "1"
+  LEDGER_FILES: "1"
+  LEDGER_INBOX: "1"
+  LEDGER_STATE_DIR: ~/gondroid/ledger
+  # Aaron is not sent a notice of how Stanley's questions went (the old Gondroid never did);
+  # what the gate would ask him (approvals, ask_aaron) still reaches his Telegram DM.
+  GATE_OWNER_NOTICES: "0"
+  # Long-term memory is the Definite Optimists team brain (written by the ledger, read by the gate).
+  MEMORY_BACKEND: do_brain
+  DO_BRAIN_API_URL: https://definite-optimists-brain.aaronblatnoy.workers.dev
+  # Vision (images, scans) and the writer model on Bedrock mantle, per Aaron's model choice.
+  FILES_VISION: bedrock
+  BEDROCK_VISION_URL: https://bedrock-mantle.us-east-2.api.aws/v1
+  BEDROCK_VISION_MODEL: qwen.qwen3-vl-235b-a22b-instruct
+  DEEPSEEK_BASE_URL: https://bedrock-mantle.us-east-2.api.aws/v1
+  DEEPSEEK_MODEL: deepseek.v3.2

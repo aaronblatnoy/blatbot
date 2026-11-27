@@ -3167,6 +3167,18 @@ class GateSessionManager:
 
     async def send_to_approver(self, text: str, *, kind: str = "reply") -> None:
         conv = self.approver_conv
+        if not conv and self.approver_telegram_id:
+            # An instance with no iMessage line (Gondroid: Telegram only) reaches Aaron in his
+            # Telegram DM with the bot. GATE_OWNER_NOTICES=0 keeps the "how someone else's
+            # request went" notices out of it (Aaron reads the answer in the chat it went to).
+            if kind == "notice" and (os.getenv("GATE_OWNER_NOTICES") or "1").strip().lower() in ("0", "false", "no", "off"):
+                logger.info("[gate] owner notice not sent (GATE_OWNER_NOTICES=0)")
+                return
+            tid = str(self.approver_telegram_id)
+            await self.send(f"tg:{tid}", text, "telegram",
+                            {"telegram_chat_id": tid, "telegram_user_id": tid, "sender": f"telegram:{tid}"},
+                            kind=kind, hold_exempt=True)
+            return
         await self.send(f"imessage:{conv}", text, "imessage", {"conversation_id": conv}, kind=kind,
                         hold_exempt=True)
 

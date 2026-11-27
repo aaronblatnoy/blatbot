@@ -804,6 +804,18 @@ async def handle(update: Dict[str, Any]) -> None:
     await asyncio.gather(*jobs)
 
 
+# SHADOW_TEE_URL: also hand every update, unchanged, to a shadow deployment (the gateway instance of
+# Gondroid in TELEGRAM_SHADOW mode, deploy/instances/gondroid.yaml), so it sees the same traffic without
+# polling this bot token itself. Fire and forget: the shadow can never slow or break this bot.
+TEE_URL = os.environ.get("SHADOW_TEE_URL", "").strip()
+TEE_SECRET = os.environ.get("SHADOW_TEE_SECRET", "").strip()
+
+
+async def tee_update(update: Dict[str, Any]) -> None:
+    async with httpx.AsyncClient(timeout=10.0) as c:
+        await c.post(TEE_URL, json=update, headers={"X-Telegram-Bot-Api-Secret-Token": TEE_SECRET})
+
+
 async def main() -> None:
     ME.update(await tg("getMe", {}))
     await tg("deleteWebhook", {"drop_pending_updates": False})
@@ -827,6 +839,9 @@ async def main() -> None:
             continue
         for u in updates:
             offset = u["update_id"] + 1
+            if TEE_URL:
+                tee = asyncio.create_task(tee_update(u))
+                tee.add_done_callback(lambda t: t.exception() and log.info("tee failed: %s", type(t.exception()).__name__))
             task = asyncio.create_task(handle(u))
             task.add_done_callback(lambda t: t.exception() and log.error("update failed: %r", t.exception()))
 
