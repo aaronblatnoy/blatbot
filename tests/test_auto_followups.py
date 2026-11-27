@@ -86,7 +86,8 @@ def test_timed_out_run_gets_a_checkback_that_tells_the_person_when_it_was_lost(t
     assert m.store.mark_followup_fired(again[0]["id"])
     asyncio.run(m._run_followup(m.store.get_followup(again[0]["id"])))
     assert len(sent) == 1 and sent[0][0] == "imessage:person"
-    assert f"stopped before it finished, so I have no answer for it yet (#{req.id})" in sent[0][1]
+    assert "stopped before it finished, so I have no answer for it yet:" in sent[0][1]
+    assert f"#{req.id}" not in sent[0][1]
     done = m.store.get_request(req.id)
     assert done.state == "failed" and not done.status.get("timed_out")
 

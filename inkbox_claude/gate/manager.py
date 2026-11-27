@@ -5539,13 +5539,15 @@ class GateSessionManager:
             # The late result came back and was delivered (or it moved on to an ask).
             self.store.finish_followup(row["id"], f"Already finished ({req.state}).")
             return
+        # A request number means something to Aaron; to anyone else it is noise.
+        ref = f" (#{req.id})" if self._is_owner_request(req) else ""
         if req.id in getattr(self.executor, "late_runs", set()):
             if self.store.count_auto_followups(req.id, "checkback") < AUTO_CHECKBACK_MAX:
                 self.store.finish_followup(row["id"], "Still running; checking again.")
                 self._arm_checkback(req)
                 return
             self.store.finish_followup(row["id"], "Still running after every check-back.")
-            message = (f"Still working on #{req.id}: {wording.plain_title(self.store, req)}. "
+            message = (f"Still working on that one{ref}: {wording.plain_title(self.store, req)}. "
                        "It is taking much longer than usual; the answer follows when it finishes.")
             await self._deliver_followup_text(row, req, message, kind="proactive")
             return
@@ -5556,7 +5558,7 @@ class GateSessionManager:
         self.store.set_state(req.id, "failed", status=saved)
         self.store.finish_followup(row["id"], "Run was lost; told the person.")
         self.task_note(req, "failed", f"Stopped before it finished, after the live timeout: {req.summary}", state="open")
-        message = (f"That one stopped before it finished, so I have no answer for it yet (#{req.id}): "
+        message = (f"That one stopped before it finished, so I have no answer for it yet{ref}: "
                    f"{wording.plain_title(self.store, req)}. Ask me again and I will start it over.")
         await self._deliver_followup_text(row, req, message, kind="proactive")
 
