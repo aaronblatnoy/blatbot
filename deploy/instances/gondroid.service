@@ -1,0 +1,30 @@
+# Gondroid: the Definite Optimists team's Telegram ledger, a second instance of the Blatbot gateway.
+# Same code tree as Blatbot (~/blatbot/app), its own profile (deploy/instances/gondroid.yaml), state
+# under ~/gondroid, and its own HOME so its Claude Code runs keep their sessions and settings apart
+# from Blatbot's. PartOf=blatbot.service: the Blatbot deploy (git pull, systemctl --user restart
+# blatbot) restarts Gondroid on the new code too, so every Blatbot upgrade reaches it.
+# Install: cp deploy/instances/gondroid.service ~/.config/systemd/user/ && systemctl --user daemon-reload
+#          && systemctl --user enable --now gondroid
+# Shadow phase only: a drop-in sets Environment=TELEGRAM_SHADOW=1 (gondroid.service.d/shadow.conf).
+[Unit]
+Description=Gondroid (second instance of the Blatbot gateway: Telegram ledger over the team brain)
+After=network-online.target blatbot.service
+PartOf=blatbot.service
+
+[Service]
+Type=simple
+WorkingDirectory=/home/aaron/gondroid
+Environment=HOME=/home/aaron/gondroid/home
+Environment=INSTANCE_PROFILE=/home/aaron/blatbot/app/deploy/instances/gondroid.yaml
+Environment=PATH=/home/aaron/.local/bin:/usr/local/bin:/usr/bin:/bin
+ExecStartPre=/usr/bin/mkdir -p /home/aaron/gondroid/home /home/aaron/gondroid/logs /home/aaron/gondroid/exec
+ExecStart=/home/aaron/blatbot/app/.venv/bin/inkbox-claude run
+Restart=always
+RestartSec=5
+TimeoutStopSec=20
+KillMode=mixed
+StandardOutput=append:/home/aaron/gondroid/logs/gateway.log
+StandardError=append:/home/aaron/gondroid/logs/gateway.log
+
+[Install]
+WantedBy=default.target
