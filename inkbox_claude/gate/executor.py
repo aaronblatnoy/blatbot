@@ -502,6 +502,9 @@ class Executor:
 
     async def _continue_after_timeout(self, req: Request, go_task: asyncio.Future,
                                       finalize: Any, finalize_exception: Any) -> None:
+        # Read by the gate's check-back follow-up: a timed-out request still in this
+        # set is alive and will deliver on its own; one missing from it was lost.
+        self.late_runs.add(req.id)
         try:
             try:
                 late_result = await go_task
@@ -516,6 +519,10 @@ class Executor:
             raise
         except Exception:  # noqa: BLE001 - orphaned delivery must never escape
             logger.exception("[gate] #%s background delivery failed", req.id)
+        finally:
+            self.late_runs.discard(req.id)
+
+    late_runs: "set[int]" = set()   # request ids still running past their live timeout
 
     allow_send = False        # set for one run, after the owner has read the draft and said yes
     held_send: Optional[Dict[str, Any]] = None   # the call that was stopped, for the gate to show him

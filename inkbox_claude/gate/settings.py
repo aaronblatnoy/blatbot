@@ -86,6 +86,11 @@ KNOBS: List[Dict[str, Any]] = [
     {"name": "GATE_FOLLOWUPS", "kind": "bool", "default": True, "group": "Safety",
      "label": "Let runs set follow-up timers",
      "help": "Lets ordinary runs check back later on work they already have permission to do."},
+    {"name": "GATE_AUTO_FOLLOWUPS", "kind": "bool", "default": True, "group": "Safety",
+     "label": "Check back on its own",
+     "help": "Reminds you about a request still waiting on your answer well before it expires, and "
+             "checks back on a run that went past the reply timeout so its result is delivered or "
+             "the person hears what happened."},
     {"name": "GATE_ACCESS_ASKS", "kind": "bool", "default": True, "group": "Safety",
      "label": "Let runs ask for access",
      "help": "Lets a run pause and ask for a missing system, then continue when access is decided."},

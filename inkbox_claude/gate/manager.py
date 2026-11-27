@@ -55,6 +55,13 @@ _MODE_LABEL = {
     "voice": "phone call", "telegram": "Telegram", "whatsapp": "WhatsApp",
 }
 EXPIRE_SECONDS = 24 * 3600
+# The gate's own follow-ups (no run sets these): a reminder to Aaron on a request that
+# waits on him, well before it would expire; and a check-back on a run that passed the
+# live timeout, so its result is delivered or the person is told what happened.
+AUTO_REMIND_AFTER = 6 * 3600
+AUTO_REMIND_BEFORE_EXPIRY = 4 * 3600
+AUTO_CHECKBACK_AFTER = 15 * 60
+AUTO_CHECKBACK_MAX = 8
 # How sure the event judgment must be that a message only handed over information
 # before a run that answered it without a tool call is accepted as done.
 INFO_ONLY_FLOOR = 0.6
@@ -3771,6 +3778,7 @@ class GateSessionManager:
             await self.send_schedule_notice(schedule, full_text, kind="approval")
         else:
             await self.send_to_approver(full_text, kind="approval")
+            self._arm_reminder(req)
 
     async def handle_ask(self, req: Request, status: Dict[str, Any]) -> None:
         """A run asked Aaron something (ask_aaron, always deferred). Park the request with
@@ -3788,6 +3796,7 @@ class GateSessionManager:
         owner = _owner_request(self, req)
         self.task_note(req, "request", f"Asked Aaron: {question}", state="waiting_aaron")
         await self.send_to_approver(outcomes.ask_text(req, question, kind, owner), kind="approval")
+        self._arm_reminder(req)
         if not owner:
             try:
                 await self.get(req.chat_id).send_to_sender(HANDOFF_LINE, role="access_wait")
@@ -3874,6 +3883,7 @@ class GateSessionManager:
                        ("Also needs to", labels), ("Why", why)],
                 handle=ownertext.reply_handle(req.id)),
                 kind="approval")
+            self._arm_reminder(req)
             if not _owner_request(self, req):
                 try:
                     await self.get(req.chat_id).send_to_sender(HANDOFF_LINE, role="access_wait")
@@ -3973,6 +3983,7 @@ class GateSessionManager:
         if req.state not in ("pending",):
             # Someone already answered this one. Say so rather than acting again.
             return {"ok": False, "error": f"#{req.id} is already {req.state}", "state": req.state}
+        self._cancel_auto_followups(req.id, ["remind"])
         if (req.status or {}).get("held_message"):
             return await self._decide_held_message(req, (decision or "").strip().lower(), actor)
         hold = (req.status or {}).get("admin_hold")
@@ -4856,6 +4867,7 @@ class GateSessionManager:
         if the fast timeout path already told the person something in the meantime."""
         fresh = self.store.get_request(req.id)
         req = fresh or req
+        self._cancel_auto_followups(req.id, ["checkback"])
         if status.get("deferred") and status["deferred"].get("kind") == "ask":
             try:
                 await self.handle_ask(req, status)
@@ -5160,6 +5172,11 @@ class GateSessionManager:
         self.store.set_state(req.id, "done" if ok else "failed",
                              status=status, raw_output=status.get("raw"))
         self.store.set_thread(req.chat_id, "idle")
+        if status.get("timed_out"):
+            if not req.schedule_id and not (req.status or {}).get("followup_id"):
+                self._arm_checkback(req)
+        else:
+            self._cancel_auto_followups(req.id)
         if (req.status or {}).get("followup_id"):
             # The timer owns delivery. This run is already approved, but it has no
             # inbound message to answer and must not close the ongoing task.
@@ -5338,6 +5355,7 @@ class GateSessionManager:
         # they are never in store.expire_older_than's result; they expire here too.
         await self.schedules.expire_stale_proposals(EXPIRE_SECONDS)
         for req in self.store.expire_older_than(EXPIRE_SECONDS):
+            self._cancel_auto_followups(req.id, ["remind"])
             self.store.set_thread(req.chat_id, "idle")
             if self.schedules.is_proposal_request(req):
                 self.schedules.proposal_expired(req)
@@ -5429,8 +5447,135 @@ class GateSessionManager:
             except Exception as exc:
                 logger.warning("[gate] follow-up loop failed: %s", exc)
 
+    # -- the gate's own follow-ups ------------------------------------------------
+    def _auto_followups_on(self) -> bool:
+        return bool(_settings.get("GATE_FOLLOWUPS") and _settings.get("GATE_AUTO_FOLLOWUPS")
+                    and getattr(self.store, "followups_available", False))
+
+    def _arm_auto_followup(self, req: Request, kind: str, due_at: float, note: str) -> Optional[int]:
+        if not self._auto_followups_on():
+            return None
+        try:
+            fid, created = self.store.arm_auto_followup(
+                kind=kind, request_id=req.id, task_id=int(self.store.task_id_for_request(req.id) or 0), chat_id=req.chat_id,
+                requester=req.sender or "", due_at=due_at, note=note)
+        except Exception as exc:
+            logger.warning("[gate] #%s could not set its %s follow-up: %s", req.id, kind, exc)
+            return None
+        if created:
+            logger.info("[gate] #%s %s follow-up #%s set for %s", req.id, kind, fid,
+                        time.strftime("%Y-%m-%d %H:%M", time.localtime(due_at)))
+        return fid
+
+    def _arm_reminder(self, req: Request) -> Optional[int]:
+        """Waiting on Aaron: remind him once, well before the request would expire."""
+        now = time.time()
+        due = min(now + AUTO_REMIND_AFTER, now + EXPIRE_SECONDS - AUTO_REMIND_BEFORE_EXPIRY)
+        return self._arm_auto_followup(req, "remind", due, f"Remind Aaron about #{req.id}")
+
+    def _arm_checkback(self, req: Request) -> Optional[int]:
+        """A run passed the live timeout: check back that its result reached the person."""
+        return self._arm_auto_followup(req, "checkback", time.time() + AUTO_CHECKBACK_AFTER,
+                                       f"Check back on #{req.id}")
+
+    def _cancel_auto_followups(self, request_id: int, kinds: Optional[List[str]] = None) -> None:
+        if not getattr(self.store, "followups_available", False):
+            return
+        try:
+            self.store.cancel_auto_followups(request_id, kinds)
+        except Exception as exc:
+            logger.warning("[gate] #%s could not retire its follow-ups: %s", request_id, exc)
+
+    @staticmethod
+    def _reminder_text(req: Request) -> str:
+        status = req.status or {}
+        deferred = status.get("deferred") or {}
+        ask = status.get("ask") or {}
+        answer = (deferred.get("kind") == "ask" or bool(ask)) and ask.get("kind") != "permission"
+        question = " ".join(str(ask.get("question") or "").split())
+        waiting = max(0.0, time.time() - float(req.updated_at or req.created_at or time.time()))
+        left = max(1, int(round((EXPIRE_SECONDS - waiting) / 3600)))
+        group, tagged_from, _ = ownertext.split_group_tag(req.original_message or req.summary or "")
+        return ownertext.compose(
+            "ask", f"Still waiting on you (#{req.id})",
+            facts=[("From", ownertext.person(req.sender_name or tagged_from, req.sender)),
+                   ("Task", ownertext.strip_group_tag(req.summary or "")),
+                   ("Question", question)],
+            tail=f"Nothing has been done yet. It expires in about {left} hours with no answer.",
+            handle=ownertext.reply_handle(req.id, answer=answer))
+
+    async def _deliver_followup_text(self, row: Dict[str, Any], original: Request, message: str,
+                                     *, kind: str = "reply") -> None:
+        route = self.store.thread_route(row["chat_id"])
+        mode = (route or {}).get("mode") or original.mode
+        if mode == "voice" and not self._is_owner_request(original) and len(_digits(row["requester"])) >= 7:
+            number = row["requester"]
+            await self.send(f"sms:{number}", message, "sms", {"to": number, "sender": number},
+                            chat_id=row["chat_id"], kind=kind)
+        elif mode == "voice" or not route:
+            await self.send_to_approver(message, kind=kind)
+        else:
+            await self.send(row["chat_id"], message, mode, route["meta"], chat_id=row["chat_id"], kind=kind)
+
+    async def _run_auto_followup(self, row: Dict[str, Any]) -> None:
+        req = self.store.get_request(int(row["request_id"]))
+        if req is None:
+            self.store.finish_followup(row["id"], "Request is gone.")
+            return
+        if row["kind"] == "remind":
+            status = req.status or {}
+            waiting = req.state == "pending" and bool(
+                status.get("deferred") or status.get("access_request") or status.get("confirm") or status.get("ask"))
+            if not waiting:
+                self.store.finish_followup(row["id"], f"No longer waiting ({req.state}).")
+                return
+            await self.send_to_approver(self._reminder_text(req), kind="proactive")
+            self.store.finish_followup(row["id"], "Reminded Aaron.")
+            self.task_note(req, "note", f"Reminded Aaron about #{req.id}.", state="waiting_aaron")
+            return
+        # checkback
+        status = req.status or {}
+        if req.state != "failed" or not status.get("timed_out"):
+            # The late result came back and was delivered (or it moved on to an ask).
+            self.store.finish_followup(row["id"], f"Already finished ({req.state}).")
+            return
+        # A request number means something to Aaron; to anyone else it is noise.
+        ref = f" (#{req.id})" if self._is_owner_request(req) else ""
+        if req.id in getattr(self.executor, "late_runs", set()):
+            if self.store.count_auto_followups(req.id, "checkback") < AUTO_CHECKBACK_MAX:
+                self.store.finish_followup(row["id"], "Still running; checking again.")
+                self._arm_checkback(req)
+                return
+            self.store.finish_followup(row["id"], "Still running after every check-back.")
+            message = (f"Still working on that one{ref}: {wording.plain_title(self.store, req)}. "
+                       "It is taking much longer than usual; the answer follows when it finishes.")
+            await self._deliver_followup_text(row, req, message, kind="proactive")
+            return
+        # Not running any more and nothing was delivered: a restart cut it off, or the
+        # background delivery died. Close it and say so instead of leaving silence.
+        saved = {k: v for k, v in status.items() if k != "timed_out"}
+        saved.update({"ok": False, "error": "stopped before it finished", "summary": "stopped before it finished"})
+        self.store.set_state(req.id, "failed", status=saved)
+        self.store.finish_followup(row["id"], "Run was lost; told the person.")
+        self.task_note(req, "failed", f"Stopped before it finished, after the live timeout: {req.summary}", state="open")
+        message = (f"That one stopped before it finished, so I have no answer for it yet{ref}: "
+                   f"{wording.plain_title(self.store, req)}. Ask me again and I will start it over.")
+        await self._deliver_followup_text(row, req, message, kind="proactive")
+
     async def _run_followup(self, row: Dict[str, Any], *, raise_errors: bool = False) -> None:
         from .hosttools import followup_time
+        if row.get("kind") in ("remind", "checkback"):
+            try:
+                await self._run_auto_followup(row)
+            except Exception as exc:
+                logger.warning("[gate] follow-up #%s (%s) failed: %s", row["id"], row.get("kind"), exc)
+                try:
+                    self.store.finish_followup(row["id"], str(exc), failed=True)
+                except Exception:
+                    pass
+                if raise_errors:
+                    raise
+            return
         request = None
         run_failed = False
         try:
@@ -5480,16 +5625,7 @@ class GateSessionManager:
                 return
             message = result if status.get("ok") else wording.failure_message(
                 wording.plain_title(self.store, request), status)
-            route = self.store.thread_route(row["chat_id"])
-            mode = (route or {}).get("mode") or original.mode
-            if mode == "voice" and not self._is_owner_request(original) and len(_digits(row["requester"])) >= 7:
-                number = row["requester"]
-                await self.send(f"sms:{number}", message, "sms", {"to": number, "sender": number},
-                                chat_id=row["chat_id"])
-            elif mode == "voice" or not route:
-                await self.send_to_approver(message)
-            else:
-                await self.send(row["chat_id"], message, mode, route["meta"], chat_id=row["chat_id"])
+            await self._deliver_followup_text(row, original, message)
         except Exception as exc:
             logger.warning("[gate] follow-up #%s failed: %s", row["id"], exc)
             try:

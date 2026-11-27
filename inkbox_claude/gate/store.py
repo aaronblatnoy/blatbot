@@ -823,7 +823,8 @@ CREATE TABLE IF NOT EXISTS followups (
   status TEXT NOT NULL DEFAULT 'pending',
   created_at REAL NOT NULL,
   fired_at REAL,
-  result TEXT NOT NULL DEFAULT ''
+  result TEXT NOT NULL DEFAULT '',
+  kind TEXT NOT NULL DEFAULT ''
 );
 CREATE INDEX IF NOT EXISTS followups_due ON followups(status, due_at);
 """
@@ -841,7 +842,8 @@ CREATE TABLE IF NOT EXISTS followups (
   status TEXT NOT NULL DEFAULT 'pending',
   created_at DOUBLE PRECISION NOT NULL,
   fired_at DOUBLE PRECISION,
-  result TEXT NOT NULL DEFAULT ''
+  result TEXT NOT NULL DEFAULT '',
+  kind TEXT NOT NULL DEFAULT ''
 );
 CREATE INDEX IF NOT EXISTS followups_due ON followups(status, due_at);
 """
@@ -1027,6 +1029,18 @@ class Store:
             # A timer table failure must not prevent ordinary requests from starting.
             try:
                 self._db.executescript(FOLLOWUPS_SCHEMA_PG if self._is_pg else FOLLOWUPS_SCHEMA)
+                # kind: '' for a timer a run set itself; 'remind' and 'checkback' for the
+                # ones the gate sets on its own (manager._arm_auto_followup).
+                if self._is_pg:
+                    have_kind = self._db.execute(
+                        "SELECT 1 FROM information_schema.columns WHERE table_schema = current_schema() "
+                        "AND table_name='followups' AND column_name='kind'").fetchone()
+                    if not have_kind:
+                        self._db.execute("ALTER TABLE followups ADD COLUMN IF NOT EXISTS kind TEXT NOT NULL DEFAULT ''")
+                else:
+                    cols = {r["name"] for r in self._db.execute("PRAGMA table_info(followups)")}
+                    if "kind" not in cols:
+                        self._db.execute("ALTER TABLE followups ADD COLUMN kind TEXT NOT NULL DEFAULT ''")
                 self._db.commit()
             except Exception as exc:
                 self.followups_available = False
@@ -4226,7 +4240,8 @@ class Store:
             else:
                 self._db.execute("BEGIN IMMEDIATE")
             pending = [dict(r) for r in self._db.execute(
-                "SELECT * FROM followups WHERE task_id=? AND status='pending' ORDER BY due_at, id", (task_id,)).fetchall()]
+                "SELECT * FROM followups WHERE task_id=? AND status='pending' AND COALESCE(kind,'')='' "
+                "ORDER BY due_at, id", (task_id,)).fetchall()]
             if len(pending) >= 3:
                 # Release the task lock before returning a full queue.
                 self._db.commit()
@@ -4237,6 +4252,45 @@ class Store:
                 (task_id, request_id, chat_id, requester, json.dumps(scopes), due_at, note, time.time()))
             self._db.commit()
             return cur.lastrowid, pending
+
+    def arm_auto_followup(self, *, kind: str, request_id: int, task_id: int, chat_id: str,
+                          requester: str, due_at: float, note: str) -> Tuple[Optional[int], bool]:
+        """One pending follow-up per request per kind, set by the gate itself. Returns
+        (id, created); a second arm for the same request and kind returns the first."""
+        with self._lock:
+            if self._is_pg:
+                self._db.execute("SELECT id FROM requests WHERE id=? FOR UPDATE", (request_id,)).fetchone()
+            else:
+                self._db.execute("BEGIN IMMEDIATE")
+            row = self._db.execute(
+                "SELECT id FROM followups WHERE request_id=? AND kind=? AND status='pending' ORDER BY id LIMIT 1",
+                (request_id, kind)).fetchone()
+            if row:
+                self._db.commit()
+                return int(row["id"]), False
+            cur = self._db.execute(
+                "INSERT INTO followups(task_id,request_id,chat_id,requester,scopes_json,due_at,note,status,created_at,kind) "
+                "VALUES(?,?,?,?,'[]',?,?,'pending',?,?)",
+                (task_id, request_id, chat_id, requester, due_at, note, time.time(), kind))
+            self._db.commit()
+            return cur.lastrowid, True
+
+    def cancel_auto_followups(self, request_id: int, kinds: Optional[List[str]] = None) -> int:
+        """Retire the gate's own pending follow-ups for a request that no longer needs them."""
+        kinds = kinds or ["remind", "checkback"]
+        marks = ",".join("?" for _ in kinds)
+        with self._lock:
+            cur = self._db.execute(
+                f"UPDATE followups SET status='cancelled' WHERE request_id=? AND status='pending' AND kind IN ({marks})",
+                (request_id, *kinds))
+            self._db.commit()
+            return cur.rowcount or 0
+
+    def count_auto_followups(self, request_id: int, kind: str) -> int:
+        with self._lock:
+            row = self._db.execute(
+                "SELECT COUNT(*) AS n FROM followups WHERE request_id=? AND kind=?", (request_id, kind)).fetchone()
+        return int(row["n"] if row else 0)
 
     def pending_followups(self, task_id: Optional[int] = None) -> List[Dict[str, Any]]:
         where = " AND task_id=?" if task_id is not None else ""
