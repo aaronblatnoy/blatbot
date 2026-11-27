@@ -80,6 +80,14 @@ KNOBS: List[Dict[str, Any]] = [
      "label": "Trust my voice on the phone",
      "help": "Caller ID can be faked, so by default a spoken request from your number still "
              "waits for a yes by text. Turn this on to act on calls from your number directly."},
+    {"name": "GATE_SUGGESTIONS", "kind": "bool", "default": False, "group": "Speaking",
+     "label": "Send me suggestions",
+     "help": "A few times a day, look at what I have been doing with you and text me at most two "
+             "things you could do for me right now, each with its own #id yes / no. Quiet when "
+             "nothing is worth my time."},
+    {"name": "SUGGESTION_TIMES", "kind": "text", "default": "9:00, 13:00, 18:00", "group": "Speaking",
+     "label": "When to suggest (New York time)",
+     "help": "Times of day for the suggestion pass, separated by commas, for example 9:00, 13:00, 18:00."},
     {"name": "GATE_SCHEDULES_PAUSED", "kind": "bool", "default": False, "group": "Safety",
      "label": "Pause every schedule",
      "help": "Stops new scheduled runs from starting. Existing runs keep going."},
