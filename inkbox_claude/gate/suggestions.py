@@ -287,13 +287,20 @@ async def gather(manager: Any, now: Optional[float] = None) -> Dict[str, Any]:
     try:
         threads = [OWNER_THREAD] + [c for c in store.owner_threads() if c != OWNER_THREAD][:4]
         for cid in threads:
+            route = store.thread_route(cid) or {}
+            meta = route.get("meta") or {}
+            group = meta.get("group_title") if (meta.get("conversation_kind") == "group" or meta.get("group_title")) else ""
             for m in store.history(cid, 30):
                 if now - float(m.get("created_at") or 0) > MESSAGE_LOOKBACK_S:
                     continue
                 if m.get("kind") not in ("inbound", "outbound"):
                     continue
-                who = "Aaron" if m["kind"] == "inbound" else "Blatbot"
-                msgs.append((float(m["created_at"]), f"{_ago(m['created_at'], now)} {who}: {_short(m['text'], 260)}"))
+                if m["kind"] == "outbound":
+                    who = "Blatbot" + (f" in {group}" if group else "")
+                else:
+                    who = f"In {group}" if group else "Aaron"
+                text = ownertext.strip_group_tag(m["text"])
+                msgs.append((float(m["created_at"]), f"{_ago(m['created_at'], now)} {who}: {_short(text, 260)}"))
     except Exception as exc:
         logger.warning("[suggest] could not read messages: %s", exc)
     msgs.sort()
