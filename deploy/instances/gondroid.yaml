@@ -1,0 +1,43 @@
+# Gondroid, the Definite Optimists team's Telegram ledger (@gondroid_bot), run as a second
+# instance of this gateway: same code as Blatbot, its own identity, state, database, port and
+# scope registry. Started by deploy/instances/gondroid.service (systemd user unit `gondroid` on
+# black-sky, PartOf=blatbot.service, so every Blatbot deploy restarts it on the new code too).
+# Secrets live in ~/gondroid/.env and the secret files below, never in this file.
+name: gondroid
+description: The Definite Optimists team's Telegram ledger; answers Aaron and Stanley only.
+env_files:
+  - ~/gondroid/.env
+secret_files:
+  TELEGRAM_BOT_TOKEN: ~/.config/definite-optimists/gondroid-telegram-token
+env:
+  # Identity
+  ASSISTANT_NAME: Gondroid
+  ASSISTANT_EMAIL: ""
+  SERVER_NAME: black-sky
+  OWNER_NAME: Aaron Blatnoy
+  OWNER_FIRST_NAME: Aaron
+  # Surfaces: Telegram only. No Inkbox identity, mailbox, phone or tunnel.
+  INKBOX_MODE: gate
+  INKBOX_OFFLINE: "1"
+  INKBOX_IDENTITY: gondroid
+  INKBOX_REALTIME_ENABLED: "0"
+  # Ports and state (all under ~/gondroid; nothing shared with ~/blatbot)
+  INKBOX_BRIDGE_HOST: 0.0.0.0
+  INKBOX_BRIDGE_PORT: "8772"
+  INKBOX_CLAUDE_HOME: ~/gondroid
+  INKBOX_CLAUDE_ENV_FILE: ~/gondroid/.env
+  GATE_DB_PATH: ~/gondroid/gate.db
+  GATE_EXEC_DIR: ~/gondroid/exec
+  CLAUDE_PROJECT_DIR: ~/gondroid/exec
+  GATE_STANDING_PATH: ${INSTANCE_DIR}/gondroid/standing.md
+  GATE_SCOPES_FILE: ${INSTANCE_DIR}/gondroid/scopes.yaml
+  BLATBOT_MEDIA_DIR: ~/gondroid/media/telegram
+  BLATBOT_GENERATED_DIR: ~/gondroid/media/generated
+  BLATBOT_VAULT_DIR: ~/gondroid/vault
+  GATE_DEV_DIR: ~/gondroid/devwork
+  # Group history is read through Aaron's own Telegram account, as Blatbot does.
+  BLATBOT_TELEGRAM_USER_DIR: /home/aaron/blatbot/telegram-user
+  # Models (Aaron 2026-11-19: "gondroid's model should be bedrock"). Runs: Claude Code, sonnet.
+  CLAUDE_MODEL: sonnet
+  GATE_EXECUTOR: claude
+  GATE_EXECUTOR_FALLBACK: claude

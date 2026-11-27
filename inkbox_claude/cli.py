@@ -75,6 +75,8 @@ def main(argv: list[str] | None = None) -> int:
         "--purge", action="store_true",
         help="also delete config, logs, and sessions in ~/.inkbox-claude",
     )
+    profile_p = sub.add_parser("profile", help="show what an instance profile sets (names and sources, never values)")
+    profile_p.add_argument("path", nargs="?", default="", help="profile file; default $INSTANCE_PROFILE")
     sub.add_parser("doctor", help="check configuration and dependencies")
     sub.add_parser("whoami", help="show the bridged Inkbox identity")
 
@@ -82,6 +84,14 @@ def main(argv: list[str] | None = None) -> int:
     if args.command == "scopes":
         from .scopes_cli import run as scopes_run
         return scopes_run(args)
+    if args.command == "profile":
+        from . import profile as _profile
+        path = args.path or os.getenv(_profile.PROFILE_ENV, "")
+        if not path:
+            print("no profile given and INSTANCE_PROFILE is not set")
+            return 1
+        print("\n".join(_profile.describe(path)))
+        return 0
     if args.command == "setup":
         interactive_setup()
         return 0

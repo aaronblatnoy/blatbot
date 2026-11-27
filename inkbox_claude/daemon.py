@@ -146,7 +146,8 @@ def run_foreground() -> int:
         signal.signal(signal.SIGTERM, signal.default_int_handler)
 
     cfg = read_config()
-    if not cfg.api_key or not cfg.identity:
+    offline = (os.getenv("INKBOX_OFFLINE") or "").strip().lower() in {"1", "true", "yes", "on"}
+    if not offline and (not cfg.api_key or not cfg.identity):
         print("Inkbox is not set up yet.")
         print("Run `inkbox-claude setup`, or set INKBOX_API_KEY and INKBOX_IDENTITY in your .env file.")
         return 1

@@ -1,0 +1,47 @@
+# Gondroid's scope registry: the team brain (memory search) and the public web. Nothing of
+# Aaron's personal systems (no Drive, Gmail, TAMID, Brightspace, vault, server, Coolify,
+# Telegram account), no Inkbox mailbox or phone. Add scopes here only if Aaron asks.
+version: 1
+where_things_live:
+- 'What was said or shared in the Definite Optimists chats (who said what and when, decisions, plans, files and
+  their contents): the team brain, searched with memory search. It is the team''s shared record.'
+- 'The public web is only for things outside the team: other organizations, people''s public profiles,
+  articles, general facts.'
+systems:
+  long_term_memory:
+    description: 'The Definite Optimists team brain: every message and file from the team''s Telegram chats, with
+      who said it and when, as dated facts plus the raw entries. For anything said or shared in the team chats.'
+    requires: graphiti
+    always:
+    - memory_read
+    leaves: {}
+  public_web:
+    description: 'The public internet, for facts that live OUTSIDE the team''s chats: another organization''s
+      site, a person''s public profile, an article, a general fact.'
+    always:
+    - web
+    leaves: {}
+scopes:
+  memory_read:
+    description: 'search the Definite Optimists team brain (every message and file from the team''s Telegram
+      chats, with who said it and when). Read-only.'
+    label: search the team brain
+    ask: 'search the team brain'
+    synonyms:
+    - what did we say
+    - what was said
+    - team brain
+    read: true
+    tools:
+    - mcp__host__memory_search
+  web:
+    description: search the public web and open web pages, only when the answer lives OUTSIDE the team's chats.
+    label: read public web pages
+    ask: 'search and read public web pages'
+    synonyms:
+    - look it up online
+    - search the web
+    read: true
+    tools:
+    - WebSearch
+    - WebFetch
