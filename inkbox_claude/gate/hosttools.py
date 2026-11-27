@@ -23,7 +23,9 @@ logger = logging.getLogger(__name__)
 SET_FOLLOWUP_DESCRIPTION = (
     "SET A FOLLOW-UP TIMER for work you already have permission to do. When you sent something and need to "
     "see whether it was answered, or something is due later, set a follow-up instead of waiting or asking "
-    "the person to remind you. A new run will continue this task at that time."
+    "the person to remind you. A new run will continue this task at that time. Also set one for long or "
+    "multi-step work: if the task is not finished when this run ends, or something you started completes "
+    "later, set a follow-up to check back and finish it, instead of saying you will check back."
 )
 SET_FOLLOWUP_SCHEMA = {"type": "object", "required": ["note"], "properties": {
     "when": {"type": "string", "description": "ISO-8601 date and local time, America/New_York unless an offset is given"},
