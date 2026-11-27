@@ -2669,6 +2669,7 @@ class GateSessionManager:
         self._expiry_task: Optional[asyncio.Task] = None
         self._schedule_task: Optional[asyncio.Task] = None
         self._followup_task: Optional[asyncio.Task] = None
+        self._suggest_task: Optional[asyncio.Task] = None
         self._outbox_task: Optional[asyncio.Task] = None
         self._outbox_wake = asyncio.Event()
         self._outbox_waiters: Dict[int, asyncio.Future] = {}
@@ -2691,6 +2692,8 @@ class GateSessionManager:
             self._expiry_task = asyncio.get_running_loop().create_task(self._expiry_loop())
             self._schedule_task = asyncio.get_running_loop().create_task(self._schedule_loop())
             self._followup_task = asyncio.get_running_loop().create_task(self._followup_loop())
+            from . import suggestions as _suggestions
+            self._suggest_task = asyncio.get_running_loop().create_task(_suggestions.loop(self))
             if self._outbox_enabled():
                 self._outbox_task = asyncio.get_running_loop().create_task(self._outbox_loop())
         except RuntimeError:
@@ -2714,6 +2717,8 @@ class GateSessionManager:
             self._schedule_task.cancel()
         if self._followup_task:
             self._followup_task.cancel()
+        if self._suggest_task:
+            self._suggest_task.cancel()
         if self._outbox_task:
             self._outbox_task.cancel()
         for task in self._outbox_target_tasks.values():
@@ -3974,6 +3979,12 @@ class GateSessionManager:
         req = self.store.get_request(int(request_id))
         if req is None:
             return {"ok": False, "error": f"no request #{request_id}", "state": ""}
+        from . import suggestions as _suggestions
+        if req.state == _suggestions.SUGGESTED:
+            out = await _suggestions.decide(self, req.id, "yes" if (decision or "").strip().lower() in _YES else
+                                            "no" if (decision or "").strip().lower() in _NO | {"stop", "decline"}
+                                            else "", actor=actor)
+            return {"ok": out["ok"], "state": out["state"], "error": out["error"]}
         if req.state in ("approved", "running") and not req.schedule_id and \
                 (decision or "").strip().lower() in ("no", "n", "stop", "cancel", "abort", "drop", "reject", "decline"):
             # "#520 no" while #520 runs: stop it, from a text or the console alike.
@@ -4135,6 +4146,9 @@ class GateSessionManager:
 
     async def handle_approver_command(self, session: GateSession, text: str) -> bool:
         """Parse Aaron's reply as a gate command. Returns True if consumed."""
+        from . import suggestions as _suggestions
+        if await _suggestions.handle_reply(self, session, text):
+            return True
         if await self.handle_task_command(session, text):
             return True
         pending = self.store.pending()

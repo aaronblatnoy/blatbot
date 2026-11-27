@@ -359,6 +359,11 @@ async def get_outbox(request: web.Request) -> web.StreamResponse:
     return _json(api.outbox_view(_manager(request).store, _limit(request, 200, 1000)))
 
 
+async def get_suggestions(request: web.Request) -> web.StreamResponse:
+    from ..gate import suggestions
+    return _json(suggestions.console_view(_manager(request).store, _limit(request, 100, 500)))
+
+
 async def get_followups(request: web.Request) -> web.StreamResponse:
     return _json(api.followups_view(_manager(request).store, _limit(request, 100, 1000)))
 
@@ -461,6 +466,7 @@ def register(app: web.Application, gateway: Any) -> None:
     app.router.add_get("/console/api/inbox", _endpoint(get_inbox))
     app.router.add_get("/console/api/outbox", _endpoint(get_outbox))
     app.router.add_get("/console/api/followups", _endpoint(get_followups))
+    app.router.add_get("/console/api/suggestions", _endpoint(get_suggestions))
     app.router.add_get("/console/api/memory", _endpoint(get_memory))
     app.router.add_get("/console/api/pages", _endpoint(get_pages))
     app.router.add_get("/console/api/settings", _endpoint(get_settings))
@@ -479,7 +485,7 @@ def register(app: web.Application, gateway: Any) -> None:
         "/console/api/scopes", "/console/api/scopes/breakdown", "/console/api/requests",
         "/console/api/requests/decide", "/console/api/tasks", "/console/api/health",
         "/console/api/settings", "/console/api/groups", "/console/api/groups/mode",
-        "/console/api/inbox", "/console/api/outbox", "/console/api/followups",
+        "/console/api/inbox", "/console/api/outbox", "/console/api/followups", "/console/api/suggestions",
         "/console/api/memory", "/console/api/pages",
     ):
         app.router.add_route("OPTIONS", path, _options)
