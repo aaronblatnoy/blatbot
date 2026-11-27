@@ -7,6 +7,10 @@ sent by bots other than Gondroid, and writes each (with its file) into the Gondr
 gondroid.py's inbox_loop keeps it. It never sends, marks read, or changes anything in Telegram.
 
 Run: systemd user unit gondroid-bridge (env from ~/blatbot/telegram-user/.env).
+
+Gondroid as a gateway instance (deploy/instances/gondroid.yaml) runs on the host, not in a container:
+set BRIDGE_LEDGER_DIR to its ledger state folder (~/gondroid/ledger) and the bridge reads the trusted
+groups from chats.json there and writes into inbox/ there directly. Unset, it uses the container.
 """
 import asyncio, json, logging, os, subprocess, time
 from datetime import datetime, timedelta, timezone
@@ -25,12 +29,33 @@ def sh(args, data=None) -> str:
     return subprocess.run(args, input=data, capture_output=True, check=True, timeout=120).stdout.decode()
 
 
+LEDGER_DIR = os.path.expanduser(os.getenv("BRIDGE_LEDGER_DIR") or "")
+
+
 def container() -> str:
+    if LEDGER_DIR:
+        return "host"
     return (sh(["docker", "ps", "--filter", "name=gondroid-", "--format", "{{.Names}}"]).split() or [""])[0]
 
 
 def put(c: str, name: str, data: bytes) -> None:
+    if LEDGER_DIR:
+        d = os.path.join(LEDGER_DIR, "inbox")
+        os.makedirs(d, exist_ok=True)
+        with open(os.path.join(d, name + ".tmp"), "wb") as f:
+            f.write(data)
+        os.replace(os.path.join(d, name + ".tmp"), os.path.join(d, name))
+        return
     sh(["docker", "exec", "-i", c, "sh", "-c", f'mkdir -p /data/inbox && cat > "/data/inbox/{name}.tmp" && mv "/data/inbox/{name}.tmp" "/data/inbox/{name}"'], data)
+
+
+def group_chats(c: str) -> list:
+    """The groups to read: the ones Gondroid keeps a transcript for (negative ids)."""
+    if LEDGER_DIR:
+        names = os.listdir(os.path.join(LEDGER_DIR, "transcripts")) if os.path.isdir(os.path.join(LEDGER_DIR, "transcripts")) else []
+    else:
+        names = sh(["docker", "exec", c, "ls", "/data/transcripts"]).split() if c else []
+    return [int(n[:-6]) for n in names if n.endswith(".jsonl") and n.startswith("-")]
 
 
 async def main() -> None:
@@ -47,8 +72,7 @@ async def main() -> None:
     while True:
         try:
             c = container()
-            chats = [int(n[:-6]) for n in sh(["docker", "exec", c, "ls", "/data/transcripts"]).split()
-                     if n.endswith(".jsonl") and n.startswith("-")] if c else []
+            chats = group_chats(c)
             for chat in chats:
                 key, last = str(chat), state.get(str(chat))
                 if last is None:   # first time: the last two days

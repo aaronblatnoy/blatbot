@@ -64,7 +64,10 @@ def _gondroid() -> Any:
         spec.loader.exec_module(mod)
         mod.OLLAMA = (os.getenv("BLATBOT_OLLAMA_URL") or "http://127.0.0.1:11434").rstrip("/")
         mod.VISION_MODEL = os.getenv("BLATBOT_VISION_MODEL") or "qwen2.5vl:7b"
-        mod.BEDROCK_KEY = ""   # Blatbot's images stay on the local model, whatever the environment holds
+        if (os.getenv("FILES_VISION") or "local").strip().lower() != "bedrock":
+            mod.BEDROCK_KEY = ""   # Blatbot's images stay on the local model, whatever the environment holds
+        # FILES_VISION=bedrock (Gondroid): images and scans go to the Bedrock vision model that
+        # gondroid.py reads from BEDROCK_VISION_KEY / BEDROCK_VISION_MODEL.
         _reader = mod
     return _reader
 
