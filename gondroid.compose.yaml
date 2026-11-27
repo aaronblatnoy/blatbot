@@ -1,3 +1,5 @@
+# Being replaced by deploy/instances/gondroid.yaml (Gondroid as a gateway instance); after the cutover
+# this app is kept stopped, for rollback only.
 # Gondroid: the Definite Optimists team's Telegram ledger. It writes every message in its chats to
 # the Definite Optimists brain and answers questions from it, in the chat where it was asked.
 # Nothing else: no email, phone, tools, timers or local memory. Deployed on black-sky as the
@@ -19,6 +21,10 @@ services:
       - LEDGER_MODEL=sonnet
       - OLLAMA_URL=http://host.docker.internal:11434
       - VISION_MODEL=qwen2.5vl:7b
+      # Shadow phase of the move to the gateway instance (deploy/instances/gondroid.yaml): every update
+      # is also handed to it, fire and forget. Unset, nothing is teed.
+      - SHADOW_TEE_URL=${SHADOW_TEE_URL:-}
+      - SHADOW_TEE_SECRET=${SHADOW_TEE_SECRET:-}
     extra_hosts:
       - "host.docker.internal:host-gateway"
     volumes:
