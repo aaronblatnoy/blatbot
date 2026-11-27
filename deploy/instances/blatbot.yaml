@@ -1,0 +1,12 @@
+# Blatbot, the original instance. It runs as the systemd user unit `blatbot` on black-sky, which
+# loads ~/blatbot/.env itself (EnvironmentFile) and exports CLAUDE_MODEL and
+# INKBOX_AUTO_ALLOWED_TOOLS in ~/blatbot/watchdog.sh, so the live unit does not need this file.
+# It is here so every instance has a profile: running with INSTANCE_PROFILE pointing at it
+# loads the same ~/blatbot/.env and nothing else, which is exactly today's environment (the
+# real environment always wins, and every default in the code is Blatbot's).
+name: blatbot
+description: Aaron's own assistant on iMessage, SMS, email, voice and Telegram (@bh_blatbot).
+env_files:
+  - ~/blatbot/.env
+env:
+  CLAUDE_MODEL: sonnet
