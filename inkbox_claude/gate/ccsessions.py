@@ -286,7 +286,7 @@ def snapshot(label: str, hours: float = 24, turns: int = 6, now: Optional[float]
             "cwd": info["cwd"],
             "project": _project_label(info["cwd"], r["path"].parent.name),
             "entrypoint": entry,
-            "automated": entry.startswith("sdk"),
+            "automated": entry in ("sdk-py", "sdk-ts"),   # Blatbot's own runs; a headless `claude -p` of Aaron's still counts
             "state": state,
             "process_alive": bool(live),
             "started_at": _iso((live or {}).get("startedAt", 0) / 1000) if live and live.get("startedAt") else "",
