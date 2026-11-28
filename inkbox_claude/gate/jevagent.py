@@ -104,6 +104,7 @@ VIRTUAL_TOOLS: Dict[str, Dict[str, Any]] = {
     "mcp__host__set_followup": {"description": hosttools.SET_FOLLOWUP_DESCRIPTION, "schema": hosttools.SET_FOLLOWUP_SCHEMA},
     "mcp__host__cancel_followup": {"description": hosttools.CANCEL_FOLLOWUP_DESCRIPTION, "schema": hosttools.CANCEL_FOLLOWUP_SCHEMA},
     "mcp__host__host_status": {"description": hosttools.DESCRIPTION, "schema": hosttools.SCHEMA},
+    "mcp__host__claude_sessions": {"description": hosttools.CLAUDE_SESSIONS_DESCRIPTION, "schema": hosttools.CLAUDE_SESSIONS_SCHEMA},
     "mcp__host__render_image": {"description": imagetool.DESCRIPTION, "schema": imagetool.SCHEMA},
     "mcp__host__rows_where": {"description": hosttools.ROWS_WHERE_DESCRIPTION, "schema": hosttools.ROWS_WHERE_SCHEMA},
     "mcp__host__memory_search": {"description": hosttools.MEMORY_SEARCH_DESCRIPTION, "schema": hosttools.MEMORY_SEARCH_SCHEMA},
@@ -336,6 +337,8 @@ class ToolBox:
             return await self._browser_search(str(args.get("query") or ""))
         if name == "mcp__host__host_status":
             return await hosttools.host_status(args)
+        if name == "mcp__host__claude_sessions":
+            return await hosttools.claude_sessions(args, self._is_commander)
         if name == "mcp__host__render_image":
             return (await imagetool.render(args))["text"] + "\n(This agent cannot see the picture; it was rendered and saved.)"
         if name == "mcp__host__rows_where":

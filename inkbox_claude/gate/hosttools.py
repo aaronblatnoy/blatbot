@@ -232,6 +232,28 @@ SCHEMA = {"type": "object", "properties": {
     "parts": {"type": "array", "items": {"type": "string", "enum": list(COMMANDS)},
               "description": "which of: " + ", ".join(COMMANDS) + ". Omit for all."}}}
 
+CLAUDE_SESSIONS_DESCRIPTION = (
+    "WHAT AARON'S CLAUDE CODE SESSIONS ARE UP TO right now, on his Mac and on black-sky: every session active in the "
+    "last few hours with its machine, project folder, last activity time, whether it is working or idle, his latest ask "
+    "and a short gist of what it last did or said. Give session=<id prefix, name or folder> for one session in more "
+    "detail (recent asks and turns). Use it for 'what is claude doing', 'what are my sessions up to', 'what is the "
+    "claude on my mac working on', 'is anything still running'. Read-only, commander only, short excerpts only. If the "
+    "Mac has not reported recently it says when the Mac was last seen instead of presenting old data as current."
+)
+CLAUDE_SESSIONS_SCHEMA = {"type": "object", "properties": {
+    "hours": {"type": "number", "description": "how far back to look, in hours (default 6, at most 72)"},
+    "machine": {"type": "string", "enum": ["all", "mac", "black-sky"], "description": "which machine (default all)"},
+    "session": {"type": "string", "description": "a session id prefix, name or folder: gives that one session in detail"},
+    "include_automated": {"type": "boolean", "description": "also list the assistant's own automated runs (default false)"}}}
+CLAUDE_SESSIONS_REFUSAL = "Only Aaron, as the verified commander, can see his Claude Code sessions."
+
+
+async def claude_sessions(args: Dict[str, Any], is_commander: bool) -> str:
+    if not is_commander:
+        return CLAUDE_SESSIONS_REFUSAL
+    from . import ccsessions
+    return await asyncio.to_thread(ccsessions.report, args or {})
+
 
 async def _run(cmd: list) -> str:
     try:
@@ -387,6 +409,10 @@ def sdk_server(*, vault_prefixes: Optional[List[str]] = None, manager: Any = Non
     async def _host_status(args: Dict[str, Any]) -> Dict[str, Any]:
         return {"content": [{"type": "text", "text": await host_status(args)}]}
 
+    @tool("claude_sessions", CLAUDE_SESSIONS_DESCRIPTION, CLAUDE_SESSIONS_SCHEMA)
+    async def _claude_sessions(args: Dict[str, Any]) -> Dict[str, Any]:
+        return {"content": [{"type": "text", "text": await claude_sessions(args, is_commander)}]}
+
     @tool("set_followup", SET_FOLLOWUP_DESCRIPTION, SET_FOLLOWUP_SCHEMA)
     async def _set_followup(args: Dict[str, Any]) -> Dict[str, Any]:
         return {"content": [{"type": "text", "text": set_followup(args, manager, request)}]}
@@ -481,7 +507,7 @@ def sdk_server(*, vault_prefixes: Optional[List[str]] = None, manager: Any = Non
     async def _make_page(args: Dict[str, Any]) -> Dict[str, Any]:
         return {"content": [{"type": "text", "text": await pages.publish_page(args, pages.allowed_for(is_commander))}]}
 
-    tools = [_make_page, _render_image, _host_status, _set_followup, _cancel_followup, _request_access,
+    tools = [_make_page, _render_image, _host_status, _claude_sessions, _set_followup, _cancel_followup, _request_access,
              _send_message, _react_message, _nothing_to_send, _where_to_reach, _ask_aaron,
              _vault_search, _vault_read, _vault_list, _memory_search,
              _telegram_find_chats, _telegram_list_chats, _telegram_read_chat,

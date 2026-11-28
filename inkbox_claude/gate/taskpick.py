@@ -281,6 +281,8 @@ class TaskPicker:
                     "and delete any of those; replace headshots and flyers.",
                     "Public web: search, open a page, read and find text on it, click, type and fill forms.",
                     f"The {_SERVER_NAME} server: what is running (containers, services, uptime, disk, memory, GPUs).",
+                    "Aaron's own Claude Code sessions on his Mac and on the server: which are active, working or "
+                    "idle, his latest ask in each, and what each last did (read-only, Aaron only).",
                     "Aaron's second brain (his Obsidian vault of notes): search notes, read a note, list notes.",
                     "TAMID's Instagram and LinkedIn: account, recent posts, insights, audience; stage and publish posts.",
                     "TAMID's Google Analytics property: dimensions, metrics, key events, streams, access; change them.",

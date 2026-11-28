@@ -396,6 +396,7 @@ TOOL_PURPOSE: Dict[str, str] = {
     "mcp__host__vault_read": "READ ONE VAULT NOTE IN FULL by the path vault_search or vault_list printed, or by title. Read-only.",
     "mcp__host__vault_list": "LIST THE NOTES in Aaron's vault, all or under one folder (Projects, Areas, Daily, Reference, Inbox, Archive). Read-only.",
     "mcp__host__render_image": "DRAW AN IMAGE AS SVG CODE AND RENDER IT TO PNG (logos, icons, diagrams, cards, contact sheets of variants), then look at it, fix it and send it with send_message images. No image model: you write the vector shapes.",
+    "mcp__host__claude_sessions": "WHAT AARON'S CLAUDE CODE SESSIONS ARE UP TO, on his Mac and on black-sky: machine, folder, last activity, working or idle, his latest ask, a short gist. Use for 'what's claude doing', 'what are my sessions up to'. Pass session=<id> for one in detail. Read-only, Aaron only.",
     "mcp__host__host_status": f"WHAT IS RUNNING ON BLACK-SKY (the server {_ASSISTANT} runs on): containers, services, uptime, disk, memory, GPUs. Read-only.",
     # web
     "mcp__playwright__browser_search": "SEARCH THE PUBLIC WEB (last resort for facts that live OUTSIDE Aaron's own systems): a person's LinkedIn or employer, an outside organization's leadership, an article, a public page. Not for anything that lives in TAMID/SJBA sheets, forms, rosters, calendars or inboxes; use those tools first.",
