@@ -48,6 +48,11 @@ _SECRETS = re.compile(
     r"|(?i:(?:token|secret|password|passwd|api[_-]?key)\s*[=:]\s*)\S{6,})")
 
 
+def enabled() -> bool:
+    """Per instance, off unless CLAUDE_SESSIONS_ENABLED is set: Blatbot's profile turns it on, Gondroid's turns it off."""
+    return str(os.environ.get("CLAUDE_SESSIONS_ENABLED") or "").strip().lower() in ("1", "true", "yes", "on")
+
+
 def _claude_dir() -> Path:
     return Path(os.environ.get("CCSESSIONS_CLAUDE_DIR") or (Path.home() / ".claude"))
 
