@@ -18,6 +18,9 @@ where_things_live:
 - A task that only reads never needs a write capability; a task that changes something needs the write capability
   of that system, not a browser.
 - '''black sky'' / ''black-sky'' is the server: containers, services, uptime. Not the web.'
+- 'What Aaron''s Claude Code sessions are doing (the Claude on his Mac and the Claude on black-sky: which are active,
+  working or idle, what he last asked each, what each last did): the Claude sessions reader. Not the server''s status,
+  not Blatbot''s own runs, not the web.'
 - 'What Aaron has written down for himself (notes on his projects, people, decisions, preferences, how something
   was set up, daily notes): his second brain, the Obsidian vault. Not Drive, not the public web.'
 - 'What happened in earlier conversations with Blatbot, on any channel (who someone is, what they asked for, what
@@ -157,6 +160,13 @@ systems:
       containers, services, the gateway, uptime, disk, memory, GPUs.'
     always:
     - host_read
+    leaves: {}
+  claude_sessions:
+    description: 'What Aaron''s own Claude Code sessions are doing (''what is claude doing'', ''what are my sessions up
+      to'', the Claude on his Mac, the Claude on black-sky): which are active, working or idle, his latest ask in each,
+      what each last did. Read-only. Not the server''s status, not a Blatbot run, not the web.'
+    always:
+    - claude_sessions_read
     leaves: {}
   telegram_account:
     description: 'Aaron''s own Telegram account (his personal account, not Blatbot''s bot): his groups, channels
@@ -764,6 +774,23 @@ scopes:
     read: true
     tools:
     - mcp__host__host_status
+  claude_sessions_read:
+    description: 'see what Aaron''s own Claude Code sessions are up to, on his Mac and on black-sky: which are active,
+      working or idle, his latest ask in each, a short gist of what each last did, and one session in more detail.
+      Read-only, short excerpts, Aaron only (never granted to anyone else). Not the server''s status, not the web.'
+    label: 'see what your Claude sessions are doing'
+    ask: 'see what your Claude sessions are doing'
+    synonyms:
+    - what is claude doing
+    - what are my sessions up to
+    - my claude sessions
+    - claude code sessions
+    - the claude on my mac
+    - claude on black sky
+    read: true
+    explicit_only: true
+    tools:
+    - mcp__host__claude_sessions
   telegram_read:
     description: 'read Aaron''s own Telegram account (his personal account, not Blatbot''s bot): find a chat,
       list chats, read messages in a chat. Read-only: no send, edit, delete or mark-read.'

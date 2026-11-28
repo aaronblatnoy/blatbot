@@ -639,6 +639,11 @@ class Executor:
                         f"Call request_access with access [\"{scope}\"] and one sentence saying why. "
                         "Then stop and say you are waiting. Do not try another route to the same data."))
                 return PermissionResultDeny(message=f"{tool_name} is outside this task's scope; do not retry it.")
+            if tool_name == "mcp__host__claude_sessions" and not from_owner:
+                # Aaron's own Claude Code sessions: even if a role was ever handed the scope, only the
+                # verified commander's own run may call it.
+                denied_steps.append({"tool": tool_name, "args": dict(input_data or {}), "ok": False, "denied": "commander_only"})
+                return PermissionResultDeny(message="Only Aaron, as the verified commander, can see his Claude Code sessions.")
             if tool_name.startswith("mcp__host__admin_") and not from_owner:
                 # Belt and suspenders: allowed_set should already exclude these for
                 # anyone but the verified commander (see scopes.BLATBOT_ADMIN_SCOPE),
