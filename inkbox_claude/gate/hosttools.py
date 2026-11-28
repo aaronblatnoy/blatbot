@@ -249,9 +249,11 @@ CLAUDE_SESSIONS_REFUSAL = "Only Aaron, as the verified commander, can see his Cl
 
 
 async def claude_sessions(args: Dict[str, Any], is_commander: bool) -> str:
+    from . import ccsessions
+    if not ccsessions.enabled():
+        return "Claude session reading is not switched on for this assistant."
     if not is_commander:
         return CLAUDE_SESSIONS_REFUSAL
-    from . import ccsessions
     return await asyncio.to_thread(ccsessions.report, args or {})
 
 
@@ -507,13 +509,16 @@ def sdk_server(*, vault_prefixes: Optional[List[str]] = None, manager: Any = Non
     async def _make_page(args: Dict[str, Any]) -> Dict[str, Any]:
         return {"content": [{"type": "text", "text": await pages.publish_page(args, pages.allowed_for(is_commander))}]}
 
-    tools = [_make_page, _render_image, _host_status, _claude_sessions, _set_followup, _cancel_followup, _request_access,
+    tools = [_make_page, _render_image, _host_status, _set_followup, _cancel_followup, _request_access,
              _send_message, _react_message, _nothing_to_send, _where_to_reach, _ask_aaron,
              _vault_search, _vault_read, _vault_list, _memory_search,
              _telegram_find_chats, _telegram_list_chats, _telegram_read_chat,
              _admin_list_settings, _admin_get_setting, _admin_set_setting,
              _admin_list_roles, _admin_set_role_scopes, _admin_set_person_role,
              _admin_schedule, _admin_set_chat_mode, _admin_set_person_access, _admin_show_access]
+    from . import ccsessions
+    if ccsessions.enabled():   # per instance: Blatbot only, never registered for Gondroid
+        tools.append(_claude_sessions)
     return create_sdk_mcp_server(name="host", version="1.0.0", tools=tools)
 
 

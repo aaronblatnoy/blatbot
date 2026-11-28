@@ -67,8 +67,19 @@ def test_no_mac_snapshot_says_so(tmp_path, monkeypatch):
     assert "no snapshot has arrived" in ccsessions.report({"machine": "all"})
 
 
-def test_tool_is_commander_only():
+def test_tool_is_commander_only(monkeypatch):
+    monkeypatch.setenv("CLAUDE_SESSIONS_ENABLED", "1")
     assert asyncio.run(hosttools.claude_sessions({}, False)) == hosttools.CLAUDE_SESSIONS_REFUSAL
+
+
+def test_tool_is_off_unless_the_instance_enables_it(monkeypatch):
+    monkeypatch.delenv("CLAUDE_SESSIONS_ENABLED", raising=False)
+    assert not ccsessions.enabled()
+    assert "not switched on" in asyncio.run(hosttools.claude_sessions({}, True))
+    for name, want in (("blatbot", True), ("gondroid", False)):
+        text = open(os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+                                 "deploy", "instances", name + ".yaml")).read()
+        assert ("CLAUDE_SESSIONS_ENABLED: \"%d\"" % int(want)) in text
 
 
 def test_scope_is_in_blatbot_but_not_gondroid():

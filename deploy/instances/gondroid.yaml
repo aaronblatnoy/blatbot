@@ -15,6 +15,8 @@ env_files:
 secret_files:
   TELEGRAM_BOT_TOKEN: ~/.config/definite-optimists/gondroid-telegram-token
 env:
+  # Aaron's Claude Code sessions are Blatbot's alone: the tool is not registered here.
+  CLAUDE_SESSIONS_ENABLED: "0"
   # Identity
   ASSISTANT_NAME: Gondroid
   ASSISTANT_EMAIL: ""

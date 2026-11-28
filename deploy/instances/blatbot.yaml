@@ -10,3 +10,7 @@ env_files:
   - ~/blatbot/.env
 env:
   CLAUDE_MODEL: sonnet
+  # Aaron's Claude Code sessions (the claude_sessions tool, commander only). Blatbot only: off by
+  # default in code, on here, explicitly off in gondroid.yaml. The Mac's push job writes into
+  # ~/blatbot/ccsessions, which only this instance reads.
+  CLAUDE_SESSIONS_ENABLED: "1"

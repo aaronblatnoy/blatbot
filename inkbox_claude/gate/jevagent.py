@@ -104,7 +104,6 @@ VIRTUAL_TOOLS: Dict[str, Dict[str, Any]] = {
     "mcp__host__set_followup": {"description": hosttools.SET_FOLLOWUP_DESCRIPTION, "schema": hosttools.SET_FOLLOWUP_SCHEMA},
     "mcp__host__cancel_followup": {"description": hosttools.CANCEL_FOLLOWUP_DESCRIPTION, "schema": hosttools.CANCEL_FOLLOWUP_SCHEMA},
     "mcp__host__host_status": {"description": hosttools.DESCRIPTION, "schema": hosttools.SCHEMA},
-    "mcp__host__claude_sessions": {"description": hosttools.CLAUDE_SESSIONS_DESCRIPTION, "schema": hosttools.CLAUDE_SESSIONS_SCHEMA},
     "mcp__host__render_image": {"description": imagetool.DESCRIPTION, "schema": imagetool.SCHEMA},
     "mcp__host__rows_where": {"description": hosttools.ROWS_WHERE_DESCRIPTION, "schema": hosttools.ROWS_WHERE_SCHEMA},
     "mcp__host__memory_search": {"description": hosttools.MEMORY_SEARCH_DESCRIPTION, "schema": hosttools.MEMORY_SEARCH_SCHEMA},
@@ -130,6 +129,10 @@ VIRTUAL_TOOLS: Dict[str, Dict[str, Any]] = {
                    "properties": {"query": {"type": "string", "description": "what to search the web for: a name plus a distinguishing word (school, club, company), or a topic"}}},
     },
 }
+from . import ccsessions as _ccsessions  # noqa: E402
+if _ccsessions.enabled():   # per instance: registered for Blatbot only (CLAUDE_SESSIONS_ENABLED), never for Gondroid
+    VIRTUAL_TOOLS["mcp__host__claude_sessions"] = {"description": hosttools.CLAUDE_SESSIONS_DESCRIPTION,
+                                                   "schema": hosttools.CLAUDE_SESSIONS_SCHEMA}
 
 
 class _SessionWorker:
